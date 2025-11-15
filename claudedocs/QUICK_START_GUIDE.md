@@ -1,196 +1,357 @@
-# Observability Hardening - 快速开始指南
+# MetaSheet v2 Quick Start Guide
 
-**📍 当前状态**: Phase 1 完成，等待审批 →合并 → Phase 2-4
+**🚀 Get MetaSheet v2 running in 5 minutes**
 
----
-
-## ⚡ 立即行动（需要你手动完成）
-
-### 步骤1: 审批并合并PR #421
-
-由于GitHub规则限制（不能自我审批），你需要：
-
-**选项A - 使用另一个账号审批**（推荐）:
-```bash
-# 切换到有权限的GitHub账号
-gh auth login
-
-# 审批PR
-gh pr review 421 --repo zensgit/smartsheet --approve \
-  --body "Migration fixes verified. All CI checks passed."
-
-# Auto-merge会自动触发（已启用）
-```
-
-**选项B - Admin权限直接合并**:
-```bash
-# 如果你有admin PAT token
-export GITHUB_TOKEN="your_admin_pat_token_here"
-
-curl -X PUT \
-  -H "Authorization: token $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/zensgit/smartsheet/pulls/421/merge \
-  -d '{"merge_method":"squash","commit_title":"ci: observability hardening with migration fixes","commit_message":"Fixes migration idempotency issues in 042a and 042c"}'
-```
-
-**选项C - 临时调整branch protection**（不推荐）:
-```bash
-# 临时移除审批要求
-gh api -X DELETE repos/zensgit/smartsheet/branches/main/protection/required_pull_request_reviews
-
-# 合并PR
-gh pr merge 421 --repo zensgit/smartsheet --squash
-
-# 恢复保护规则
-gh api -X PATCH repos/zensgit/smartsheet/branches/main/protection \
-  -f required_pull_request_reviews='{"required_approving_review_count":1}'
-```
+Version: 2.4.0  
+Last Updated: 2025-11-16
 
 ---
 
-### 步骤2: 等待合并完成
+## 📋 Prerequisites
+
+Before starting, ensure you have:
+
+- **Node.js**: v18.0.0 or higher
+- **pnpm**: v8.0.0 or higher
+- **PostgreSQL**: v14.0 or higher
+- **Redis**: v6.0 or higher (optional, for caching)
+
+---
+
+## ⚡ Quick Installation
+
+### 1. Clone and Install
 
 ```bash
-# 监控PR状态（每5秒刷新）
-watch -n 5 'gh pr view 421 --repo zensgit/smartsheet --json state,merged | jq'
+# Clone the repository
+git clone https://github.com/zensgit/metasheet2.git
+cd metasheet2
 
-# 当输出显示 "merged": true 时，继续下一步
+# Install dependencies
+pnpm install
+
+# Build packages
+pnpm run build
 ```
 
----
-
-### 步骤3: 执行Phase 2验证（合并后5分钟）
+### 2. Database Setup
 
 ```bash
-# 切换到metasheet-v2目录
-cd /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2
+# Create database
+createdb metasheet_dev
 
-# 执行自动化验证脚本
-bash scripts/phase2-post-merge-verify.sh
+# Run migrations
+cd packages/core-backend
+pnpm run migrate
 
-# 查看验证报告
-cat claudedocs/PHASE2_POST_MERGE_VERIFICATION_*.md
+# (Optional) Seed demo data
+pnpm run seed
 ```
 
-**预期输出**:
-- ✅ Main branch CI成功
-- ✅ 042a和042c migrations已应用
-- ✅ Metrics正常（conflicts=0）
-- ✅ RBAC seeding成功
-- ✅ 无regression
+### 3. Environment Configuration
 
----
+Create `.env` file in `packages/core-backend/`:
 
-## 📋 完整执行路径
-
-```
-[现在] Phase 1: ✅ CI检查全部通过，等待审批
-   ↓
-   ↓ (手动: 审批PR)
-   ↓
-[T+0] 🚀 PR自动合并到main
-   ↓
-   ↓ (等待5分钟)
-   ↓
-[T+5min] Phase 2: 运行验证脚本
-   ↓ bash scripts/phase2-post-merge-verify.sh
-   ↓
-[T+10min] ✅ 验证通过，开始Phase 3
-   ↓
-   ↓ (后台运行24小时)
-   ↓
-[T+1h] Phase 3: 24小时观察
-   ↓ （脚本已在Phase 2完成时自动记录）
-   ↓
-[T+24h] Phase 4: 文档整理
-   ↓ 生成完成报告
-   ↓
-[T+48h] ✅ 项目完成
-```
-
----
-
-## 🔗 关键文档
-
-| 文档 | 用途 |
-|------|------|
-| [OBSERVABILITY_HARDENING_COMPLETE_GUIDE.md](./OBSERVABILITY_HARDENING_COMPLETE_GUIDE.md) | 完整技术文档 |
-| [OBSERVABILITY_ROLLBACK_SOP.md](./OBSERVABILITY_ROLLBACK_SOP.md) | 紧急回滚流程 |
-| [PHASE1_PROGRESS_UPDATE.md](./PHASE1_PROGRESS_UPDATE.md) | Phase 1进度记录 |
-| [PHASE1_MIGRATION_FIX_TROUBLESHOOTING.md](./PHASE1_MIGRATION_FIX_TROUBLESHOOTING.md) | 修复过程详情 |
-
----
-
-## 🆘 遇到问题？
-
-### Q: PR审批后没有自动合并？
-
-**检查**:
 ```bash
-# 查看PR状态
-gh pr view 421 --repo zensgit/smartsheet --json autoMergeRequest,mergeStateStatus
+# Database
+DATABASE_URL=postgresql://localhost:5432/metasheet_dev
 
-# 如果mergeStateStatus不是BLOCKED，可能需要手动触发
-gh pr merge 421 --repo zensgit/smartsheet --squash
+# Server
+PORT=8900
+NODE_ENV=development
+
+# JWT Authentication
+JWT_SECRET=your-secret-key-here
+
+# Redis (Optional)
+REDIS_URL=redis://localhost:6379
+
+# Observability (Optional)
+METRICS_URL=http://localhost:9090
 ```
 
-### Q: Phase 2验证失败？
+### 4. Start Development Server
 
-**步骤**:
-1. 查看详细报告：`cat claudedocs/PHASE2_POST_MERGE_VERIFICATION_*.md`
-2. 检查main分支CI: `gh run list --repo zensgit/smartsheet --branch main --limit 5`
-3. 如果发现conflicts>0，考虑回滚：`bash scripts/obs-rollback.sh --confirm`
-
-### Q: Migration没有在main分支应用？
-
-**诊断**:
 ```bash
-# 获取最新main分支运行
-MAIN_RUN=$(gh run list --repo zensgit/smartsheet --branch main \
-  --workflow "Observability (V2 Strict)" --limit 1 --json databaseId --jq '.[0].databaseId')
+# Start backend server
+cd packages/core-backend
+pnpm run dev
 
-# 检查migration日志
-gh run view $MAIN_RUN --log --repo zensgit/smartsheet 2>&1 | grep -E "042[ac]"
+# In another terminal, start frontend (if needed)
+cd apps/web
+pnpm run dev
+```
+
+Server will be available at: `http://localhost:8900`
+
+---
+
+## ✅ Verification
+
+### Quick Health Check
+
+```bash
+# Server health
+curl http://localhost:8900/health
+
+# Expected response:
+# {"ok":true,"status":"healthy","version":"2.4.0"}
+```
+
+### Comprehensive Feature Verification
+
+```bash
+# Run automated verification suite
+bash scripts/verify-features.sh all
+
+# Or test individual features:
+bash scripts/verify-features.sh approval
+bash scripts/verify-features.sh cache
+bash scripts/verify-features.sh rbac
+```
+
+### Generate Development Token
+
+```bash
+# Generate JWT token for API testing
+TOKEN=$(node scripts/gen-dev-token.js)
+echo $TOKEN
+
+# Use in API requests
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8900/api/approvals
 ```
 
 ---
 
-## ✅ 成功标志
+## 🔧 Development Workflows
 
-**Phase 1 完成** (当前状态):
-- [x] 所有CI检查通过
-- [x] Migration修复已提交
-- [x] Auto-merge已启用
-- [ ] **等待：PR审批** ← **你在这里**
+### Running Tests
 
-**Phase 2 完成** (合并后):
-- [ ] Main分支CI成功
-- [ ] Migrations在main应用
-- [ ] Metrics基线正常
-- [ ] 无regression
+```bash
+# Unit tests
+pnpm run test
 
-**Phase 3 完成** (24小时后):
-- [ ] 无critical issues
-- [ ] 成功率 >98%
-- [ ] Conflicts = 0
-- [ ] Fallback usage <10%
+# Integration tests
+pnpm run test:integration
 
-**Phase 4 完成** (48小时后):
-- [ ] 文档已更新
-- [ ] 完成报告已生成
-- [ ] 临时文件已清理
+# E2E tests
+pnpm run test:e2e
+```
+
+### Building for Production
+
+```bash
+# Build all packages
+pnpm run build
+
+# Build specific package
+cd packages/core-backend
+pnpm run build
+```
+
+### Database Migrations
+
+```bash
+# Create new migration
+cd packages/core-backend
+pnpm run migrate:create migration_name
+
+# Run pending migrations
+pnpm run migrate
+
+# Rollback last migration
+pnpm run migrate:rollback
+```
+
+### Code Quality
+
+```bash
+# Lint code
+pnpm run lint
+
+# Format code
+pnpm run format
+
+# Type check
+pnpm run typecheck
+```
 
 ---
 
-## 📞 支持
+## 🐛 Troubleshooting
 
-- **完整文档**: `claudedocs/OBSERVABILITY_HARDENING_COMPLETE_GUIDE.md`
-- **紧急回滚**: `claudedocs/OBSERVABILITY_ROLLBACK_SOP.md`
-- **GitHub Issue**: https://github.com/zensgit/smartsheet/issues
+### Port Already in Use
+
+```bash
+# Error: Port 8900 already in use
+# Solution: Kill existing process or use different port
+lsof -ti:8900 | xargs kill -9
+# Or change PORT in .env
+```
+
+### Database Connection Failed
+
+```bash
+# Error: Connection refused to PostgreSQL
+# Solution: Ensure PostgreSQL is running
+brew services start postgresql
+# Or on Linux:
+sudo systemctl start postgresql
+```
+
+### pnpm Install Failures
+
+```bash
+# Error: Lockfile out of sync
+# Solution: Clear cache and reinstall
+rm -rf node_modules .pnpm-store
+pnpm install --force
+```
+
+### Migration Errors
+
+```bash
+# Error: Migration already applied
+# Solution: Check migration status
+cd packages/core-backend
+pnpm run migrate:status
+
+# Reset database (⚠️ DESTRUCTIVE)
+pnpm run migrate:reset
+```
+
+### Build Errors
+
+```bash
+# Error: TypeScript compilation failed
+# Solution: Clean and rebuild
+pnpm run clean
+pnpm run build
+```
 
 ---
 
-**最后更新**: 2025-11-11 03:30 UTC
-**当前阻塞**: 等待PR #421审批
-**预计完成**: T+48h after merge
+## 📚 Core Features Overview
+
+### 1. Approval System
+- Automated workflow approvals
+- Multi-level approval chains
+- IM platform integration (Feishu, DingTalk, WeCom)
+- Version conflict handling
+
+**Quick Test**:
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8900/api/approvals?status=pending
+```
+
+### 2. Cache System
+- Redis-backed caching
+- Prometheus metrics integration
+- Cache hit/miss tracking
+- Multi-tier cache strategy
+
+**Quick Test**:
+```bash
+curl http://localhost:8900/api/cache/health
+```
+
+### 3. RBAC Permission System
+- Role-based access control
+- Fine-grained permissions
+- Permission caching
+- Real-time permission checks
+
+**Quick Test**:
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8900/api/permissions/check?userId=u1&resource=spreadsheet&resourceId=sheet-001&action=read"
+```
+
+### 4. API Gateway
+- Rate limiting
+- Circuit breaker
+- Load balancing
+- Request validation
+
+### 5. Event Bus
+- Pub/Sub messaging
+- Inter-plugin communication
+- Async event processing
+- Event history tracking
+
+### 6. Notification System
+- Multi-channel notifications (Email, SMS, Push)
+- IM platform support (Feishu, DingTalk, WeCom)
+- Template management
+- Delivery tracking
+
+---
+
+## 🎯 Next Steps
+
+### Essential Documentation
+- [API Documentation](API_DOCUMENTATION.md) - Complete API reference
+- [Feature Assessment](FEATURE_MIGRATION_ASSESSMENT.md) - Feature completeness analysis
+- [Phase 5 Guide](PHASE5_COMPLETION_GUIDE.md) - Production baseline completion
+
+### Development Resources
+- [Architecture Overview](../README.md) - System architecture
+- [Contributing Guidelines](../CONTRIBUTING.md) - Development guidelines
+- [Testing Guide](../TESTING.md) - Testing strategies
+
+### Production Deployment
+1. Wait for Phase 5 METRICS_URL configuration
+2. Complete 24-hour observability validation
+3. Archive baseline metrics
+4. Deploy to production environment
+
+---
+
+## 🔗 Useful Commands
+
+```bash
+# Development
+pnpm dev              # Start dev server
+pnpm build            # Build all packages
+pnpm test             # Run tests
+pnpm lint             # Lint code
+
+# Database
+pnpm migrate          # Run migrations
+pnpm migrate:rollback # Rollback migration
+pnpm seed             # Seed demo data
+
+# Verification
+bash scripts/verify-features.sh all  # Verify all features
+
+# Git
+git status            # Check status
+git checkout -b feat/your-feature  # Create feature branch
+```
+
+---
+
+## 💡 Tips for New Developers
+
+1. **Always use feature branches**: Never work directly on `main`
+2. **Run verification before commit**: Ensure all tests pass
+3. **Check existing patterns**: Follow project conventions
+4. **Use type checking**: TypeScript types are your friends
+5. **Test API changes**: Use Postman or curl to verify endpoints
+
+---
+
+## 🆘 Getting Help
+
+- **Documentation**: Check `claudedocs/` directory
+- **Issues**: Report bugs on GitHub Issues
+- **API Reference**: See [API_DOCUMENTATION.md](API_DOCUMENTATION.md)
+- **Architecture Questions**: Review system design documents
+
+---
+
+**🤖 Generated with [Claude Code](https://claude.com/claude-code)**
+
+**Last Updated**: 2025-11-16
