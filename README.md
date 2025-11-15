@@ -23,6 +23,12 @@ MetaSheet V2 is a collaborative spreadsheet platform built on a modern microkern
 
 ## 🚀 Quick Start
 
+### 📖 Documentation Quick Links
+
+- **👋 New to the Project?** → [Quick Start Guide](claudedocs/QUICK_START_GUIDE.md) (5-minute setup)
+- **📊 Project Status?** → [Development Status](claudedocs/DEVELOPMENT_STATUS.md) (comprehensive overview)
+- **🔌 Need API Reference?** → [API Documentation](claudedocs/API_DOCUMENTATION.md) (complete API guide)
+
 ### Prerequisites
 
 - Node.js >= 18.x
@@ -45,11 +51,17 @@ cp .env.example .env
 # Edit .env with your configuration
 
 # Run database migrations
+cd packages/core-backend
 pnpm run migrate
 
 # Start development server
 pnpm run dev
+
+# Verify installation
+bash scripts/verify-features.sh all
 ```
+
+**📘 Detailed Instructions**: See [Quick Start Guide](claudedocs/QUICK_START_GUIDE.md) for complete setup instructions
 
 ### Environment Variables
 
@@ -165,26 +177,79 @@ OUT_DIR=artifacts
 
 ## 📚 Documentation
 
-### Core Documentation
+### 🎯 Essential Documentation (Start Here)
+
+| Document | Purpose | Target Audience |
+|----------|---------|-----------------|
+| **[Development Status](claudedocs/DEVELOPMENT_STATUS.md)** | 📊 Complete project status, roadmap, and workflows | All team members |
+| **[Quick Start Guide](claudedocs/QUICK_START_GUIDE.md)** | 🚀 5-minute installation and setup | New developers |
+| **[API Documentation](claudedocs/API_DOCUMENTATION.md)** | 🔌 Complete API reference for all 6 core systems | Frontend/Integration developers |
+
+### 📋 Feature & Migration Documentation
+
+- **[Feature Migration Assessment](claudedocs/FEATURE_MIGRATION_ASSESSMENT.md)** - Feature completeness analysis and migration recommendations
+- **[Phase 5 Completion Guide](claudedocs/PHASE5_COMPLETION_GUIDE.md)** - Phase 5 execution steps and checklist
+
+### 🔧 Observability Documentation
 
 - **[Observability Hardening Complete Guide](claudedocs/OBSERVABILITY_HARDENING_COMPLETE_GUIDE.md)** - Comprehensive observability documentation
 - **[Phase 4 Completion Report](claudedocs/PHASE4_COMPLETION_REPORT.md)** - Phase 4 achievements and metrics
 - **[Quick Wins Verification Report](claudedocs/QUICK_WINS_VERIFICATION_REPORT.md)** - Enhancement validation details
 
-### Phase 5 Documentation
+### 🚀 Phase 5 Documentation
 
 - **[Phase 5 Execution Guide](claudedocs/ISSUE_DRAFT_PHASE5_PROD_ENDPOINT.md)** - Production baseline execution instructions
 - **[Alert Integration Guide](claudedocs/ALERT_INTEGRATION_CONFIG.md)** - Webhook and GitHub Issue integration
 - **[Issue #1](https://github.com/zensgit/metasheet2/issues/1)** - Track Phase 5 progress
 
-### Scripts
+### 🛠️ Scripts & Tools
 
-- **[observe-24h.sh](scripts/observe-24h.sh)** - Enhanced 24-hour observation script with Quick Wins features
-- **[Phase 4 Scripts](scripts/)** - Validation, verification, and metrics calculation scripts
+| Script | Purpose | Usage |
+|--------|---------|-------|
+| **[verify-features.sh](scripts/verify-features.sh)** | Automated test suite for 6 core features | `bash scripts/verify-features.sh all` |
+| **[observe-24h.sh](scripts/observe-24h.sh)** | 24-hour observation script with Quick Wins | `bash scripts/observe-24h.sh` |
+| **[phase5-completion.sh](scripts/phase5-completion.sh)** | Phase 5 automated completion | `bash scripts/phase5-completion.sh` |
+| **[gen-dev-token.js](scripts/gen-dev-token.js)** | JWT token generator for API testing | `node scripts/gen-dev-token.js` |
 
 ---
 
 ## 🔧 Development
+
+### Feature Verification
+
+```bash
+# Verify all 6 core features (Approval, Cache, RBAC, Gateway, EventBus, Notification)
+bash scripts/verify-features.sh all
+
+# Verify individual features
+bash scripts/verify-features.sh approval
+bash scripts/verify-features.sh cache
+bash scripts/verify-features.sh rbac
+bash scripts/verify-features.sh gateway
+bash scripts/verify-features.sh eventbus
+bash scripts/verify-features.sh notification
+
+# View test results
+cat verification-reports/test-results-*.csv
+```
+
+### API Testing
+
+```bash
+# Generate development JWT token
+export TOKEN=$(node scripts/gen-dev-token.js)
+
+# Test Approval API
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8900/api/approvals
+
+# Test Permission Check API
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8900/api/permissions/check?userId=u1&resource=spreadsheet&resourceId=sheet-001&action=read"
+
+# Test Cache Health
+curl http://localhost:8900/api/cache/health
+```
 
 ### Running Observability Tests
 
