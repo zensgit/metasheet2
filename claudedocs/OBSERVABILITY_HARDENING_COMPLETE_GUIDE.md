@@ -828,7 +828,9 @@ bash scripts/update-docs.sh
 
 > 下一步：Phase 5（生产 2 小时基线）执行卡：`claudedocs/PHASE5_EXECUTION_CARD.md`
 
-**Phase 5 准备完成 (2025-11-14)**: Quick Wins增强功能已全部实现并验证通过(综合评分4.7/5.0，生产就绪度100%) | 完整文档已就绪: [Issue #426](https://github.com/zensgit/smartsheet/issues/426) 追踪生产endpoint配置、[ALERT_INTEGRATION_CONFIG.md](claudedocs/ALERT_INTEGRATION_CONFIG.md) 提供告警集成指南(Slack/钉钉/飞书/GitHub Issue)、[QUICK_WINS_VERIFICATION_REPORT.md](claudedocs/QUICK_WINS_VERIFICATION_REPORT.md) 记录增强功能验证详情 | 观察脚本增强: ✅ 单实例防护(.observe-24h.lock机制)、✅ OUT_DIR支持(灵活配置输出目录)、✅ CSV自动去重(基于时间戳) | 当前状态: **等待生产METRICS_URL配置**以启动2小时生产基线采集(12个样本，10分钟间隔，预期2小时完成) | Phase 5执行命令: `export METRICS_URL="<prod_endpoint>" INTERVAL_SECONDS=600 MAX_SAMPLES=12 OBS_WINDOW_LABEL=phase5-prod-2h OUT_DIR=metasheet-v2/artifacts && nohup bash scripts/observe-24h.sh > metasheet-v2/artifacts/phase5-run.log 2>&1 & echo $! > metasheet-v2/artifacts/phase5.pid`
+**Phase 5 准备完成 (2025-11-15)**: Quick Wins增强功能已全部实现并验证通过(综合评分4.7/5.0，生产就绪度100%) | 完整文档已就绪: [Issue #1](https://github.com/zensgit/metasheet2/issues/1) 追踪生产endpoint配置、[ALERT_INTEGRATION_CONFIG.md](claudedocs/ALERT_INTEGRATION_CONFIG.md) 提供告警集成指南(Slack/钉钉/飞书/GitHub Issue)、[QUICK_WINS_VERIFICATION_REPORT.md](claudedocs/QUICK_WINS_VERIFICATION_REPORT.md) 记录增强功能验证详情 | 观察脚本增强: ✅ 单实例防护(.observe-24h.lock机制)、✅ OUT_DIR支持(灵活配置输出目录)、✅ CSV自动去重(基于时间戳) | 当前状态: **等待生产METRICS_URL配置**以启动2小时生产基线采集(12个样本，10分钟间隔，预期2小时完成) | Phase 5执行命令: `export METRICS_URL="<prod_endpoint>" INTERVAL_SECONDS=600 MAX_SAMPLES=12 OBS_WINDOW_LABEL=phase5-prod-2h OUT_DIR=artifacts && nohup bash scripts/observe-24h.sh > artifacts/phase5-run.log 2>&1 & echo $! > artifacts/phase5.pid`
+
+> 💡 **仓库迁移说明 (2025-11-15)**: 项目已从 [zensgit/smartsheet](https://github.com/zensgit/smartsheet) 迁移到独立仓库 [zensgit/metasheet2](https://github.com/zensgit/metasheet2)。历史Issue和PR链接保留指向原仓库，新Issue从 #1 开始编号。
 
 <!--
 待填充内容模板（来自 PHASE4_EXECUTION_CHECKLIST.md）：
