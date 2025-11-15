@@ -1,0 +1,44 @@
+{
+  "name": "metasheet-v2",
+  "version": "2.4.0",
+  "description": "Next-generation collaborative spreadsheet platform with microkernel architecture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @metasheet/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "type-check": "pnpm -r type-check",
+    "clean": "pnpm -r clean && rm -rf node_modules"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.37.0",
+    "@types/node": "^22.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "eslint": "^9.37.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "spreadsheet",
+    "collaboration",
+    "microkernel",
+    "bpmn",
+    "observability",
+    "metasheet"
+  ],
+  "author": "MetaSheet Team",
+  "license": "Private",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zensgit/metasheet2.git"
+  }
+}
