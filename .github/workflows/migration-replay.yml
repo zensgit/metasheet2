@@ -7,8 +7,8 @@ on:
       - main
       - 'feat/**'
     paths:
-      - 'metasheet-v2/packages/core-backend/**'
-      - 'metasheet-v2/.github/workflows/migration-replay.yml'
+      - 'packages/core-backend/**'
+      - '.github/workflows/migration-replay.yml'
 
 jobs:
   migration-replay:
@@ -83,6 +83,6 @@ jobs:
         with:
           name: migration-replay-install-logs
           path: |
-            metasheet-v2/install.log
-            metasheet-v2/pnpm-lock.yaml
-            metasheet-v2/packages/**/package.json
+            install.log
+            pnpm-lock.yaml
+            packages/**/package.json

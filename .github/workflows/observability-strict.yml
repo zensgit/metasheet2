@@ -14,10 +14,10 @@ on:
       - main
       - 'v2/**'
     paths:
-      - 'metasheet-v2/packages/core-backend/**'
-      - 'metasheet-v2/apps/web/**'
-      - 'metasheet-v2/packages/openapi/**'
-      - 'metasheet-v2/.github/workflows/observability-strict.yml'
+      - 'packages/core-backend/**'
+      - 'apps/web/**'
+      - 'packages/openapi/**'
+      - '.github/workflows/observability-strict.yml'
 
 jobs:
   observability-strict:
@@ -88,7 +88,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: observability-install-log
-          path: metasheet-v2/install.log
+          path: install.log
 
       - name: Build OpenAPI spec
         working-directory: metasheet-v2
@@ -599,9 +599,9 @@ jobs:
         with:
           name: strict-metrics-${{ github.run_id }}
           path: |
-            metasheet-v2/metrics.txt
-            metasheet-v2/contract-smoke.json
-            metasheet-v2/server.log
+            metrics.txt
+            contract-smoke.json
+            server.log
             /tmp/ci-artifacts-*/
           retention-days: 7
 

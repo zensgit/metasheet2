@@ -5,22 +5,22 @@ on:
     branches:
       - feat/batch2-test-stabilization
     paths:
-      - 'metasheet-v2/plugins/plugin-telemetry-otel/**'
-      - 'metasheet-v2/packages/core-backend/**'
-      - 'metasheet-v2/packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'plugins/plugin-telemetry-otel/**'
+      - 'packages/core-backend/**'
+      - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
   pull_request:
     branches: [ main ]
     paths:
-      - 'metasheet-v2/plugins/plugin-telemetry-otel/**'
-      - 'metasheet-v2/packages/core-backend/**'
-      - 'metasheet-v2/packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'plugins/plugin-telemetry-otel/**'
+      - 'packages/core-backend/**'
+      - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
 
 jobs:
   telemetry-plugin:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: metasheet-v2/plugins/plugin-telemetry-otel
+        working-directory: plugins/plugin-telemetry-otel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: metasheet-v2/packages/core-backend
+        working-directory: packages/core-backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
