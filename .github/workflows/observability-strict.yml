@@ -79,7 +79,6 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies (with log)
-        working-directory: metasheet-v2
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
@@ -91,13 +90,11 @@ jobs:
           path: install.log
 
       - name: Build OpenAPI spec
-        working-directory: metasheet-v2
         run: |
           pnpm -F @metasheet/openapi build
           pnpm -F @metasheet/openapi validate
 
       - name: Run DB migrations
-        working-directory: metasheet-v2
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
           # Exclude problematic migrations (see migration-replay.yml for details)
@@ -108,7 +105,6 @@ jobs:
           pnpm -F @metasheet/core-backend db:migrate
 
       - name: Start Backend Server (with diagnostics)
-        working-directory: metasheet-v2
         env:
           HOST: 127.0.0.1
           PORT: 8900
@@ -135,7 +131,6 @@ jobs:
           fi
 
       - name: Startup diagnostics snapshot
-        working-directory: metasheet-v2
         run: |
           echo '--- ps node snapshot ---'
           ps -ef | grep -i node | head -n 15 || true
@@ -145,7 +140,6 @@ jobs:
           tail -n 80 server.log || echo 'server.log not created yet'
 
       - name: Wait for health (extended with log probes)
-        working-directory: metasheet-v2
         run: |
           for i in {1..40}; do
             if curl -fsS http://127.0.0.1:8900/health >/dev/null; then
@@ -158,7 +152,6 @@ jobs:
           echo "::error::Health never ready after 40 attempts"; tail -n 200 server.log || true; exit 1
 
       - name: RBAC preliminary counter probe (non-blocking)
-        working-directory: metasheet-v2
         run: |
           echo '--- preliminary metrics probe (if server up) ---'
           curl -fsS http://127.0.0.1:8900/metrics/prom | \
@@ -166,14 +159,12 @@ jobs:
           echo '------------------------------------------------'
 
       - name: Generate dev token
-        working-directory: metasheet-v2
         run: |
           TOKEN=$(node scripts/gen-dev-token.js)
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
           echo "BASE_URL=http://127.0.0.1:8900" >> $GITHUB_ENV
 
       - name: Contract Tests (Blocking in Strict Mode)
-        working-directory: metasheet-v2
         run: |
           echo "Running contract tests in STRICT mode (must pass)..."
           node scripts/contract-smoke.js
@@ -391,7 +382,6 @@ jobs:
           curl -fsS http://127.0.0.1:8900/metrics/prom | grep -E 'rbac_perm_queries_(real|synth)_total' || echo 'No RBAC query counters yet'
 
       - name: Generate RBAC traffic (unified script)
-        working-directory: metasheet-v2
         env:
           BASE_URL: http://127.0.0.1:8900
           TOKEN: ${{ env.TOKEN }}
@@ -449,14 +439,12 @@ jobs:
           echo "Stress test completed"
 
       - name: Force RBAC real/synth activity
-        working-directory: metasheet-v2
         run: |
           bash scripts/ci/force-rbac-activity.sh || echo "force activity failed"
           echo "Waiting for metrics to propagate..."
           sleep 2
 
       - name: Fetch and validate metrics (STRICT)
-        working-directory: metasheet-v2
         run: |
           curl -fsS http://127.0.0.1:8900/metrics/prom | tee metrics.txt
           echo '--- RBAC counter probe ---'
@@ -484,7 +472,6 @@ jobs:
           echo ""; echo "========================================="; echo "STRICT MODE VALIDATION (Enhanced Thresholds)"; echo "========================================="
 
       - name: Assert STRICT performance thresholds
-        working-directory: metasheet-v2
         run: |
           # Extract P99 latency
           P99=$(awk -F' ' '/^http_server_requests_seconds_summary\{[^}]*quantile="0.99"[^}]*\} [0-9.eE+-]+$/ {
@@ -503,7 +490,6 @@ jobs:
           echo "✅ STRICT: P99 latency check passed ($P99s < 0.3s)"
 
       - name: Assert STRICT error rate thresholds
-        working-directory: metasheet-v2
         run: |
           # Calculate error rate
           TOTAL=$(awk '/^http_requests_total\{[^}]*\} [0-9]+$/ {sum+=$NF} END {print (sum==""?0:sum)}' metrics.txt)
@@ -525,7 +511,6 @@ jobs:
           fi
 
       - name: Assert STRICT cache performance
-        working-directory: metasheet-v2
         run: |
           # Cache hit rate must be > 60% in strict mode
           HITS=$(awk '/^rbac_perm_cache_hits_total\{[^}]*\} [0-9]+$/ {print $NF}' metrics.txt | head -1)
@@ -550,7 +535,6 @@ jobs:
           fi
 
       - name: Assert business metrics thresholds
-        working-directory: metasheet-v2
         run: |
           # Check approval metrics
           SUCCESS=$(awk '/^metasheet_approval_actions_total\{[^}]*result="success"[^}]*\} [0-9]+$/{sum+=$NF} END{print (sum==""?0:sum)}' metrics.txt)
@@ -575,7 +559,6 @@ jobs:
 
       - name: Stop server and check for errors
         if: always()
-        working-directory: metasheet-v2
         run: |
           if [ -f server.pid ]; then
             kill $(cat server.pid) || true

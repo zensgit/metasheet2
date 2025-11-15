@@ -31,7 +31,6 @@ jobs:
           run_install: false
 
       - name: Install dependencies
-        working-directory: metasheet-v2
         run: |
           pnpm install --frozen-lockfile 2>&1 | tee install.log
         shell: bash
@@ -57,7 +56,6 @@ jobs:
           psql -h 127.0.0.1 -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
 
       - name: Run migrations twice (replay)
-        working-directory: metasheet-v2
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
@@ -72,7 +70,6 @@ jobs:
           pnpm -F @metasheet/core-backend db:migrate
           pnpm -F @metasheet/core-backend db:migrate
       - name: List migrations
-        working-directory: metasheet-v2
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
         run: pnpm -F @metasheet/core-backend db:list
