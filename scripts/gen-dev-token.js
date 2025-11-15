@@ -3,7 +3,7 @@
  * JWT token generator for CI environments
  * Standalone version - no dependencies on TypeScript or external packages
  */
-const crypto = require('crypto')
+import crypto from 'crypto'
 
 // Simple JWT implementation
 function base64url(input) {
