@@ -1,0 +1,46 @@
+name: Batch2 Test Stabilization
+
+on:
+  push:
+    branches:
+      - feat/batch2-test-stabilization
+    paths:
+      - 'metasheet-v2/plugins/plugin-telemetry-otel/**'
+      - 'metasheet-v2/packages/core-backend/**'
+      - 'metasheet-v2/packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'metasheet-v2/plugins/plugin-telemetry-otel/**'
+      - 'metasheet-v2/packages/core-backend/**'
+      - 'metasheet-v2/packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+
+jobs:
+  telemetry-plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: metasheet-v2/plugins/plugin-telemetry-otel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci || npm i
+      - run: npm run build
+      - run: npm run smoke:local
+      - run: npm run -s test -- --run --reporter=dot
+
+  core-backend-cache:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: metasheet-v2/packages/core-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci || npm i
+      - run: npm run test:cache
+

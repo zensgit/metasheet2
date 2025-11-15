@@ -1,0 +1,184 @@
+name: Plugin System Tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/**'
+      - 'plugins/**'
+      - 'apps/web/src/**'
+      - '.github/workflows/plugin-tests.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/**'
+      - 'plugins/**'
+      - 'apps/web/src/**'
+      - '.github/workflows/plugin-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-${{ matrix.node-version }}
+          path: install.log
+
+      - name: Run linting
+        run: |
+          pnpm lint || true # Non-blocking for now
+
+      - name: Run core-backend tests
+        run: |
+          pnpm --filter @metasheet/core-backend test
+
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 14
+      - name: Create test database
+        run: |
+          psql -c 'CREATE DATABASE metasheet_test;' -U postgres -h localhost
+
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres@localhost/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Start core backend (background)
+        env:
+          DATABASE_URL: postgresql://postgres@localhost/metasheet_test
+          PORT: 8900
+        run: |
+          nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
+          sleep 5
+          echo "Server PID: $(cat server.pid)"
+
+      - name: Run plugin smoke test
+        env:
+          API_ORIGIN: http://localhost:8900
+        run: |
+          pnpm --filter @metasheet/core-backend smoke:plugins
+
+      - name: Config snapshot (non-blocking)
+        if: always()
+        run: |
+          curl -sf http://localhost:8900/metrics/config || true
+
+      - name: Admin KV list (non-blocking)
+        if: always()
+        env:
+          API_ORIGIN: http://localhost:8900
+        run: |
+          set +e
+          curl -sf "${API_ORIGIN}/api/admin/plugin-kv?plugin=@metasheet/plugin-test-a" || true
+
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          cat server.log || true
+
+      - name: Stop core backend
+        if: always()
+        run: |
+          kill $(cat server.pid) || true
+
+      - name: Build web app
+        run: |
+          pnpm --filter @metasheet/web build
+
+      - name: Run integration tests
+        run: |
+          pnpm --filter @metasheet/core-backend test:integration || true # Non-blocking
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.node-version }}
+          path: |
+            packages/core-backend/coverage/
+            packages/core-backend/test-results/
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install dependencies (with log)
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+      - name: Upload install log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-log-coverage
+          path: install.log
+
+      - name: Run tests with coverage
+        run: |
+          pnpm --filter @metasheet/core-backend test --coverage || true
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: romeovs/lcov-reporter-action@v0.3.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          lcov-file: ./packages/core-backend/coverage/lcov.info
+        continue-on-error: true

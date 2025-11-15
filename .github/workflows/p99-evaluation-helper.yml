@@ -1,0 +1,126 @@
+name: P99 Evaluation Helper
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to analyze
+        required: false
+        default: main
+      max_runs:
+        description: How many latest runs to analyze
+        required: false
+        default: '20'
+      pr_number:
+        description: PR number to comment summary (optional)
+        required: false
+        default: '79'
+      post_comment:
+        description: Post comment to PR (true/false)
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare workspace
+        run: |
+          mkdir -p out
+
+      - name: Collect last runs and extract p99
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.inputs.branch || 'main' }}
+          MAX_RUNS: ${{ github.event.inputs.max_runs || '20' }}
+        run: |
+          set -e
+          echo "Listing last $MAX_RUNS runs of Observability (V2 Strict) on $BRANCH"
+          # Fetch runs for the workflow file path
+          runs_json=$(gh api repos/${{ github.repository }}/actions/workflows/observability-strict.yml/runs \
+            -q '.workflow_runs | map(select(.head_branch==env.BRANCH)) | .[:(env.MAX_RUNS|fromjson)]')
+          echo "$runs_json" | jq '.' > out/runs.json
+
+          echo "run_id,timestamp,head_sha,conclusion,p99,db_p99,total,errors,hit_rate,lint_errs" > out/p99_data.csv
+          idx=0
+          for run_id in $(echo "$runs_json" | jq -r '.[].id'); do
+            idx=$((idx+1))
+            echo "Processing run $idx: $run_id"
+            art_url=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
+              --jq '.artifacts[] | select(.name=="observability-strict-artifacts") | .archive_download_url' || true)
+            if [ -z "$art_url" ]; then
+              echo "No artifact for run $run_id, skipping"; continue
+            fi
+            tmpd=$(mktemp -d)
+            curl -fsSL -H "Authorization: token $GH_TOKEN" "$art_url" -o "$tmpd/art.zip"
+            unzip -q "$tmpd/art.zip" -d "$tmpd"
+            if [ -f "$tmpd/verification-report.json" ]; then
+              ts=$(jq -r '.timestamp' "$tmpd/verification-report.json")
+              p99=$(jq -r '.metrics.p99_latency // .p99 // 0' "$tmpd/verification-report.json")
+              dbp99=$(jq -r '.metrics.db_p99_latency // .dbp99 // 0' "$tmpd/verification-report.json")
+              total=$(jq -r '.metrics.total_requests // .requests.total // 0' "$tmpd/verification-report.json")
+              errs=$(jq -r '.metrics.error_5xx // .requests.errors // 0' "$tmpd/verification-report.json")
+              hit=$(jq -r '(.metrics.rbac_cache_hits // 0) as $h | (.metrics.rbac_cache_misses // 0) as $m | if ($h+$m)>0 then ($h/($h+$m)) else 0 end' "$tmpd/verification-report.json")
+              lint=$(jq -r '.metrics.openapi_lint_issues // .openapi.lintErrors // 0' "$tmpd/verification-report.json")
+              sha=$(echo "$runs_json" | jq -r ".[] | select(.id==$run_id) | .head_sha")
+              concl=$(echo "$runs_json" | jq -r ".[] | select(.id==$run_id) | .conclusion")
+              echo "$run_id,$ts,$sha,$concl,$p99,$dbp99,$total,$errs,$hit,$lint" >> out/p99_data.csv
+            fi
+            rm -rf "$tmpd"
+          done
+
+          # Build Markdown summary
+          node - <<'JS'
+          const fs = require('fs')
+          const csv = fs.readFileSync('out/p99_data.csv','utf8').trim().split('\n').slice(1).map(l=>l.split(','))
+          const md = []
+          md.push('# P99 Evaluation Summary')
+          md.push('')
+          md.push(`Runs analyzed: ${csv.length}`)
+          md.push('')
+          if (csv.length>0) {
+            const p99s = csv.map(r => Number(r[4]||0))
+            const avg = p99s.reduce((a,b)=>a+b,0)/p99s.length
+            const max = Math.max(...p99s)
+            const pass = p99s.filter(v => v < 0.1).length
+            md.push(`- Avg P99: ${avg.toFixed(6)}s`)
+            md.push(`- Max P99: ${max.toFixed(6)}s`)
+            md.push(`- Pass (<0.1s): ${pass}/${p99s.length}`)
+            md.push('')
+            md.push('| run_id | timestamp | p99 | db_p99 | total | errors | hit_rate | lint |')
+            md.push('|-|-|-|-|-|-|-|-|')
+            for (const r of csv.slice(0, 10)) {
+              md.push(`| ${r[0]} | ${r[1]} | ${Number(r[4]).toFixed(6)} | ${Number(r[5]).toFixed(6)} | ${r[6]} | ${r[7]} | ${(Number(r[8])*100).toFixed(1)}% | ${r[9]} |`)
+            }
+          }
+          fs.writeFileSync('out/P99_EVALUATION_SUMMARY.md', md.join('\n'))
+          JS
+
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p99-evaluation-summary
+          path: out/
+
+      - name: Comment to PR (optional)
+        if: ${{ github.event.inputs.post_comment == 'true' && github.event.inputs.pr_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const md = fs.readFileSync('out/P99_EVALUATION_SUMMARY.md','utf8')
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUM||'79'),
+              body: `<!-- p99-eval-helper -->\n` + md
+            })
+        env:
+          PR_NUM: ${{ github.event.inputs.pr_number }}
+
+# Trigger workflow scan

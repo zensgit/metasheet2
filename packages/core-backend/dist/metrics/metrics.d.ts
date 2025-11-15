@@ -1,0 +1,31 @@
+import type { Application, Request, Response, NextFunction } from 'express';
+import client from 'prom-client';
+export declare function installMetrics(app: Application): void;
+export declare function requestMetricsMiddleware(req: Request, res: Response, next: NextFunction): void;
+export declare const metrics: {
+    jwtAuthFail: client.Counter<"reason">;
+    approvalActions: client.Counter<"action" | "result">;
+    approvalConflict: client.Counter<"action">;
+    rbacPermCacheHits: client.Counter<never>;
+    rbacPermCacheMiss: client.Counter<never>;
+    rbacPermCacheMisses: client.Counter<never>;
+    rbacDenials: client.Counter<never>;
+    authFailures: client.Counter<never>;
+    httpSummary: client.Summary<"status" | "route" | "method">;
+    httpRequestsTotal: client.Counter<"status" | "method">;
+    eventsEmittedTotal: client.Counter<never>;
+    messagesProcessedTotal: client.Counter<never>;
+    messagesRetriedTotal: client.Counter<never>;
+    messagesExpiredTotal: client.Counter<never>;
+    permissionDeniedTotal: client.Counter<never>;
+    rpcTimeoutsTotal: client.Counter<never>;
+    cache_hits_total: client.Counter<"impl" | "key_pattern">;
+    cache_miss_total: client.Counter<"impl" | "key_pattern">;
+    cache_set_total: client.Counter<"impl" | "key_pattern">;
+    cache_del_total: client.Counter<"impl" | "key_pattern">;
+    cache_errors_total: client.Counter<"impl" | "error_type">;
+    cache_invalidate_total: client.Counter<"impl" | "tag">;
+    cache_enabled: client.Gauge<"impl">;
+    cache_candidate_requests: client.Counter<"route" | "method">;
+};
+//# sourceMappingURL=metrics.d.ts.map

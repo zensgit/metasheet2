@@ -1,0 +1,7 @@
+{
+  "name": "plugin-perm-denied",
+  "version": "0.1.0",
+  "engines": { "metasheet": ">=2.0.0" },
+  "main": { "backend": "index.js" },
+  "permissions": ["fs.readFile"]
+}

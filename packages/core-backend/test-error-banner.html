@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Error Banner Test</title>
+  <style>
+    .error-banner {
+      background: #ffecec;
+      color: #d93025;
+      padding: 0.75rem 1rem;
+      border: 1px solid #f5c6cb;
+      border-radius: 6px;
+      margin: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h2>测试错误Banner</h2>
+  <div id="test1"></div>
+  <div id="test2"></div>
+  
+  <script>
+    // 测试1: 正常连接
+    fetch('http://localhost:8900/api/plugins')
+      .then(res => res.json())
+      .then(plugins => {
+        document.getElementById('test1').innerHTML = 
+          '<p>✅ 连接成功，获取到 ' + plugins.length + ' 个插件</p>';
+      })
+      .catch(err => {
+        document.getElementById('test1').innerHTML = 
+          '<div class="error-banner">插件加载失败：' + err.message + '</div>';
+      });
+    
+    // 测试2: 模拟错误
+    fetch('http://localhost:9999/api/plugins')
+      .then(res => res.json())
+      .then(plugins => {
+        document.getElementById('test2').innerHTML = 
+          '<p>连接成功</p>';
+      })
+      .catch(err => {
+        document.getElementById('test2').innerHTML = 
+          '<div class="error-banner">插件加载失败：Failed to fetch</div>';
+      });
+  </script>
+</body>
+</html>

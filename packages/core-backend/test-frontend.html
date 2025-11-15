@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head><title>Plugin Test</title></head>
+<body>
+<div id="app">
+  <h2>Plugin Loading Test</h2>
+  <div id="status">Loading...</div>
+  <div id="plugins"></div>
+</div>
+<script>
+async function testPlugins() {
+  const status = document.getElementById('status');
+  const pluginsDiv = document.getElementById('plugins');
+  
+  try {
+    const res = await fetch('http://localhost:8900/api/plugins');
+    if (!res.ok) throw new Error(\`\${res.status} \${res.statusText}\`);
+    const plugins = await res.json();
+    
+    status.textContent = \`Loaded \${plugins.length} plugins\`;
+    pluginsDiv.innerHTML = '<h3>Plugins:</h3>' + plugins.map(p => 
+      \`<div style="margin: 10px; padding: 10px; border: 1px solid \${p.status === 'failed' ? 'red' : 'green'}">
+        <strong>\${p.displayName || p.name}</strong> v\${p.version}<br>
+        Status: \${p.status}<br>
+        \${p.error ? \`Error: \${p.error} (Code: \${p.errorCode})\` : ''}
+      </div>\`
+    ).join('');
+  } catch (e) {
+    status.textContent = \`Error: \${e.message}\`;
+    status.style.color = 'red';
+  }
+}
+testPlugins();
+</script>
+</body>
+</html>

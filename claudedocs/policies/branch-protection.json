@@ -1,0 +1,50 @@
+{
+  "description": "Main branch protection configuration for smartsheet/metasheet-v2",
+  "version": "2.0",
+  "last_updated": "2025-10-29T23:50:00Z",
+  "repository": "zensgit/smartsheet",
+  "branch": "main",
+  "config": {
+    "strict": true,
+    "contexts": [
+      "Migration Replay",
+      "lint-type-test-build",
+      "smoke",
+      "typecheck"
+    ]
+  },
+  "change_log": [
+    {
+      "date": "2025-10-29",
+      "action": "Added typecheck to required checks",
+      "reason": "Phase 3 type safety initiative - ensuring all PRs pass TypeScript type checking",
+      "pr": "#337",
+      "author": "Phase 3 Team"
+    },
+    {
+      "date": "2025-10-29",
+      "action": "Removed v2-observability-strict from required checks",
+      "reason": "Changed to non-blocking for faster iteration - observability is informational only",
+      "pr": "#332",
+      "author": "Phase 2 Team"
+    },
+    {
+      "date": "2025-10-29",
+      "action": "Established 4 core required checks",
+      "reason": "Phase 2 completion - Migration Replay, lint-type-test-build, smoke, typecheck",
+      "pr": "#332",
+      "author": "Phase 2 Team"
+    }
+  ],
+  "notes": {
+    "migration_replay": "Most critical check - validates database migration integrity",
+    "lint_type_test_build": "Web application build and lint validation",
+    "smoke": "Basic functionality smoke tests",
+    "typecheck": "TypeScript type safety check (added in Phase 3)",
+    "non_blocking_checks": [
+      "v2-observability-strict",
+      "Observability E2E",
+      "scan"
+    ]
+  }
+}

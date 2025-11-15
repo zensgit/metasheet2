@@ -1,0 +1,27 @@
+{
+  "name": "@metasheet/plugin-telemetry-otel",
+  "version": "1.0.0",
+  "description": "OpenTelemetry observability plugin for MetaSheet V2",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "smoke:local": "node scripts/local-smoke.js",
+    "test": "npm run build && vitest"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.52.0",
+    "@opentelemetry/instrumentation-http": "^0.52.0",
+    "@opentelemetry/exporter-prometheus": "^0.52.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
+    "prom-client": "^15.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^7.1.2",
+    "vitest": "^2.0.0"
+  }
+}

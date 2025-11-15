@@ -1,0 +1,285 @@
+name: Observability E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'packages/core-backend/**'
+      - 'apps/web/**'
+      - '.github/workflows/observability-e2e.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/core-backend/**'
+      - 'apps/web/**'
+      - '.github/workflows/observability-e2e.yml'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: quay.io/enterprisedb/postgresql:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: metasheet
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Enable corepack / setup pnpm
+        run: |
+          corepack enable
+          pnpm -v || npm i -g pnpm@8
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build OpenAPI spec
+        run: |
+          pnpm -F @metasheet/openapi build
+          pnpm -F @metasheet/openapi validate
+
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+        run: |
+          pnpm -F @metasheet/core-backend db:list || true
+          pnpm -F @metasheet/core-backend db:migrate
+      - name: Start backend
+        env:
+          HOST: 127.0.0.1
+          PORT: 8900
+          KANBAN_AUTH_REQUIRED: 'true'
+          APPROVAL_AUTH_REQUIRED: 'false'
+          JWT_SECRET: 'e2e-test-secret'
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+        run: |
+          nohup pnpm -F @metasheet/core-backend dev:core >/tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+      - name: Wait for health (with retries)
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          for i in {1..90}; do
+            if curl -fsS "$API/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Health never ready"; tail -n +1 /tmp/server.log; exit 1
+
+      - name: Set environment variables
+        run: |
+          echo "BASE_URL=http://127.0.0.1:8900" >> $GITHUB_ENV
+
+      - name: Generate JWT token for RBAC tests
+        env:
+          JWT_SECRET: 'e2e-test-secret'
+        run: |
+          TOKEN=$(JWT_SECRET=e2e-test-secret node scripts/gen-dev-token.js)
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "JWT token generated for authenticated RBAC tests"
+
+      - name: Smoke (kanban)
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          # Add a quick pre-check to avoid transient failures
+          for i in {1..5}; do
+            if curl -fsS "$API/health" >/dev/null; then break; fi
+            sleep 1
+          done
+          bash scripts/smoke-kanban.sh
+
+      - name: RBAC warmup with backoff
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          set +e
+          tries=0
+          until curl -fsS "$API/api/permissions?userId=u1" >/dev/null; do
+            tries=$((tries+1))
+            if [ $tries -ge 5 ]; then echo "RBAC warmup failed after $tries attempts"; exit 1; fi
+            sleep $((tries))
+          done
+          set -e
+      - name: Collect health snapshot on failure
+        if: failure()
+        run: |
+          echo "# Health" > /tmp/health.txt
+          curl -fsS http://127.0.0.1:8900/health >> /tmp/health.txt || true
+      - name: Perform approval operations for metrics
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          echo "Executing approval operations to generate business metrics..."
+
+          # Get current approval state
+          CURRENT=$(curl -fsS "$API/api/approvals/demo-1" 2>/dev/null | jq -r '.data.version // 0' || echo "0")
+          echo "Current approval version: $CURRENT"
+
+          # Execute several approval actions (some will succeed, some may conflict)
+          for i in {1..5}; do
+            VERSION=$(($CURRENT + $i - 1))
+            echo "Attempting approval with version $VERSION"
+
+            # Try to approve with potentially stale version (will cause some conflicts)
+            curl -sS -X POST -H "Content-Type: application/json" \
+              -d "{\"version\":$VERSION,\"comment\":\"e2e test $i\"}" \
+              "$API/api/approvals/demo-1/approve" 2>&1 | jq -c . || echo "Approval attempt $i failed (expected for conflicts)" &
+
+            # Some concurrent operations to generate conflicts
+            if [ $((i % 2)) -eq 0 ]; then
+              curl -sS -X POST -H "Content-Type: application/json" \
+                -d "{\"version\":$VERSION,\"comment\":\"concurrent $i\"}" \
+                "$API/api/approvals/demo-1/approve" 2>&1 | jq -c . || echo "Concurrent approval $i failed (expected)" &
+            fi
+          done
+
+          wait  # Wait for all operations to complete
+          echo "Approval operations completed"
+
+      - name: RBAC metrics warmup with retry
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          echo "Warming up RBAC metrics endpoint..."
+          for i in {1..3}; do
+            echo "Attempt $i: Fetching /metrics/prom"
+            if curl -fsS "$API/metrics/prom" >/dev/null 2>&1; then
+              echo "Metrics endpoint responsive"
+              break
+            fi
+            echo "Retry in 2s..."
+            sleep 2
+          done
+
+          echo "Pausing 1s for metric collection stabilization..."
+          sleep 1
+
+      - name: Force RBAC real/synth activity
+        env:
+          API: http://127.0.0.1:8900
+          BASE_URL: http://127.0.0.1:8900
+        run: |
+          echo "Running RBAC activity script with TOKEN authentication..."
+          bash scripts/ci/force-rbac-activity.sh || {
+            echo "::error::RBAC activity script failed"
+            echo "Check if endpoints are available and JWT is valid"
+            exit 1
+          }
+
+      - name: Fetch metrics for validation
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          curl -fsS "$API/metrics/prom" | tee /tmp/metrics.txt
+          echo '--- RBAC counter probe (E2E) ---'
+          grep -E 'rbac_perm_(cache|queries)_(hits|miss|misses|real|synth)_total' /tmp/metrics.txt || echo 'RBAC counters missing'
+          echo '--------------------------------'
+
+      - name: Assert RBAC metrics activity (relaxed)
+        run: |
+          HITS=$(awk '/rbac_perm_cache_hits_total/{print $2}' /tmp/metrics.txt | head -1)
+          MISS=$(awk '/rbac_perm_cache_misses_total/{print $2}' /tmp/metrics.txt | head -1)
+
+          HITS=${HITS:-0}
+          MISS=${MISS:-0}
+          TOTAL=$((HITS + MISS))
+
+          echo "RBAC Cache Metrics: hits=$HITS misses=$MISS total=$TOTAL"
+
+          # Relaxed assertion: require at least 1 activity (hits + misses >= 1)
+          if [ "$TOTAL" -lt 1 ]; then
+            echo "::error::Expected at least 1 RBAC cache activity (hits+misses), got $TOTAL"
+            echo "This indicates RBAC permission checks are not being exercised"
+            exit 1
+          fi
+
+          # Strong condition: at least 1 cache hit
+          if [ "$HITS" -lt 1 ]; then
+            echo "::warning::Expected at least 1 cache hit, got $HITS (misses=$MISS)"
+            echo "Cache is working but hit rate may be low - consider investigation"
+          else
+            echo "✓ RBAC cache is active (hits=$HITS, misses=$MISS)"
+          fi
+
+      - name: Validate RealShare presence (non-blocking)
+        run: |
+          REAL=$(awk '/rbac_perm_queries_real_total/{print $2}' /tmp/metrics.txt | head -1)
+          SYN=$(awk '/rbac_perm_queries_synth_total/{print $2}' /tmp/metrics.txt | head -1)
+          if [ -z "$REAL" ] || [ -z "$SYN" ]; then
+            echo '::warning::RealShare counters absent'; exit 0; fi
+          TOTAL=$((REAL + SYN))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo '::warning::RealShare counters zero (not yet eligible)'; exit 0; fi
+          SHARE=$(awk -v r=$REAL -v s=$SYN 'BEGIN{ if(r+s>0) printf "%.1f", r/(r+s)*100; else print 0 }')
+          echo "RealShare=${SHARE}% (REAL=$REAL SYN=$SYN)"
+          if awk -v x=$SHARE 'BEGIN{exit !(x>=30)}'; then
+            echo 'RealShare threshold met (>=30%)'
+          else
+            echo '::warning::RealShare below 30% threshold'
+          fi
+
+      - name: Collect diagnostics snapshot
+        if: always()
+        run: |
+          echo "=== Health Snapshot ===" > /tmp/diagnostics.txt
+          curl -fsS http://127.0.0.1:8900/health >> /tmp/diagnostics.txt 2>&1 || echo "Health check failed" >> /tmp/diagnostics.txt
+          echo "" >> /tmp/diagnostics.txt
+          echo "=== RBAC Metrics Snapshot ===" >> /tmp/diagnostics.txt
+          curl -fsS http://127.0.0.1:8900/metrics/prom | grep rbac_perm >> /tmp/diagnostics.txt 2>&1 || echo "No RBAC metrics" >> /tmp/diagnostics.txt
+          echo "" >> /tmp/diagnostics.txt
+          echo "=== Last 100 Server Logs ===" >> /tmp/diagnostics.txt
+          tail -100 /tmp/server.log >> /tmp/diagnostics.txt 2>&1 || echo "No server logs" >> /tmp/diagnostics.txt
+
+      - name: Assert metrics thresholds
+        run: |
+          # Debug: Check if metrics file exists and show content
+          if [ -f /tmp/metrics.txt ]; then
+            echo "Metrics file found, checking content..."
+            echo "Lines containing approval metrics:"
+            grep -E "(metasheet_approval_actions_total|metasheet_approval_conflict_total)" /tmp/metrics.txt || echo "No approval metrics found"
+          else
+            echo "ERROR: /tmp/metrics.txt not found"
+            ls -la /tmp/ || true
+          fi
+
+          SUCCESS=$(awk '/^metasheet_approval_actions_total\{[^}]*result="success"[^}]*\} [0-9]+$/{sum+=$NF} END{print (sum==""?0:sum)}' /tmp/metrics.txt)
+          CONFLICT=$(awk '/^metasheet_approval_conflict_total\{[^}]*\} [0-9]+$/{sum+=$NF} END{print (sum==""?0:sum)}' /tmp/metrics.txt)
+          echo "success=$SUCCESS conflict=$CONFLICT"
+
+          # Require at least one successful approval operation
+          if [ "$SUCCESS" -lt 1 ]; then
+            echo "ERROR: Expected at least 1 successful approval action, got $SUCCESS"
+            echo "This indicates approval operations failed to complete successfully"
+            exit 1
+          fi
+
+          echo "SUCCESS: Found approval metrics (success=$SUCCESS, conflict=$CONFLICT)"
+
+      - name: Upload observability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: observability-e2e-artifacts
+          path: |
+            /tmp/server.log
+            /tmp/health.txt
+            /tmp/metrics.txt
+            /tmp/diagnostics.txt
+          retention-days: 7

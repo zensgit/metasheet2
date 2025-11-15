@@ -1,0 +1,1133 @@
+🚀 Starting Phase 3: 24-Hour Observation
+📊 Sampling interval: 1800s (30 minutes)
+🎯 Maximum samples: 48
+📁 CSV output: artifacts/observability-24h.csv
+📄 Summary output: artifacts/observability-24h-summary.json
+🚨 Critical alerts: alerts/observability-critical.txt
+
+⚙️ Thresholds:
+  - Success Rate: WARN <0.98, CRIT <0.95
+  - Conflicts: WARN =1, CRIT ≥2
+  - Fallback Ratio: WARN >0.10, CRIT >0.25
+  - P99 Latency: WARN >0.30s, CRIT >0.40s
+  - Cold Start Exemption: First 1 samples
+  - P99 Smoothing: Median of last 3 samples
+
+🔔 Alert Hooks:
+  - Webhook: disabled
+  - Custom CMD: disabled
+  - GitHub Issues: false
+
+🛑 To stop observation early: touch artifacts/STOP_OBSERVATION
+
+📋 Observation PID: 30986 (saved to artifacts/observation.pid)
+
+✅ Initialized summary file: artifacts/observability-24h-summary.json
+🔄 Starting observation loop...
+
+
+=== Sample #1 at Tue Nov 11 15:35:00 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+❄️  Cold start sample - skipping alert checks
+✅ Status: COLD_START
+🚨 Alert flags: cold_start
+�
+=== Sample #2 at Tue Nov 11 15:39:39 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_
+=== Sample #2 at Tue Nov 11 16:05:03 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+�
+=== Sample #3 at Tue Nov 11 16:09:43 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_
+=== Sample #3 at Tue Nov 11 16:35:08 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_rati
+=== Sample #4 at Tue Nov 11 16:39:48 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   
+=== Sample #4 at Tue Nov 11 17:05:13 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1
+=== Sample #5 at Tue Nov 11 17:09:52 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latenc
+=== Sample #5 at Tue Nov 11 17:35:17 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 
+=== Sample #6 at Tue Nov 11 17:39:56 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calcula
+=== Sample #6 at Tue Nov 11 18:05:22 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p9
+=== Sample #7 at Tue Nov 11 18:10:03 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (
+=== Sample #7 at Tue Nov 11 21:48:18 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: I
+=== Sample #8 at Tue Nov 11 21:52:58 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #8, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 8 / 48 samples collected
+   Next sample at: Tue Nov 11 22:22:58 CST 2025
+
+=== Sample #9 at Tue Nov 11 22:38:14 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #9, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 9 / 48 samples collected
+   Next sample at: Tue Nov 11 23:08:14 CST 2025
+
+=== Sample #10 at Wed Nov 12 00:24:44 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 10 / 48 samples collected
+   Next sample at: Wed Nov 12 00:54:48 CST 2025
+
+=== Sample #11 at Wed Nov 12 09:03:38 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 11 / 48 samples collected
+   Next sample at: Wed Nov 12 09:33:41 CST 2025
+
+=== Sample #12 at Wed Nov 12 10:03:41 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 12 / 48 samples collected
+   Next sample at: Wed Nov 12 10:33:46 CST 2025
+
+=== Sample #13 at Wed Nov 12 10:58:13 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 13 / 48 samples collected
+   Next sample at: Wed Nov 12 11:28:16 CST 2025
+
+=== Sample #14 at Wed Nov 12 11:28:17 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 14 / 48 samples collected
+   Next sample at: Wed Nov 12 11:58:21 CST 2025
+
+=== Sample #15 at Wed Nov 12 11:58:21 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 15 / 48 samples collected
+   Next sample at: Wed Nov 12 12:28:29 CST 2025
+
+=== Sample #16 at Wed Nov 12 12:28:29 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #16, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 16 / 48 samples collected
+   Next sample at: Wed Nov 12 12:58:29 CST 2025
+
+=== Sample #17 at Wed Nov 12 12:58:29 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #17, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 17 / 48 samples collected
+   Next sample at: Wed Nov 12 13:28:29 CST 2025
+
+=== Sample #18 at Wed Nov 12 13:28:29 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #18, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 18 / 48 samples collected
+   Next sample at: Wed Nov 12 13:58:29 CST 2025
+
+=== Sample #19 at Wed Nov 12 13:58:29 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 19 / 48 samples collected
+   Next sample at: Wed Nov 12 14:28:34 CST 2025
+
+=== Sample #20 at Wed Nov 12 14:28:34 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 20 / 48 samples collected
+   Next sample at: Wed Nov 12 14:58:38 CST 2025
+
+=== Sample #21 at Wed Nov 12 14:58:38 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 21 / 48 samples collected
+   Next sample at: Wed Nov 12 15:28:44 CST 2025
+
+=== Sample #22 at Wed Nov 12 15:28:44 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 22 / 48 samples collected
+   Next sample at: Wed Nov 12 15:58:49 CST 2025
+
+=== Sample #23 at Wed Nov 12 15:58:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 23 / 48 samples collected
+   Next sample at: Wed Nov 12 16:28:53 CST 2025
+
+=== Sample #24 at Wed Nov 12 16:28:53 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 24 / 48 samples collected
+   Next sample at: Wed Nov 12 16:58:59 CST 2025
+
+=== Sample #25 at Wed Nov 12 16:58:59 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 25 / 48 samples collected
+   Next sample at: Wed Nov 12 17:29:04 CST 2025
+
+=== Sample #26 at Wed Nov 12 17:29:04 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #26, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 26 / 48 samples collected
+   Next sample at: Wed Nov 12 17:59:04 CST 2025
+
+=== Sample #27 at Thu Nov 13 08:21:13 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 27 / 48 samples collected
+   Next sample at: Thu Nov 13 08:51:18 CST 2025
+
+=== Sample #28 at Thu Nov 13 08:51:18 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 28 / 48 samples collected
+   Next sample at: Thu Nov 13 09:21:23 CST 2025
+
+=== Sample #29 at Thu Nov 13 09:21:23 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 29 / 48 samples collected
+   Next sample at: Thu Nov 13 09:51:29 CST 2025
+
+=== Sample #30 at Thu Nov 13 09:51:29 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 30 / 48 samples collected
+   Next sample at: Thu Nov 13 10:21:33 CST 2025
+
+=== Sample #31 at Thu Nov 13 10:21:33 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 31 / 48 samples collected
+   Next sample at: Thu Nov 13 10:51:37 CST 2025
+
+=== Sample #32 at Thu Nov 13 10:51:37 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 32 / 48 samples collected
+   Next sample at: Thu Nov 13 11:21:41 CST 2025
+
+=== Sample #33 at Thu Nov 13 11:21:41 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 33 / 48 samples collected
+   Next sample at: Thu Nov 13 11:51:45 CST 2025
+
+=== Sample #34 at Thu Nov 13 11:51:45 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 34 / 48 samples collected
+   Next sample at: Thu Nov 13 12:21:49 CST 2025
+
+=== Sample #35 at Thu Nov 13 12:21:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #35, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 35 / 48 samples collected
+   Next sample at: Thu Nov 13 12:51:49 CST 2025
+
+=== Sample #36 at Thu Nov 13 12:51:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #36, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 36 / 48 samples collected
+   Next sample at: Thu Nov 13 13:21:49 CST 2025
+
+=== Sample #37 at Thu Nov 13 13:21:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #37, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 37 / 48 samples collected
+   Next sample at: Thu Nov 13 13:51:49 CST 2025
+
+=== Sample #38 at Thu Nov 13 13:51:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #38, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 38 / 48 samples collected
+   Next sample at: Thu Nov 13 14:21:49 CST 2025
+
+=== Sample #39 at Thu Nov 13 14:21:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #39, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 39 / 48 samples collected
+   Next sample at: Thu Nov 13 14:51:49 CST 2025
+
+=== Sample #40 at Thu Nov 13 14:51:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #40, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 40 / 48 samples collected
+   Next sample at: Thu Nov 13 15:21:49 CST 2025
+
+=== Sample #41 at Thu Nov 13 15:21:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #41, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 41 / 48 samples collected
+   Next sample at: Thu Nov 13 15:51:49 CST 2025
+
+=== Sample #42 at Thu Nov 13 15:51:49 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+⚠️  Failed to collect sample #42, will retry next interval
+
+⏳ Waiting 1800s until next sample...
+   Progress: 42 / 48 samples collected
+   Next sample at: Thu Nov 13 16:21:50 CST 2025
+
+=== Sample #43 at Thu Nov 13 16:21:50 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 43 / 48 samples collected
+   Next sample at: Thu Nov 13 16:51:54 CST 2025
+
+=== Sample #44 at Thu Nov 13 16:51:54 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 44 / 48 samples collected
+   Next sample at: Thu Nov 13 17:22:00 CST 2025
+  post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 32 / 48 samples collected
+   Next sample at: Thu Nov 13 11:50:39 CST 2025
+
+=== Sample #33 at Thu Nov 13 11:50:39 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 33 / 48 samples collected
+   Next sample at: Thu Nov 13 12:20:43 CST 2025
+
+=== Sample #34 at Thu Nov 13 12:20:43 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 34 / 48 samples collected
+   Next sample at: Thu Nov 13 12:50:56 CST 2025
+
+=== Sample #35 at Thu Nov 13 12:50:56 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (2 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 35 / 48 samples collected
+   Next sample at: Thu Nov 13 13:21:08 CST 2025
+
+=== Sample #36 at Thu Nov 13 13:21:08 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (3 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 36 / 48 samples collected
+   Next sample at: Thu Nov 13 13:51:21 CST 2025
+
+=== Sample #37 at Thu Nov 13 13:51:21 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (4 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 37 / 48 samples collected
+   Next sample at: Thu Nov 13 14:21:33 CST 2025
+
+=== Sample #38 at Thu Nov 13 14:21:33 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (5 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 38 / 48 samples collected
+   Next sample at: Thu Nov 13 14:51:46 CST 2025
+
+=== Sample #39 at Thu Nov 13 14:51:46 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (6 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 39 / 48 samples collected
+   Next sample at: Thu Nov 13 15:21:58 CST 2025
+
+=== Sample #40 at Thu Nov 13 15:21:58 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (7 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 40 / 48 samples collected
+   Next sample at: Thu Nov 13 15:52:11 CST 2025
+
+=== Sample #41 at Thu Nov 13 15:52:11 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+⚠️  gh command failed (attempt 1), retrying...
+⚠️  gh command failed (attempt 2), retrying...
+❌ gh command failed after 3 attempts
+jq: parse error: Invalid numeric literal at line 1, column 6
+jq: parse error: Invalid numeric literal at line 1, column 6
+📊 Using run:  (created: )
+📈 Raw metrics:
+   approval_success: 0
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 0 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+🔴 CRITICAL: Success rate 0 < 0.95
+🔴 ALERT: Consecutive low success rate (8 times)
+✅ Status: CRIT
+🚨 Alert flags: success_rate_crit,consecutive_success
+📄 Updated summary: artifacts/observability-24h-summary.json
+🚨 CRITICAL ALERT - Writing to alerts/observability-critical.txt
+
+⏳ Waiting 1800s until next sample...
+   Progress: 41 / 48 samples collected
+   Next sample at: Thu Nov 13 16:22:23 CST 2025
+
+=== Sample #42 at Thu Nov 13 16:22:23 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 42 / 48 samples collected
+   Next sample at: Thu Nov 13 16:52:28 CST 2025
+
+=== Sample #43 at Thu Nov 13 16:52:28 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 43 / 48 samples collected
+   Next sample at: Thu Nov 13 17:22:32 CST 2025
+
+=== Sample #44 at Thu Nov 13 17:22:32 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 44 / 48 samples collected
+   Next sample at: Thu Nov 13 17:52:38 CST 2025
+
+=== Sample #45 at Thu Nov 13 17:52:38 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 45 / 48 samples collected
+   Next sample at: Thu Nov 13 18:22:43 CST 2025
+
+=== Sample #46 at Thu Nov 13 18:22:43 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 46 / 48 samples collected
+   Next sample at: Thu Nov 13 18:52:48 CST 2025
+
+=== Sample #47 at Fri Nov 14 08:03:01 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+
+⏳ Waiting 1800s until next sample...
+   Progress: 47 / 48 samples collected
+   Next sample at: Fri Nov 14 08:33:05 CST 2025
+
+=== Sample #48 at Fri Nov 14 08:33:05 CST 2025 ===
+📊 Data source: CI workflow logs (fallback)
+📊 Using run: 19253708447 (created: 2025-11-11T03:14:01Z)
+📈 Raw metrics:
+   approval_success: 8
+   approval_conflict: 0
+   post_fallback_success: 0
+   p99_latency: 0
+   db_p99_latency: 0
+   p99_smoothed (median of last 3): 0
+📊 Calculated metrics:
+   success_rate: 1.0000 (target: >0.98)
+   fallback_ratio: 0 (target: <0.10)
+✅ Status: OK
+📄 Updated summary: artifacts/observability-24h-summary.json
+scripts/observe-24h.sh: line 589: syntax error near unexpected token `collected'

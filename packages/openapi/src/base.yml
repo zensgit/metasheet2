@@ -1,0 +1,206 @@
+openapi: 3.0.3
+info:
+  title: Metasheet v2 API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8900
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    StandardResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          nullable: true
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+  responses:
+    Unauthorized:
+      description: Unauthorized - Missing or invalid JWT token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            missing_token:
+              summary: Missing Authorization Header
+              value:
+                ok: false
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "Authorization header is required"
+            invalid_token:
+              summary: Invalid JWT Token
+              value:
+                ok: false
+                error:
+                  code: "INVALID_TOKEN"
+                  message: "Invalid or expired JWT token"
+            malformed_token:
+              summary: Malformed Token
+              value:
+                ok: false
+                error:
+                  code: "MALFORMED_TOKEN"
+                  message: "Authorization header must start with 'Bearer '"
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            insufficient_permissions:
+              summary: Insufficient Permissions
+              value:
+                ok: false
+                error:
+                  code: "FORBIDDEN"
+                  message: "You do not have permission to perform this action"
+            role_restricted:
+              summary: Role Restriction
+              value:
+                ok: false
+                error:
+                  code: "ROLE_RESTRICTED"
+                  message: "This action requires admin privileges"
+            resource_access_denied:
+              summary: Resource Access Denied
+              value:
+                ok: false
+                error:
+                  code: "ACCESS_DENIED"
+                  message: "Access denied to this resource"
+    ValidationError:
+      description: Validation error - Invalid request data
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            missing_required_field:
+              summary: Missing Required Field
+              value:
+                ok: false
+                error:
+                  code: "VALIDATION_ERROR"
+                  message: "Required field 'name' is missing"
+            invalid_field_type:
+              summary: Invalid Field Type
+              value:
+                ok: false
+                error:
+                  code: "INVALID_TYPE"
+                  message: "Field 'page' must be a positive integer"
+            invalid_field_value:
+              summary: Invalid Field Value
+              value:
+                ok: false
+                error:
+                  code: "INVALID_VALUE"
+                  message: "Field 'pageSize' must be between 1 and 100"
+            invalid_request_format:
+              summary: Invalid Request Format
+              value:
+                ok: false
+                error:
+                  code: "INVALID_FORMAT"
+                  message: "Request body must be valid JSON"
+    NotFound:
+      description: Not found - Resource does not exist
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            resource_not_found:
+              summary: Resource Not Found
+              value:
+                ok: false
+                error:
+                  code: "NOT_FOUND"
+                  message: "The requested resource was not found"
+            user_not_found:
+              summary: User Not Found
+              value:
+                ok: false
+                error:
+                  code: "USER_NOT_FOUND"
+                  message: "User with ID 'user123' does not exist"
+            role_not_found:
+              summary: Role Not Found
+              value:
+                ok: false
+                error:
+                  code: "ROLE_NOT_FOUND"
+                  message: "Role with ID 'role456' does not exist"
+            spreadsheet_not_found:
+              summary: Spreadsheet Not Found
+              value:
+                ok: false
+                error:
+                  code: "SPREADSHEET_NOT_FOUND"
+                  message: "Spreadsheet with ID 'sheet789' does not exist"
+            file_not_found:
+              summary: File Not Found
+              value:
+                ok: false
+                error:
+                  code: "FILE_NOT_FOUND"
+                  message: "File with ID 'file123' does not exist"
+    ServiceUnavailable:
+      description: Service unavailable - Temporary server issues
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            database_unavailable:
+              summary: Database Unavailable
+              value:
+                ok: false
+                error:
+                  code: "DATABASE_UNAVAILABLE"
+                  message: "Database connection temporarily unavailable"
+            service_overloaded:
+              summary: Service Overloaded
+              value:
+                ok: false
+                error:
+                  code: "SERVICE_OVERLOADED"
+                  message: "Service temporarily overloaded, please try again later"
+            maintenance_mode:
+              summary: Maintenance Mode
+              value:
+                ok: false
+                error:
+                  code: "MAINTENANCE"
+                  message: "Service is temporarily under maintenance"
+    Pagination:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { }
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+        total:
+          type: integer
+          minimum: 0
+paths: {}

@@ -1,0 +1,17 @@
+{
+  "name": "@metasheet/plugin-test-a",
+  "version": "1.0.0",
+  "displayName": "Test Plugin A",
+  "description": "Registers a simple communication API (ping) and uses plugin storage.",
+  "engines": {
+    "metasheet": ">=1.0.0",
+    "node": ">=16.0.0"
+  },
+  "main": { "backend": "index.js" },
+  "permissions": [
+    "file.read",
+    "file.write"
+  ],
+  "activationEvents": ["onStartup"]
+}
+

@@ -1,0 +1,514 @@
+{
+  "dashboard": {
+    "title": "Cache Observability - Phase 2",
+    "tags": ["cache", "observability", "phase2"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "30m", "1h"],
+      "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+    },
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": "-- Grafana --",
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        }
+      ]
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "links": [],
+    "liveNow": false,
+    "panels": [
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 0},
+        "id": 1,
+        "title": "Cache Observability Dashboard - Phase 2",
+        "type": "text",
+        "options": {
+          "mode": "markdown",
+          "content": "# Cache Observability - Phase 2\n\nThis dashboard tracks cache access patterns during Phase 2 observability period.\nUse this data to identify high-value caching candidates for Phase 3 Redis implementation.\n\n**📊 Metrics Period:** NullCache (observability only, no actual caching)\n\n**🎯 Objective:** Collect 1-2 weeks of real traffic data to identify:\n- High-frequency access patterns\n- Read/write ratios\n- Peak usage times\n- Cache candidate priorities"
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 2},
+        "id": 2,
+        "title": "Cache Misses by Pattern (Total)",
+        "type": "timeseries",
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "cache_miss_total{impl=\"null\"}",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {
+              "axisBorderShow": false,
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "hideFrom": {"tooltip": false, "viz": false, "legend": false},
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 2,
+              "pointSize": 5,
+              "scaleDistribution": {"type": "linear"},
+              "showPoints": "never",
+              "spanNulls": false,
+              "stacking": {"group": "A", "mode": "none"},
+              "thresholdsStyle": {"mode": "off"}
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null}
+              ]
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 2},
+        "id": 3,
+        "title": "Cache Operations Rate (ops/sec)",
+        "type": "timeseries",
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "rate(cache_miss_total{impl=\"null\"}[5m])",
+            "legendFormat": "{{key_pattern}} - misses",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(cache_set_total{impl=\"null\"}[5m])",
+            "legendFormat": "{{key_pattern}} - sets",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {
+              "axisBorderShow": false,
+              "axisLabel": "ops/sec",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "hideFrom": {"tooltip": false, "viz": false, "legend": false},
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {"type": "linear"},
+              "showPoints": "never",
+              "spanNulls": false,
+              "stacking": {"group": "A", "mode": "none"},
+              "thresholdsStyle": {"mode": "off"}
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null}
+              ]
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 10},
+        "id": 4,
+        "title": "Top 10 High-Frequency Patterns",
+        "type": "bargauge",
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient",
+          "showUnfilled": true
+        },
+        "targets": [
+          {
+            "expr": "topk(10, cache_miss_total{impl=\"null\"})",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "continuous-GrYlRd"},
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 50},
+                {"color": "red", "value": 100}
+              ]
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 10},
+        "id": 5,
+        "title": "Read/Write Ratio by Pattern",
+        "type": "bargauge",
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient",
+          "showUnfilled": true
+        },
+        "targets": [
+          {
+            "expr": "cache_miss_total{impl=\"null\"} / (cache_set_total{impl=\"null\"} + cache_del_total{impl=\"null\"} + 1)",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "continuous-BlYlRd"},
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "blue", "value": null},
+                {"color": "yellow", "value": 3},
+                {"color": "red", "value": 10}
+              ]
+            },
+            "unit": "short",
+            "decimals": 2
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 10},
+        "id": 6,
+        "title": "Cache Priority Score",
+        "type": "stat",
+        "options": {
+          "graphMode": "area",
+          "colorMode": "background",
+          "justifyMode": "auto",
+          "textMode": "value_and_name",
+          "wideLayout": true,
+          "showPercentChange": false,
+          "reduceOptions": {
+            "values": false,
+            "fields": "",
+            "calcs": ["lastNotNull"]
+          }
+        },
+        "targets": [
+          {
+            "expr": "topk(5, (cache_miss_total{impl=\"null\"} * 10) / (1 + cache_set_total{impl=\"null\"} + cache_del_total{impl=\"null\"}))",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "blue", "value": null},
+                {"color": "green", "value": 20},
+                {"color": "yellow", "value": 50},
+                {"color": "red", "value": 100}
+              ]
+            },
+            "unit": "none",
+            "decimals": 2
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "id": 7,
+        "title": "Hourly Access Patterns (Heatmap)",
+        "type": "heatmap",
+        "options": {
+          "calculate": false,
+          "cellGap": 2,
+          "cellRadius": 0,
+          "color": {
+            "exponent": 0.5,
+            "fill": "dark-orange",
+            "mode": "scheme",
+            "reverse": false,
+            "scale": "exponential",
+            "scheme": "Spectral",
+            "steps": 128
+          },
+          "exemplars": {
+            "color": "rgba(255,0,255,0.7)"
+          },
+          "filterValues": {
+            "le": 1e-9
+          },
+          "legend": {
+            "show": true
+          },
+          "rowsFrame": {
+            "layout": "auto"
+          },
+          "tooltip": {
+            "show": true,
+            "yHistogram": false
+          },
+          "yAxis": {
+            "axisPlacement": "left",
+            "reverse": false
+          }
+        },
+        "targets": [
+          {
+            "expr": "sum by (key_pattern) (rate(cache_miss_total{impl=\"null\"}[1h]))",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "id": 8,
+        "title": "Cache Operations Distribution",
+        "type": "piechart",
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "showLegend": true,
+            "values": ["value", "percent"]
+          },
+          "pieType": "pie",
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          },
+          "displayLabels": ["name", "percent"],
+          "reduceOptions": {
+            "values": false,
+            "fields": "",
+            "calcs": ["lastNotNull"]
+          }
+        },
+        "targets": [
+          {
+            "expr": "cache_miss_total{impl=\"null\"}",
+            "legendFormat": "{{key_pattern}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {
+              "hideFrom": {
+                "tooltip": false,
+                "viz": false,
+                "legend": false
+              }
+            },
+            "mappings": [],
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 6, "w": 24, "x": 0, "y": 24},
+        "id": 9,
+        "title": "Cache Candidates Summary Table",
+        "type": "table",
+        "options": {
+          "showHeader": true,
+          "sortBy": [
+            {
+              "displayName": "Priority Score",
+              "desc": true
+            }
+          ]
+        },
+        "targets": [
+          {
+            "expr": "cache_miss_total{impl=\"null\"}",
+            "format": "table",
+            "instant": true,
+            "legendFormat": "",
+            "refId": "A"
+          },
+          {
+            "expr": "cache_set_total{impl=\"null\"}",
+            "format": "table",
+            "instant": true,
+            "refId": "B"
+          },
+          {
+            "expr": "cache_del_total{impl=\"null\"}",
+            "format": "table",
+            "instant": true,
+            "refId": "C"
+          },
+          {
+            "expr": "(cache_miss_total{impl=\"null\"} * 10) / (1 + cache_set_total{impl=\"null\"} + cache_del_total{impl=\"null\"})",
+            "format": "table",
+            "instant": true,
+            "refId": "D"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "merge",
+            "options": {}
+          },
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true,
+                "__name__": true,
+                "impl": true,
+                "instance": true,
+                "job": true
+              },
+              "indexByName": {
+                "key_pattern": 0,
+                "Value #A": 1,
+                "Value #B": 2,
+                "Value #C": 3,
+                "Value #D": 4
+              },
+              "renameByName": {
+                "key_pattern": "Pattern",
+                "Value #A": "Total Misses",
+                "Value #B": "Total Sets",
+                "Value #C": "Total Deletes",
+                "Value #D": "Priority Score"
+              }
+            }
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "custom": {
+              "align": "auto",
+              "cellOptions": {
+                "type": "auto"
+              },
+              "inspect": false
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null}
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "Priority Score"},
+              "properties": [
+                {
+                  "id": "custom.cellOptions",
+                  "value": {"type": "color-background"}
+                },
+                {
+                  "id": "thresholds",
+                  "value": {
+                    "mode": "absolute",
+                    "steps": [
+                      {"color": "blue", "value": null},
+                      {"color": "green", "value": 20},
+                      {"color": "yellow", "value": 50},
+                      {"color": "red", "value": 100}
+                    ]
+                  }
+                },
+                {
+                  "id": "decimals",
+                  "value": 2
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 30},
+        "id": 10,
+        "title": "Phase 3 Action Items",
+        "type": "text",
+        "options": {
+          "mode": "markdown",
+          "content": "## 🎯 Phase 3 Implementation Guidance\n\n**High Priority** (Score >= 50): Implement Redis caching immediately\n**Medium Priority** (20-50): Consider for second phase\n**Low Priority** (< 20): Defer or exclude based on cost/benefit\n\n**📋 Next Steps:**\n1. Review high-priority patterns with team\n2. Define TTL strategy for each pattern\n3. Plan cache invalidation triggers\n4. Estimate infrastructure costs\n5. Deploy Phase 3 Redis implementation\n\n**📚 Documentation:** See `claudedocs/PHASE2_ACTION_PLAN.md` for detailed implementation guide"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@metasheet/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for MetaSheet V2 API",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "scripts": {
+    "build": "node ./scripts/build.mjs"
+  },
+  "keywords": ["metasheet","sdk","openapi"],
+  "license": "UNLICENSED"
+}
+

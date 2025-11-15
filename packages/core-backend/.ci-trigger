@@ -1,0 +1,5 @@
+# CI Trigger File for PR #342
+# This file triggers the smoke test check required for merge
+# Can be safely removed after PR is merged
+Trigger Date: 2025-11-01
+Purpose: Trigger smoke check for branch protection compliance

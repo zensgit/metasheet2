@@ -1,0 +1,1 @@
+{"version":3,"file":"plugin-context.d.ts","sourceRoot":"","sources":["../../src/core/plugin-context.ts"],"names":[],"mappings":"AAAA;;GAEG;AAGH,OAAO,KAAK,EACV,aAAa,EACb,cAAc,EAEd,OAAO,EAIR,MAAM,iBAAiB,CAAA;AAKxB;;GAEG;AACH,wBAAgB,mBAAmB,CACjC,QAAQ,EAAE,cAAc,EACxB,OAAO,EAAE,OAAO,GACf,aAAa,CAmCf"}

@@ -1,0 +1,7 @@
+{
+  "name": "plugin-bad-version",
+  "version": "0.1.0",
+  "engines": { "metasheet": ">=9.9.9" },
+  "main": { "backend": "index.js" },
+  "permissions": ["http.*"]
+}

@@ -1,0 +1,121 @@
+{
+  "id": "example-plugin",
+  "name": "Example Plugin",
+  "version": "1.0.0",
+  "description": "An example plugin demonstrating the plugin system capabilities",
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.com"
+  },
+  "license": "MIT",
+  "main": "index.js",
+  "api_version": 2,
+
+  "permissions": {
+    "apis": [
+      "api:read",
+      "database:read",
+      "plugin:communicate"
+    ],
+    "modules": [
+      "lodash",
+      "moment"
+    ]
+  },
+
+  "hooks": {
+    "beforeSave": {
+      "handler": "onBeforeSave",
+      "priority": 10,
+      "required": false
+    },
+    "afterSave": {
+      "handler": "onAfterSave",
+      "priority": 5
+    },
+    "dataTransform": {
+      "handler": "transformData"
+    }
+  },
+
+  "ui": {
+    "panels": [
+      {
+        "id": "example-panel",
+        "title": "Example Panel",
+        "icon": "📊",
+        "component": "ExamplePanel",
+        "position": "right"
+      }
+    ],
+    "menuItems": [
+      {
+        "id": "example-menu",
+        "label": "Example Action",
+        "icon": "⚡",
+        "action": "executeExample"
+      }
+    ],
+    "toolbarButtons": [
+      {
+        "id": "example-button",
+        "label": "Example",
+        "icon": "🔧",
+        "action": "toolbarAction",
+        "position": 100
+      }
+    ]
+  },
+
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable plugin functionality"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "API key for external service"
+        },
+        "maxRetries": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 3,
+          "description": "Maximum number of retry attempts"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["feature1", "feature2", "feature3"]
+          },
+          "default": ["feature1"],
+          "description": "Enabled features"
+        }
+      },
+      "required": ["enabled"]
+    },
+    "defaults": {
+      "enabled": true,
+      "maxRetries": 3,
+      "features": ["feature1"]
+    }
+  },
+
+  "categories": ["productivity", "data-processing"],
+  "keywords": ["example", "demo", "tutorial"],
+  "homepage": "https://github.com/metasheet/plugins",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/metasheet/example-plugin"
+  },
+
+  "singleton": false,
+  "autoEnable": true,
+  "hotReload": true,
+  "background": false
+}

@@ -1,0 +1,647 @@
+
+> @metasheet/core-backend@2.0.0-alpha.1 dev /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend
+> tsx watch src/index.ts
+
+[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:17:26.177Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.179Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.385Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.393Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.405Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.409Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.411Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.414Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.414Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.415Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.415Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.416Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.416Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.416Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.417Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.417Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.418Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.418Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.418Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.419Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:17:26.419Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:17:26.419Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.419Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.424Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:324:5)","syscall":"open","timestamp":"2025-11-01T03:17:26.430Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.435Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:17:26.436Z"}
+node:events:486
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::8900
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at Server.listen (node:net:2102:7)
+    at MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:326:21)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1976:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -48,
+  syscall: 'listen',
+  address: '::',
+  port: 8900
+}
+
+Node.js v24.10.0
+11:19:39 AM [tsx] change in ./src/auth/jwt-middleware.ts Rerunning...
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.509Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.511Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.747Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.819Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.828Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.844Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.845Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.846Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.846Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.849Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.850Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.851Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.852Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.852Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.853Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.853Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.854Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.854Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.855Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.855Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:19:42.855Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.855Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.855Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.864Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:324:5)","syscall":"open","timestamp":"2025-11-01T03:19:42.867Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.868Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.869Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:19:42.870Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.871Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.871Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.871Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.871Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:42.871Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:19:48.211Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:20:52.070Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:20:52.091Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:17.441Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:17.506Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:44.328Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:44.330Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:46.021Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:49.325Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:53.835Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:54.323Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:59.327Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:21:59.926Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:04.324Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:09.530Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:14.325Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:19.323Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:20.840Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:24.323Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:22:29.323Z"}
+11:57:25 AM [tsx] change in ./src/index.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:25.448Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:25.449Z"}
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.579Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.581Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.609Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.613Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.615Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.617Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.618Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.618Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.619Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.620Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.620Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.621Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.621Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.621Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.622Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.622Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.623Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.623Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.623Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.624Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:26.624Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.624Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.624Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.629Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:348:5)","syscall":"open","timestamp":"2025-11-01T03:57:26.633Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.634Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:26.635Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.636Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.636Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.636Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.636Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:26.636Z"}
+11:57:34 AM [tsx] change in ./src/auth/jwt-middleware.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:34.113Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:34.113Z"}
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:34.991Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:34.993Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.005Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.006Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.007Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.008Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.009Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.009Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.010Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.011Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.013Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.013Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.014Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.014Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.015Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.016Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.017Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.018Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.023Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:348:5)","syscall":"open","timestamp":"2025-11-01T03:57:35.024Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T03:57:35.026Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.027Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.027Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.027Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.027Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T03:57:35.027Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:37.425Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:37.431Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:38.786Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:42.398Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:46.663Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:47.398Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:52.397Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:53.891Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:01:57.399Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:02.399Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:07.397Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:12.402Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:17.398Z"}
+[32minfo[39m: GET /api/kanban/board1 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:20.237Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:22.398Z"}
+12:02:25 PM [tsx] change in ./src/metrics/metrics.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:25.414Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:25.415Z"}
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:26.980Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:26.985Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.393Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.496Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.526Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.657Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.658Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.659Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.659Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.660Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.661Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.662Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.663Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.663Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.664Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.664Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.665Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.665Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.666Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.666Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:27.666Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.666Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.666Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.673Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:348:5)","syscall":"open","timestamp":"2025-11-01T04:02:27.676Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.677Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.677Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.677Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:27.678Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.679Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.679Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.679Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.679Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:27.679Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:32.499Z"}
+12:02:33 PM [tsx] change in ./src/metrics/metrics.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:33.580Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:33.581Z"}
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.612Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.614Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.685Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.687Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.687Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.709Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.710Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.711Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.711Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.712Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.712Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.712Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.713Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.713Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.713Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.714Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.714Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.714Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.715Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.715Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:34.715Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.715Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.715Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.721Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:348:5)","syscall":"open","timestamp":"2025-11-01T04:02:34.723Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.724Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:34.725Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.726Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.726Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.726Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.726Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:34.726Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:37.502Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:42.499Z"}
+12:02:43 PM [tsx] change in ./src/index.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:43.755Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:43.755Z"}
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.781Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.783Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.795Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.796Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.797Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.808Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.808Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.809Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.809Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.810Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.810Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.810Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.811Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.811Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.811Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.812Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.812Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.812Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.812Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.813Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T04:02:44.813Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.813Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.813Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.817Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:342:5)","syscall":"open","timestamp":"2025-11-01T04:02:44.819Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.820Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:44.821Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:47.502Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:52.500Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:02:57.496Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:02.498Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:07.496Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:12.498Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:17.495Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:22.494Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:03:43.495Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:04:43.498Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:04:47.399Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:04:52.396Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:04:57.494Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:02.497Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:07.495Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:12.494Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:17.494Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:22.493Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:27.496Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:32.493Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:37.521Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:42.494Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:47.493Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:05:52.495Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:06:43.503Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:07:43.501Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:08:43.500Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:09:43.507Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:10:43.495Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:11:43.496Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:12:43.493Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:13:43.602Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:14:43.614Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:15:43.665Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:16:43.597Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:17:43.600Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:18:43.601Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:19:43.685Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:20:43.619Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:21:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:22:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:23:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:24:43.600Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:25:43.599Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:26:43.597Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:27:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:28:43.602Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:29:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:30:43.592Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:31:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:32:43.595Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:33:43.595Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:34:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:35:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:36:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:37:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:38:43.596Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:39:43.594Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:40:43.595Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:41:43.598Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:41:46.898Z"}
+[32minfo[39m: GET /api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:41:46.908Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:41:52.600Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T04:59:12.743Z"}
+[32minfo[39m: Cleaned up old events {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T05:15:41.948Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T05:15:45.472Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T05:15:50.406Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T05:15:55.404Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T05:16:00.405Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:00:14.993Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:01:14.914Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:02:14.907Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:03:14.911Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:04:14.909Z"}
+[32minfo[39m: GET /health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:05:14.907Z"}
+2:05:54 PM [tsx] change in ./src/routes/permissions.ts Restarting...
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:05:54.457Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:05:54.461Z"}
+cnode:internal/modules/package_json_reader:189
+  const result = modulesBinding.readPackageJSON(nearestParentPackageJSON);
+                                ^
+
+Error: Invalid package config /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/package.json.
+    at Object.getNearestParentPackageJSON (node:internal/modules/package_json_reader:189:33)
+    at trySelf (node:internal/modules/cjs/loader:627:33)
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1396:24)
+    at defaultResolveImpl (node:internal/modules/cjs/loader:1058:19)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1063:22)
+    at Module._load (node:internal/modules/cjs/loader:1226:37)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:244:24)
+    at Module.require (node:internal/modules/cjs/loader:1503:12)
+    at node:internal/modules/cjs/loader:2046:12 {
+  code: 'ERR_INVALID_PACKAGE_CONFIG'
+}
+
+Node.js v24.10.0
+2:06:08 PM [tsx] change in ./src/routes/permissions.ts Rerunning...
+c[32minfo[39m: Initializing EventBusService... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.607Z"}
+[32minfo[39m: Initializing EventBus service {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.610Z"}
+[32minfo[39m: Loaded 15 event types {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.663Z"}
+[32minfo[39m: Loaded 0 subscriptions {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.673Z"}
+[32minfo[39m: Loaded permissions for 0 plugins {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.674Z"}
+[32minfo[39m: Event type registered: plugin.loaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.677Z"}
+[32minfo[39m: Event type registered: plugin.unloaded {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.677Z"}
+[32minfo[39m: Event type registered: plugin.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.678Z"}
+[32minfo[39m: Event type registered: data.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.678Z"}
+[32minfo[39m: Event type registered: data.updated {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.679Z"}
+[32minfo[39m: Event type registered: data.deleted {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.679Z"}
+[32minfo[39m: Event type registered: workflow.started {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.680Z"}
+[32minfo[39m: Event type registered: workflow.completed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.680Z"}
+[32minfo[39m: Event type registered: workflow.failed {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.681Z"}
+[32minfo[39m: Event type registered: user.login {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.681Z"}
+[32minfo[39m: Event type registered: user.logout {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.681Z"}
+[32minfo[39m: Event type registered: user.created {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.682Z"}
+[32minfo[39m: Event type registered: system.startup {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.682Z"}
+[32minfo[39m: Event type registered: system.shutdown {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.683Z"}
+[32minfo[39m: Event type registered: system.error {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.683Z"}
+[32minfo[39m: EventBus service initialized {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T06:06:15.683Z"}
+[32minfo[39m: Loading plugins... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.683Z"}
+[32minfo[39m: Starting plugin loading... {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.683Z"}
+[32minfo[39m: Found 6 plugin directories {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.688Z"}
+[33mwarn[39m: Failed to load manifest from /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json' {"code":"ENOENT","context":"PluginLoader","errno":-2,"path":"/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json","service":"metasheet","stack":"Error: ENOENT: no such file or directory, open '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/plugins/plugin-view-gantt/plugin.json'\n    at async open (node:internal/fs/promises:642:25)\n    at async Object.readFile (node:internal/fs/promises:1279:14)\n    at async PluginLoader.loadManifests (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:112:25)\n    at async PluginLoader.loadPlugins (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/core/plugin-loader.ts:46:25)\n    at async MetaSheetServer.start (/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/packages/core-backend/src/index.ts:342:5)","syscall":"open","timestamp":"2025-11-01T06:06:15.692Z"}
+[32minfo[39m: Loaded 5 plugin manifests {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m: Manifest validation failed for @metasheet/plugin-view-kanban: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m:   - Plugin name must be lowercase letters, numbers, and hyphens only {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.694Z"}
+[31merror[39m: Manifest validation failed for plugin-view-grid: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m: Manifest validation failed for plugin-intelligent-restore: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m: Manifest validation failed for plugin-audit-logger: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m: Manifest validation failed for hello-world: {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: manifestVersion {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: description {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: author {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: engine {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[31merror[39m:   - Missing required field: capabilities {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[32minfo[39m: 0 plugins passed validation {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[32minfo[39m: Successfully loaded 0 plugins {"context":"PluginLoader","service":"metasheet","timestamp":"2025-11-01T06:06:15.695Z"}
+[32minfo[39m: MetaSheet v2 core listening on http://localhost:8900 {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.696Z"}
+[32minfo[39m: Health:  http://localhost:8900/health {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.696Z"}
+[32minfo[39m: Metrics: http://localhost:8900/metrics/prom {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.696Z"}
+[32minfo[39m: Plugins: http://localhost:8900/api/plugins {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.696Z"}
+[32minfo[39m: Events:  http://localhost:8900/api/events {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T06:06:15.696Z"}
+[32minfo[39m: Cleaned up old events {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T07:06:15.744Z"}
+[32minfo[39m: Cleaned up old events {"context":"EventBus","service":"metasheet","timestamp":"2025-11-01T08:06:15.672Z"}
+[32minfo[39m: Received SIGTERM, shutting down... {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T08:19:24.879Z"}
+[32minfo[39m: HTTP server closed {"context":"MetaSheetServer","service":"metasheet","timestamp":"2025-11-01T08:19:24.881Z"}

@@ -1,0 +1,49 @@
+Phase 3 Observability Data Archive
+===================================
+
+Archive Date: 20251114_091827
+Generated: 2025-11-14 09:18:27 CST
+
+Archived Files:
+---------------
+-rw-r--r--@ 1 huazhou  staff     0B Nov 14 09:18 MANIFEST.txt
+-rw-r--r--@ 1 huazhou  staff   5.8K Nov 14 09:18 PHASE3_24H_OBSERVATION_REPORT_20251114_091815.md
+-rw-r--r--@ 1 huazhou  staff   1.2K Nov 14 09:18 observability-24h-summary.json
+-rw-r--r--@ 1 huazhou  staff   4.5K Nov 14 09:18 observability-24h.csv
+-rw-r--r--@ 1 huazhou  staff    22K Nov 14 09:18 observability-critical.txt
+-rw-r--r--@ 1 huazhou  staff     6B Nov 14 09:18 observation.pid
+-rw-r--r--@ 1 huazhou  staff    37K Nov 14 09:18 observe-24h.log
+
+Archive Size:
+-------------
+ 88K
+
+Source Information:
+-------------------
+- Observation Start: 2025-11-11T07:35:00Z
+- Samples Collected: 48
+- Final Status: OK
+- Total Alerts: 17
+
+Restoration Instructions:
+-------------------------
+To restore this archive:
+
+1. Navigate to archive directory:
+   cd artifacts/archive/20251114_091827
+
+2. View manifest:
+   cat MANIFEST.txt
+
+3. Copy files back to artifacts/:
+   cp observability-24h.csv ../../
+   cp observability-24h-summary.json ../../
+
+4. Regenerate report:
+   bash scripts/generate-phase3-report.sh
+
+Notes:
+------
+- Original files remain in artifacts/ directory
+- This archive provides historical baseline for future comparisons
+- Archived data can be used for trend analysis and regression testing

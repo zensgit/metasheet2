@@ -1,0 +1,33 @@
+paths:
+  /api/audit-logs:
+    get:
+      summary: Admin-only audit log query
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: actorId
+          schema: { type: string }
+        - in: query
+          name: resourceType
+          schema: { type: string }
+        - in: query
+          name: resourceId
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }

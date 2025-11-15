@@ -1,0 +1,208 @@
+paths:
+  /api/approvals/{id}:
+    get:
+      summary: Get approval instance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not found }
+  /api/approvals/{id}/approve:
+    post:
+      summary: Approve instance with optimistic locking
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { version: { type: integer } }
+              required: [version]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, example: demo-1 }
+                      status: { type: string, example: APPROVED }
+                      version: { type: integer, example: 1 }
+                      prevVersion: { type: integer, example: 0 }
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 1
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approvals/{id}/reject:
+    post:
+      summary: Reject instance with optimistic locking
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { version: { type: integer } }
+              required: [version]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, example: demo-1 }
+                      status: { type: string, example: REJECTED }
+                      version: { type: integer, example: 2 }
+                      prevVersion: { type: integer, example: 1 }
+        '409': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approvals/{id}/return:
+    post:
+      summary: Return instance with optimistic locking
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { version: { type: integer } }
+              required: [version]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, example: demo-1 }
+                      status: { type: string, example: RETURNED }
+                      version: { type: integer, example: 3 }
+                      prevVersion: { type: integer, example: 2 }
+        '409': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approvals/{id}/revoke:
+    post:
+      summary: Revoke instance with optimistic locking
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { version: { type: integer } }
+              required: [version]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, example: demo-1 }
+                      status: { type: string, example: REVOKED }
+                      version: { type: integer, example: 4 }
+                      prevVersion: { type: integer, example: 3 }
+        '409': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/approvals/{id}/history:
+    get:
+      summary: Get approval history (from approval_records)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pagination' }
+              examples:
+                sample:
+                  value:
+                    items:
+                      - occurred_at: '2025-09-19T09:12:00Z'
+                        actor_id: 'u1'
+                        action: 'approve'
+                        comment: 'LGTM'
+                        from_status: 'PENDING'
+                        to_status: 'APPROVED'
+                        version: 1
+                    page: 1
+                    pageSize: 50
+                    total: 4
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }

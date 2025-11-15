@@ -1,0 +1,8 @@
+{
+  "name": "plugin-cycle-a",
+  "version": "0.1.0",
+  "engines": { "metasheet": ">=1.0.0" },
+  "dependencies": { "plugin-cycle-b": "*" },
+  "main": { "backend": "index.js" },
+  "permissions": ["http.*"]
+}

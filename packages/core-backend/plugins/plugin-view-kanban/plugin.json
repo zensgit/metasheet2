@@ -1,0 +1,101 @@
+{
+  "name": "@metasheet/plugin-view-kanban",
+  "version": "1.0.0",
+  "displayName": "看板视图",
+  "description": "提供拖拽式看板视图，适合项目管理和任务跟踪",
+  "author": "MetaSheet Team",
+  "license": "MIT",
+
+  "engines": {
+    "metasheet": ">=1.0.0",
+    "node": ">=16.0.0"
+  },
+
+  "main": {
+    "backend": "src/index.ts"
+  },
+
+  "contributes": {
+    "views": [
+      {
+        "id": "kanban",
+        "name": "看板",
+        "icon": "mdi-view-dashboard",
+        "component": "KanbanView",
+        "config": {
+          "requiredFields": [
+            {
+              "type": "select",
+              "role": "groupBy"
+            }
+          ],
+          "supportedFields": ["text", "select", "user", "date", "number"]
+        }
+      }
+    ],
+
+    "commands": [
+      {
+        "id": "kanban.moveCard",
+        "title": "移动卡片",
+        "handler": "moveCardHandler"
+      },
+      {
+        "id": "kanban.addColumn",
+        "title": "添加列",
+        "handler": "addColumnHandler"
+      }
+    ],
+
+    "menus": {
+      "view/title": [
+        {
+          "command": "kanban.addColumn",
+          "group": "navigation",
+          "when": "view == kanban"
+        }
+      ]
+    },
+
+    "configuration": {
+      "type": "object",
+      "properties": {
+        "kanban.cardHeight": {
+          "type": "string",
+          "enum": ["auto", "fixed"],
+          "default": "auto",
+          "description": "卡片高度模式"
+        },
+        "kanban.showAvatar": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示用户头像"
+        },
+        "kanban.showProgress": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示进度条"
+        },
+        "kanban.maxCardsPerColumn": {
+          "type": "number",
+          "default": 50,
+          "minimum": 10,
+          "maximum": 200,
+          "description": "每列最大卡片数"
+        }
+      }
+    }
+  },
+
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "websocket.broadcast",
+    "events.emit"
+  ],
+
+  "activationEvents": [
+    "onView:kanban"
+  ]
+}

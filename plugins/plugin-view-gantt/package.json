@@ -1,0 +1,21 @@
+{
+  "name": "@metasheet/plugin-view-gantt",
+  "version": "1.0.0",
+  "description": "Gantt chart view plugin for MetaSheet",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@metasheet/core-backend": "workspace:*",
+    "express": "^4.17.21"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/express": "^4.17.21",
+    "typescript": "^5.3.3",
+    "vitest": "^1.1.0"
+  }
+}

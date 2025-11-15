@@ -1,0 +1,103 @@
+name: RealShare Trend Snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Number of PRs to scan'
+        required: false
+        default: '40'
+        type: string
+  schedule:
+    # Run weekly on Sundays at 10:00 UTC
+    - cron: '0 10 * * 0'
+
+jobs:
+  collect-realshare-trend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Collect RealShare trend data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          echo "Collecting RealShare trend data from recent PRs..."
+          LIMIT="${{ github.event.inputs.limit || '40' }}"
+          echo "Scanning $LIMIT PRs for observability comments"
+
+          # Install dependencies if needed
+          if [ -f "scripts/metrics/collect-observability-comments.js" ]; then
+            cd scripts/metrics
+            if [ ! -d "node_modules" ]; then
+              npm init -y
+              npm install
+            fi
+            cd ../..
+          fi
+
+          # Run the collection script
+          node scripts/metrics/collect-observability-comments.js --limit "$LIMIT"
+
+          echo "✓ Collection complete"
+
+      - name: Verify output files
+        run: |
+          echo "Generated files:"
+          if [ -f "gh-pages-data/metrics/realshare-trend.json" ]; then
+            echo "✓ realshare-trend.json created"
+            echo "Entries: $(jq length gh-pages-data/metrics/realshare-trend.json)"
+          else
+            echo "❌ realshare-trend.json not found"
+          fi
+
+          if [ -f "gh-pages-data/metrics/realshare-trend.md" ]; then
+            echo "✓ realshare-trend.md created"
+            echo "Preview:"
+            head -10 gh-pages-data/metrics/realshare-trend.md
+          else
+            echo "❌ realshare-trend.md not found"
+          fi
+
+      - name: Upload trend artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: realshare-trend
+          path: |
+            gh-pages-data/metrics/realshare-trend.json
+            gh-pages-data/metrics/realshare-trend.md
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          echo "## RealShare Trend Collection Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "gh-pages-data/metrics/realshare-trend.json" ]; then
+            ENTRIES=$(jq length gh-pages-data/metrics/realshare-trend.json)
+            echo "- **Data entries found:** $ENTRIES" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$ENTRIES" -gt 0 ]; then
+              echo "- **Latest entry:** $(jq -r '.[0].pr // "N/A"' gh-pages-data/metrics/realshare-trend.json)" >> $GITHUB_STEP_SUMMARY
+              echo "- **Date range:** $(jq -r '.[0].updatedAt // "N/A"' gh-pages-data/metrics/realshare-trend.json) to $(jq -r '.[-1].updatedAt // "N/A"' gh-pages-data/metrics/realshare-trend.json)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Status:** No RealShare data found in recent PRs" >> $GITHUB_STEP_SUMMARY
+              echo "- **Note:** PRs need comments with marker: \`<!-- v2-observability-strict -->\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "- **Status:** ❌ Collection failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts uploaded with 90-day retention." >> $GITHUB_STEP_SUMMARY

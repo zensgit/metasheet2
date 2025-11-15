@@ -1,0 +1,584 @@
+openapi: 3.0.3
+info:
+  title: Metasheet v2 API
+  description: API for Metasheet v2 spreadsheet and workflow management system
+  version: 0.1.0
+  contact:
+    name: API Support
+    email: support@metasheet.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:8900
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    StandardResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          nullable: true
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    Pagination:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            list:
+              type: array
+              items:
+                type: object
+            total:
+              type: integer
+              example: 42
+            page:
+              type: integer
+              example: 1
+            pageSize:
+              type: integer
+              example: 50
+            totalPages:
+              type: integer
+              example: 1
+paths:
+  /health:
+    get:
+      tags:
+        - System
+      summary: Health check
+      description: Check if the API server is running and healthy
+      operationId: getHealth
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /api/plugins:
+    get:
+      tags:
+        - Plugins
+      summary: List plugins
+      description: Get a list of all available plugins
+      operationId: listPlugins
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of plugins retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+  /api/approvals/{id}:
+    get:
+      tags:
+        - Approvals
+      summary: Get approval instance
+      description: Retrieve a specific approval instance by ID
+      operationId: getApproval
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: The approval instance ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Approval instance retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '404':
+          description: Approval instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/approvals/{id}/approve:
+    post:
+      tags:
+        - Approvals
+      summary: Approve instance with optimistic locking
+      description: Approve an approval instance with version control for optimistic locking
+      operationId: approveInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+            examples:
+              approve:
+                value:
+                  version: 0
+      responses:
+        '200':
+          description: Approval action completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 1
+        '422':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                ok: false
+                error:
+                  code: INVALID_STATE_TRANSITION
+                  message: Cannot approve from current status
+  /api/audit-logs:
+    get:
+      tags:
+        - Audit
+      summary: Query audit logs
+      description: Query audit logs (admin-only endpoint)
+      operationId: queryAuditLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: actorId
+          description: Filter by actor ID
+          schema:
+            type: string
+        - in: query
+          name: resourceType
+          description: Filter by resource type
+          schema:
+            type: string
+        - in: query
+          name: resourceId
+          description: Filter by resource ID
+          schema:
+            type: string
+        - in: query
+          name: action
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+        '403':
+          description: Forbidden
+  /api/approvals/{id}/reject:
+    post:
+      tags:
+        - Approvals
+      summary: Reject instance with optimistic locking
+      description: Reject an approval instance with version control
+      operationId: rejectInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+        '409':
+          description: Version conflict
+  /api/approvals/{id}/return:
+    post:
+      tags:
+        - Approvals
+      summary: Return instance with optimistic locking
+      description: Return an approval instance for revision with version control
+      operationId: returnInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+        '409':
+          description: Version conflict
+  /api/approvals/{id}/revoke:
+    post:
+      tags:
+        - Approvals
+      summary: Revoke instance with optimistic locking
+      description: Revoke a previously approved instance with version control
+      operationId: revokeInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+        '409':
+          description: Version conflict
+  /api/approvals/{id}/history:
+    get:
+      tags:
+        - Approvals
+      summary: Get approval history
+      description: Retrieve the approval history from audit logs
+      operationId: getApprovalHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '503':
+          description: Service unavailable
+  /api/roles:
+    get:
+      tags:
+        - Roles
+      summary: List roles
+      description: Get a list of all roles in the system
+      operationId: listRoles
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of roles retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+    post:
+      tags:
+        - Roles
+      summary: Create role
+      description: Create a new role with specified permissions
+      operationId: createRole
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                permissions:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: OK
+  /api/roles/{id}:
+    put:
+      summary: Update role
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+    delete:
+      summary: Delete role
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+  /api/permissions:
+    get:
+      summary: Get user permissions
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+  /api/permissions/grant:
+    post:
+      summary: Grant permission
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                permission:
+                  type: string
+              required:
+                - userId
+                - permission
+      responses:
+        '200':
+          description: OK
+  /api/permissions/revoke:
+    post:
+      summary: Revoke permission
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                permission:
+                  type: string
+              required:
+                - userId
+                - permission
+      responses:
+        '200':
+          description: OK
+  /api/spreadsheets:
+    get:
+      summary: List spreadsheets
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: Create spreadsheet
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+  /api/spreadsheets/{id}:
+    put:
+      summary: Update spreadsheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+    delete:
+      summary: Delete spreadsheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+  /api/files/upload:
+    post:
+      summary: Upload file (placeholder)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+  /api/files/{id}:
+    get:
+      summary: Get file meta
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+  /api/spreadsheets/{id}/permissions:
+    get:
+      summary: List spreadsheet permissions
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+  /api/spreadsheets/{id}/permissions/grant:
+    post:
+      summary: Grant spreadsheet permission
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+  /api/spreadsheets/{id}/permissions/revoke:
+    post:
+      summary: Revoke spreadsheet permission
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK

@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-cache",
+    "noEmit": false,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "declarationMap": false,
+    "strict": false
+  },
+  "include": [
+    "src/cache/**/*.ts",
+    "types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-cache",
+    "**/*.test.ts"
+  ]
+}

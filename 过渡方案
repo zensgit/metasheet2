@@ -1,0 +1,189 @@
+你有两种合理做法（择一）：
+
+  - 同仓库内并行维护（便于过渡）
+      - 适合你现在这种“v1（backend/ 等）+ v2（metasheet-v2/）”双轨共存。
+      - 建议独立分支，开 PR 到当前主开发分支 macos-docker。
+      - 命令：
+          - git switch -c v2/init macos-docker
+          - git add metasheet-v2
+          - git commit -m "feat(v2): scaffold microkernel plugin workspace"
+          - git push -u origin v2/init
+          - 创建 PR 并标注仅影响 metasheet-v2/*
+      - 注意：用 CI 路径过滤避免 v1 的工作流误触发；后续再逐步把试点功能迁移为
+  插件。
+  - 独立新仓库（长期更干净，推荐用于大改造）
+      - v2 有自己的 Issue、Release、CI 与版本治理，不与 v1 混在一个历史里。
+          - 本地从当前目录导出：
+              - rsync -a --delete metasheet-v2/ ../metasheet-v2/
+              - cd ../metasheet-v2 && git init && git remote add origin <new-
+  repo-url>
+              - git add . && git commit -m "feat: scaffold v2 workspace"
+              - git push -u origin main
+      - 如需在老仓库中引用 v2，可加为 submodule 或用文档链接。
+
+  建议
+
+  - 如果你的 v2 会长期演进且与 v1 差异巨大，建议“独立仓库”。管理更清晰、发布与
+  CI 更简单。
+  - 如果你更希望短期内快速联动、用同一套权限与 PR 流程，先用“同仓库新分支 + 顶层
+  目录 metasheet-v2/”，等稳定后再迁移到独立仓库也可。
+我的建议：先同仓库演进，成熟后再独立
+
+  - 现在先放在同仓库的独立目录 metasheet-v2/，走独立分支与 PR 流程更高效（共用权
+  限、Issue、Secrets、环境变量，便于与 v1 联调和逐步迁移）。
+  - 等 v2 的微内核与首批插件稳定、有清晰的发布/CI 后，再迁出到独立仓库，降低长期
+  耦合与历史包袱。
+
+  这样做的好处
+
+  - 低成本启动：无需额外仓库/权限/流水线配置，v1-v2 可共享冒烟脚本与 DB。
+  - 渐进迁移：保持 v1 生产安全，v2 在分支/目录内试点，随时回滚。
+  - 审阅友好：PR 仅限 metasheet-v2/** 变化，代码评审清晰。
+
+  需要补充的工程治理
+
+把 Postgres 作为权威数据源，v2 的
+  monorepo + core-backend（插件化）正好能承载 n8n 风格可视化、Camunda 风格可追踪
+  执行、Baserow/SeaTable 的多视图与脚本扩展，以及 NocoDB 的外部数据源连接能力。
+
+  建议总体架构（v2 方向）
+
+  - packages/core-backend（核心）
+      - 核心服务：HTTP/路由基座、PluginContext、插件注册表、事件总线、统一配置与
+  密钥管理、鉴权/RBAC、审计与指标、存储适配（Postgres）。
+      - 持久层：采用 Kysely/Knex 或 Prisma 访问 Postgres，使用 JSONB 承载灵活配
+  置；迁移沿用 SQL（现已具备）。
+      - 可观测：Prometheus 指标（审批、队列、数据库）、OpenTelemetry（可选），结
+  构化日志。
+  - plugins（扩展）
+      - 视图插件：view-kanban / view-calendar / view-gallery / view-
+  form（Baserow/SeaTable 思路）
+      - 工作流/审批插件：workflow-engine（Camunda 思路：BPMN/DAG）、approval-
+  actions
+      - 数据源插件：datasource-postgres / datasource-mysql / datasource-
+  http（NocoDB 思路）
+      - 审计与追踪：audit-trail（统一写 operation_audit_logs / execution_logs /
+  incidents）
+      - 脚本运行：script-runner（SeaTable 思路：JS 沙箱 + 任务队列；Python 可通
+  过 worker）
+  - apps/web
+      - n8n 风格流程设计器（BPMN/DAG 可视节点），视图切换器（Grid/Kanban/
+  Calendar/Gallery/Form）共用同一数据模型，按「视图配置」渲染。
+
+  数据库（Postgres）核心模型建议
+
+  - 审批与工作流（Camunda 思路）
+      - workflow_definitions(id, name, bpmn_json, version, status, created_by,
+  created_at,…)
+      - workflow_instances(id, definition_id, business_key, status[pending|
+  running|completed|failed], current_activity, variables jsonb, created_by,
+  created_at, completed_at, version int) — 乐观锁版本已实践
+      - workflow_tokens(id, instance_id, activity_id, state, payload jsonb,
+  created_at) — 并行/补偿需要
+      - workflow_incidents(id, instance_id, activity_id, type, message, context
+  jsonb, created_at, resolved_at)
+      - workflow_audit_logs(id, instance_id, action, actor_id, details jsonb,
+  created_at) — 与现 operation_audit_logs 统一口径
+  - 多视图（Baserow/SeaTable 思路）
+      - tables(id, name, schema jsonb, owner_id,…)
+      - views(id, table_id, type[grid|kanban|calendar|gallery|form], name,
+  config jsonb, created_by,…)
+          - Kanban config：group_by_field、swimlanes、card_fields
+          - Calendar config：date_field、range_field（可选）、time_zone
+          - Gallery config：cover_field、fields_to_show
+          - Form config：字段布局、校验规则、公开访问设置
+      - view_states(id, view_id, user_id, state jsonb, updated_at) — 个性化筛选/
+  排序/列宽
+  - 审计/统一操作日志（已落地）
+      - operation_audit_logs(id, actor_id, action, resource_type, resource_id,
+  details jsonb, created_at)
+  - 外部数据源（NocoDB 思路）
+      - data_sources(id, type[postgres|mysql|http|…], name, config jsonb,
+  status, created_at)
+      - data_source_credentials(id, data_source_id, secret_ref, created_at) — 存
+  vault/密钥管控
+      - external_tables(id, data_source_id, schema_name, table_name, mapping
+  jsonb, writable boolean, cache_policy jsonb)
+      - materializations(id, external_table_id, last_sync_at,… 可选增量同步/CDC)
+
+  前端（n8n + 多视图）
+
+  - 流程设计器：节点库（手动节点、条件、脚本、审批、数据写入/查询、Webhook/定
+  时），拖拽连线，保存到 workflow_definitions（bpmn_json / dag_json）。
+  - 视图切换器：与 table/view 模型绑定；视图配置持久化在 views.config；用户个性
+  化状态在 view_states；Grid/Kanban/Calendar/Gallery/Form 共用数据层，渲染器按
+  type 渲染。
+
+  后端（Camunda 可追踪执行）
+
+  - 引擎：支持 DAG（或 BPMN 映射），每次执行生成 workflow_instances 与
+  workflow_tokens；所有节点进入/离开记录事件及变量变更；失败自动生成 incidents。
+  - 可追踪可解释：instances + tokens + incidents + audit_logs 的查询 API；按实
+  例/节点/时间过滤；支持重试/跳过/补偿（回滚节点需业务配合）。
+  - 审批：沿用乐观锁思想（version 字段），审批并发冲突返回 409；审批动作写 audit
+  与 metrics。
+
+  外部数据源（NocoDB）
+
+  - 统一抽象接口：introspectSchema()、listRecords()、getRecord()、create/update/
+  delete、queryBuilder
+  - 映射到「虚拟表」（external_tables），前端与本地表一致体验；写策略（直写/禁止
+  写/经中间层）由 external_tables 决定。
+  - 可选物化：materializations（定时或触发器），便于索引与复杂查询；CDC 视规模选
+  型（Debezium/服务商特性）。
+  - 自动 API 生成：对 table/view 定义自动暴露 REST/GraphQL；REST 与 OpenAPI 自
+  动生成（core-backend 装饰器/扫描器），GraphQL 可用 Nexus/GraphQL Yoga 或
+  PostGraphile（针对 Postgres 本地表）。
+
+  插件化（Baserow）
+
+  - PluginContext 提供：db、logger、config、eventBus、metrics、auth、auditWriter
+  - 插件清单（manifest）：name、version、capabilities（view-provider/workflow-
+  node/datasource/field-type/automation）、migrations、routes（可注册子路由
+  与 OpenAPI）
+  - PluginLoader：从 plugins/* 动态加载；每个插件可注册视图/字段/节点/数据源等；
+  隔离边界（版本、错误防护）
+  - 安全与扩展：插件声明能力 + RBAC；审核发布机制
+
+  脚本字段/自动化（SeaTable）
+
+  - JS 沙箱（vm2 或 isolated-vm），限定 API，超时/内存限制，审计脚本执行（谁/何
+  时/表/字段/状态/资源消耗）。
+  - 结果持久：字段值/日志/指标；支持定时任务与事件驱动（行变更/视图筛选命中）。
+  - Python 支持可通过独立 Worker（队列）与 RPC 实现，避免核心进程污染。
+
+  OpenAPI + CI（延续并升级）
+
+  - 持续生成合并 OpenAPI（v2 插件自注册路径 + 核心路径合并）
+  - CI：lint + validate（bearerAuth 强制）+ diff（breaking fail）+ Release；并发
+  烟囱与指标门禁保持
+  - 后续增加 GraphQL SDL 快照 diff（可选）
+
+  落地路线图（建议 3 阶段）
+
+  - 阶段 1（1–3 周）
+      - 在 v2/core-backend 落 Postgres 适配层（Kysely/Prisma），迁移
+  operation_audit_logs、workflow_*、views/tables 基础表。
+      - 搭工作流引擎最小可用：workflow_definitions + instances + 审批节点 +
+  incidents + audit。对接现有审批乐观锁与指标。
+      - 视图基础：Grid/Kanban 的 View/State 模型 + 查询接口；前端视图切换器
+  雏形。
+      - 将现 OpenAPI/CI 脚本迁到 v2，并让 Observability E2E 在 core-backend
+  跑通。
+  - 阶段 2（3–6 周）
+      - 增加 Calendar/Gallery/Form 视图渲染与配置；表单提交落库与审批联动。
+      - 外部数据源：先打通 Postgres/MySQL 只读 + 「虚拟表」映射；REST 自动生成。
+      - 工作流引擎完善：节点类型扩充（脚本/HTTP/条件/并行），执行轨迹可视
+  化 API。
+      - 安全：RBAC 扩展到 v2；插件能力白名单；审计覆盖更多写端点。
+  - 阶段 3（6–10 周）
+      - 外部数据源写策略与物化同步；GraphQL 自动生成；CDC（可选）。
+      - 脚本字段运行器（JS），沙箱 + 队列 + 资源限制 + 审计。
+      - 模板库与「一键启动方案」（表 + 视图 + 流程 + 表单）。
+      - 可观测扩展：执行耗时、失败率、卡点排行；OpenTelemetry trace 贯穿节点。
+
+  与现有工作的衔接
+
+  - 我们已实现的乐观锁/审计/指标/并发 CI 门禁，直接作为 v2 核心规范：审批与工作
+  流插件沿用，operation_audit_logs 作为统一审计。
+  - OpenAPI 合并/校验/发布流程仍可沿用，在 v2 下改为扫描插件注册路由统一合并。

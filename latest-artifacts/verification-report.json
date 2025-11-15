@@ -1,0 +1,38 @@
+{
+  "timestamp": "2025-09-25T15:04:16Z",
+  "run_id": "18011814292",
+  "branch": "main",
+  "commit": "1f270e3ab221e4443b4768f41521c45b6a76d65d",
+  "status": "success",
+  "metrics": {
+    "p99_latency": 0,
+    "db_p99_latency": 0,
+    "total_requests": 0,
+    "error_5xx": 0,
+    "error_rate": ,
+    "rbac_cache_hits": 0,
+    "rbac_cache_misses": 0,
+    "rbac_cache_hit_rate": 0,
+    "openapi_lint_issues": 0,
+    "approval_success": 1,
+    "approval_conflict": 0
+  },
+  "rbac": {
+    "hits": 0,
+    "misses": 0,
+    "hitRate": 0,
+    "rbacCacheStatus": "poor",
+    "permMode": "user_only"
+  },
+  "openapi": { "lintErrors": 0 },
+  "contract_tests": {
+    "ok": null,
+    "total_checks": null,
+    "passed_checks": null
+  },
+  "thresholds": {
+    "p99_threshold": "0.1",
+    "error_rate_threshold": 0.005,
+    "cache_hit_rate_threshold": "60"
+  }
+}

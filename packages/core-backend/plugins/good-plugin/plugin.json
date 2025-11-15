@@ -1,0 +1,8 @@
+{
+  "name": "@test/good-plugin",
+  "version": "1.0.0",
+  "displayName": "Good Plugin",
+  "engines": { "metasheet": ">=1.0.0" },
+  "permissions": ["database.read"],
+  "main": { "backend": "dist/index.js" }
+}

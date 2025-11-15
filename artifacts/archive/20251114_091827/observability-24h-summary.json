@@ -1,0 +1,28 @@
+{
+  "observation_start": "2025-11-11T07:35:00Z",
+  "interval_seconds": 1800,
+  "max_samples": 48,
+  "samples_collected": 48,
+  "alerts": [
+    "2025-11-11T07:35:03Z: cold_start",
+    "2025-11-11T13:48:30Z: success_rate_crit",
+    "2025-11-11T14:33:58Z: success_rate_crit,consecutive_success",
+    "2025-11-12T00:45:54Z: success_rate_crit",
+    "2025-11-12T03:55:59Z: success_rate_crit",
+    "2025-11-12T04:26:39Z: success_rate_crit,consecutive_success",
+    "2025-11-12T04:56:52Z: success_rate_crit,consecutive_success",
+    "2025-11-12T05:27:04Z: success_rate_crit,consecutive_success",
+    "2025-11-12T09:27:55Z: success_rate_crit",
+    "2025-11-13T04:20:55Z: success_rate_crit",
+    "2025-11-13T04:51:08Z: success_rate_crit,consecutive_success",
+    "2025-11-13T05:21:21Z: success_rate_crit,consecutive_success",
+    "2025-11-13T05:51:33Z: success_rate_crit,consecutive_success",
+    "2025-11-13T06:21:46Z: success_rate_crit,consecutive_success",
+    "2025-11-13T06:51:58Z: success_rate_crit,consecutive_success",
+    "2025-11-13T07:22:11Z: success_rate_crit,consecutive_success",
+    "2025-11-13T07:52:23Z: success_rate_crit,consecutive_success"
+  ],
+  "status": "running",
+  "last_update": "2025-11-14T00:33:10Z",
+  "last_status": "OK"
+}

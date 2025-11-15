@@ -1,0 +1,201 @@
+"use strict";
+/**
+ * 简化版服务器 - 用于快速测试
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+const http = __importStar(require("http"));
+const port = 8900;
+// 模拟插件数据
+const plugins = [
+    { name: 'plugin-view-kanban', displayName: '看板视图', status: 'active' },
+    { name: 'plugin-field-text', displayName: '文本字段', status: 'active' },
+    { name: 'plugin-workflow-engine', displayName: '工作流引擎', status: 'inactive' }
+];
+// 存储表格数据（内存存储）
+const spreadsheetData = {};
+const server = http.createServer((req, res) => {
+    // 设置CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    const url = req.url || '';
+    const method = req.method;
+    const pathname = url.split('?')[0];
+    console.log(`[${new Date().toISOString()}] ${method} ${pathname}`);
+    // 处理预检请求
+    if (method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+    // 设置Content-Type
+    res.setHeader('Content-Type', 'application/json');
+    // 路由处理
+    if (pathname === '/health' && method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            plugins: plugins.length
+        }));
+    }
+    else if (pathname === '/api/plugins' && method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify(plugins));
+    }
+    else if (pathname.startsWith('/api/kanban/') && method === 'GET') {
+        // 模拟看板数据
+        res.writeHead(200);
+        res.end(JSON.stringify({
+            success: true,
+            data: [
+                {
+                    id: 'todo',
+                    title: '待处理',
+                    cards: [
+                        { id: '1', title: '任务1', content: '这是任务1的描述', status: 'todo' },
+                        { id: '2', title: '任务2', content: '这是任务2的描述', status: 'todo' }
+                    ],
+                    order: 1
+                },
+                {
+                    id: 'in_progress',
+                    title: '进行中',
+                    cards: [
+                        { id: '3', title: '任务3', content: '正在处理中', status: 'in_progress' }
+                    ],
+                    order: 2
+                },
+                {
+                    id: 'done',
+                    title: '已完成',
+                    cards: [
+                        { id: '4', title: '任务4', content: '已经完成了', status: 'done' }
+                    ],
+                    order: 3
+                }
+            ]
+        }));
+    }
+    else if (pathname === '/api/spreadsheet' && method === 'GET') {
+        // 获取表格数据
+        const urlObj = new URL(req.url, `http://${req.headers.host}`);
+        const id = urlObj.searchParams.get('id') || 'default';
+        const data = spreadsheetData[id] || {
+            rows: 100,
+            cols: 26,
+            data: {},
+            styles: {},
+            merges: []
+        };
+        res.writeHead(200);
+        res.end(JSON.stringify(data));
+    }
+    else if (pathname === '/api/spreadsheet' && method === 'POST') {
+        // 保存表格数据
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', () => {
+            try {
+                const data = JSON.parse(body);
+                const id = data.id || 'default';
+                // 保存数据到内存
+                spreadsheetData[id] = {
+                    rows: data.rows || 100,
+                    cols: data.cols || 26,
+                    data: data.data || {},
+                    styles: data.styles || {},
+                    merges: data.merges || [],
+                    lastModified: new Date().toISOString()
+                };
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                    success: true,
+                    message: '数据保存成功',
+                    id: id,
+                    lastModified: spreadsheetData[id].lastModified
+                }));
+            }
+            catch (error) {
+                res.writeHead(400);
+                res.end(JSON.stringify({
+                    success: false,
+                    message: '数据格式错误'
+                }));
+            }
+        });
+    }
+    else {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Not found' }));
+    }
+});
+server.listen(port, () => {
+    console.log(`
+╔════════════════════════════════════════════════╗
+║      MetaSheet Backend Core (Simple Mode)      ║
+╠════════════════════════════════════════════════╣
+║  Server running at: http://localhost:${port}     ║
+║                                                ║
+║  Available endpoints:                          ║
+║  • GET  /health           - Health check       ║
+║  • GET  /api/plugins      - List plugins       ║
+║  • GET  /api/kanban/:id   - Get kanban data   ║
+║  • GET  /api/spreadsheet  - Get spreadsheet   ║
+║  • POST /api/spreadsheet  - Save spreadsheet  ║
+╚════════════════════════════════════════════════╝
+
+Press Ctrl+C to stop the server
+  `);
+});
+// 优雅关闭
+process.on('SIGTERM', () => {
+    console.log('\nShutting down server...');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
+process.on('SIGINT', () => {
+    console.log('\nShutting down server...');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
+//# sourceMappingURL=simple-server.js.map

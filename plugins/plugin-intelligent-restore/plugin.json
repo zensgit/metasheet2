@@ -1,0 +1,46 @@
+{
+  "name": "plugin-intelligent-restore",
+  "version": "1.0.0",
+  "displayName": "智能恢复系统",
+  "description": "智能版本控制和恢复系统，支持智能存储、压缩、列级恢复等高级功能",
+  "type": "feature",
+  "main": {
+    "backend": "dist/index.js",
+    "frontend": "dist/IntelligentRestoreView.vue"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "restore.smart",
+        "title": "智能恢复"
+      },
+      {
+        "id": "restore.column",
+        "title": "列恢复"
+      },
+      {
+        "id": "restore.snapshot",
+        "title": "快照恢复"
+      }
+    ],
+    "apis": [
+      {
+        "id": "intelligentStorage",
+        "methods": [
+          "storeHistory",
+          "retrieveHistory",
+          "analyzeStorage"
+        ]
+      }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "storage.manage",
+    "events.basic"
+  ],
+  "engines": {
+    "metasheet": ">=2.0.0"
+  }
+}

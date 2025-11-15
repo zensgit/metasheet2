@@ -1,0 +1,193 @@
+[2025-11-03 16:33:25] Monitoring started (PID: 74642)
+[2025-11-03 16:33:25] Running initial collection...
+🔍 Cache Metrics Collection Script
+==================================
+
+📊 Configuration:
+  Prometheus:    http://localhost:9090
+  API Origin:    http://localhost:8900
+  Duration:      24h
+  Output:        /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251103_163325.md
+
+[1;33mWarning: Cannot connect to Prometheus at http://localhost:9090[0m
+Falling back to direct metrics endpoint at http://localhost:8900/metrics/prom
+
+📈 Collecting cache metrics...
+[0;32m✓[0m Found 8 key patterns
+
+| Pattern | Misses | Sets | Deletes | Read/Write Ratio | Priority |
+|---------|--------|------|---------|------------------|----------|
+| audit | 5 | 0 | 0 | inf | 🔥 HIGH |
+| config | 3 | 0 | 0 | inf | 🟡 MEDIUM |
+| department | 60 | 6 | 3 | 6.66 | 🔥 HIGH |
+| file | 25 | 5 | 0 | 5.00 | 🟡 MEDIUM |
+| permission | 20 | 4 | 0 | 5.00 | 🟡 MEDIUM |
+| spreadsheet | 50 | 5 | 3 | 6.25 | 🔥 HIGH |
+| user | 180 | 18 | 9 | 6.66 | 🔥 HIGH |
+| workflow | 30 | 6 | 0 | 5.00 | 🟡 MEDIUM |
+
+---
+
+## Top Cache Candidates (Phase 3 Priority)
+
+### 1. `user` (Score: 64.28)
+
+- **Total Misses:** 180
+- **Avg Misses/Hour:** 7.50
+- **Recommendation:** High-value caching candidate
+
+### 2. `department` (Score: 60.00)
+
+- **Total Misses:** 60
+- **Avg Misses/Hour:** 2.50
+- **Recommendation:** High-value caching candidate
+
+### 3. `spreadsheet` (Score: 55.55)
+
+- **Total Misses:** 50
+- **Avg Misses/Hour:** 2.08
+- **Recommendation:** High-value caching candidate
+
+### 4. `audit` (Score: 50.00)
+
+- **Total Misses:** 5
+- **Avg Misses/Hour:** .20
+- **Recommendation:** High-value caching candidate
+
+### 5. `workflow` (Score: 42.85)
+
+- **Total Misses:** 30
+- **Avg Misses/Hour:** 1.25
+- **Recommendation:** High-value caching candidate
+
+### 6. `file` (Score: 41.66)
+
+- **Total Misses:** 25
+- **Avg Misses/Hour:** 1.04
+- **Recommendation:** High-value caching candidate
+
+### 7. `permission` (Score: 40.00)
+
+- **Total Misses:** 20
+- **Avg Misses/Hour:** .83
+- **Recommendation:** High-value caching candidate
+
+### 8. `config` (Score: 30.00)
+
+- **Total Misses:** 3
+- **Avg Misses/Hour:** .12
+- **Recommendation:** High-value caching candidate
+
+
+[0;32m✓[0m Report generated successfully!
+
+📄 Report location: /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251103_163325.md
+
+📊 Summary:
+  - Analyzed 8 key patterns
+  - Duration: 24 hours
+  - Top candidates identified and ranked
+
+💡 Next steps:
+  1. Review the report: cat /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251103_163325.md
+  2. Discuss with team: Which patterns to cache in Phase 3?
+  3. Continue collection: Run this script daily for trending analysis
+
+[2025-11-03 16:33:25] Initial collection completed successfully
+[2025-11-03 16:33:25] Sleeping for 24h until next collection...
+[2025-11-05 00:25:12] Running collection #2...
+🔍 Cache Metrics Collection Script
+==================================
+
+📊 Configuration:
+  Prometheus:    http://localhost:9090
+  API Origin:    http://localhost:8900
+  Duration:      24h
+  Output:        /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251105_002512.md
+
+[1;33mWarning: Cannot connect to Prometheus at http://localhost:9090[0m
+Falling back to direct metrics endpoint at http://localhost:8900/metrics/prom
+
+📈 Collecting cache metrics...
+[0;32m✓[0m Found 8 key patterns
+
+| Pattern | Misses | Sets | Deletes | Read/Write Ratio | Priority |
+|---------|--------|------|---------|------------------|----------|
+| audit | 5 | 0 | 0 | inf | 🔥 HIGH |
+| config | 3 | 0 | 0 | inf | 🟡 MEDIUM |
+| department | 60 | 6 | 3 | 6.66 | 🔥 HIGH |
+| file | 25 | 5 | 0 | 5.00 | 🟡 MEDIUM |
+| permission | 20 | 4 | 0 | 5.00 | 🟡 MEDIUM |
+| spreadsheet | 50 | 5 | 3 | 6.25 | 🔥 HIGH |
+| user | 180 | 18 | 9 | 6.66 | 🔥 HIGH |
+| workflow | 30 | 6 | 0 | 5.00 | 🟡 MEDIUM |
+
+---
+
+## Top Cache Candidates (Phase 3 Priority)
+
+### 1. `user` (Score: 64.28)
+
+- **Total Misses:** 180
+- **Avg Misses/Hour:** 7.50
+- **Recommendation:** High-value caching candidate
+
+### 2. `department` (Score: 60.00)
+
+- **Total Misses:** 60
+- **Avg Misses/Hour:** 2.50
+- **Recommendation:** High-value caching candidate
+
+### 3. `spreadsheet` (Score: 55.55)
+
+- **Total Misses:** 50
+- **Avg Misses/Hour:** 2.08
+- **Recommendation:** High-value caching candidate
+
+### 4. `audit` (Score: 50.00)
+
+- **Total Misses:** 5
+- **Avg Misses/Hour:** .20
+- **Recommendation:** High-value caching candidate
+
+### 5. `workflow` (Score: 42.85)
+
+- **Total Misses:** 30
+- **Avg Misses/Hour:** 1.25
+- **Recommendation:** High-value caching candidate
+
+### 6. `file` (Score: 41.66)
+
+- **Total Misses:** 25
+- **Avg Misses/Hour:** 1.04
+- **Recommendation:** High-value caching candidate
+
+### 7. `permission` (Score: 40.00)
+
+- **Total Misses:** 20
+- **Avg Misses/Hour:** .83
+- **Recommendation:** High-value caching candidate
+
+### 8. `config` (Score: 30.00)
+
+- **Total Misses:** 3
+- **Avg Misses/Hour:** .12
+- **Recommendation:** High-value caching candidate
+
+
+[0;32m✓[0m Report generated successfully!
+
+📄 Report location: /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251105_002512.md
+
+📊 Summary:
+  - Analyzed 8 key patterns
+  - Duration: 24 hours
+  - Top candidates identified and ranked
+
+💡 Next steps:
+  1. Review the report: cat /Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/cache-reports/cache_analysis_20251105_002512.md
+  2. Discuss with team: Which patterns to cache in Phase 3?
+  3. Continue collection: Run this script daily for trending analysis
+
+[2025-11-05 00:25:13] Collection #2 completed successfully
+[2025-11-05 00:25:13] Sleeping for 24h until next collection...
