@@ -105,5 +105,108 @@ export function adminRouter(): Router {
       return res.status(503).json({ ok: false, healthy: false, error: 'DB_QUERY_FAILED' })
     }
   })
+
+  // Plugin reload endpoint (Phase 8)
+  r.post('/api/admin/plugins/:name/reload', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+    const pluginName = req.params.name
+    const userId = (req as any).user?.id
+    const startTime = Date.now()
+
+    try {
+      // Get plugin loader from global registry (injected during app setup)
+      const pluginLoader = (global as any).__pluginLoader
+      if (!pluginLoader) {
+        return res.status(503).json({
+          ok: false,
+          error: { code: 'PLUGIN_LOADER_UNAVAILABLE', message: 'Plugin loader not initialized' }
+        })
+      }
+
+      // Perform reload
+      await pluginLoader.reloadPlugin(pluginName)
+      const duration = (Date.now() - startTime) / 1000
+
+      // Record metrics
+      try {
+        metrics.pluginReloadTotal.labels(pluginName, 'success').inc()
+        metrics.pluginReloadDuration.labels(pluginName).observe(duration)
+      } catch {}
+
+      // Audit log
+      await auditLog({
+        actorId: userId,
+        actorType: 'user',
+        action: 'reload',
+        resourceType: 'plugin',
+        resourceId: pluginName,
+        meta: { duration }
+      })
+
+      return res.json({
+        ok: true,
+        data: {
+          pluginName,
+          reloaded: true,
+          duration
+        }
+      })
+    } catch (e) {
+      const duration = (Date.now() - startTime) / 1000
+      const error = e as Error
+
+      // Record failure metrics
+      try {
+        metrics.pluginReloadTotal.labels(pluginName, 'failure').inc()
+        metrics.pluginReloadDuration.labels(pluginName).observe(duration)
+      } catch {}
+
+      // Audit log failure
+      await auditLog({
+        actorId: userId,
+        actorType: 'user',
+        action: 'reload',
+        resourceType: 'plugin',
+        resourceId: pluginName,
+        meta: { error: error.message, duration }
+      })
+
+      return res.status(500).json({
+        ok: false,
+        error: {
+          code: 'PLUGIN_RELOAD_FAILED',
+          message: error.message
+        }
+      })
+    }
+  })
+
+  // List all loaded plugins
+  r.get('/api/admin/plugins', rbacGuard('permissions', 'read'), async (_req: Request, res: Response) => {
+    try {
+      const pluginLoader = (global as any).__pluginLoader
+      if (!pluginLoader) {
+        return res.status(503).json({
+          ok: false,
+          error: { code: 'PLUGIN_LOADER_UNAVAILABLE' }
+        })
+      }
+
+      const plugins = pluginLoader.getPlugins()
+      const pluginList = Array.from(plugins.entries()).map(([name, instance]: [string, any]) => ({
+        name,
+        version: instance.manifest?.version || 'unknown',
+        status: instance.status || 'loaded',
+        permissions: instance.manifest?.permissions || []
+      }))
+
+      return res.json({ ok: true, data: pluginList })
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: { code: 'PLUGIN_LIST_ERROR' }
+      })
+    }
+  })
+
 return r
 }

@@ -111,6 +111,20 @@ const rpcTimeoutsTotal = new client.Counter({
   labelNames: [] as const
 })
 
+// Plugin reload metrics (Phase 8)
+const pluginReloadTotal = new client.Counter({
+  name: 'metasheet_plugin_reload_total',
+  help: 'Total plugin reload operations',
+  labelNames: ['plugin_name', 'result'] as const
+})
+
+const pluginReloadDuration = new client.Histogram({
+  name: 'metasheet_plugin_reload_duration_seconds',
+  help: 'Plugin reload duration in seconds',
+  labelNames: ['plugin_name'] as const,
+  buckets: [0.1, 0.5, 1, 2, 5, 10]
+})
+
 // Cache metrics (Phase 1)
 const cache_hits_total = new client.Counter({
   name: 'cache_hits_total',
@@ -177,6 +191,8 @@ registry.registerMetric(messagesRetriedTotal)
 registry.registerMetric(messagesExpiredTotal)
 registry.registerMetric(permissionDeniedTotal)
 registry.registerMetric(rpcTimeoutsTotal)
+registry.registerMetric(pluginReloadTotal)
+registry.registerMetric(pluginReloadDuration)
 registry.registerMetric(cache_hits_total)
 registry.registerMetric(cache_miss_total)
 registry.registerMetric(cache_set_total)
@@ -230,6 +246,8 @@ export const metrics = {
   messagesExpiredTotal,
   permissionDeniedTotal,
   rpcTimeoutsTotal,
+  pluginReloadTotal,
+  pluginReloadDuration,
   cache_hits_total,
   cache_miss_total,
   cache_set_total,

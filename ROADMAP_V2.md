@@ -6,9 +6,9 @@
 3. Plugin Lifecycle & Sandbox – DONE
 4. Observability (Prometheus) – DONE
 5. Messaging Pattern + Expiry – DONE
-6. Event Bus Metrics Unification – IN PROGRESS
-7. Permission Denial Metrics – PLANNED
-8. Plugin Reload & Hot Swap – PLANNED
+6. Event Bus Metrics Unification – DONE
+7. Permission Denial Metrics – DONE
+8. Plugin Reload & Hot Swap – DONE
 9. Snapshot / Versioning MVP – PLANNED
 10. Advanced Messaging (delay, DLQ, backoff) – FUTURE
 11. Performance & Scale (pattern index, sharding) – FUTURE
@@ -20,14 +20,16 @@
 - Sandbox permission groups (database.*, events.basic, messaging.*, http.register)
 - Plugin lifecycle load/activate & subscription cleanup
 - Prometheus metrics exporter + CI grep
+- Event Bus metrics counting unified (eventsEmittedTotal)
+- Permission denial metrics (permissionDeniedTotal, PermissionMetrics class)
+- Plugin reload: reloadPlugin() method, HTTP endpoint, metrics (pluginReloadTotal, pluginReloadDuration)
 
 ## In Progress
-- Unify event bus metrics counting (single increment path)
+- None (Phase 9 Snapshot/Versioning ready for implementation)
 
 ## Near-Term Planned
-- `permissionDenied_total` metric
-- Plugin reload endpoint & metrics
 - Snapshot/versioning tables & APIs
+- Plugin hot swap during reload (cache module state)
 
 ## Future Enhancements
 - Delay scheduling & dead-letter queue

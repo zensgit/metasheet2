@@ -370,7 +370,53 @@ export class PluginLoader extends EventEmitter {
    * 重新加载插件
    */
   async reloadPlugin(name: string): Promise<void> {
+    const instance = this.plugins.get(name)
+    if (!instance) {
+      throw new Error(`Plugin ${name} not found for reload`)
+    }
+
+    // 保存插件路径信息用于重新加载
+    const pluginPath = (instance.manifest as any).path
+    if (!pluginPath) {
+      throw new Error(`Plugin ${name} has no path information for reload`)
+    }
+
+    this.logger.info(`Reloading plugin: ${name}`)
+    this.emit('plugin:reloading', name)
+
+    // 卸载插件
     await this.unloadPlugin(name)
-    // TODO: 重新扫描并加载插件
+
+    // 重新加载 manifest
+    const manifestPath = path.join(pluginPath, 'plugin.json')
+    let manifest: PluginManifest
+
+    try {
+      const content = await fs.readFile(manifestPath, 'utf-8')
+      manifest = JSON.parse(content) as PluginManifest
+      manifest.path = pluginPath
+    } catch (error) {
+      this.logger.error(`Failed to reload manifest for ${name}`, error as Error)
+      this.emit('plugin:reload:failed', { name, error })
+      throw new Error(`Failed to reload manifest for ${name}: ${(error as Error).message}`)
+    }
+
+    // 验证 manifest
+    if (!this.validateManifest(manifest)) {
+      this.emit('plugin:reload:failed', { name, error: 'Manifest validation failed' })
+      throw new Error(`Manifest validation failed for ${name}`)
+    }
+
+    // 重新加载插件
+    try {
+      await this.loadPlugin(manifest)
+      this.logger.info(`Plugin ${name} reloaded successfully`)
+      this.emit('plugin:reloaded', name)
+    } catch (error) {
+      this.logger.error(`Failed to reload plugin ${name}`, error as Error)
+      this.emit('plugin:reload:failed', { name, error })
+      throw error
+    }
   }
 }
+
