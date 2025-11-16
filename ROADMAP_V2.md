@@ -9,7 +9,7 @@
 6. Event Bus Metrics Unification – DONE
 7. Permission Denial Metrics – DONE
 8. Plugin Reload & Hot Swap – DONE
-9. Snapshot / Versioning MVP – PLANNED
+9. Snapshot / Versioning MVP – DONE
 10. Advanced Messaging (delay, DLQ, backoff) – FUTURE
 11. Performance & Scale (pattern index, sharding) – FUTURE
 
@@ -23,13 +23,15 @@
 - Event Bus metrics counting unified (eventsEmittedTotal)
 - Permission denial metrics (permissionDeniedTotal, PermissionMetrics class)
 - Plugin reload: reloadPlugin() method, HTTP endpoint, metrics (pluginReloadTotal, pluginReloadDuration)
+- Snapshot/versioning: DB tables (snapshots, snapshot_items, snapshot_restore_log), SnapshotService, REST API, metrics
 
 ## In Progress
-- None (Phase 9 Snapshot/Versioning ready for implementation)
+- None (All planned phases complete through Phase 9)
 
 ## Near-Term Planned
-- Snapshot/versioning tables & APIs
 - Plugin hot swap during reload (cache module state)
+- Snapshot auto-cleanup for expired snapshots
+- Snapshot diff comparison API
 
 ## Future Enhancements
 - Delay scheduling & dead-letter queue

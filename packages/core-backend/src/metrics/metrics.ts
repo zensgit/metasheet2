@@ -125,6 +125,26 @@ const pluginReloadDuration = new client.Histogram({
   buckets: [0.1, 0.5, 1, 2, 5, 10]
 })
 
+// Snapshot metrics (Phase 9)
+const snapshotCreateTotal = new client.Counter({
+  name: 'metasheet_snapshot_create_total',
+  help: 'Total snapshot create operations',
+  labelNames: ['result'] as const
+})
+
+const snapshotRestoreTotal = new client.Counter({
+  name: 'metasheet_snapshot_restore_total',
+  help: 'Total snapshot restore operations',
+  labelNames: ['result'] as const
+})
+
+const snapshotOperationDuration = new client.Histogram({
+  name: 'metasheet_snapshot_operation_duration_seconds',
+  help: 'Snapshot operation duration in seconds',
+  labelNames: ['operation'] as const,
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30]
+})
+
 // Cache metrics (Phase 1)
 const cache_hits_total = new client.Counter({
   name: 'cache_hits_total',
@@ -193,6 +213,9 @@ registry.registerMetric(permissionDeniedTotal)
 registry.registerMetric(rpcTimeoutsTotal)
 registry.registerMetric(pluginReloadTotal)
 registry.registerMetric(pluginReloadDuration)
+registry.registerMetric(snapshotCreateTotal)
+registry.registerMetric(snapshotRestoreTotal)
+registry.registerMetric(snapshotOperationDuration)
 registry.registerMetric(cache_hits_total)
 registry.registerMetric(cache_miss_total)
 registry.registerMetric(cache_set_total)
@@ -248,6 +271,9 @@ export const metrics = {
   rpcTimeoutsTotal,
   pluginReloadTotal,
   pluginReloadDuration,
+  snapshotCreateTotal,
+  snapshotRestoreTotal,
+  snapshotOperationDuration,
   cache_hits_total,
   cache_miss_total,
   cache_set_total,
