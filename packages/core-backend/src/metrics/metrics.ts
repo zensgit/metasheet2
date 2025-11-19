@@ -1,7 +1,7 @@
 import type { Application, Request, Response, NextFunction } from 'express'
 import client from 'prom-client'
 
-const registry = new client.Registry()
+export const registry = new client.Registry()
 client.collectDefaultMetrics({ register: registry })
 
 const httpHistogram = new client.Histogram({
@@ -145,6 +145,49 @@ const snapshotOperationDuration = new client.Histogram({
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30]
 })
 
+const snapshotCleanupTotal = new client.Counter({
+  name: 'metasheet_snapshot_cleanup_total',
+  help: 'Total snapshot cleanup operations',
+  labelNames: ['result'] as const
+})
+
+// Sprint 2: Snapshot Protection Metrics
+const snapshotTagsTotal = new client.Counter({
+  name: 'metasheet_snapshot_tags_total',
+  help: 'Total count of snapshot tags usage',
+  labelNames: ['tag'] as const
+})
+
+const snapshotProtectionLevel = new client.Gauge({
+  name: 'metasheet_snapshot_protection_level',
+  help: 'Snapshot protection level distribution',
+  labelNames: ['level'] as const
+})
+
+const snapshotReleaseChannel = new client.Gauge({
+  name: 'metasheet_snapshot_release_channel',
+  help: 'Snapshot release channel distribution',
+  labelNames: ['channel'] as const
+})
+
+const protectionRuleEvaluationsTotal = new client.Counter({
+  name: 'metasheet_protection_rule_evaluations_total',
+  help: 'Total protection rule evaluations',
+  labelNames: ['rule', 'result'] as const
+})
+
+const protectionRuleBlocksTotal = new client.Counter({
+  name: 'metasheet_protection_rule_blocks_total',
+  help: 'Total operations blocked by protection rules',
+  labelNames: ['rule', 'operation'] as const
+})
+
+const snapshotProtectedSkippedTotal = new client.Counter({
+  name: 'metasheet_snapshot_protected_skipped_total',
+  help: 'Total protected snapshots skipped during cleanup',
+  labelNames: [] as const
+})
+
 // Cache metrics (Phase 1)
 const cache_hits_total = new client.Counter({
   name: 'cache_hits_total',
@@ -216,6 +259,13 @@ registry.registerMetric(pluginReloadDuration)
 registry.registerMetric(snapshotCreateTotal)
 registry.registerMetric(snapshotRestoreTotal)
 registry.registerMetric(snapshotOperationDuration)
+registry.registerMetric(snapshotCleanupTotal)
+registry.registerMetric(snapshotTagsTotal)
+registry.registerMetric(snapshotProtectionLevel)
+registry.registerMetric(snapshotReleaseChannel)
+registry.registerMetric(protectionRuleEvaluationsTotal)
+registry.registerMetric(protectionRuleBlocksTotal)
+registry.registerMetric(snapshotProtectedSkippedTotal)
 registry.registerMetric(cache_hits_total)
 registry.registerMetric(cache_miss_total)
 registry.registerMetric(cache_set_total)
@@ -274,6 +324,13 @@ export const metrics = {
   snapshotCreateTotal,
   snapshotRestoreTotal,
   snapshotOperationDuration,
+  snapshotCleanupTotal,
+  snapshotTagsTotal,
+  snapshotProtectionLevel,
+  snapshotReleaseChannel,
+  protectionRuleEvaluationsTotal,
+  protectionRuleBlocksTotal,
+  snapshotProtectedSkippedTotal,
   cache_hits_total,
   cache_miss_total,
   cache_set_total,

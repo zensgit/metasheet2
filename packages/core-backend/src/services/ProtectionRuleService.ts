@@ -1,0 +1,538 @@
+/**
+ * Protection Rule Service
+ * Sprint 2: Snapshot Protection System
+ *
+ * Provides rule-based protection evaluation engine with:
+ * - CRUD operations for protection rules
+ * - Condition matching (tags_contain, protection_level, etc.)
+ * - Effect application (block, elevate_risk, require_approval)
+ * - Priority-based rule execution
+ * - Audit logging for rule evaluations
+ */
+
+import { db } from '../db/db'
+import { Logger } from '../core/logger'
+import { metrics } from '../metrics/metrics'
+import crypto from 'crypto'
+
+// ============================================
+// TYPE DEFINITIONS
+// ============================================
+
+export interface ProtectionRule {
+  id: string
+  rule_name: string
+  description?: string
+  target_type: 'snapshot' | 'plugin' | 'schema' | 'workflow'
+  conditions: RuleConditions
+  effects: RuleEffects
+  priority: number
+  is_active: boolean
+  version: number
+  created_by: string
+  created_at: Date
+  updated_at: Date
+  last_evaluated_at?: Date
+  evaluation_count: number
+}
+
+export interface RuleConditions {
+  all?: RuleCondition[]  // AND logic
+  any?: RuleCondition[]  // OR logic
+  not?: RuleCondition    // NOT logic
+}
+
+export interface RuleCondition {
+  field: string
+  operator: 'eq' | 'ne' | 'contains' | 'not_contains' | 'in' | 'not_in' | 'gt' | 'lt' | 'gte' | 'lte' | 'exists' | 'not_exists'
+  value?: any
+}
+
+export interface RuleEffects {
+  action: 'allow' | 'block' | 'elevate_risk' | 'require_approval'
+  risk_level?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+  message?: string
+  require_typed_confirmation?: boolean
+  confirmation_text?: string
+  metadata?: Record<string, any>
+}
+
+export interface RuleEvaluationContext {
+  entity_type: 'snapshot' | 'plugin' | 'schema' | 'workflow'
+  entity_id: string
+  operation: string
+  properties: Record<string, any>
+  user_id?: string
+}
+
+export interface RuleEvaluationResult {
+  matched: boolean
+  rule_id?: string
+  rule_name?: string
+  effects?: RuleEffects
+  execution_time_ms: number
+}
+
+export interface CreateRuleOptions {
+  rule_name: string
+  description?: string
+  target_type: 'snapshot' | 'plugin' | 'schema' | 'workflow'
+  conditions: RuleConditions
+  effects: RuleEffects
+  priority?: number
+  is_active?: boolean
+  created_by: string
+}
+
+export interface UpdateRuleOptions {
+  rule_name?: string
+  description?: string
+  conditions?: RuleConditions
+  effects?: RuleEffects
+  priority?: number
+  is_active?: boolean
+}
+
+// ============================================
+// SERVICE IMPLEMENTATION
+// ============================================
+
+export class ProtectionRuleService {
+  private logger: Logger
+
+  constructor() {
+    this.logger = new Logger('ProtectionRuleService')
+  }
+
+  /**
+   * Create a new protection rule
+   */
+  async createRule(options: CreateRuleOptions): Promise<ProtectionRule> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    this.logger.info(`Creating protection rule: ${options.rule_name}`)
+
+    try {
+      const rule = await db
+        .insertInto('protection_rules')
+        .values({
+          id: crypto.randomUUID(),
+          rule_name: options.rule_name,
+          description: options.description || null,
+          target_type: options.target_type,
+          conditions: JSON.stringify(options.conditions),
+          effects: JSON.stringify(options.effects),
+          priority: options.priority || 100,
+          is_active: options.is_active !== undefined ? options.is_active : true,
+          version: 1,
+          created_by: options.created_by,
+          evaluation_count: 0
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow()
+
+      this.logger.info(`Protection rule created: ${rule.id}`)
+
+      return {
+        ...rule,
+        conditions: JSON.parse(rule.conditions as string),
+        effects: JSON.parse(rule.effects as string),
+        created_at: new Date(rule.created_at as any),
+        updated_at: new Date(rule.updated_at as any),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+      } as ProtectionRule
+    } catch (error) {
+      this.logger.error('Failed to create protection rule', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Update an existing protection rule
+   */
+  async updateRule(ruleId: string, options: UpdateRuleOptions): Promise<ProtectionRule> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    this.logger.info(`Updating protection rule: ${ruleId}`)
+
+    try {
+      // Get current rule to increment version
+      const currentRule = await this.getRule(ruleId)
+      if (!currentRule) {
+        throw new Error(`Rule not found: ${ruleId}`)
+      }
+
+      const updateData: any = {
+        updated_at: new Date()
+      }
+
+      if (options.rule_name !== undefined) updateData.rule_name = options.rule_name
+      if (options.description !== undefined) updateData.description = options.description
+      if (options.conditions !== undefined) {
+        updateData.conditions = JSON.stringify(options.conditions)
+        updateData.version = currentRule.version + 1
+      }
+      if (options.effects !== undefined) updateData.effects = JSON.stringify(options.effects)
+      if (options.priority !== undefined) updateData.priority = options.priority
+      if (options.is_active !== undefined) updateData.is_active = options.is_active
+
+      const rule = await db
+        .updateTable('protection_rules')
+        .set(updateData)
+        .where('id', '=', ruleId)
+        .returningAll()
+        .executeTakeFirstOrThrow()
+
+      this.logger.info(`Protection rule updated: ${rule.id}`)
+
+      return {
+        ...rule,
+        conditions: JSON.parse(rule.conditions as string),
+        effects: JSON.parse(rule.effects as string),
+        created_at: new Date(rule.created_at as any),
+        updated_at: new Date(rule.updated_at as any),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+      } as ProtectionRule
+    } catch (error) {
+      this.logger.error('Failed to update protection rule', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Delete a protection rule
+   */
+  async deleteRule(ruleId: string): Promise<void> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    this.logger.info(`Deleting protection rule: ${ruleId}`)
+
+    try {
+      await db
+        .deleteFrom('protection_rules')
+        .where('id', '=', ruleId)
+        .executeTakeFirstOrThrow()
+
+      this.logger.info(`Protection rule deleted: ${ruleId}`)
+    } catch (error) {
+      this.logger.error('Failed to delete protection rule', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Get a single protection rule by ID
+   */
+  async getRule(ruleId: string): Promise<ProtectionRule | null> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    try {
+      const rule = await db
+        .selectFrom('protection_rules')
+        .selectAll()
+        .where('id', '=', ruleId)
+        .executeTakeFirst()
+
+      if (!rule) {
+        return null
+      }
+
+      return {
+        ...rule,
+        conditions: JSON.parse(rule.conditions as string),
+        effects: JSON.parse(rule.effects as string),
+        created_at: new Date(rule.created_at as any),
+        updated_at: new Date(rule.updated_at as any),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+      } as ProtectionRule
+    } catch (error) {
+      this.logger.error('Failed to get protection rule', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * List all protection rules with optional filtering
+   */
+  async listRules(options?: {
+    target_type?: string
+    is_active?: boolean
+  }): Promise<ProtectionRule[]> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    try {
+      let query = db
+        .selectFrom('protection_rules')
+        .selectAll()
+        .orderBy('priority', 'desc')
+        .orderBy('created_at', 'desc')
+
+      if (options?.target_type) {
+        query = query.where('target_type', '=', options.target_type as any)
+      }
+
+      if (options?.is_active !== undefined) {
+        query = query.where('is_active', '=', options.is_active)
+      }
+
+      const rules = await query.execute()
+
+      return rules.map((rule: any) => ({
+        ...rule,
+        conditions: JSON.parse(rule.conditions as string),
+        effects: JSON.parse(rule.effects as string),
+        created_at: new Date(rule.created_at as any),
+        updated_at: new Date(rule.updated_at as any),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+      })) as ProtectionRule[]
+    } catch (error) {
+      this.logger.error('Failed to list protection rules', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Evaluate protection rules against a context
+   * Returns the first matching rule with highest priority
+   */
+  async evaluateRules(context: RuleEvaluationContext): Promise<RuleEvaluationResult> {
+    const startTime = Date.now()
+
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    try {
+      // Get active rules for this entity type, ordered by priority
+      const rules = await this.listRules({
+        target_type: context.entity_type,
+        is_active: true
+      })
+
+      this.logger.debug(`Evaluating ${rules.length} rules for ${context.entity_type} ${context.entity_id}`)
+
+      // Evaluate rules in priority order (already sorted in listRules)
+      for (const rule of rules) {
+        const matched = this.evaluateConditions(rule.conditions, context.properties)
+
+        // Log execution
+        await this.logRuleExecution({
+          rule_id: rule.id,
+          rule_version: rule.version,
+          entity_type: context.entity_type,
+          entity_id: context.entity_id,
+          operation: context.operation,
+          matched,
+          effect_applied: matched ? rule.effects : null,
+          execution_time_ms: Date.now() - startTime
+        })
+
+        // Update rule evaluation stats
+        await this.updateRuleStats(rule.id)
+
+        if (matched) {
+          const executionTime = Date.now() - startTime
+
+          // Record metrics
+          try {
+            metrics.protectionRuleEvaluationsTotal
+              .labels(rule.rule_name, matched ? 'matched' : 'not_matched')
+              .inc()
+
+            if (rule.effects.action === 'block') {
+              metrics.protectionRuleBlocksTotal
+                .labels(rule.rule_name, context.operation)
+                .inc()
+            }
+          } catch {}
+
+          this.logger.info(
+            `Rule matched: ${rule.rule_name} (${rule.id}) for ${context.entity_type} ${context.entity_id}, action: ${rule.effects.action}`
+          )
+
+          return {
+            matched: true,
+            rule_id: rule.id,
+            rule_name: rule.rule_name,
+            effects: rule.effects,
+            execution_time_ms: executionTime
+          }
+        }
+      }
+
+      const executionTime = Date.now() - startTime
+
+      // No rules matched
+      this.logger.debug(`No rules matched for ${context.entity_type} ${context.entity_id}`)
+
+      return {
+        matched: false,
+        execution_time_ms: executionTime
+      }
+    } catch (error) {
+      this.logger.error('Failed to evaluate protection rules', error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Evaluate rule conditions against entity properties
+   */
+  private evaluateConditions(conditions: RuleConditions, properties: Record<string, any>): boolean {
+    // Handle composite conditions
+    if (conditions.all) {
+      return conditions.all.every(condition => this.evaluateCondition(condition, properties))
+    }
+
+    if (conditions.any) {
+      return conditions.any.some(condition => this.evaluateCondition(condition, properties))
+    }
+
+    if (conditions.not) {
+      return !this.evaluateCondition(conditions.not, properties)
+    }
+
+    return false
+  }
+
+  /**
+   * Evaluate a single condition
+   */
+  private evaluateCondition(condition: RuleCondition, properties: Record<string, any>): boolean {
+    const fieldValue = properties[condition.field]
+
+    switch (condition.operator) {
+      case 'eq':
+        return fieldValue === condition.value
+
+      case 'ne':
+        return fieldValue !== condition.value
+
+      case 'contains':
+        if (Array.isArray(fieldValue)) {
+          return fieldValue.includes(condition.value)
+        }
+        if (typeof fieldValue === 'string') {
+          return fieldValue.includes(condition.value)
+        }
+        return false
+
+      case 'not_contains':
+        if (Array.isArray(fieldValue)) {
+          return !fieldValue.includes(condition.value)
+        }
+        if (typeof fieldValue === 'string') {
+          return !fieldValue.includes(condition.value)
+        }
+        return true
+
+      case 'in':
+        if (!Array.isArray(condition.value)) {
+          return false
+        }
+        return condition.value.includes(fieldValue)
+
+      case 'not_in':
+        if (!Array.isArray(condition.value)) {
+          return true
+        }
+        return !condition.value.includes(fieldValue)
+
+      case 'gt':
+        return fieldValue > condition.value
+
+      case 'lt':
+        return fieldValue < condition.value
+
+      case 'gte':
+        return fieldValue >= condition.value
+
+      case 'lte':
+        return fieldValue <= condition.value
+
+      case 'exists':
+        return fieldValue !== undefined && fieldValue !== null
+
+      case 'not_exists':
+        return fieldValue === undefined || fieldValue === null
+
+      default:
+        this.logger.warn(`Unknown operator: ${condition.operator}`)
+        return false
+    }
+  }
+
+  /**
+   * Log rule execution to audit table
+   */
+  private async logRuleExecution(data: {
+    rule_id: string
+    rule_version: number
+    entity_type: string
+    entity_id: string
+    operation: string
+    matched: boolean
+    effect_applied: RuleEffects | null
+    execution_time_ms: number
+  }): Promise<void> {
+    if (!db) {
+      return
+    }
+
+    try {
+      await db
+        .insertInto('rule_execution_log')
+        .values({
+          id: crypto.randomUUID(),
+          rule_id: data.rule_id,
+          rule_version: data.rule_version,
+          entity_type: data.entity_type,
+          entity_id: data.entity_id,
+          operation: data.operation,
+          matched: data.matched,
+          effect_applied: data.effect_applied ? JSON.stringify(data.effect_applied) : null,
+          execution_time_ms: data.execution_time_ms
+        })
+        .execute()
+    } catch (error) {
+      this.logger.error('Failed to log rule execution', error as Error)
+      // Don't throw - logging failure shouldn't break rule evaluation
+    }
+  }
+
+  /**
+   * Update rule evaluation statistics
+   */
+  private async updateRuleStats(ruleId: string): Promise<void> {
+    if (!db) {
+      return
+    }
+
+    try {
+      await db
+        .updateTable('protection_rules')
+        .set({
+          last_evaluated_at: new Date(),
+          evaluation_count: db.fn('evaluation_count', ['+', 1]) as any
+        })
+        .where('id', '=', ruleId)
+        .execute()
+    } catch (error) {
+      this.logger.error('Failed to update rule stats', error as Error)
+      // Don't throw - stats update failure shouldn't break rule evaluation
+    }
+  }
+}
+
+// Export singleton instance
+export const protectionRuleService = new ProtectionRuleService()
