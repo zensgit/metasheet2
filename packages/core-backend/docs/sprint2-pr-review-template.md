@@ -215,6 +215,52 @@
 
 ---
 
+#### 📊 PromQL 验证片段（复制使用）
+
+**规则评估速率**（每分钟评估次数）：
+```promql
+rate(metasheet_protection_rule_evaluations_total[5m])
+```
+
+**规则阻止操作速率**（每分钟阻止次数）：
+```promql
+rate(metasheet_protection_rule_blocks_total[5m])
+```
+
+**规则评估延迟 P50/P95**（如有 histogram）：
+```promql
+histogram_quantile(0.50, rate(metasheet_rule_evaluation_duration_bucket[5m]))
+histogram_quantile(0.95, rate(metasheet_rule_evaluation_duration_bucket[5m]))
+```
+
+**保护级别分布**（当前值）：
+```promql
+metasheet_snapshot_protection_level
+```
+
+**Top 5 最常用标签**：
+```promql
+topk(5, metasheet_snapshot_tags_total)
+```
+
+**保护快照清理跳过率**（占总清理的比例）：
+```promql
+rate(metasheet_snapshot_protected_skipped_total[5m])
+/
+rate(metasheet_snapshot_cleanup_total[5m])
+```
+
+**验证结果粘贴区**：
+```
+# 示例：
+metasheet_protection_rule_evaluations_total{rule="block-production-delete", result="matched"} = 42
+metasheet_protection_rule_blocks_total{rule="block-production-delete", operation="delete"} = 15
+P50 延迟 = 25ms
+P95 延迟 = 78ms
+```
+
+---
+
 ## ✅ Ready for Review 条件
 
 **所有以下条件满足后，PR 可标记为 Ready for Review**：
@@ -224,11 +270,6 @@
 - [ ] Grafana 仪表板验证通过
 - [ ] Prometheus 指标验证通过
 - [ ] 无 blocker 级别问题
-
-**审查结论**:
-- [ ] ✅ **APPROVED** - 可以合并
-- [ ] 🔄 **REQUEST CHANGES** - 需修复问题（见下方）
-- [ ] 💬 **COMMENT** - 建议改进（非阻塞）
 
 ---
 
@@ -301,6 +342,103 @@
 
 ---
 
+## 📊 审查总结
+
+### 审查信息
+
 **审查人**: ___________
 **审查日期**: ___________
-**审查结论**: [ ] APPROVED | [ ] REQUEST CHANGES | [ ] COMMENT
+**审查开始时间**: _____:_____
+**审查结束时间**: _____:_____
+**审查总用时**: _____ 小时 _____ 分钟
+
+**审查范围**（勾选已审查的模块）：
+- [ ] 模块 1: 数据库与迁移
+- [ ] 模块 2: 规则引擎核心逻辑
+- [ ] 模块 3: SafetyGuard 集成
+- [ ] 模块 4: API 路由与安全
+- [ ] 模块 5: 可观测性
+- [ ] 模块 6: 测试覆盖
+- [ ] 模块 7: 文档完整性
+- [ ] Staging 验证
+- [ ] Prometheus/Grafana 验证
+
+---
+
+## 🎯 审批结论（三选一，请勾选）
+
+### ✅ 选项 1: APPROVED（批准合并）
+
+- [ ] **我批准此 PR 合并到 main 分支**
+
+**批准条件已满足**：
+- [ ] 所有代码审查检查项通过
+- [ ] 所有验证通过（CI/Staging/Observability）
+- [ ] 无 blocker 级别问题
+- [ ] 文档齐全且准确
+- [ ] 已确认合并后监控计划
+
+**审批签名**: ___________ （审查人签名）
+**批准时间**: ___________
+
+---
+
+### 🔄 选项 2: REQUEST CHANGES（要求修改）
+
+- [ ] **我要求修改后才能合并**
+
+**必须修复的问题**（见上方 "需修复的问题" 部分）：
+- 问题数量: _____ 个 blocker 级别问题
+
+**预计修复时间**: _____ 天
+
+**跟进责任人**: ___________（负责修复和重新提交审查）
+
+**下次审查时间**: ___________
+
+---
+
+### 💬 选项 3: COMMENT（建议改进，非阻塞）
+
+- [ ] **我提出建议，但不阻塞合并**
+
+**建议改进事项**（见上方 "需修复的问题" 部分）：
+- 建议数量: _____ 个
+
+**建议优先级**: [ ] 高 | [ ] 中 | [ ] 低
+
+**是否需要跟进**: [ ] 是（后续 PR）| [ ] 否
+
+**跟进责任人**（如需）: ___________
+
+---
+
+## 📋 审查后跟进
+
+### 合并前确认（如 APPROVED）
+
+- [ ] **CHANGELOG 版本号已确认**（见上方）
+- [ ] **Squash Merge 提交信息已确认**（见上方）
+- [ ] **合并后监控计划已确认**（见上方）
+
+### 合并后跟进责任人
+
+**生产部署监控负责人**: ___________
+**预计部署时间**: ___________
+**监控时长**: 合并后 _____ 小时内
+
+**异常响应联系人**: ___________
+**回滚决策人**: ___________
+
+---
+
+## 📝 审查备注
+
+_（审查过程中的其他观察、建议或需要记录的信息）_
+
+---
+
+**最终审查状态**:
+- **结论**: [ ] APPROVED | [ ] REQUEST CHANGES | [ ] COMMENT
+- **审查人签名**: ___________
+- **审查完成时间**: ___________
