@@ -1,0 +1,127 @@
+# Sprint 2 Schema Snapshot — Thu Nov 20 08:23:22 CST 2025
+DB: metasheet_v2
+
+## snapshots
+                                                               Table "public.snapshots"
+       Column       |           Type           | Collation | Nullable |         Default         | Storage  | Compression | Stats target | Description 
+--------------------+--------------------------+-----------+----------+-------------------------+----------+-------------+--------------+-------------
+ id                 | text                     |           | not null | gen_random_uuid()::text | extended |             |              | 
+ view_id            | text                     |           | not null |                         | extended |             |              | 
+ name               | text                     |           | not null |                         | extended |             |              | 
+ description        | text                     |           |          |                         | extended |             |              | 
+ version            | integer                  |           | not null | 1                       | plain    |             |              | 
+ created_by         | text                     |           | not null |                         | extended |             |              | 
+ snapshot_type      | text                     |           | not null | 'manual'::text          | extended |             |              | 
+ metadata           | jsonb                    |           |          | '{}'::jsonb             | extended |             |              | 
+ is_locked          | boolean                  |           | not null | false                   | plain    |             |              | 
+ parent_snapshot_id | text                     |           |          |                         | extended |             |              | 
+ created_at         | timestamp with time zone |           | not null | now()                   | plain    |             |              | 
+ expires_at         | timestamp with time zone |           |          |                         | plain    |             |              | 
+ tags               | text[]                   |           |          | '{}'::text[]            | extended |             |              | 
+ protection_level   | text                     |           |          | 'normal'::text          | extended |             |              | 
+ release_channel    | text                     |           |          |                         | extended |             |              | 
+Indexes:
+    "snapshots_pkey" PRIMARY KEY, btree (id)
+    "idx_snapshots_created_at" btree (created_at)
+    "idx_snapshots_created_by" btree (created_by)
+    "idx_snapshots_protection_level" btree (protection_level)
+    "idx_snapshots_release_channel" btree (release_channel) WHERE release_channel IS NOT NULL
+    "idx_snapshots_tags" gin (tags)
+    "idx_snapshots_view_id" btree (view_id)
+    "idx_snapshots_view_version" btree (view_id, version)
+Check constraints:
+    "chk_protection_level" CHECK (protection_level = ANY (ARRAY['normal'::text, 'protected'::text, 'critical'::text]))
+    "chk_release_channel" CHECK (release_channel IS NULL OR (release_channel = ANY (ARRAY['stable'::text, 'canary'::text, 'beta'::text, 'experimental'::text])))
+Access method: heap
+
+
+## snapshot_items
+                                                         Table "public.snapshot_items"
+   Column    |           Type           | Collation | Nullable |         Default         | Storage  | Compression | Stats target | Description 
+-------------+--------------------------+-----------+----------+-------------------------+----------+-------------+--------------+-------------
+ id          | text                     |           | not null | gen_random_uuid()::text | extended |             |              | 
+ snapshot_id | text                     |           | not null |                         | extended |             |              | 
+ item_type   | text                     |           | not null |                         | extended |             |              | 
+ item_id     | text                     |           | not null |                         | extended |             |              | 
+ data        | jsonb                    |           | not null |                         | extended |             |              | 
+ checksum    | text                     |           |          |                         | extended |             |              | 
+ created_at  | timestamp with time zone |           | not null | now()                   | plain    |             |              | 
+Indexes:
+    "snapshot_items_pkey" PRIMARY KEY, btree (id)
+    "idx_snapshot_items_composite" btree (snapshot_id, item_type)
+    "idx_snapshot_items_snapshot_id" btree (snapshot_id)
+    "idx_snapshot_items_type" btree (item_type)
+Access method: heap
+
+
+## protection_rules
+                                                       Table "public.protection_rules"
+      Column       |           Type           | Collation | Nullable |     Default      | Storage  | Compression | Stats target | Description 
+-------------------+--------------------------+-----------+----------+------------------+----------+-------------+--------------+-------------
+ id                | text                     |           | not null |                  | extended |             |              | 
+ rule_name         | text                     |           | not null |                  | extended |             |              | 
+ description       | text                     |           |          |                  | extended |             |              | 
+ target_type       | text                     |           | not null | 'snapshot'::text | extended |             |              | 
+ conditions        | jsonb                    |           | not null |                  | extended |             |              | 
+ effects           | jsonb                    |           | not null |                  | extended |             |              | 
+ priority          | integer                  |           | not null | 100              | plain    |             |              | 
+ is_active         | boolean                  |           | not null | true             | plain    |             |              | 
+ version           | integer                  |           | not null | 1                | plain    |             |              | 
+ created_by        | text                     |           | not null |                  | extended |             |              | 
+ created_at        | timestamp with time zone |           | not null | now()            | plain    |             |              | 
+ updated_at        | timestamp with time zone |           | not null | now()            | plain    |             |              | 
+ last_evaluated_at | timestamp with time zone |           |          |                  | plain    |             |              | 
+ evaluation_count  | integer                  |           |          | 0                | plain    |             |              | 
+Indexes:
+    "protection_rules_pkey" PRIMARY KEY, btree (id)
+    "idx_protection_rules_active" btree (is_active, priority DESC)
+    "idx_protection_rules_conditions" gin (conditions)
+    "idx_protection_rules_created_by" btree (created_by)
+    "idx_protection_rules_target" btree (target_type)
+    "protection_rules_rule_name_key" UNIQUE CONSTRAINT, btree (rule_name)
+Check constraints:
+    "chk_target_type" CHECK (target_type = ANY (ARRAY['snapshot'::text, 'plugin'::text, 'schema'::text, 'workflow'::text]))
+Access method: heap
+
+
+## rule_execution_log
+                                                  Table "public.rule_execution_log"
+      Column       |           Type           | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+-------------------+--------------------------+-----------+----------+---------+----------+-------------+--------------+-------------
+ id                | text                     |           | not null |         | extended |             |              | 
+ rule_id           | text                     |           | not null |         | extended |             |              | 
+ rule_version      | integer                  |           | not null |         | plain    |             |              | 
+ entity_type       | text                     |           | not null |         | extended |             |              | 
+ entity_id         | text                     |           | not null |         | extended |             |              | 
+ operation         | text                     |           | not null |         | extended |             |              | 
+ matched           | boolean                  |           | not null |         | plain    |             |              | 
+ effect_applied    | jsonb                    |           |          |         | extended |             |              | 
+ execution_time_ms | integer                  |           |          |         | plain    |             |              | 
+ executed_at       | timestamp with time zone |           | not null | now()   | plain    |             |              | 
+Indexes:
+    "rule_execution_log_pkey" PRIMARY KEY, btree (id)
+    "idx_rule_execution_log_entity" btree (entity_type, entity_id)
+    "idx_rule_execution_log_rule" btree (rule_id, executed_at DESC)
+Access method: heap
+
+
+## snapshot_restore_log
+                                                       Table "public.snapshot_restore_log"
+     Column     |           Type           | Collation | Nullable |         Default         | Storage  | Compression | Stats target | Description 
+----------------+--------------------------+-----------+----------+-------------------------+----------+-------------+--------------+-------------
+ id             | text                     |           | not null | gen_random_uuid()::text | extended |             |              | 
+ snapshot_id    | text                     |           | not null |                         | extended |             |              | 
+ view_id        | text                     |           | not null |                         | extended |             |              | 
+ restored_by    | text                     |           | not null |                         | extended |             |              | 
+ restore_type   | text                     |           | not null | 'full'::text            | extended |             |              | 
+ items_restored | integer                  |           | not null | 0                       | plain    |             |              | 
+ status         | text                     |           | not null | 'success'::text         | extended |             |              | 
+ error_message  | text                     |           |          |                         | extended |             |              | 
+ metadata       | jsonb                    |           |          | '{}'::jsonb             | extended |             |              | 
+ created_at     | timestamp with time zone |           | not null | now()                   | plain    |             |              | 
+Indexes:
+    "snapshot_restore_log_pkey" PRIMARY KEY, btree (id)
+    "idx_snapshot_restore_log_snapshot" btree (snapshot_id)
+    "idx_snapshot_restore_log_view" btree (view_id)
+Access method: heap
+
