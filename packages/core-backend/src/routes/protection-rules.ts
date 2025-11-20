@@ -12,6 +12,26 @@ import { Logger } from '../core/logger';
 const router = Router();
 const logger = new Logger('ProtectionRulesRoutes');
 
+// Simple in-memory rate limiter: 10 requests per 60s per user+method+path
+const rateLimitStore = new Map<string, number[]>();
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+router.use((req, res, next) => {
+  const userId = (req.headers['x-user-id'] as string) || 'anon';
+  const key = `${userId}:${req.method}:${req.path}`;
+  let timestamps = rateLimitStore.get(key) || [];
+  const now = Date.now();
+  // prune
+  timestamps = timestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
+  if (timestamps.length >= RATE_LIMIT_MAX) {
+    return res.status(429).json({ success: false, error: 'Rate limit exceeded', error_code: 'RATE_LIMIT' });
+  }
+  timestamps.push(now);
+  rateLimitStore.set(key, timestamps);
+  return next();
+});
+
 /**
  * GET /api/admin/safety/rules
  * List all protection rules
@@ -87,7 +107,7 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     // Validation
-    if (!rule_name || !target_type || !conditions || !effects) {
+    if (!rule_name || !target_type || conditions === undefined || effects === undefined) {
       return res.status(400).json({
         success: false,
         error: 'Missing required fields: rule_name, target_type, conditions, effects'
@@ -101,19 +121,39 @@ router.post('/', async (req, res) => {
       });
     }
 
-    if (!['allow', 'block', 'elevate_risk', 'require_approval'].includes(effects.action)) {
+    // Normalize if client sent stringified JSON
+    let normalizedConditions: any = conditions
+    let normalizedEffects: any = effects
+    try {
+      if (typeof normalizedConditions === 'string') normalizedConditions = JSON.parse(normalizedConditions)
+      if (typeof normalizedEffects === 'string') normalizedEffects = JSON.parse(normalizedEffects)
+    } catch (e) {
+      return res.status(400).json({ success:false, error:'conditions/effects string not valid JSON' })
+    }
+
+    if (!['allow', 'block', 'elevate_risk', 'require_approval'].includes(normalizedEffects.action)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid effects.action. Must be: allow, block, elevate_risk, or require_approval'
       });
     }
 
+    // Debug logging for malformed JSON
+    if (typeof conditions === 'string') {
+      logger.warn('conditions received as string – attempting JSON.parse')
+      try { JSON.parse(conditions) } catch (e) { return res.status(400).json({ success:false, error:'conditions string not valid JSON' }) }
+    }
+    if (typeof effects === 'string') {
+      logger.warn('effects received as string – attempting JSON.parse')
+      try { JSON.parse(effects) } catch (e) { return res.status(400).json({ success:false, error:'effects string not valid JSON' }) }
+    }
+
     const rule = await protectionRuleService.createRule({
       rule_name,
       description,
       target_type,
-      conditions,
-      effects,
+      conditions: normalizedConditions,
+      effects: normalizedEffects,
       priority,
       is_active,
       created_by: userId
@@ -125,11 +165,12 @@ router.post('/', async (req, res) => {
       message: 'Protection rule created successfully'
     });
   } catch (error) {
+    const err: any = error;
+    if (err?.code === '23505') { // unique_violation
+      return res.status(409).json({ success: false, error: 'Rule name already exists', error_code: 'RULE_DUPLICATE' });
+    }
     logger.error('Failed to create protection rule', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    return res.status(500).json({ success: false, error: (error as Error).message });
   }
 });
 

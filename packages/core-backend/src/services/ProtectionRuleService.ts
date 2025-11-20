@@ -115,6 +115,21 @@ export class ProtectionRuleService {
     this.logger.info(`Creating protection rule: ${options.rule_name}`)
 
     try {
+      // Avoid double JSON stringify: if client accidentally sends stringified JSON, parse first
+      const normalizedConditions = typeof (options as any).conditions === 'string'
+        ? JSON.parse((options as any).conditions)
+        : options.conditions
+      const normalizedEffects = typeof (options as any).effects === 'string'
+        ? JSON.parse((options as any).effects)
+        : options.effects
+
+      if (typeof normalizedConditions !== 'object' || normalizedConditions === null) {
+        throw new Error('conditions must be a JSON object')
+      }
+      if (typeof normalizedEffects !== 'object' || normalizedEffects === null) {
+        throw new Error('effects must be a JSON object')
+      }
+
       const rule = await db
         .insertInto('protection_rules')
         .values({
@@ -122,8 +137,8 @@ export class ProtectionRuleService {
           rule_name: options.rule_name,
           description: options.description || null,
           target_type: options.target_type,
-          conditions: JSON.stringify(options.conditions),
-          effects: JSON.stringify(options.effects),
+          conditions: normalizedConditions as any,
+          effects: normalizedEffects as any,
           priority: options.priority || 100,
           is_active: options.is_active !== undefined ? options.is_active : true,
           version: 1,
@@ -135,10 +150,16 @@ export class ProtectionRuleService {
 
       this.logger.info(`Protection rule created: ${rule.id}`)
 
+      // conditions/effects now stored as JSONB; if driver returns object keep as-is
+      const rawConditions = rule.conditions as any
+      const rawEffects = rule.effects as any
+      const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
+      const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
+
       return {
         ...rule,
-        conditions: JSON.parse(rule.conditions as string),
-        effects: JSON.parse(rule.effects as string),
+        conditions: parsedConditions,
+        effects: parsedEffects,
         created_at: new Date(rule.created_at as any),
         updated_at: new Date(rule.updated_at as any),
         last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
@@ -173,10 +194,18 @@ export class ProtectionRuleService {
       if (options.rule_name !== undefined) updateData.rule_name = options.rule_name
       if (options.description !== undefined) updateData.description = options.description
       if (options.conditions !== undefined) {
-        updateData.conditions = JSON.stringify(options.conditions)
+        const normalizedConditions = typeof (options as any).conditions === 'string'
+          ? JSON.parse((options as any).conditions)
+          : options.conditions
+        updateData.conditions = normalizedConditions as any
         updateData.version = currentRule.version + 1
       }
-      if (options.effects !== undefined) updateData.effects = JSON.stringify(options.effects)
+      if (options.effects !== undefined) {
+        const normalizedEffects = typeof (options as any).effects === 'string'
+          ? JSON.parse((options as any).effects)
+          : options.effects
+        updateData.effects = normalizedEffects as any
+      }
       if (options.priority !== undefined) updateData.priority = options.priority
       if (options.is_active !== undefined) updateData.is_active = options.is_active
 
@@ -189,10 +218,14 @@ export class ProtectionRuleService {
 
       this.logger.info(`Protection rule updated: ${rule.id}`)
 
+      const rawConditions = rule.conditions as any
+      const rawEffects = rule.effects as any
+      const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
+      const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
       return {
         ...rule,
-        conditions: JSON.parse(rule.conditions as string),
-        effects: JSON.parse(rule.effects as string),
+        conditions: parsedConditions,
+        effects: parsedEffects,
         created_at: new Date(rule.created_at as any),
         updated_at: new Date(rule.updated_at as any),
         last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
@@ -287,14 +320,20 @@ export class ProtectionRuleService {
 
       const rules = await query.execute()
 
-      return rules.map((rule: any) => ({
-        ...rule,
-        conditions: JSON.parse(rule.conditions as string),
-        effects: JSON.parse(rule.effects as string),
-        created_at: new Date(rule.created_at as any),
-        updated_at: new Date(rule.updated_at as any),
-        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
-      })) as ProtectionRule[]
+      return rules.map((rule: any) => {
+        const rawConditions = rule.conditions as any
+        const rawEffects = rule.effects as any
+        const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
+        const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
+        return {
+          ...rule,
+          conditions: parsedConditions,
+          effects: parsedEffects,
+          created_at: new Date(rule.created_at as any),
+          updated_at: new Date(rule.updated_at as any),
+          last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+        }
+      }) as ProtectionRule[]
     } catch (error) {
       this.logger.error('Failed to list protection rules', error as Error)
       throw error
