@@ -23,6 +23,15 @@ export class PluginLoader extends EventEmitter {
   private coreAPI: CoreAPI
   private logger: Logger
   private manifestValidator: ManifestValidator
+  private lastSummary: {
+    scannedDirs: number
+    manifests: number
+    validManifests: number
+    loaded: number
+    activated: number
+    errors: Array<{ plugin?: string; message: string }>
+    timestamp: string
+  } = { scannedDirs: 0, manifests: 0, validManifests: 0, loaded: 0, activated: 0, errors: [], timestamp: new Date().toISOString() }
 
   constructor(coreAPI: CoreAPI) {
     super()
@@ -36,7 +45,7 @@ export class PluginLoader extends EventEmitter {
    */
   async loadPlugins(): Promise<void> {
     this.logger.info('Starting plugin loading...')
-
+    const summaryErrors: Array<{ plugin?: string; message: string }> = []
     try {
       // 1. 扫描插件目录
       const pluginDirs = await this.scanPluginDirectories()
@@ -53,18 +62,49 @@ export class PluginLoader extends EventEmitter {
       // 4. 解析依赖关系并排序
       const sortedManifests = this.topologicalSort(validManifests)
 
-      // 5. 按序加载插件
+      // 5. 按序加载插件（单个失败不影响整体）
       for (const manifest of sortedManifests) {
-        await this.loadPlugin(manifest)
+        try {
+          await this.loadPlugin(manifest)
+        } catch (e: any) {
+          const msg = (e && e.message) ? e.message : String(e)
+          summaryErrors.push({ plugin: manifest.name, message: msg })
+          // continue
+        }
       }
 
-      // 6. 激活所有插件
-      await this.activatePlugins()
+      // 6. 激活所有插件（激活失败也仅记录）
+      try {
+        await this.activatePlugins()
+      } catch (e: any) {
+        const msg = (e && e.message) ? e.message : String(e)
+        summaryErrors.push({ message: `activate: ${msg}` })
+      }
 
       this.logger.info(`Successfully loaded ${this.plugins.size} plugins`)
+      this.lastSummary = {
+        scannedDirs: pluginDirs.length,
+        manifests: manifests.length,
+        validManifests: validManifests.length,
+        loaded: this.plugins.size,
+        activated: Array.from(this.plugins.values()).filter(p => p.status === 'active').length,
+        errors: summaryErrors.slice(0, 10),
+        timestamp: new Date().toISOString()
+      }
     } catch (error) {
-      this.logger.error('Failed to load plugins', error as Error)
-      throw error
+      this.logger.error('Failed to load plugins (top-level)', error as Error)
+      const msg = (error as any)?.message || String(error)
+      summaryErrors.push({ message: msg })
+      this.lastSummary = {
+        scannedDirs: this.lastSummary.scannedDirs,
+        manifests: this.lastSummary.manifests,
+        validManifests: this.lastSummary.validManifests,
+        loaded: this.plugins.size,
+        activated: Array.from(this.plugins.values()).filter(p => p.status === 'active').length,
+        errors: summaryErrors.slice(0, 10),
+        timestamp: new Date().toISOString()
+      }
+      // 不再抛出，保证启动继续
     }
   }
 
@@ -76,6 +116,7 @@ export class PluginLoader extends EventEmitter {
     const rootDir = path.resolve(process.cwd(), '../../')
     const patterns = [
       path.join(rootDir, 'plugins', '*'),
+      path.resolve(process.cwd(), 'plugins', '*'), // Local plugins in core-backend/plugins
       path.join(process.cwd(), 'node_modules', '@metasheet', 'plugin-*')
     ]
 
@@ -266,11 +307,47 @@ export class PluginLoader extends EventEmitter {
    * 检查权限
    */
   private checkPermissions(manifest: PluginManifest): void {
-    // TODO: 实现权限检查逻辑
-    const requiredPermissions = manifest.permissions || []
-    for (const permission of requiredPermissions) {
-      this.logger.debug(`Checking permission: ${permission}`)
-      // 验证权限是否合法
+    const perms = manifest.permissions
+    if (!perms) {
+      this.logger.debug(`No permissions declared for ${manifest.name}`)
+      return
+    }
+
+    // Support both old array format and new V2 object format
+    if (Array.isArray(perms)) {
+      // Old format: string[]
+      for (const permission of perms) {
+        this.logger.debug(`Checking permission: ${permission}`)
+      }
+    } else {
+      // New V2 format: object with database/http/filesystem
+      if (perms.database) {
+        const dbPerms = perms.database
+        if (dbPerms.read) {
+          this.logger.debug(`Database read permissions: ${dbPerms.read.join(', ')}`)
+        }
+        if (dbPerms.write) {
+          this.logger.debug(`Database write permissions: ${dbPerms.write.join(', ')}`)
+        }
+      }
+      if (perms.http) {
+        const httpPerms = perms.http
+        if (httpPerms.internal) {
+          this.logger.debug(`HTTP internal access: enabled`)
+        }
+        if (httpPerms.external) {
+          this.logger.debug(`HTTP external domains: ${httpPerms.external.join(', ')}`)
+        }
+      }
+      if (perms.filesystem) {
+        const fsPerms = perms.filesystem
+        if (fsPerms.read) {
+          this.logger.debug(`Filesystem read paths: ${fsPerms.read.join(', ')}`)
+        }
+        if (fsPerms.write) {
+          this.logger.debug(`Filesystem write paths: ${fsPerms.write.join(', ')}`)
+        }
+      }
     }
   }
 
@@ -360,6 +437,25 @@ export class PluginLoader extends EventEmitter {
   }
 
   /**
+   * 获取插件加载摘要
+   */
+  getSummary() {
+    return { ...this.lastSummary }
+  }
+
+  /**
+   * 获取扁平列表（用于HTTP返回）
+   */
+  getList() {
+    return Array.from(this.plugins.entries()).map(([name, instance]) => ({
+      name,
+      version: instance.manifest.version,
+      displayName: instance.manifest.displayName,
+      status: instance.status
+    }))
+  }
+
+  /**
    * 获取单个插件
    */
   getPlugin(name: string): PluginInstance | undefined {
@@ -419,4 +515,3 @@ export class PluginLoader extends EventEmitter {
     }
   }
 }
-
