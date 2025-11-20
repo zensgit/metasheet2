@@ -27,7 +27,8 @@ for i in $(seq 1 $ROUNDS); do
   end=$(ms_now)
   dur=$((end-start))
   echo "$(date -Iseconds),$dur,$code" >> "$CSV"
-  sleep 1
+  # Light pacing to reduce CPU burst but complete faster
+  sleep 0.2
 done
 
 # Simple stats with awk
