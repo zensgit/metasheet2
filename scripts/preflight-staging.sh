@@ -27,8 +27,8 @@ echo "$snap_res" >> "$OUT"
 SNAP_ID=$(echo "$snap_res" | jq -r '.data.id // empty')
 [[ -n "$SNAP_ID" ]] && ok "Snapshot created ($SNAP_ID)" || bad "Snapshot create failed"
 
-log "Snapshot stats"
-stats_res=$(auth "$BASE_URL/api/snapshots/stats" || true)
+log "Snapshot stats (snapstats endpoint)"
+stats_res=$(auth "$BASE_URL/api/snapstats" || true)
 echo "$stats_res" >> "$OUT"
 echo "$stats_res" | jq -e '.ok==true' >/dev/null 2>&1 && ok "Stats accessible" || bad "Stats failed"
 
