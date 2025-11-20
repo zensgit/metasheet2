@@ -219,24 +219,13 @@ export function snapshotsRouter(): Router {
   })
 
   // Get snapshot statistics (allow admin or any authenticated user for observability)
-  r.get('/api/snapshots/stats', async (_req: Request, res: Response) => {
-    const user = (_req as any).user
-    // Quick permission check: admin bypass; otherwise require rbacGuard equivalent
-    if (!(await import('../rbac/rbac').then(m => m.hasPermission(user, { resource: 'permissions', action: 'read' })) )) {
-      // fallback: if user has admin role skip; if not, still allow to avoid 500 in perf baseline, but mark as limited
-      if (!user || !Array.isArray(user.roles) || !user.roles.includes('admin')) {
-        // allow read but annotate
-      }
-    }
+  r.get('/api/snapstats', async (_req: Request, res: Response) => {
     try {
       const stats = await snapshotService.getStats()
       return res.json({ ok: true, data: stats })
     } catch (e) {
       const err = e as Error
-      return res.status(500).json({
-        ok: false,
-        error: { code: 'SNAPSHOT_STATS_ERROR', message: err.message }
-      })
+      return res.status(500).json({ ok: false, error: { code: 'SNAPSHOT_STATS_ERROR', message: err.message } })
     }
   })
 

@@ -5,7 +5,7 @@ API_TOKEN=${1:-}
 BASE_URL=${2:-http://localhost:8900}
 OUT_DIR="docs/sprint2/performance"
 ROUNDS=${ROUNDS:-60}
-ENDPOINT=${ENDPOINT:-"/api/v2/hello"}
+ENDPOINT=${ENDPOINT:-"/api/snapstats"}
 
 if [[ -z "$API_TOKEN" ]]; then
   echo "Usage: $0 <API_TOKEN> [BASE_URL]" >&2
