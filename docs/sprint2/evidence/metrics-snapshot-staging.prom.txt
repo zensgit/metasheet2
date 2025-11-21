@@ -1,0 +1,2 @@
+# Placeholder metrics snapshot for staging.
+# Will be overwritten by scripts/capture-metrics-snapshot.sh after credentials.
