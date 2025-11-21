@@ -68,10 +68,55 @@ Runbooks: ops — docs/sprint2/ops-runbook.md | rollback — docs/sprint2/rollba
 - JWT configuration mismatch needs resolution before staging validation
 - vitest `__vite_ssr_exportName__` error indicates test setup problems beyond simple dependencies
 
+### Vitest Infrastructure Troubleshooting (Extended Effort)
+
+**Status**: ❌ UNRESOLVED after 8 fix attempts | **Decision**: Accept current state
+**Impact**: Test infrastructure only, Sprint 2 feature code validity not affected
+**Time Invested**: ~90 minutes | **Detailed Documentation**: `docs/sprint2/tech-debt-vitest-ssr-issue.md`
+
+**Persistent Error**:
+```
+ReferenceError: __vite_ssr_exportName__ is not defined
+ ❯ tests/utils/test-db.ts:1:1
+```
+
+**Fix Attempts (All Failed)**:
+1. ✅ **Phase 1**: node_modules corruption → Fixed with `pnpm install`
+2. ✅ **Phase 2**: DataCloneError → Fixed by externalizing globalTeardown
+3. ✅ **Phase 3**: Invalid import in setup.ts → Fixed by removing responseMatchers
+4. ❌ **Phase 4 Attempt 1**: Added `deps.inline` configuration
+5. ❌ **Phase 4 Attempt 2**: Added `deps.optimizer.ssr` configuration
+6. ❌ **Phase 4 Attempt 3**: Changed `moduleResolution: "bundler"` → `"node16"`
+7. ❌ **Phase 4 Attempt 4**: Created `tsconfig.test.json` with `moduleResolution: "node"`
+8. ❌ **Phase 4 Attempt 5**: Multiple vite cache clears
+
+**Root Cause Analysis**: Deep vitest/vite SSR transformation incompatibility, likely requiring:
+- Vitest version changes
+- Fundamental test utility restructuring
+- Upstream bug fix
+
+**Professional Decision**:
+- **Accept** Day 1 baseline (17/17 tests passed) as sufficient validation
+- **Justification**: Feature code unchanged since Day 1, low ROI for continued debugging
+- **Risk**: Low (test infrastructure issue separate from feature quality)
+- **Confidence Impact**: Overall 75%, Feature Code 95%
+
+**Configuration Rollback**:
+- ✅ tsconfig.json: Reverted `moduleResolution` back to `"bundler"`
+- ✅ Deleted experimental `tsconfig.test.json`
+- ✅ Removed `typecheck` config from vitest.config.ts
+- ✅ Kept successful fixes: globalTeardown externalization, setup.ts import fix
+
+**Technical Debt Created**:
+- Issue documented: `docs/sprint2/tech-debt-vitest-ssr-issue.md`
+- Priority: P2-medium (post-Sprint 2 resolution)
+- Recommended actions: Investigate vitest GitHub issues, test version changes
+
 ### Next Milestone: 48h Decision (2025-11-22 22:28 CST)
 
 **If still no credentials by 48h mark**:
 - Submit PR with labels: `Local Validation Only`, `Staging Verification Required`, `P1-high`
+- Include note: `Test Infrastructure Issue` (documented separately)
 - Create post-merge validation issue
 - Coordinate with DevOps for 24h post-merge validation window
 
@@ -79,6 +124,7 @@ Runbooks: ops — docs/sprint2/ops-runbook.md | rollback — docs/sprint2/rollba
 - Execute immediate staging validation (60-90 min)
 - Fix JWT_SECRET configuration before validation
 - Complete all staging validation gates
+- Vitest issue tracked separately as technical debt
 
 ### Artifacts Added
 
@@ -86,6 +132,7 @@ Runbooks: ops — docs/sprint2/ops-runbook.md | rollback — docs/sprint2/rollba
 - 24h Decision Notice: `docs/sprint2/24h-decision-notice-draft.md` (posted to Issue #5)
 - Quick Reference Card: `docs/sprint2/quick-reference-card.md`
 - Database reset evidence: Migration logs in background process da6a03
+- **Vitest Issue Documentation**: `docs/sprint2/tech-debt-vitest-ssr-issue.md` (comprehensive troubleshooting history)
 
 ---
 

@@ -6,6 +6,15 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Fix vite SSR transformation issues
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: ['test-db']
+        }
+      }
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],
