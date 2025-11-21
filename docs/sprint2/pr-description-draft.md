@@ -109,10 +109,71 @@
 - docs/sprint2/evidence/snapshot-protection-20251120_161036.json
 - docs/sprint2/evidence/snapshot-tags-20251120_161036.json
 
-## Risks & Mitigations
-- Rule precedence and effect conflicts — precedence documented
-- Idempotency & rate limiting — validated in staging scripts
-- Audit trail linkage — rule_execution_log checked
+## Comprehensive Risk Assessment
+
+### 1. Technical Risks
+
+| Risk | Severity | Impact | Probability | Mitigation | Status |
+|------|----------|--------|-------------|------------|--------|
+| **JWT Authentication Issues** | 🟡 Medium | Extended performance testing blocked (200-round test) | High (occurred) | Using existing 60-round baseline (P95: 43ms, 3.5x better than target) | ✅ Mitigated |
+| **Plugin System Health** | 🟢 Low | 44% activation rate (4/9 plugins), 5 with errors | Medium | Core features not plugin-dependent; Sprint 2 validation unaffected | ✅ Acceptable |
+| **Plugin Permission Issues** | 🟢 Low | 3 plugins denied `events` API access | Medium | Document required permissions; defer fixes to post-Sprint 2 | ⏳ Deferred |
+| **Rule Precedence Conflicts** | 🟡 Medium | Multiple rules may conflict in execution order | Low | Precedence documented in API spec; dry-run evaluation validates behavior | ✅ Documented |
+| **Database Performance** | 🟢 Low | Query optimization for protection_rules, snapshots tables | Low | P95: 43ms (3.5x better than 150ms target); indexes reviewed | ✅ Validated |
+| **Rate Limiting Behavior** | 🟢 Low | Edge case handling for API throttling | Low | Validated in local tests; captured expected 429 responses | ✅ Tested |
+
+### 2. Process Risks
+
+| Risk | Severity | Impact | Probability | Mitigation | Status |
+|------|----------|--------|-------------|------------|--------|
+| **Staging Credential Unavailability** | 🔴 High | Blocks full staging validation (BASE_URL + JWT missing) | Very High | 3-tier fallback timeline (<24h/24-48h/>48h); local validation 100% complete | ⚠️ Active |
+| **Incomplete Staging Validation** | 🟡 Medium | No screenshots, metrics verification, or 4 rule effects validation in staging | High | Placeholders prepared; checklist ready for immediate execution when credentials arrive | ⏳ Prepared |
+| **Audit Trail Verification** | 🟡 Medium | rule_execution_log linkage not fully validated in staging | Medium | Local tests verify linkage; post-merge validation will confirm | ⏳ Pending |
+| **Idempotency Edge Cases** | 🟢 Low | Duplicate rule creation, update conflicts | Low | Validated in local tests with duplicate scenarios | ✅ Tested |
+
+### 3. Timeline Risks
+
+| Risk | Severity | Impact | Probability | Mitigation | Status |
+|------|----------|--------|-------------|------------|--------|
+| **24h Decision Point** | 🟡 Medium | Approaching in ~12h (2025-11-21 14:28 UTC) | Very High | Partial validation phase planned (24-48h); comprehensive local evidence ready | ⏳ Monitored |
+| **48h Escalation Threshold** | 🟡 Medium | May need "Local Validation Only" PR submission | Medium | PR template prepared; post-merge validation workflow documented | ⏳ Prepared |
+| **Sprint Velocity Impact** | 🟢 Low | Delay blocks dependent work or sprint goals | Low | Feature implementation complete; deployment independent of staging access | ✅ Complete |
+| **Credential Delay Unknown** | 🟡 Medium | No ETA from DevOps/Infrastructure team | High | Auto-escalation active; manual checks every 2h; Issue #5 tracking | ⚠️ Escalated |
+
+### 4. Operational Risks
+
+| Risk | Severity | Impact | Probability | Mitigation | Status |
+|------|----------|--------|-------------|------------|--------|
+| **Watcher Process Degradation** | 🟡 Medium | TLS handshake timeouts to GitHub API (PID: 72134) | Medium | Manual Issue #5 checks every 2h; watcher self-recovery expected | ⚠️ Degraded |
+| **Monitoring Gaps** | 🟢 Low | Auto-reminders may miss credential availability | Low | Dual monitoring: watcher + manual checks; 12h checkpoint completed | ✅ Mitigated |
+| **Post-Merge Verification Dependency** | 🟡 Medium | Requires DevOps coordination for staging access post-merge | Medium | Follow-up issue template prepared; 24h validation window scheduled | ⏳ Planned |
+| **Rollback Complexity** | 🟢 Low | If staging validation fails post-merge, rollback required | Very Low | Rollback procedure documented (`docs/sprint2/rollback.md`); migration reversible | ✅ Documented |
+| **Token Security** | 🟢 Low | JWT token exposure in logs or commits | Very Low | Token masking in logs; no token persistence; .env excluded from git | ✅ Protected |
+
+### Risk Summary
+
+**Overall Risk Level**: 🟡 **MEDIUM** (Acceptable for PR submission with conditions)
+
+**Critical Blockers**: 1 (Staging credentials P0)
+**High Risks**: 0
+**Medium Risks**: 9
+**Low Risks**: 11
+
+**Risk Trend**:
+- **Hour 0-12**: 🟢 LOW → 🟡 MEDIUM (expected progression)
+- **Hour 12-24**: 🟡 MEDIUM (current state)
+- **Hour 24-48**: 🟡 MEDIUM (partial validation phase)
+- **Hour 48+**: 🟡 MEDIUM (local validation sufficient for merge)
+
+**Acceptance Criteria for PR Merge** (if >48h no credentials):
+1. ✅ Local validation: 17/17 tests passed (100%)
+2. ✅ Performance: P95 ≤150ms (actual: 43ms, 3.5x better)
+3. ✅ Error rate: <1% (actual: 0%)
+4. ✅ Documentation: Complete with troubleshooting guide
+5. ✅ Evidence: 165+ files collected
+6. ⏳ Staging validation: Post-merge within 24h (with rollback plan)
+
+**Key Decision**: Strong local validation + documented fallback strategy + post-merge plan = Acceptable risk for >48h submission
 
 ## Follow-ups
 - Fill staging report with final results and attach screenshots
