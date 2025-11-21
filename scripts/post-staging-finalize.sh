@@ -7,11 +7,25 @@ set -euo pipefail
 # - Optionally updates the live PR body via gh CLI
 #
 # Usage:
-#   bash scripts/post-staging-finalize.sh [path/to/staging-perf.summary.json]
+#   bash scripts/post-staging-finalize.sh [path/to/staging-perf.summary.json] [--screenshots-dir DIR]
 
 PERF_DIR="docs/sprint2/performance"
 DEFAULT_FILE="$PERF_DIR/staging-perf.summary.json"
-SUMMARY_FILE=${1:-}
+SUMMARY_FILE=""
+SS_DIR="${STAGING_SCREENSHOTS_DIR:-}"
+
+# Parse args (optional summary path and/or --screenshots-dir)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --screenshots-dir)
+      SS_DIR="$2"; shift 2 ;;
+    --screenshots-dir=*)
+      SS_DIR="${1#*=}"; shift ;;
+    *)
+      if [[ -z "$SUMMARY_FILE" ]]; then SUMMARY_FILE="$1"; else echo "Unknown arg: $1" >&2; exit 2; fi
+      shift ;;
+  esac
+done
 
 choose_summary() {
   if [[ -n "$SUMMARY_FILE" && -f "$SUMMARY_FILE" ]]; then
@@ -85,6 +99,14 @@ echo "[post-staging-finalize] Metrics: err=${err}% p50=${p50}ms p95=${p95}ms p99
 
 bash scripts/insert-staging-metrics-into-pr.sh "$file" "$err" "$p50" "$p95" "$p99" "$maxv"
 
+# Optionally replace screenshots if directory provided or env set
+if [[ -n "$SS_DIR" && -d "$SS_DIR" ]]; then
+  echo "[post-staging-finalize] Replacing screenshots from: $SS_DIR"
+  bash scripts/replace-staging-screenshots.sh --dir "$SS_DIR" || true
+else
+  echo "[post-staging-finalize] No screenshots dir provided; skipping screenshot replacement"
+fi
+
 # Try to push PR body via gh CLI
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   prnum=$(gh pr view --json number -q .number 2>/dev/null || echo "")
@@ -100,4 +122,3 @@ else
 fi
 
 echo "[post-staging-finalize] Done."
-
