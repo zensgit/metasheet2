@@ -239,6 +239,18 @@ while true; do
       /tmp/collect-evidence.sh || true
     fi
 
+    # Post-staging finalize (insert metrics into PR description if perf summary exists)
+    if [[ -x "scripts/post-staging-finalize.sh" ]]; then
+      # Attempt to locate a staging perf summary; use default placeholder if not yet replaced
+      perf_summary=$(ls -1t docs/sprint2/performance/staging*summary.json 2>/dev/null | head -n1 || true)
+      if [[ -n "$perf_summary" ]]; then
+        echo "📊 Inserting staging performance metrics into PR draft (file: $perf_summary)"
+        bash scripts/post-staging-finalize.sh "$perf_summary" || true
+      else
+        echo "ℹ️ No staging performance summary found; skipping metrics insertion"
+      fi
+    fi
+
     # Optional: comment back to the issue (no token exposure)
     summary="Staging validation executed on ${BASE_URL}. Evidence pushed to docs/sprint2."
     post_comment "$summary"
