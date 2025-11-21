@@ -88,14 +88,20 @@
 - Introduces Snapshot Protection: labels, protection levels, release channels
 - Adds Protection Rules admin APIs with dry-run evaluation
 
+<!-- STAGING_METRICS_INSERT -->
+<!-- This marker will be replaced automatically after staging run by metrics insertion script -->
+
 ## Validation Summary
 - Local: PASSED — see docs/sprint2/local-validation-report.md
 - Staging: In Progress — see docs/sprint2/staging-validation-report.md
 
-### Performance Summary
+### Performance & Capacity Summary
 - Samples: 30  |  Errors: 0
 - P50: 38 ms  |  P95: 42 ms  |  P99: 43 ms  |  Max: 45 ms
-- Artifact:       docs/sprint2/performance/perf-20251120_161036.csv.summary.json
+- Perf Artifact: docs/sprint2/performance/perf-20251120_161036.csv.summary.json
+- Capacity Baseline T0 (20251121-132911): ~8MB total DB (business tables empty)
+- Capacity T1 (20251121-133338): ~8MB (0% growth) → Alert: GREEN
+- Diff Artifact: docs/sprint2/capacity/capacity-diff-20251121-133340.md
 
 ## Evidence (latest)
 - docs/sprint2/evidence/validation-summary-20251120_161036.json
@@ -177,4 +183,3 @@
 
 ## Follow-ups
 - Fill staging report with final results and attach screenshots
-
