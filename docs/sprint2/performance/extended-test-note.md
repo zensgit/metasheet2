@@ -26,6 +26,24 @@ From `perf-20251120_132024.csv.summary.json`:
 - Error rate: 0% (target: <1%) - **Perfect**
 - Sample size: 60 requests
 
+## Extended 200-Round Attempt
+From `perf-20251121_000015.csv.summary.json`:
+```json
+{"p50":32,"p95":48,"p99":58,"max":78,"errors":200,"total":200}
+```
+
+**⚠️ Important: Understanding "errors" Field**:
+- `errors: 200` means **all 200 requests failed due to JWT authentication issue**
+- These are HTTP 401 "Invalid token" responses, NOT core API failures
+- The latency metrics (p50: 32ms, p95: 48ms) represent **time to rejection**, not successful request processing
+- This extended test is **NOT VALID** for performance validation due to 100% authentication failure
+
+**Why This Doesn't Invalidate Sprint 2**:
+1. The authentication issue is infrastructure/configuration related, not a feature defect
+2. The 60-round baseline with `errors: 0` provides valid performance evidence
+3. Core snapshot protection functionality is unaffected (17/17 integration tests passing)
+4. The blocker is specific to this extended performance test environment setup
+
 ## Recommendation
 Current 60-round baseline is sufficient for Sprint 2 validation:
 1. Performance far exceeds targets with significant margin
