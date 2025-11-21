@@ -1,17 +1,29 @@
 {
-  "name": "@metasheet/plugin-test-a",
+  "manifestVersion": "2.0.0",
+  "name": "plugin-test-a",
   "version": "1.0.0",
   "displayName": "Test Plugin A",
   "description": "Registers a simple communication API (ping) and uses plugin storage.",
-  "engines": {
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
     "metasheet": ">=1.0.0",
     "node": ">=16.0.0"
   },
-  "main": { "backend": "index.js" },
-  "permissions": [
-    "file.read",
-    "file.write"
-  ],
-  "activationEvents": ["onStartup"]
+  "main": "index.js",
+  "capabilities": {
+    "views": [],
+    "workflows": [],
+    "functions": []
+  },
+  "permissions": {
+    "database": {},
+    "http": {
+      "internal": false
+    },
+    "filesystem": {}
+  },
+  "license": "MIT"
 }
-

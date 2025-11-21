@@ -1,12 +1,11 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { expect, beforeAll, afterAll, vi } from 'vitest'
-import { spreadsheetMatchers, responseMatchers } from './utils/test-db'
+import { spreadsheetMatchers } from './utils/test-db'
 
 // Extend expect with custom matchers
 expect.extend({
-  ...spreadsheetMatchers,
-  ...responseMatchers
+  ...spreadsheetMatchers
 })
 
 // Global test environment setup with better error handling

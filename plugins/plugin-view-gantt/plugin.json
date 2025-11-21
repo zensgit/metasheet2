@@ -1,200 +1,40 @@
 {
-  "name": "@metasheet/plugin-view-gantt",
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-gantt",
   "version": "1.0.0",
   "displayName": "甘特图视图",
   "description": "提供专业的甘特图视图，支持任务依赖、进度跟踪和关键路径分析，适合项目管理和时间规划",
-  "author": "MetaSheet Team",
-  "license": "MIT",
-
-  "engines": {
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
     "metasheet": ">=2.0.0",
     "node": ">=16.0.0"
   },
-
-  "main": {
-    "backend": "dist/index.js"
+  "main": "dist/index.js",
+  "capabilities": {
+    "views": [],
+    "workflows": [],
+    "functions": []
   },
-
-  "contributes": {
-    "views": [
-      {
-        "id": "gantt",
-        "name": "甘特图",
-        "icon": "mdi-chart-gantt",
-        "component": "GanttView",
-        "config": {
-          "requiredFields": [
-            {
-              "type": "text",
-              "role": "taskName"
-            },
-            {
-              "type": "date",
-              "role": "startDate"
-            },
-            {
-              "type": "date",
-              "role": "endDate"
-            }
-          ],
-          "supportedFields": ["text", "date", "number", "user", "select", "progress"]
-        }
-      }
-    ],
-
-    "commands": [
-      {
-        "id": "gantt.addTask",
-        "title": "添加任务",
-        "handler": "addTaskHandler"
-      },
-      {
-        "id": "gantt.addSubtask",
-        "title": "添加子任务",
-        "handler": "addSubtaskHandler"
-      },
-      {
-        "id": "gantt.addDependency",
-        "title": "添加依赖",
-        "handler": "addDependencyHandler"
-      },
-      {
-        "id": "gantt.updateProgress",
-        "title": "更新进度",
-        "handler": "updateProgressHandler"
-      },
-      {
-        "id": "gantt.calculateCriticalPath",
-        "title": "计算关键路径",
-        "handler": "calculateCriticalPathHandler"
-      },
-      {
-        "id": "gantt.exportProject",
-        "title": "导出项目",
-        "handler": "exportProjectHandler"
-      }
-    ],
-
-    "menus": {
-      "view/title": [
-        {
-          "command": "gantt.addTask",
-          "group": "navigation",
-          "when": "view == gantt"
-        },
-        {
-          "command": "gantt.calculateCriticalPath",
-          "group": "analysis",
-          "when": "view == gantt"
-        },
-        {
-          "command": "gantt.exportProject",
-          "group": "export",
-          "when": "view == gantt"
-        }
+  "permissions": {
+    "database": {
+      "read": [
+        "*"
       ],
-      "gantt/task": [
-        {
-          "command": "gantt.addSubtask",
-          "group": "task",
-          "when": "view == gantt"
-        },
-        {
-          "command": "gantt.addDependency",
-          "group": "task",
-          "when": "view == gantt"
-        },
-        {
-          "command": "gantt.updateProgress",
-          "group": "task",
-          "when": "view == gantt"
-        }
+      "write": [
+        "*"
       ]
     },
-
-    "configuration": {
-      "type": "object",
-      "properties": {
-        "gantt.timeScale": {
-          "type": "string",
-          "enum": ["day", "week", "month"],
-          "default": "day",
-          "description": "时间刻度显示单位"
-        },
-        "gantt.showCriticalPath": {
-          "type": "boolean",
-          "default": true,
-          "description": "显示关键路径"
-        },
-        "gantt.showProgress": {
-          "type": "boolean",
-          "default": true,
-          "description": "显示任务进度"
-        },
-        "gantt.showDependencies": {
-          "type": "boolean",
-          "default": true,
-          "description": "显示任务依赖关系"
-        },
-        "gantt.showBaseline": {
-          "type": "boolean",
-          "default": false,
-          "description": "显示基线计划"
-        },
-        "gantt.autoSchedule": {
-          "type": "boolean",
-          "default": false,
-          "description": "启用自动调度"
-        },
-        "gantt.workingDays": {
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 6
-          },
-          "default": [1, 2, 3, 4, 5],
-          "description": "工作日设置 (0=周日, 1=周一, ..., 6=周六)"
-        },
-        "gantt.hoursPerDay": {
-          "type": "number",
-          "default": 8,
-          "minimum": 1,
-          "maximum": 24,
-          "description": "每日工作小时数"
-        },
-        "gantt.showResourceUtilization": {
-          "type": "boolean",
-          "default": false,
-          "description": "显示资源利用率"
-        }
-      }
+    "http": {
+      "internal": true
+    },
+    "filesystem": {
+      "read": [
+        "*"
+      ]
     }
   },
-
-  "permissions": [
-    "database.read",
-    "database.write",
-    "http.addRoute",
-    "websocket.broadcast",
-    "events.emit",
-    "files.read",
-    "files.write"
-  ],
-
-  "activationEvents": [
-    "onView:gantt"
-  ],
-
-  "capabilities": {
-    "taskHierarchy": true,
-    "dependencies": ["finish_to_start", "start_to_start", "finish_to_finish", "start_to_finish"],
-    "criticalPath": true,
-    "resourceManagement": true,
-    "progressTracking": true,
-    "baselineSupport": true,
-    "autoScheduling": true,
-    "exportFormats": ["pdf", "png", "xlsx", "json"],
-    "realTimeCollaboration": true
-  }
+  "license": "MIT"
 }

@@ -1,0 +1,12 @@
+-- 035_create_files.sql
+
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  url TEXT NULL,
+  owner_id TEXT NULL,
+  meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
+

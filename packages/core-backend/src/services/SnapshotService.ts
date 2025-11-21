@@ -6,6 +6,7 @@
  */
 
 import { db } from '../db/db'
+import { sql } from 'kysely'
 import { Logger } from '../core/logger'
 import { metrics } from '../metrics/metrics'
 import { auditLog } from '../audit/audit'
@@ -943,11 +944,12 @@ export class SnapshotService {
     }
 
     try {
-      // Use PostgreSQL array contains operator
+      // Use PostgreSQL ANY overlap (&&) for at least one matching tag.
+      // Build ARRAY[...] literal safely.
       const snapshots = await db
         .selectFrom('snapshots')
         .selectAll()
-        .where('tags', '@>', JSON.stringify(tags) as any)
+        .where(sql`tags && ${sql.raw('ARRAY[' + tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',') + ']')}`)
         .orderBy('created_at', 'desc')
         .execute()
 

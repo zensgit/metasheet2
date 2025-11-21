@@ -137,12 +137,18 @@ PY
 is_valid_base_url() {
   local url="$1"
   python3 - "$url" << 'PY' || return 1
-import sys, urllib.parse
+import sys, urllib.parse, re
 u=sys.argv[1]
 try:
   p=urllib.parse.urlparse(u)
-  host=p.netloc
-  ok = p.scheme in ('http','https') and host and '.' in host and not host.endswith('example.com')
+  host=p.netloc.lower()
+  scheme_ok = p.scheme in ('http','https')
+  host_ok = bool(host) and '.' in host and not host.endswith('example.com')
+  # Reject bare 'staging' host or IP-only without dots
+  if host in ('staging','staging-env','staging-stage'): host_ok=False
+  # Basic TLD pattern (not exhaustive)
+  tld_ok = bool(re.search(r"\.[a-zA-Z]{2,}$", host))
+  ok = scheme_ok and host_ok and tld_ok
   print('OK' if ok else '')
 except Exception:
   print('')

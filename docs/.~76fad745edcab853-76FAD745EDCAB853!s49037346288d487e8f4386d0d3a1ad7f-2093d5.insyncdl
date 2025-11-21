@@ -1,0 +1,34 @@
+# 会话与改造记录（2025-09-17）
+
+本次改动聚焦 v2/init 的后端内核搭建、审批并发一致性、RBAC 与审计、OpenAPI 与 CI 门禁搭建。
+
+## 关键交付
+- 核心后端（packages/core-backend）最小可运行：Express+Socket.io，JWT 白名单保护（/api/auth/*、/health、/metrics*），Prom 指标（/metrics、/metrics/prom）。
+- 审批乐观锁：approve/reject/return/revoke 采用事务+版本校验，冲突 409；计数指标与审计落库；审批历史接口（分页）。
+- 审计：operation_audit_logs + 管理员审计查询 API（RBAC：audit:read）。
+- RBAC：PG 版 service 与路由守卫；roles/permissions 路由 PG 化；seed:rbac 初始化 admin+权限集。
+- 资源 DB 化：spreadsheets/files/spreadsheet-permissions 迁移与路由 PG 化，统一审计与分页/校验（zod）。
+- 迁移：031/032/033/034/035/036；迁移执行器；demo 与 rbac 种子脚本。
+- OpenAPI：按模块拆分并合并构建；安全校验（/api/** 必须 bearerAuth）；简易 diff（路径删除视为破坏性变更）。
+- CI：Observability + Migration Replay 工作流；OpenAPI build/validate/diff；迁移+种子+并发冒烟；上传工件。
+- 健康与池化：/health 返回连接池统计；进程优雅关闭释放 PG 连接。
+
+## 使用指引
+- 迁移+种子：
+  - DATABASE_URL/ JWT_SECRET 环境变量
+  - pnpm -F @metasheet/core-backend migrate
+  - pnpm -F @metasheet/core-backend seed:rbac && pnpm -F @metasheet/core-backend seed:demo
+- 启动：pnpm -F @metasheet/core-backend dev
+- 令牌：node metasheet-v2/scripts/gen-dev-token.js（默认 admin）
+- 并发冒烟：bash metasheet-v2/scripts/approval-concurrency-smoke.sh（需 TOKEN）
+
+## 未决与后续
+- OpenAPI diff 增强：方法/Schema 破坏性检测；统一响应 Schema + 示例完善。
+- 审计导出：CSV/NDJSON；历史/审计的 total/count 与参数校验统一化。
+- RBAC 扩展：缓存策略与权限冲突/批量；资源全量覆盖与分页统一。
+- 指标门禁：在 CI 加错误率/P99 上限与审批冲突占比门槛。
+
+---
+
+如需更详尽的架构与路线，请参阅 metasheet-v2/docs/Architecture_Refactor_Plan_zh_CN.md。
+

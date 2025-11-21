@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-11-21T05:31:24Z",
+  "base_snapshot": "capacity-20251121-132911.json",
+  "new_snapshot": "capacity-20251121-132911.json",
+  "database_growth_pct": 0.00,
+  "alert_level": "GREEN",
+  "tables": []
+}

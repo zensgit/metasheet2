@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# MetaSheet V2 - End-to-End Validation Script
+# Validates database migration, API endpoints, and concurrency handling
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BACKEND_DIR="$PROJECT_ROOT/packages/core-backend"
+
+echo -e "${BLUE}=========================================${NC}"
+echo -e "${BLUE}MetaSheet V2 - E2E Validation${NC}"
+echo -e "${BLUE}=========================================${NC}"
+
+# Step 1: Run database migration
+echo -e "\n${YELLOW}1. Running database migration...${NC}"
+if [ -d "$BACKEND_DIR" ]; then
+    cd "$BACKEND_DIR"
+
+    # Check if migration command exists
+    if grep -q "migrate" package.json 2>/dev/null; then
+        pnpm migrate || npm run migrate || {
+            echo -e "${YELLOW}Warning: Migration command not found, skipping...${NC}"
+        }
+    else
+        echo -e "${YELLOW}No migration script found in package.json${NC}"
+    fi
+else
+    echo -e "${RED}Error: Backend directory not found${NC}"
+    exit 1
+fi
+
+# Step 2: Seed demo data
+echo -e "\n${YELLOW}2. Seeding demo data...${NC}"
+if grep -q "seed:demo" package.json 2>/dev/null; then
+    pnpm seed:demo || npm run seed:demo || {
+        echo -e "${YELLOW}Warning: Seed command not found, skipping...${NC}"
+    }
+else
+    echo -e "${YELLOW}No seed script found, creating demo instance manually...${NC}"
+    # You could add manual seeding logic here if needed
+fi
+
+# Step 3: Start backend server
+echo -e "\n${YELLOW}3. Starting backend server...${NC}"
+if [ -z "${SKIP_SERVER_START:-}" ]; then
+    # Kill any existing server on port 3000
+    lsof -ti:3000 | xargs kill -9 2>/dev/null || true
+
+    # Start server in background
+    pnpm dev > /tmp/metasheet-backend.log 2>&1 &
+    SERVER_PID=$!
+
+    # Wait for server to be ready
+    echo -n "Waiting for server to start"
+    for i in {1..30}; do
+        if curl -s http://localhost:3000/api/approvals/demo-1 > /dev/null 2>&1; then
+            echo -e " ${GREEN}✓${NC}"
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+
+    if ! curl -s http://localhost:3000/api/approvals/demo-1 > /dev/null 2>&1; then
+        echo -e " ${RED}✗${NC}"
+        echo -e "${RED}Server failed to start. Check logs:${NC}"
+        tail -20 /tmp/metasheet-backend.log
+        exit 1
+    fi
+else
+    echo -e "${YELLOW}Using existing server...${NC}"
+fi
+
+# Step 4: Generate JWT token for testing
+echo -e "\n${YELLOW}4. Generating test token...${NC}"
+export TOKEN=$(node -e "
+const jwt = require('jsonwebtoken');
+const token = jwt.sign({ id: 'test-user', role: 'admin' }, process.env.JWT_SECRET || 'test-secret');
+console.log(token);
+" 2>/dev/null || echo "test-token")
+echo "Token generated: ${TOKEN:0:20}..."
+
+# Step 5: Run concurrency tests
+echo -e "\n${YELLOW}5. Running concurrency tests...${NC}"
+
+run_test() {
+    local test_name=$1
+    local script_path=$2
+
+    echo -e "\n${BLUE}Testing: $test_name${NC}"
+
+    if [ -f "$script_path" ]; then
+        if BASE_URL=http://localhost:3000 TOKEN="$TOKEN" bash "$script_path"; then
+            echo -e "${GREEN}✓ $test_name passed${NC}"
+            return 0
+        else
+            echo -e "${RED}✗ $test_name failed${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}⚠ Script not found: $script_path${NC}"
+        return 1
+    fi
+}
+
+# Track test results
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+# Run each concurrency test
+if run_test "Approve Concurrency" "$SCRIPT_DIR/approval-concurrency-smoke.sh"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+fi
+
+if run_test "Reject Concurrency" "$SCRIPT_DIR/approval-reject-concurrency-smoke.sh"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+fi
+
+if run_test "Return Concurrency" "$SCRIPT_DIR/approval-return-concurrency-smoke.sh"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+fi
+
+# Step 6: Validate OpenAPI spec
+echo -e "\n${YELLOW}6. Validating OpenAPI specification...${NC}"
+if [ -f "$BACKEND_DIR/openapi.yaml" ]; then
+    # Simple validation - check if file is valid YAML
+    if command -v python3 > /dev/null; then
+        if python3 -c "import yaml; yaml.safe_load(open('$BACKEND_DIR/openapi.yaml'))" 2>/dev/null; then
+            echo -e "${GREEN}✓ OpenAPI spec is valid YAML${NC}"
+        else
+            echo -e "${RED}✗ OpenAPI spec is invalid YAML${NC}"
+            ((TESTS_FAILED++))
+        fi
+    else
+        echo -e "${YELLOW}⚠ Python not available for YAML validation${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠ OpenAPI spec not found${NC}"
+fi
+
+# Step 7: Test API endpoints
+echo -e "\n${YELLOW}7. Testing API endpoints...${NC}"
+
+# Test GET /api/approvals/{id}
+echo -n "GET /api/approvals/demo-1: "
+if curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/approvals/demo-1 | jq -e '.ok == true' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${RED}✗${NC}"
+    ((TESTS_FAILED++))
+fi
+
+# Test GET /api/approvals/{id}/history
+echo -n "GET /api/approvals/demo-1/history: "
+if curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/approvals/demo-1/history | jq -e '.ok == true' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    ((TESTS_PASSED++))
+else
+    echo -e "${RED}✗${NC}"
+    ((TESTS_FAILED++))
+fi
+
+# Cleanup
+if [ -n "${SERVER_PID:-}" ] && [ -z "${SKIP_SERVER_START:-}" ]; then
+    echo -e "\n${YELLOW}8. Cleaning up...${NC}"
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+fi
+
+# Final report
+echo -e "\n${BLUE}=========================================${NC}"
+echo -e "${BLUE}Validation Summary${NC}"
+echo -e "${BLUE}=========================================${NC}"
+echo -e "${GREEN}Tests Passed: $TESTS_PASSED${NC}"
+echo -e "${RED}Tests Failed: $TESTS_FAILED${NC}"
+
+if [ $TESTS_FAILED -eq 0 ]; then
+    echo -e "\n${GREEN}✅ All validations passed!${NC}"
+    exit 0
+else
+    echo -e "\n${RED}❌ Some validations failed${NC}"
+    exit 1
+fi

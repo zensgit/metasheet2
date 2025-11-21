@@ -1,89 +1,35 @@
 {
+  "manifestVersion": "2.0.0",
   "name": "plugin-audit-logger",
   "version": "1.0.0",
   "displayName": "审计日志",
   "description": "系统审计日志记录器，跟踪用户操作、数据变更、权限访问等系统活动",
-  "type": "service",
-  "main": {
-    "backend": "dist/index.js"
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
   },
-  "contributes": {
-    "services": [
-      {
-        "id": "audit-logger",
-        "name": "审计日志服务",
-        "description": "记录系统操作和数据变更的审计日志"
-      }
-    ],
-    "apiRoutes": [
-      {
-        "method": "GET",
-        "path": "/api/v2/audit/logs",
-        "description": "获取审计日志列表"
-      },
-      {
-        "method": "GET",
-        "path": "/api/v2/audit/logs/:logId",
-        "description": "获取特定审计日志详情"
-      },
-      {
-        "method": "POST",
-        "path": "/api/v2/audit/export",
-        "description": "导出审计日志"
-      }
-    ],
-    "commands": [
-      {
-        "id": "audit.viewLogs",
-        "title": "查看审计日志"
-      },
-      {
-        "id": "audit.exportLogs",
-        "title": "导出日志"
-      },
-      {
-        "id": "audit.clearOldLogs",
-        "title": "清理旧日志"
-      }
-    ],
-    "events": [
-      {
-        "id": "audit.log.created",
-        "description": "新审计日志创建时触发"
-      },
-      {
-        "id": "audit.log.exported",
-        "description": "审计日志导出完成时触发"
-      }
-    ]
-  },
-  "permissions": [
-    "database.read",
-    "database.write",
-    "system.audit",
-    "api.register",
-    "events.emit",
-    "http.register"
-  ],
-  "engines": {
+  "engine": {
     "metasheet": ">=2.0.0"
   },
-  "config": {
-    "logRetentionDays": {
-      "type": "number",
-      "default": 365,
-      "description": "审计日志保留天数"
+  "main": "dist/index.js",
+  "capabilities": {
+    "views": [],
+    "workflows": [],
+    "functions": []
+  },
+  "permissions": {
+    "database": {
+      "read": [
+        "*"
+      ],
+      "write": [
+        "*"
+      ]
     },
-    "enableRealTimeLogging": {
-      "type": "boolean",
-      "default": true,
-      "description": "启用实时日志记录"
+    "http": {
+      "internal": true
     },
-    "logLevel": {
-      "type": "string",
-      "default": "info",
-      "enum": ["debug", "info", "warn", "error"],
-      "description": "日志记录级别"
-    }
-  }
+    "filesystem": {}
+  },
+  "license": "MIT"
 }

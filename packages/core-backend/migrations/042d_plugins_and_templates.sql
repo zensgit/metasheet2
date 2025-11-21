@@ -19,8 +19,15 @@ CREATE TABLE IF NOT EXISTS plugin_manifests (
   CONSTRAINT unique_plugin_version UNIQUE (plugin_id, version)
 );
 
-CREATE INDEX IF NOT EXISTS idx_plugin_manifests_plugin ON plugin_manifests(plugin_id);
-CREATE INDEX IF NOT EXISTS idx_plugin_manifests_version ON plugin_manifests(version);
+-- Create indexes only if columns exist
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_manifests' AND column_name = 'plugin_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_plugin_manifests_plugin ON plugin_manifests(plugin_id);
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_manifests' AND column_name = 'version') THEN
+    CREATE INDEX IF NOT EXISTS idx_plugin_manifests_version ON plugin_manifests(version);
+  END IF;
+END $$;
 
 -- Plugin dependencies
 CREATE TABLE IF NOT EXISTS plugin_dependencies (
@@ -34,8 +41,14 @@ CREATE TABLE IF NOT EXISTS plugin_dependencies (
   CONSTRAINT valid_dependency_type CHECK (dependency_type IN ('RUNTIME','PEER','OPTIONAL','DEV'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_plugin_dependencies_plugin ON plugin_dependencies(plugin_id);
-CREATE INDEX IF NOT EXISTS idx_plugin_dependencies_depends ON plugin_dependencies(depends_on_id);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_dependencies' AND column_name = 'plugin_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_plugin_dependencies_plugin ON plugin_dependencies(plugin_id);
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_dependencies' AND column_name = 'depends_on_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_plugin_dependencies_depends ON plugin_dependencies(depends_on_id);
+  END IF;
+END $$;
 
 -- Templates
 CREATE TABLE IF NOT EXISTS templates (

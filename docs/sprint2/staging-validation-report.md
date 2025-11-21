@@ -23,8 +23,13 @@ Runbooks: ops — docs/sprint2/ops-runbook.md | rollback — docs/sprint2/rollba
    - Confirmed all tables recreated with correct schema
 
 3. **⚠️ Integration Test Re-run Status**
-   - **BLOCKED**: node_modules corruption (tsx/vitest modules missing)
-   - **Cause**: npm cache permission issues preventing reinstallation
+   - **PARTIALLY RESOLVED**: node_modules corruption fixed via pnpm reinstall
+   - **NEW BLOCKER**: vitest infrastructure error (`__vite_ssr_exportName__ is not defined`)
+   - **Root Cause**: vitest/vite module transformation issue in test infrastructure (not feature code)
+   - **Fixes Applied**:
+     - ✅ pnpm reinstall completed (tsx v4.20.6 working)
+     - ✅ vitest.config.ts DataCloneError resolved (moved globalTeardown to separate file)
+     - ✅ tests/setup.ts import error fixed (removed non-existent responseMatchers)
    - **Mitigation**: Day 1 baseline (17/17 tests passing) remains valid reference
    - **Code unchanged**: Sprint 2 feature code has not been modified since Day 1 validation
 
@@ -48,18 +53,20 @@ Runbooks: ops — docs/sprint2/ops-runbook.md | rollback — docs/sprint2/rollba
 
 ### Confidence Assessment
 
-**Overall Confidence**: 80% (down from 85% due to test re-run blocker)
+**Overall Confidence**: 75% (down from 85% due to test infrastructure issues)
 
 **Strengths**:
 - Database successfully reset and rebuilt
 - All migrations applied correctly
 - JWT mismatch root-caused (not a feature defect)
-- Day 1 validation evidence remains strong
+- Day 1 validation evidence remains strong (17/17 tests passed)
+- node_modules issue successfully fixed (pnpm reinstall)
 
 **Weaknesses**:
-- Unable to demonstrate test reproducibility with fresh database
+- Unable to demonstrate test reproducibility with fresh database due to vitest infrastructure error
+- Test infrastructure has multiple configuration issues requiring deeper investigation
 - JWT configuration mismatch needs resolution before staging validation
-- node_modules corruption limits extended validation capability
+- vitest `__vite_ssr_exportName__` error indicates test setup problems beyond simple dependencies
 
 ### Next Milestone: 48h Decision (2025-11-22 22:28 CST)
 

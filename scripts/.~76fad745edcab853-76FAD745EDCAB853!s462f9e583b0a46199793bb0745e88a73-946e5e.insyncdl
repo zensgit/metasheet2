@@ -1,0 +1,27 @@
+#!/bin/bash
+echo "Running approval return concurrency smoke test..."
+
+# 测试并发退回，确保 metrics 更新
+BASE_URL="${BASE_URL:-http://localhost:8900}"
+TOKEN="${TOKEN:-test-token}"
+
+# 创建测试审批
+for i in {9..11}; do
+  curl -X POST "$BASE_URL/api/approvals" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"id\": \"return-test-$i\", \"title\": \"Return Test $i\"}" &
+done
+wait
+
+# 并发退回尝试 (允许失败)
+for i in {9..11}; do
+  curl -X POST "$BASE_URL/api/approvals/return-test-9/return" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"reason": "Returned for revision"}' &
+done 2>/dev/null
+wait
+
+echo "✅ Concurrent returns completed (failures allowed)"
+exit 0

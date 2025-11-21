@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export JWT_SECRET=${JWT_SECRET:-dev-secret}
+export DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/metasheet}
+export BASE_URL=${BASE_URL:-http://localhost:8900}
+
+echo "[1/6] Migrate"
+pnpm -F @metasheet/core-backend migrate
+
+echo "[2/6] Seed RBAC + demo"
+pnpm -F @metasheet/core-backend seed:rbac
+pnpm -F @metasheet/core-backend seed:demo || true
+
+echo "[3/6] Start server"
+nohup pnpm -F @metasheet/core-backend dev > server.log 2>&1 &
+sleep 3
+
+echo "[4/6] Token"
+TOKEN=$(node scripts/gen-dev-token.js)
+
+echo "[5/6] Smoke approvals"
+TOKEN="$TOKEN" bash scripts/approval-concurrency-smoke.sh
+
+echo "[6/6] Metrics"
+curl -fsS "$BASE_URL/metrics/prom" | head -n 20
+echo "Done. Logs in server.log"
+

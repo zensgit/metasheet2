@@ -1,0 +1,50 @@
+name: Plugin Manifest Validation
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/**/plugin.json'
+      - 'scripts/validate-plugin-manifests.ts'
+  push:
+    branches:
+      - main
+    paths:
+      - 'plugins/**/plugin.json'
+      - 'scripts/validate-plugin-manifests.ts'
+
+jobs:
+  validate-manifests:
+    name: Validate Plugin Manifests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate plugin manifests
+        run: pnpm validate:plugins
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Plugin Manifest Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ${{ job.status }} == "success" ]; then
+            echo "✅ All plugin manifests are valid" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some plugin manifests failed validation" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the job logs for details." >> $GITHUB_STEP_SUMMARY
+          fi

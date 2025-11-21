@@ -35,20 +35,7 @@ export default defineConfig({
     // Better error handling and debugging
     reporter: ['verbose'],
     maxConcurrency: 1, // Reduce concurrency for stability
-    globalTeardown: async () => {
-      // Clean up test fixtures after all tests
-      const fixturesDir = path.join(__dirname, 'tests/fixtures/test-plugins')
-      try {
-        await fs.rm(fixturesDir, { recursive: true, force: true })
-      } catch {
-        // Ignore if doesn't exist
-      }
-
-      // Additional cleanup for potential resource leaks
-      if (global.gc) {
-        global.gc()
-      }
-    }
+    globalTeardown: './tests/globalTeardown.ts'
   },
   resolve: {
     alias: {

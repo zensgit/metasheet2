@@ -17,7 +17,8 @@ JWT="${1:-}"
 BASE_URL="${2:-http://localhost:8900}"
 THRESHOLD_WARNING=150  # ms
 THRESHOLD_CRITICAL=250 # ms
-SAMPLES=5
+SAMPLES=${SAMPLES:-5}
+JSON_OUT="${SMOKE_JSON_OUT:-}"  # optional path to write JSON summary
 
 # Validate inputs
 if [[ -z "$JWT" ]]; then
@@ -27,13 +28,8 @@ if [[ -z "$JWT" ]]; then
 fi
 
 # Critical endpoints to monitor
-declare -A ENDPOINTS=(
-  ["health"]="/health"
-  ["snapshots_list"]="/api/snapshots"
-  ["snapshots_stats"]="/api/snapstats"
-  ["rules_list"]="/api/v2/admin/protection-rules"
-  ["plugins"]="/api/plugins"
-)
+# Bash 3 (macOS) lacks associative arrays; use a simple whitespace-delimited list
+ENDPOINTS_LIST="health:/health snapshots_list:/api/snapshots snapshots_stats:/api/snapstats rules_list:/api/v2/admin/protection-rules plugins:/api/plugins"
 
 echo "╔════════════════════════════════════════════════════════════╗"
 echo "║      Sprint 2 Staging Latency Smoke Test                  ║"
@@ -44,7 +40,7 @@ echo "Samples: $SAMPLES per endpoint"
 echo "Thresholds: ⚠️  >${THRESHOLD_WARNING}ms | 🔴 >${THRESHOLD_CRITICAL}ms"
 echo ""
 
-# Function to measure latency
+# Function to measure latency (returns milliseconds or 999 on failure)
 measure_latency() {
   local endpoint="$1"
   local url="${BASE_URL}${endpoint}"
@@ -57,38 +53,17 @@ measure_latency() {
 
   # Measure response time
   local response_time
-  response_time=$(curl -o /dev/null -s -w '%{time_total}' \
-    -H "Authorization: Bearer $JWT" \
-    "$url" 2>/dev/null || echo "999")
+  if [[ "$endpoint" == "/health" ]]; then
+    response_time=$(curl -o /dev/null -s -w '%{time_total}' \
+      "$url" 2>/dev/null || echo "999")
+  else
+    response_time=$(curl -o /dev/null -s -w '%{time_total}' \
+      -H "Authorization: Bearer $JWT" \
+      "$url" 2>/dev/null || echo "999")
+  fi
 
   # Convert to milliseconds
   echo "$response_time" | awk '{printf "%.0f", $1 * 1000}'
-}
-
-# Function to calculate stats
-calculate_stats() {
-  local -n times=$1
-  local count=${#times[@]}
-
-  if [[ $count -eq 0 ]]; then
-    echo "0 0 0"
-    return
-  fi
-
-  # Sort times
-  IFS=$'\n' sorted=($(sort -n <<<"${times[*]}"))
-  unset IFS
-
-  # Calculate min, max, avg
-  local min=${sorted[0]}
-  local max=${sorted[$((count-1))]}
-  local sum=0
-  for t in "${times[@]}"; do
-    sum=$((sum + t))
-  done
-  local avg=$((sum / count))
-
-  echo "$min $max $avg"
 }
 
 # Function to get status icon
@@ -105,41 +80,45 @@ get_status_icon() {
 }
 
 # Test all endpoints
-declare -A results
-declare -A all_latencies
+results="" # lines: name|min|max|avg|errors
 
 echo "Testing endpoints..."
 echo ""
 
-for name in "${!ENDPOINTS[@]}"; do
-  endpoint="${ENDPOINTS[$name]}"
+for pair in $ENDPOINTS_LIST; do
+  name="${pair%%:*}"
+  endpoint="${pair#*:}"
   echo -ne "${BLUE}Testing ${name}...${NC} "
 
-  latencies=()
+  latencies=""
   errors=0
 
-  for ((i=1; i<=SAMPLES; i++)); do
+  for i in $(seq 1 $SAMPLES); do
     latency=$(measure_latency "$endpoint")
-
     if [[ $latency -eq 999 ]]; then
-      ((errors++))
+      errors=$((errors+1))
     else
-      latencies+=("$latency")
+      latencies="$latencies $latency"
     fi
-
     echo -n "."
   done
 
   # Calculate stats
-  if [[ ${#latencies[@]} -gt 0 ]]; then
-    read -r min max avg <<< "$(calculate_stats latencies)"
-    results["$name"]="$min $max $avg $errors"
-    all_latencies["$name"]="${latencies[*]}"
+  latencies=${latencies# } # trim leading space
+  if [[ -n "$latencies" ]]; then
+    sorted=$(printf '%s\n' $latencies | sort -n)
+    min=$(printf '%s\n' $sorted | head -n1)
+    max=$(printf '%s\n' $sorted | tail -n1)
+    count=$(printf '%s\n' $sorted | wc -l | tr -d ' ')
+    sum=0
+    for v in $sorted; do sum=$((sum+v)); done
+    avg=$((sum/count))
+    results+="$name|$min|$max|$avg|$errors\n"
 
     status_icon=$(get_status_icon "$avg")
     echo -e " ${status_icon} avg: ${avg}ms (min: ${min}ms, max: ${max}ms)"
   else
-    results["$name"]="0 0 0 $SAMPLES"
+    results+="$name|0|0|0|$SAMPLES\n"
     echo -e " ${RED}FAILED${NC} (all requests failed)"
   fi
 done
@@ -160,8 +139,9 @@ failed_endpoints=0
 warning_endpoints=0
 critical_endpoints=0
 
-for name in "${!results[@]}"; do
-  read -r min max avg errors <<< "${results[$name]}"
+endpoint_lines=$(printf '%s' "$results" | grep -v '^$' || true)
+while IFS='|' read -r name min max avg errors; do
+  [[ -z "$name" || -z "$max" || -z "$avg" || -z "$errors" ]] && continue
 
   if [[ $errors -eq $SAMPLES ]]; then
     status="🔴 FAIL"
@@ -183,17 +163,17 @@ for name in "${!results[@]}"; do
     total_avg=$((total_avg + avg))
     ((total_endpoints++))
   fi
-done
+done <<< "$(printf '%s\n' "$endpoint_lines")"
 
 echo ""
 
 # Overall stats
+overall_avg=0
 if [[ $total_endpoints -gt 0 ]]; then
   overall_avg=$((total_avg / total_endpoints))
   echo "Overall Average Latency: ${overall_avg}ms"
 else
-  overall_avg=999
-  echo "Overall Average Latency: N/A (all endpoints failed)"
+  echo "Overall Average Latency: N/A (no successful samples)"
 fi
 
 echo ""
@@ -219,7 +199,8 @@ fi
 
 echo ""
 echo "Endpoint Status:"
-echo "  ✅ Healthy: $((${#ENDPOINTS[@]} - warning_endpoints - critical_endpoints - failed_endpoints))"
+total_defined=$(echo "$ENDPOINTS_LIST" | wc -w | tr -d ' ')
+echo "  ✅ Healthy: $((total_defined - warning_endpoints - critical_endpoints - failed_endpoints))"
 echo "  ⚠️  Warning: $warning_endpoints"
 echo "  🔴 Critical: $critical_endpoints"
 echo "  ❌ Failed: $failed_endpoints"
@@ -228,7 +209,9 @@ echo ""
 echo "Performance Targets:"
 echo "  Sprint 2 P95 Target: ≤150ms"
 echo "  Sprint 2 P99 Target: ≤250ms"
-if [[ $overall_avg -lt $THRESHOLD_WARNING ]]; then
+if [[ $total_endpoints -eq 0 ]]; then
+  echo -e "  Current Avg: N/A ${RED}(FAIL)${NC}"
+elif [[ $overall_avg -lt $THRESHOLD_WARNING ]]; then
   echo -e "  Current Avg: ${overall_avg}ms ${GREEN}(PASS)${NC}"
 elif [[ $overall_avg -lt $THRESHOLD_CRITICAL ]]; then
   echo -e "  Current Avg: ${overall_avg}ms ${YELLOW}(WARNING)${NC}"
@@ -240,5 +223,29 @@ echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo "Test completed at $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
+
+# Optional JSON export
+if [[ -n "$JSON_OUT" ]]; then
+  {
+    echo '{'
+    echo '  "base_url": '"\"$BASE_URL\""','
+    echo '  "samples": '"$SAMPLES"','
+    echo '  "threshold_warning_ms": '"$THRESHOLD_WARNING"','
+    echo '  "threshold_critical_ms": '"$THRESHOLD_CRITICAL"','
+    echo '  "overall_avg_ms": '"$overall_avg"','
+    echo '  "endpoints": ['
+    first=1
+    while IFS='|' read -r name min max avg errors; do
+      [ -z "$name" ] && continue
+      if [[ $first -eq 0 ]]; then echo ','; fi
+      first=0
+      status_icon=$(get_status_icon "$avg")
+      echo -n '    {"name": '"\"$name\""', "min_ms": '"$min"', "max_ms": '"$max"', "avg_ms": '"$avg"', "errors": '"$errors"', "status_icon": '"\"$status_icon\""'}'
+    done <<< "$results"
+    echo
+    echo '  ]'
+    echo '}'
+  } > "$JSON_OUT" 2>/dev/null || echo "⚠️  Failed to write JSON summary to $JSON_OUT"
+fi
 
 exit $exit_code

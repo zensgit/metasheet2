@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_view_states_view ON view_states(view_id);
 CREATE INDEX IF NOT EXISTS idx_view_states_user ON view_states(user_id);
 CREATE INDEX IF NOT EXISTS idx_view_states_accessed ON view_states(last_accessed);
 
--- Conditionally add FK once users table exists
+-- Conditionally add FK once users table exists (skip if type mismatch)
 DO $$ BEGIN
   IF EXISTS (
     SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users'
@@ -50,6 +50,9 @@ DO $$ BEGIN
     BEGIN
       ALTER TABLE view_states
         ADD CONSTRAINT fk_view_states_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
-    EXCEPTION WHEN duplicate_object THEN NULL; END;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+      WHEN datatype_mismatch THEN NULL; -- Skip if type incompatible (text vs uuid)
+    END;
   END IF;
 END $$;

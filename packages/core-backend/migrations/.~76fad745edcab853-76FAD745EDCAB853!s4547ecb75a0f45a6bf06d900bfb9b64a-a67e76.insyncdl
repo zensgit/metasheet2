@@ -1,0 +1,13 @@
+-- 030_create_approval_instances.sql
+-- 基础表：审批实例（供 031 添加 version 字段时依赖）
+
+CREATE TABLE IF NOT EXISTS approval_instances (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  version INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_instances_status ON approval_instances(status);
+

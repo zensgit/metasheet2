@@ -91,8 +91,52 @@ function expandPermissions(raw: string[]): Set<string> {
   return out
 }
 
+/**
+ * Normalize permissions from V2 object format to array format
+ * Supports both old string[] format and new object format
+ */
+function normalizePermissions(perms: PluginManifest['permissions']): string[] {
+  if (!perms) {
+    return []
+  }
+
+  // Already in array format
+  if (Array.isArray(perms)) {
+    return perms
+  }
+
+  // Convert object format to array format
+  const result: string[] = []
+
+  if (perms.database) {
+    if (perms.database.read && perms.database.read.length > 0) {
+      result.push('database.read')
+    }
+    if (perms.database.write && perms.database.write.length > 0) {
+      result.push('database.write')
+    }
+  }
+
+  if (perms.http) {
+    if (perms.http.internal || (perms.http.external && perms.http.external.length > 0)) {
+      result.push('http.register')
+    }
+  }
+
+  if (perms.filesystem) {
+    if (perms.filesystem.read && perms.filesystem.read.length > 0) {
+      result.push('filesystem.read')
+    }
+    if (perms.filesystem.write && perms.filesystem.write.length > 0) {
+      result.push('filesystem.write')
+    }
+  }
+
+  return result
+}
+
 function createSandboxedAPI(api: CoreAPI, manifest: PluginManifest): CoreAPI {
-  const rawPerms = manifest.permissions || []
+  const rawPerms = normalizePermissions(manifest.permissions)
   // '*' means full access
   const full = rawPerms.includes('*')
   const expanded = expandPermissions(rawPerms)

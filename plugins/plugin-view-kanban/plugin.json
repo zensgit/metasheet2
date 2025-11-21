@@ -1,0 +1,14 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-kanban",
+  "version": "0.1.0",
+  "displayName": "Kanban View Plugin",
+  "description": "Provides a Kanban view for records.",
+  "author": { "name": "MetaSheet" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "dist/index.js",
+  "capabilities": { "views": ["kanban"] },
+  "permissions": {
+    "http": { "internal": true }
+  }
+}

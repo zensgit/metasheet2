@@ -89,10 +89,13 @@ BEGIN
   END IF;
 END $$;
 
--- Add version column to approval_instances if not exists
+-- Add version column to approval_instances if table exists and column not exists
 DO $$
 BEGIN
-  IF NOT EXISTS (
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_name = 'approval_instances'
+  ) AND NOT EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_name = 'approval_instances'
     AND column_name = 'version'
