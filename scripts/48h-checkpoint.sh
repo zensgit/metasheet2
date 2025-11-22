@@ -64,18 +64,20 @@ echo "Issue State: $ISSUE_STATE"
 echo "Total Comments: $COMMENT_COUNT"
 echo ""
 
-# Check for credentials in latest comments (last 5)
+# Check for credentials in latest comments (last 10 for better coverage)
 echo "Checking for credentials in recent comments..."
-RECENT_COMMENTS=$(echo "$ISSUE_DATA" | jq -r '.comments[-5:][].body')
+RECENT_COMMENTS=$(echo "$ISSUE_DATA" | jq -r '.comments[-10:][].body')
 
 HAS_BASE_URL=false
 HAS_JWT=false
 
-if echo "$RECENT_COMMENTS" | grep -iq "BASE_URL\|staging.*url\|https://.*metasheet"; then
+# More precise pattern: actual URL (https:// followed by domain)
+if echo "$RECENT_COMMENTS" | grep -Eq "https://[a-zA-Z0-9.-]+\.(com|net|org|io)"; then
     HAS_BASE_URL=true
 fi
 
-if echo "$RECENT_COMMENTS" | grep -iq "JWT\|token.*eyJ\|Bearer.*eyJ"; then
+# More precise pattern: actual JWT token (eyJ followed by base64 chars, minimum 50 chars)
+if echo "$RECENT_COMMENTS" | grep -Eq "eyJ[A-Za-z0-9_-]{50,}"; then
     HAS_JWT=true
 fi
 
