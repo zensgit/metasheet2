@@ -59,9 +59,13 @@ fi
 ISSUE_STATE=$(echo "$ISSUE_DATA" | jq -r '.state')
 COMMENT_COUNT=$(echo "$ISSUE_DATA" | jq '.comments | length')
 LATEST_COMMENT=$(echo "$ISSUE_DATA" | jq -r '.comments[-1].body' 2>/dev/null || echo "")
+LATEST_COMMENT_TIME=$(echo "$ISSUE_DATA" | jq -r '.comments[-1].created_at' 2>/dev/null || echo "")
 
 echo "Issue State: $ISSUE_STATE"
 echo "Total Comments: $COMMENT_COUNT"
+if [ -n "$LATEST_COMMENT_TIME" ] && [ "$LATEST_COMMENT_TIME" != "null" ]; then
+  echo "Latest Comment At: $LATEST_COMMENT_TIME"
+fi
 echo ""
 
 # Check for credentials in latest comments (last 10 for better coverage)
@@ -71,8 +75,8 @@ RECENT_COMMENTS=$(echo "$ISSUE_DATA" | jq -r '.comments[-10:][].body')
 HAS_BASE_URL=false
 HAS_JWT=false
 
-# More precise pattern: actual URL (https:// followed by domain)
-if echo "$RECENT_COMMENTS" | grep -Eq "https://[a-zA-Z0-9.-]+\.(com|net|org|io)"; then
+# More precise pattern: actual URL (https:// followed by domain + allowed TLDs)
+if echo "$RECENT_COMMENTS" | grep -Eq "https://[a-zA-Z0-9.-]+\.(com|net|org|io|dev|cloud|app|co|cn)"; then
     HAS_BASE_URL=true
 fi
 
