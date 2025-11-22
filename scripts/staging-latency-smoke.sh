@@ -133,46 +133,51 @@ echo ""
 printf "%-20s %8s %8s %8s %8s %6s\n" "Endpoint" "Min" "Max" "Avg" "Status" "Errors"
 echo "────────────────────────────────────────────────────────────────"
 
-total_avg=0
-total_endpoints=0
-failed_endpoints=0
-warning_endpoints=0
-critical_endpoints=0
+# Normalize embedded newlines in results for robust parsing
+endpoint_text=$(printf '%b' "$results" | grep -v '^$' || true)
 
-endpoint_lines=$(printf '%s' "$results" | grep -v '^$' || true)
-while IFS='|' read -r name min max avg errors; do
-  [[ -z "$name" || -z "$max" || -z "$avg" || -z "$errors" ]] && continue
+# Use awk for robust parsing/printing to avoid bash multiline pitfalls
+stats_out=$(awk -v SAMPLES="$SAMPLES" -v WARN="$THRESHOLD_WARNING" -v CRIT="$THRESHOLD_CRITICAL" '
+BEGIN {
+  total_avg=0; total_ep=0; fail=0; warn=0; crit=0;
+}
+function status_icon(avg) {
+  if (avg >= CRIT) return "🔴 CRIT";
+  if (avg >= WARN) return "⚠️  WARN";
+  return "✅ OK";
+}
+{
+  # Expect lines like: name|min|max|avg|errors
+  if ($0 ~ /^[[:space:]]*$/) next;
+  n=split($0, f, "|");
+  if (n != 5) next;
+  name=f[1]; min=f[2]+0; max=f[3]+0; avg=f[4]+0; errs=f[5]+0;
+  st = (errs==SAMPLES) ? "🔴 FAIL" : status_icon(avg);
+  printf "%-20s %6dms %6dms %6dms   %s   %d/%d\n", name, min, max, avg, st, errs, SAMPLES;
+  if (errs < SAMPLES) { total_avg += avg; total_ep += 1; }
+  if (errs == SAMPLES) fail += 1; else if (avg >= CRIT) crit += 1; else if (avg >= WARN) warn += 1;
+}
+END {
+  # CSV summary for robust parsing: __S__,total_avg,total_ep,fail,warn,crit
+  printf "\n__S__,%d,%d,%d,%d,%d\n", total_avg, total_ep, fail, warn, crit;
+}
+' <<< "$endpoint_text")
 
-  if [[ $errors -eq $SAMPLES ]]; then
-    status="🔴 FAIL"
-    ((failed_endpoints++))
-  elif [[ $avg -ge $THRESHOLD_CRITICAL ]]; then
-    status="🔴 CRIT"
-    ((critical_endpoints++))
-  elif [[ $avg -ge $THRESHOLD_WARNING ]]; then
-    status="⚠️  WARN"
-    ((warning_endpoints++))
-  else
-    status="✅ OK"
-  fi
+summary_csv=$(printf '%s\n' "$stats_out" | awk -F',' '/^__S__/ {print $0}' | tail -n1)
+table_out=$(printf '%s\n' "$stats_out" | sed '/^__S__,/d')
+echo "$table_out"
 
-  printf "%-20s %6dms %6dms %6dms   %s   %d/%d\n" \
-    "$name" "$min" "$max" "$avg" "$status" "$errors" "$SAMPLES"
-
-  if [[ $errors -lt $SAMPLES ]]; then
-    total_avg=$((total_avg + avg))
-    ((total_endpoints++))
-  fi
-done <<< "$(printf '%s\n' "$endpoint_lines")"
+# Parse CSV summary
+IFS=',' read -r _ total_avg total_endpoints failed_endpoints warning_endpoints critical_endpoints <<< "$summary_csv"
 
 echo ""
 
 # Overall stats
-overall_avg=0
-if [[ $total_endpoints -gt 0 ]]; then
+if [[ ${total_endpoints:-0} -gt 0 ]]; then
   overall_avg=$((total_avg / total_endpoints))
   echo "Overall Average Latency: ${overall_avg}ms"
 else
+  overall_avg=999
   echo "Overall Average Latency: N/A (no successful samples)"
 fi
 
@@ -200,10 +205,10 @@ fi
 echo ""
 echo "Endpoint Status:"
 total_defined=$(echo "$ENDPOINTS_LIST" | wc -w | tr -d ' ')
-echo "  ✅ Healthy: $((total_defined - warning_endpoints - critical_endpoints - failed_endpoints))"
-echo "  ⚠️  Warning: $warning_endpoints"
-echo "  🔴 Critical: $critical_endpoints"
-echo "  ❌ Failed: $failed_endpoints"
+echo "  ✅ Healthy: $((total_defined - ${warning_endpoints:-0} - ${critical_endpoints:-0} - ${failed_endpoints:-0}))"
+echo "  ⚠️  Warning: ${warning_endpoints:-0}"
+echo "  🔴 Critical: ${critical_endpoints:-0}"
+echo "  ❌ Failed: ${failed_endpoints:-0}"
 
 echo ""
 echo "Performance Targets:"

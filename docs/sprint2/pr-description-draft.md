@@ -22,7 +22,10 @@
 - Database: ✅ Fresh schema rebuilt (all migrations applied)
 - Integration Tests: ⚠️ Day 1 baseline (17/17 passed) remains valid reference
 - Test Infrastructure: ⚠️ vitest SSR transformation issue documented as technical debt (P2-medium)
-- Performance: ✅ 60-round baseline (P95: 43ms, errors: 0) confirmed
+- Performance: ✅ 60-round baseline (latest P95: 39ms; clean smoke avg≈0–1ms)
+  - Smoke JSON: docs/sprint2/performance/smoke-local-003115.json
+  - 60 rounds: see latest perf-*.csv.summary.json
+  - 200 rounds: see latest perf-*.csv.summary.json (expected errors due to auth/negative checks)
 - JWT Configuration: ⚠️ Mismatch documented for staging fix
 - Overall Confidence: 75% | Feature Code Confidence: 95% (feature code unchanged since Day 1)
 - Technical Debt: `docs/sprint2/tech-debt-vitest-ssr-issue.md` (comprehensive troubleshooting history)
