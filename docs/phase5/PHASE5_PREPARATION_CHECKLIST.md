@@ -12,6 +12,10 @@
 ### ✅ Completed (Ready)
 - [x] Phase 5 scripts verified present (11 scripts found)
 - [x] Environment template created (`.env.phase5.template`)
+- [x] Environment template enhanced with comprehensive SLO targets (2025-11-24)
+- [x] Pre-flight validation script created (`phase5-verify-preconditions.sh`)
+- [x] Comprehensive metrics guide created (`docs/phase5/METRICS_GUIDE.md`, 726 lines)
+- [x] Enhancement implementation guide created (`docs/phase5/ENHANCEMENT_GUIDE.md`, 467 lines)
 - [x] Working directory structure created (`final-artifacts/phase5-prep/`, `docs/phase5/`)
 - [x] Sprint 2 preparation 100% complete
 - [x] Local baseline established (Day 1: 17/17 tests, P95: 43ms)
@@ -247,11 +251,11 @@ COUNT_CACHE_MISS_AS_FALLBACK=true \
 - [ ] Production baseline collected: ≥12 samples over ≥2 hours
 - [ ] Extended validation: ≥4 samples over ≥1 hour
 - [ ] All 6 core Prometheus metrics captured
-- [ ] P95 latency < 150ms (warning threshold)
-- [ ] P99 latency < 250ms (critical threshold)
-- [ ] Memory usage < 500MB average
-- [ ] Error rate < 1%
-- [ ] Cache hit rate > 80%
+- [ ] **Latency**: P95 < 150ms (warning), P99 < 250ms (critical)
+- [ ] **Memory**: RSS < 500MB average
+- [ ] **Cache Performance**: Hit rate > 80%
+- [ ] **Success Rates**: Plugin reload > 95%, Snapshot operations > 99%
+- [ ] **Error Rate**: < 1% overall
 
 ### Documentation
 - [ ] Production report generated with all sections
