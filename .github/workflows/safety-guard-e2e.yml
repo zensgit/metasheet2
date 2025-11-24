@@ -69,7 +69,7 @@ jobs:
           IDEMPOTENCY_ENABLED: 'true'
           RATE_LIMIT_ENABLED: 'true'
         run: |
-          nohup pnpm -F @metasheet/core-backend dev:core >/tmp/server.log 2>&1 &
+          nohup pnpm -F @metasheet/core-backend dev >/tmp/server.log 2>&1 &
           echo $! > /tmp/server.pid
 
       - name: Wait for health (with retries)
