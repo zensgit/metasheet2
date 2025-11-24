@@ -59,6 +59,15 @@ jobs:
           pnpm -F @metasheet/core-backend db:list || true
           pnpm -F @metasheet/core-backend db:migrate
 
+      - name: Seed RBAC for test user
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          SEED_USER_ID: test-admin
+        run: |
+          cd packages/core-backend
+          npx tsx src/seeds/seed-rbac.ts
+          cd ../..
+
       - name: Start backend
         env:
           HOST: 127.0.0.1
