@@ -39,7 +39,7 @@
 - SafetyGuard: risk assessment, double-confirm flow, Express middleware, metrics (dangerousOperationsTotal, blockedOperationsTotal, confirmationRequestsTotal)
 
 ## In Progress
-- None (All planned phases complete through Phase 9)
+- None (All planned phases complete through Phase 9; Phase 5 baseline finalized locally, awaiting production rerun)
 
 ---
 
@@ -201,7 +201,8 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 - [x] 开发环境一键启动 (scripts/dev-bootstrap.sh) ✅ Day 2
 - [x] 本地观测环境标准化 (Docker Prometheus + Grafana) ✅ Day 3
 - [x] 安全护栏实现 (SafetyGuard, double-confirm) ✅ Day 4
-- [x] Phase 5 生产观察基线 ✅ 本地验证通过
+- [x] Phase 5 生产观察基线 (2h local baseline complete; prod rerun scheduled) ✅ Day 5
+- [x] Phase 5 指标扩展 (p50/p95/p99, error_rate, cpu/mem, request_rate) ✅ Day 6
 
 ### Sprint 2: 产品能力增强 (5-7 天)
 - [ ] Snapshot 标签系统 (stable, canary, critical)

@@ -1,0 +1,120 @@
+{
+  "version": "1.0.0",
+  "phase": "phase5",
+  "updated": "2025-11-24",
+  "description": "SLO thresholds for Phase 5 production baseline validation",
+  "thresholds": [
+    {
+      "metric": "plugin_reload_latency_p95",
+      "kind": "latency",
+      "threshold": 2.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_plugin_reload_duration_seconds",
+      "description": "Plugin reload P95 latency should be under 2s"
+    },
+    {
+      "metric": "plugin_reload_latency_p99",
+      "kind": "latency",
+      "threshold": 5.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_plugin_reload_duration_seconds",
+      "description": "Plugin reload P99 latency should be under 5s"
+    },
+    {
+      "metric": "snapshot_restore_latency_p95",
+      "kind": "latency",
+      "threshold": 5.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_snapshot_restore_duration_seconds",
+      "description": "Snapshot restore P95 latency should be under 5s"
+    },
+    {
+      "metric": "snapshot_restore_latency_p99",
+      "kind": "latency",
+      "threshold": 8.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_snapshot_restore_duration_seconds",
+      "description": "Snapshot restore P99 latency should be under 8s"
+    },
+    {
+      "metric": "cache_hit_rate",
+      "kind": "percentage",
+      "threshold": 80.0,
+      "unit": "percent",
+      "type": "lower_bound",
+      "prometheus_metrics": ["cache_hits_total", "cache_misses_total"],
+      "calculation": "cache_hits_total / (cache_hits_total + cache_misses_total) * 100",
+      "description": "Cache hot hit rate should be at least 80%"
+    },
+    {
+      "metric": "fallback_effective_ratio",
+      "kind": "ratio",
+      "threshold": 0.6,
+      "unit": "ratio",
+      "type": "upper_bound",
+      "prometheus_metrics": ["metasheet_fallback_total"],
+      "calculation": "effective_fallback / raw_fallback (when COUNT_CACHE_MISS_AS_FALLBACK=false: raw - cache_miss)",
+      "description": "Effective fallback should be ≤ 0.6 × Raw fallback"
+    },
+    {
+      "metric": "memory_rss",
+      "kind": "memory",
+      "threshold": 500.0,
+      "unit": "megabytes",
+      "type": "upper_bound",
+      "prometheus_metric": "process_resident_memory_bytes",
+      "calculation": "process_resident_memory_bytes / 1024 / 1024",
+      "description": "Process RSS (current) should be under 500MB",
+      "note": "process_resident_memory_bytes is a gauge metric, not histogram, so we use current value rather than percentile"
+    },
+    {
+      "metric": "http_success_rate",
+      "kind": "percentage",
+      "threshold": 98.0,
+      "unit": "percent",
+      "type": "lower_bound",
+      "prometheus_metrics": ["http_requests_total"],
+      "calculation": "(2xx + 3xx) / total_requests * 100",
+      "description": "HTTP success rate should be at least 98%"
+    },
+    {
+      "metric": "error_rate",
+      "kind": "percentage",
+      "threshold": 1.0,
+      "unit": "percent",
+      "type": "upper_bound",
+      "prometheus_metrics": ["http_requests_total"],
+      "calculation": "(4xx + 5xx) / total_requests * 100",
+      "description": "HTTP error rate should be under 1%"
+    }
+  ],
+  "validation_rules": {
+    "fallback_taxonomy": {
+      "description": "Validate fallback reason labels are within enumerated taxonomy",
+      "valid_reasons": [
+        "http_timeout",
+        "http_error",
+        "message_timeout",
+        "message_error",
+        "cache_miss",
+        "circuit_breaker"
+      ]
+    },
+    "effective_fallback_calculation": {
+      "description": "When COUNT_CACHE_MISS_AS_FALLBACK=false, effective = raw - cache_miss",
+      "default_mode": "COUNT_CACHE_MISS_AS_FALLBACK=false"
+    }
+  },
+  "percentile_sources": {
+    "histogram_metrics": [
+      "metasheet_plugin_reload_duration_seconds",
+      "metasheet_snapshot_restore_duration_seconds",
+      "metasheet_snapshot_create_duration_seconds"
+    ],
+    "calculation_method": "parse histogram buckets and calculate p50/p95/p99 from cumulative distribution"
+  }
+}

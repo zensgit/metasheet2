@@ -10,7 +10,7 @@
 ## Prerequisites
 
 ### ✅ Completed (Ready)
-- [x] Phase 5 scripts verified present (11 scripts found)
+- [x] Phase 5 scripts verified present (13 scripts found)
 - [x] Environment template created (`.env.phase5.template`)
 - [x] Environment template enhanced with comprehensive SLO targets (2025-11-24)
 - [x] Pre-flight validation script created (`phase5-verify-preconditions.sh`)
@@ -52,6 +52,34 @@
 - ✅ `scripts/phase5-completion.sh` - Completion tasks
 - ✅ `scripts/phase5-demo-conclusion.sh` - Demo conclusion
 - ✅ `scripts/phase5-partial-summary.sh` - Partial summary
+
+---
+
+## Metrics Schema (CSV v3)
+
+Header (CSV v3):
+```
+timestamp,http_success_rate,p50_latency,p90_latency,p95_latency,p99_latency,raw_fallback_ratio,effective_fallback_ratio,error_rate,error_rate_4xx,error_rate_5xx,cpu_percent,rss_mb,request_rate,raw_fallback_total,effective_fallback_total,fallback_http,fallback_message,fallback_cache,http_adapter_ops,message_bus_rpc_attempts,cache_get_attempts,fb_http_ratio,fb_message_ratio,fb_cache_ratio,plugin_reload_success,plugin_reload_failure,snapshot_create_success,snapshot_create_failure,snapshot_restore_success,snapshot_restore_failure,cache_hit_rate,plugin_reload_p95,plugin_reload_p99,plugin_reload_success_rate,snapshot_operation_p95,snapshot_operation_p99,snapshot_success_rate,cache_hits_raw,cache_misses_raw,sample_num
+```
+
+Key Columns:
+| Column | Description |
+|--------|-------------|
+| raw_fallback_ratio | Raw fallback ratio (includes cache misses; basis for visibility only) |
+| effective_fallback_ratio | Effective fallback ratio (excludes cache misses when `COUNT_CACHE_MISS_AS_FALLBACK=false`) |
+| cache_hit_rate | Cache hits / (hits + misses) |
+| plugin_reload_p95/p99 | Plugin reload operation latency percentiles |
+| snapshot_operation_p95/p99 | Snapshot create/restore latency percentiles |
+| plugin_reload_success_rate | plugin reload success percentage |
+| snapshot_success_rate | (create + restore success) / all snapshot ops |
+| cache_hits_raw / cache_misses_raw | Raw counters used to compute global cache hit rate (preferred over per-sample average) |
+| sample_num | Sequential sample index (1..N) |
+
+Success Rate Definition: only 2xx/3xx considered successful; 4xx/5xx excluded. "NA" is emitted when TOTAL_REQUESTS=0 for the interval.
+
+NA Handling Policy: NA values are neutral (do not auto-fail SLO); production Go/No-Go requires metrics to be non-NA for all mandatory SLO categories (success rate, latency P95/P99, effective fallback, error, memory, cache hit).
+
+---
 
 ---
 
@@ -250,12 +278,21 @@ COUNT_CACHE_MISS_AS_FALLBACK=true \
 ### Technical Metrics
 - [ ] Production baseline collected: ≥12 samples over ≥2 hours
 - [ ] Extended validation: ≥4 samples over ≥1 hour
-- [ ] All 6 core Prometheus metrics captured
-- [ ] **Latency**: P95 < 150ms (warning), P99 < 250ms (critical)
-- [ ] **Memory**: RSS < 500MB average
-- [ ] **Cache Performance**: Hit rate > 80%
-- [ ] **Success Rates**: Plugin reload > 95%, Snapshot operations > 99%
-- [ ] **Error Rate**: < 1% overall
+- [ ] Core Metrics (enumerated 8 now):
+  1. HTTP Success Rate
+  2. Latency P95 / P99
+  3. Raw Fallback Ratio
+  4. Effective Fallback Ratio (cache misses excluded when COUNT_CACHE_MISS_AS_FALLBACK=false)
+  5. Error Rate (overall + 4xx/5xx split)
+  6. RSS Memory Usage
+  7. Cache Hit Rate (hits / (hits + misses))
+  8. Plugin & Snapshot Success Rates
+- [ ] **Latency**: P95 ≤ 150ms, P99 ≤ 250ms
+- [ ] **Memory**: RSS ≤ 500MB average
+- [ ] **Cache Performance**: Hit rate ≥ 80%
+- [ ] **Success Rates**: Plugin reload ≥ 95%, Snapshot operations ≥ 99%
+- [ ] **Error Rate**: ≤ 1% overall
+- [ ] **Effective Fallback**: ≤ 5% (cache misses excluded)
 
 ### Documentation
 - [ ] Production report generated with all sections
@@ -316,8 +353,23 @@ COUNT_CACHE_MISS_AS_FALLBACK=true \
 
 ### Production Load Impact
 - **Mitigation**: Conservative load parameters (rate=80, concurrency=20)
-- **Monitoring**: Watch for error rate spikes in production metrics
-- **Circuit Breaker**: Stop immediately if error rate > 2%
+- **Monitoring**: Watch error rate and effective fallback (exclude cache misses) for spikes
+- **Circuit Breaker**: Stop immediately if error rate > 2% or effective fallback > 8%
+
+### Raw vs Effective Fallback Definition
+- Raw Fallback: All recorded fallback events (including cache misses if flag true)
+- Effective Fallback: Degradation events excluding pure cache misses when `COUNT_CACHE_MISS_AS_FALLBACK=false`
+- Purpose: Prevent normal cache cold misses from inflating degradation metrics
+
+### Cache Hit Rate Calculation
+- Metics: `cache_hits_total`, `cache_miss_total`
+- Formula: hits / (hits + misses)
+- Target: ≥ `CACHE_HIT_RATE_TARGET` (env, default 80%)
+
+### Plugin & Snapshot Success Rates
+- Plugin Success Rate: success / (success + failure) from `metasheet_plugin_reload_total`
+- Snapshot Success Rate: (create_success + restore_success) / (all snapshot ops) from snapshot metrics
+- Latency Percentiles (if available): histogram buckets parsed for p95/p99 on reload and snapshot operations
 
 ### Credential Security
 - **Mitigation**: Store JWT in `.env.phase5` (gitignored)

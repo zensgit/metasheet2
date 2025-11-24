@@ -10,7 +10,7 @@
 
 | Category | Status | Details |
 |----------|--------|---------|
-| **Scripts** | ✅ Ready | 11 Phase 5 scripts verified present |
+| **Scripts** | ✅ Ready | 13 Phase 5 scripts verified present |
 | **Environment** | ✅ Ready | Template created, needs production values |
 | **Documentation** | ✅ Ready | Preparation checklist complete |
 | **Directory Structure** | ✅ Ready | Working directories created |
@@ -22,7 +22,7 @@
 ## Preparation Checklist Status
 
 ### ✅ Completed Today (2025-11-22)
-- [x] Verified all Phase 5 scripts exist (11 scripts)
+- [x] Verified all Phase 5 scripts exist (13 scripts)
 - [x] Created `.env.phase5.template` with all required variables
 - [x] Created `final-artifacts/phase5-prep/` directory
 - [x] Created `docs/phase5/` directory
@@ -45,7 +45,7 @@
 
 ## Phase 5 Scripts Inventory
 
-**Total**: 11 scripts verified present
+**Total**: 13 scripts verified present (including new metrics parsing capabilities)
 
 ### Core Execution (3 scripts)
 1. ✅ `phase5-run-production-baseline.sh` - Main orchestrator
@@ -81,9 +81,12 @@
 - `ENABLE_FALLBACK_TEST=false`
 
 ### Performance Targets
-- `MEMORY_SLO_TARGET=500`
-- `P95_LATENCY_TARGET=150`
-- `P99_LATENCY_TARGET=250`
+- `MEMORY_SLO_TARGET=500` (MB RSS)
+- `P95_LATENCY_TARGET=150` (ms)
+- `P99_LATENCY_TARGET=250` (ms)
+- `CACHE_HIT_RATE_TARGET=80` (%)
+- `PLUGIN_RELOAD_SUCCESS_RATE_TARGET=95` (%)
+- `SNAPSHOT_SUCCESS_RATE_TARGET=99` (%)
 
 ### Load Parameters
 - `LOAD_SAMPLES=12`
@@ -284,6 +287,20 @@ RESULT_DIR=$(ls -td results/phase5-prod-* | head -1)
 ```
 
 ---
+
+## Core Metrics Enumerated
+1. HTTP Success Rate
+2. Latency (P50/P90/P95/P99)
+3. Raw Fallback Ratio
+4. Effective Fallback Ratio (excludes cache misses)
+5. Error Rate (overall + 4xx/5xx)
+6. RSS Memory
+7. Cache Hit Rate (hits/(hits+misses))
+8. Plugin Reload Success Rate & Snapshot Success Rate
+
+## Raw vs Effective Fallback
+- Raw: All fallback events including cache misses if flag true.
+- Effective: Excludes cache misses when `COUNT_CACHE_MISS_AS_FALLBACK=false`.
 
 **Preparation Status**: ✅ 100% Complete
 **Next Milestone**: Sprint 2 Decision (2025-11-22 22:28 CST)

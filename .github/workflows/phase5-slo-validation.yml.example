@@ -1,0 +1,186 @@
+name: Phase 5 SLO Validation
+
+# This is an example workflow for Phase 5 SLO validation
+# Copy to .github/workflows/phase5-slo-validation.yml and customize as needed
+
+on:
+  # Run on every push to main
+  push:
+    branches:
+      - main
+
+  # Run on pull requests
+  pull_request:
+    branches:
+      - main
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+  # Run nightly at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  slo-validation:
+    runs-on: ubuntu-latest
+
+    services:
+      # PostgreSQL service for backend
+      postgres:
+        image: quay.io/enterprisedb/postgresql:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: metasheet
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable corepack / setup pnpm
+        run: |
+          corepack enable
+          pnpm -v || npm i -g pnpm@8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+        run: |
+          pnpm -F @metasheet/core-backend db:migrate
+
+      - name: Seed RBAC for admin user
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          SEED_USER_ID: ci-admin
+        run: |
+          cd packages/core-backend
+          npx tsx src/seeds/seed-rbac.ts
+
+      - name: Start backend server
+        env:
+          HOST: 127.0.0.1
+          PORT: 8900
+          JWT_SECRET: 'ci-test-secret'
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          SAFETY_GUARD_ENABLED: 'true'
+          IDEMPOTENCY_ENABLED: 'true'
+          RATE_LIMIT_ENABLED: 'true'
+        run: |
+          cd packages/core-backend
+          npm run dev > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+
+      - name: Wait for server health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS "http://127.0.0.1:8900/health" >/dev/null 2>&1; then
+              echo "✅ Server is healthy"
+              exit 0
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 2
+          done
+          echo "❌ Server health check timeout"
+          tail -50 /tmp/server.log
+          exit 1
+
+      - name: Run Phase 5 SLO Validation
+        id: slo_validation
+        env:
+          METRICS_URL: http://127.0.0.1:8900/metrics/prom
+        run: |
+          ./scripts/phase5-ci-validate.sh "$METRICS_URL"
+        continue-on-error: true
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-slo-validation-${{ github.run_id }}
+          path: |
+            /tmp/ci-validation-*.json
+            /tmp/ci-report-*.md
+            /tmp/server.log
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('ci-report-') && f.endsWith('.md'));
+
+            if (reportFiles.length > 0) {
+              const report = fs.readFileSync(`/tmp/${reportFiles[0]}`, 'utf8');
+              const body = `## Phase 5 SLO Validation Results\n\n${report}`;
+
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }
+
+      - name: Fail if SLO validation failed
+        if: steps.slo_validation.outcome == 'failure'
+        run: |
+          echo "❌ SLO validation failed"
+          exit 1
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/server.pid ]; then
+            kill $(cat /tmp/server.pid) || true
+          fi
+
+  # Optional: Create GitHub Issue on failure
+  create-issue-on-failure:
+    needs: slo-validation
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue for SLO violation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🚨 Nightly SLO Validation Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            ## SLO Validation Failure
+
+            The nightly SLO validation job has failed.
+
+            **Run**: ${{ github.run_id }}
+            **Workflow**: ${{ github.workflow }}
+            **Repository**: ${{ github.repository }}
+
+            Please investigate the violations and take corrective action.
+
+            [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `;
+
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['slo-violation', 'phase5', 'ops']
+            });
