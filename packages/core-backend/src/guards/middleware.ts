@@ -34,7 +34,7 @@ export interface SafetyMiddlewareOptions {
  * ```
  */
 export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const safetyGuard = getSafetyGuard();
 
     // Extract initiator from request
@@ -58,7 +58,7 @@ export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
     };
 
     // Check operation
-    const result = safetyGuard.checkOperation(context);
+    const result = await safetyGuard.checkOperation(context);
 
     // Store in request for downstream handlers
     req.safetyContext = {
