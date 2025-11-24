@@ -1,0 +1,137 @@
+name: Sprint2 Staging Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_token:
+        description: "Staging API Token"
+        required: false
+        default: ""
+      base_url:
+        description: "Staging Base URL (e.g., https://staging.example.com)"
+        required: false
+        default: ""
+      rounds:
+        description: "Performance rounds (default 60)"
+        required: false
+        default: "60"
+      pg_host:
+        description: "PGHOST for schema dump (optional)"
+        required: false
+        default: ""
+      pg_port:
+        description: "PGPORT for schema dump (optional)"
+        required: false
+        default: "5432"
+      pg_user:
+        description: "PGUSER for schema dump (optional)"
+        required: false
+        default: ""
+      pg_password:
+        description: "PGPASSWORD for schema dump (optional)"
+        required: false
+        default: ""
+      pg_database:
+        description: "PGDATABASE for schema dump (optional)"
+        required: false
+        default: "metasheet_v2"
+
+jobs:
+  feature-validation:
+    if: ${{ inputs.api_token != '' && inputs.base_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8
+      - name: Run staging validation
+        env:
+          API_TOKEN: ${{ inputs.api_token }}
+          BASE_URL: ${{ inputs.base_url }}
+        run: |
+          chmod +x scripts/verify-sprint2-staging.sh
+          bash scripts/verify-sprint2-staging.sh "$API_TOKEN" "$BASE_URL"
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-evidence
+          path: docs/sprint2/evidence
+
+  performance-baseline:
+    if: ${{ inputs.api_token != '' && inputs.base_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8
+      - name: Run performance baseline
+        env:
+          API_TOKEN: ${{ inputs.api_token }}
+          BASE_URL: ${{ inputs.base_url }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          chmod +x scripts/performance-baseline-test.sh
+          bash scripts/performance-baseline-test.sh "$API_TOKEN" "$BASE_URL"
+      - name: Enforce latency thresholds
+        run: |
+          summary=$(ls -t docs/sprint2/performance/*.summary.json | head -n1)
+          echo "Using summary: $summary"
+          P95=$(jq -r '.p95' "$summary")
+          P99=$(jq -r '.p99' "$summary")
+          echo "P95=$P95, P99=$P99"
+          if [ "$P95" -gt 150 ] || [ "$P99" -gt 250 ]; then
+            echo "Latency thresholds exceeded"; exit 1; fi
+      - name: Upload performance results
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-performance
+          path: docs/sprint2/performance
+
+  schema-snapshot:
+    if: ${{ inputs.pg_host != '' && inputs.pg_user != '' && inputs.pg_password != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Dump schema
+        env:
+          PGHOST: ${{ inputs.pg_host }}
+          PGPORT: ${{ inputs.pg_port }}
+          PGUSER: ${{ inputs.pg_user }}
+          PGPASSWORD: ${{ inputs.pg_password }}
+          PGDATABASE: ${{ inputs.pg_database }}
+          DB_NAME: ${{ inputs.pg_database }}
+        run: |
+          chmod +x scripts/dump-sprint2-schema.sh
+          bash scripts/dump-sprint2-schema.sh
+  promql-smoke:
+    if: ${{ inputs.api_token != '' && inputs.base_url != '' && inputs.prom_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PromQL smoke check
+        env:
+          PROM_URL: ${{ inputs.prom_url }}
+          PROM_AUTH: ${{ inputs.prom_auth }}
+        run: |
+          chmod +x scripts/promql-smoke-check.sh
+          bash scripts/promql-smoke-check.sh
+      - name: Upload promql summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-promql
+          path: docs/sprint2/evidence/promql-summary.json
+      - name: Upload schema snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-schema
+          path: docs/sprint2/performance/schema-sprint2.txt

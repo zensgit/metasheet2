@@ -1,0 +1,8 @@
+# Placeholder for Grafana Latency Dashboard Screenshot
+# 
+# Will be replaced with actual screenshot showing:
+# - P50/P95/P99 latency metrics over time
+# - Target thresholds: P95 ≤150ms, P99 ≤250ms
+# - Current performance baseline
+# 
+# Status: PENDING - Requires staging credentials

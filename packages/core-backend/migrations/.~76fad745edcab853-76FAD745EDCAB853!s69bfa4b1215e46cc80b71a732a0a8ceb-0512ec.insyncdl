@@ -1,0 +1,41 @@
+-- 031_add_optimistic_locking_and_audit.sql
+-- 增加审批实例乐观锁字段与通用审计日志表
+
+-- 审批实例：添加 version 字段（如表存在）
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_name = 'approval_instances'
+  ) THEN
+    BEGIN
+      ALTER TABLE approval_instances
+        ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 0;
+    EXCEPTION WHEN duplicate_column THEN
+      -- 忽略
+      NULL;
+    END;
+    CREATE INDEX IF NOT EXISTS idx_approval_instances_version ON approval_instances(version);
+  END IF;
+END$$;
+
+-- 审计日志表
+CREATE TABLE IF NOT EXISTS operation_audit_logs (
+  id BIGSERIAL PRIMARY KEY,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor_id TEXT NULL,
+  actor_type TEXT NOT NULL,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NULL,
+  request_id TEXT NULL,
+  ip INET NULL,
+  user_agent TEXT NULL,
+  meta JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_time ON operation_audit_logs(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON operation_audit_logs(actor_id);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON operation_audit_logs(resource_type, resource_id);
+

@@ -1,0 +1,87 @@
+#!/usr/bin/env node
+/*
+ Minimal contract smoke: validates response shapes for key endpoints.
+ Non-blocking by default in CI; exits 0 on success, 1 on first failure.
+*/
+
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8900'
+const TOKEN = process.env.TOKEN || ''
+
+function authHeaders() {
+  return TOKEN ? { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
+}
+
+function assert(cond, msg) {
+  if (!cond) throw new Error(msg)
+}
+
+async function jfetch(path, opts = {}) {
+  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders(), ...opts })
+  const text = await res.text()
+  let body = null
+  try { body = text ? JSON.parse(text) : null } catch { body = text }
+  return { status: res.status, body }
+}
+
+async function main() {
+  const report = { ok: true, checks: [] }
+  const push = (name, ok, info) => report.checks.push({ name, ok, info })
+
+  try {
+    // 1) Approvals: read → approve success → approve conflict
+    const r1 = await jfetch('/api/approvals/demo-1')
+    assert(r1.status === 200 && r1.body && r1.body.ok === true, 'approvals read should be ok=true')
+    const v = (r1.body.data && r1.body.data.version) || 0
+    push('approvals:get', true, { version: v })
+
+    const r2 = await jfetch('/api/approvals/demo-1/approve', { method: 'POST', body: JSON.stringify({ version: v }) })
+    assert(r2.status === 200 && r2.body.ok === true, 'approve should succeed with current version')
+    push('approvals:approve:success', true, {})
+
+    const r3 = await jfetch('/api/approvals/demo-1/approve', { method: 'POST', body: JSON.stringify({ version: v }) })
+    assert(r3.status === 409 && r3.body && r3.body.ok === false, 'approve repeat should 409')
+    push('approvals:approve:conflict', true, {})
+
+    // 2) Audit logs: paged query
+    const r4 = await jfetch('/api/audit-logs?page=1&pageSize=10')
+    assert(r4.status === 200 && r4.body.ok === true, 'audit logs should be ok')
+    assert(r4.body.data && Array.isArray(r4.body.data.items), 'audit logs items array expected')
+    push('audit-logs:list', true, { count: r4.body.data.items.length })
+
+    // 3) Permissions: list → grant → list → revoke → list
+    const userId = 'u1'
+    const perm = 'contract:test'
+    const p1 = await jfetch(`/api/permissions?userId=${encodeURIComponent(userId)}`)
+    assert(p1.status === 200 && p1.body.ok === true, 'permissions list ok')
+    push('permissions:list', true, { before: (p1.body.data || {}).permissions || [] })
+
+    const g = await jfetch('/api/permissions/grant', { method: 'POST', body: JSON.stringify({ userId, permission: perm }) })
+    assert(g.status === 200 && g.body.ok === true, 'grant ok')
+    const p2 = await jfetch(`/api/permissions?userId=${encodeURIComponent(userId)}`)
+    assert(p2.status === 200 && p2.body.ok === true, 'permissions list after grant ok')
+    push('permissions:grant+list', true, { after: (p2.body.data || {}).permissions || [] })
+
+    const rv = await jfetch('/api/permissions/revoke', { method: 'POST', body: JSON.stringify({ userId, permission: perm }) })
+    assert(rv.status === 200 && rv.body.ok === true, 'revoke ok')
+    const p3 = await jfetch(`/api/permissions?userId=${encodeURIComponent(userId)}`)
+    assert(p3.status === 200 && p3.body.ok === true, 'permissions list after revoke ok')
+    push('permissions:revoke+list', true, { after: (p3.body.data || {}).permissions || [] })
+
+    // 4) Permission cache status
+    const cs = await jfetch('/api/permissions/cache-status')
+    assert(cs.status === 200 && cs.body.ok === true, 'cache-status ok')
+    assert(typeof cs.body.data.cacheSize === 'number', 'cacheSize number')
+    push('permissions:cache-status', true, cs.body.data)
+
+    console.log(JSON.stringify(report, null, 2))
+    process.exit(0)
+  } catch (e) {
+    report.ok = false
+    report.error = String(e && e.message || e)
+    console.log(JSON.stringify(report, null, 2))
+    process.exit(1)
+  }
+}
+
+main()
+

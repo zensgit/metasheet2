@@ -460,6 +460,82 @@ export interface QueryCacheTable {
 }
 
 // ============================================
+// SNAPSHOT SYSTEM TABLES
+// ============================================
+
+export interface SnapshotsTable {
+  id: Generated<UUID>
+  view_id: UUID
+  name: string
+  description: string | null
+  version: number
+  created_by: UUID
+  snapshot_type: 'manual' | 'auto' | 'pre_migration'
+  metadata: Json
+  is_locked: boolean
+  parent_snapshot_id: UUID | null
+  created_at: Generated<Timestamp>
+  expires_at: Timestamp | null
+  // Sprint 2: Snapshot Protection
+  tags: string[]
+  protection_level: 'normal' | 'protected' | 'critical'
+  release_channel: 'stable' | 'canary' | 'beta' | 'experimental' | null
+}
+
+export interface SnapshotItemsTable {
+  id: Generated<UUID>
+  snapshot_id: UUID
+  item_type: string
+  item_id: UUID
+  data: Json
+  checksum: string | null
+  created_at: Generated<Timestamp>
+}
+
+export interface SnapshotRestoreLogTable {
+  id: Generated<UUID>
+  snapshot_id: UUID
+  view_id: UUID
+  restored_by: UUID
+  restore_type: 'full' | 'partial' | 'selective'
+  items_restored: number
+  status: 'success' | 'failed' | 'partial'
+  error_message: string | null
+  metadata: Json
+  created_at: Generated<Timestamp>
+}
+
+export interface ProtectionRulesTable {
+  id: Generated<UUID>
+  rule_name: string
+  description: string | null
+  target_type: 'snapshot' | 'plugin' | 'schema' | 'workflow'
+  conditions: Json
+  effects: Json
+  priority: number
+  is_active: boolean
+  version: number
+  created_by: UUID
+  created_at: Generated<Timestamp>
+  updated_at: Generated<Timestamp>
+  last_evaluated_at: Timestamp | null
+  evaluation_count: number
+}
+
+export interface RuleExecutionLogTable {
+  id: Generated<UUID>
+  rule_id: UUID
+  rule_version: number
+  entity_type: string
+  entity_id: UUID
+  operation: string
+  matched: boolean
+  effect_applied: Json | null
+  execution_time_ms: number | null
+  executed_at: Generated<Timestamp>
+}
+
+// ============================================
 // APPROVAL SYSTEM TABLES
 // ============================================
 
@@ -942,6 +1018,13 @@ export interface Database {
   // Approvals
   approval_instances: ApprovalInstancesTable
   approval_records: ApprovalRecordsTable
+
+  // Snapshots & Protection
+  snapshots: SnapshotsTable
+  snapshot_items: SnapshotItemsTable
+  snapshot_restore_log: SnapshotRestoreLogTable
+  protection_rules: ProtectionRulesTable
+  rule_execution_log: RuleExecutionLogTable
 
   // Files
   files: FilesTable

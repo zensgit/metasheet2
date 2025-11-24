@@ -1,0 +1,21 @@
+# HELP metasheet_snapshot_create_total Total snapshot create operations
+# TYPE metasheet_snapshot_create_total counter
+# HELP metasheet_snapshot_restore_total Total snapshot restore operations
+# TYPE metasheet_snapshot_restore_total counter
+# HELP metasheet_snapshot_operation_duration_seconds Snapshot operation duration in seconds
+# TYPE metasheet_snapshot_operation_duration_seconds histogram
+# HELP metasheet_snapshot_cleanup_total Total snapshot cleanup operations
+# TYPE metasheet_snapshot_cleanup_total counter
+# HELP metasheet_snapshot_tags_total Total count of snapshot tags usage
+# TYPE metasheet_snapshot_tags_total counter
+# HELP metasheet_snapshot_protection_level Snapshot protection level distribution
+# TYPE metasheet_snapshot_protection_level gauge
+# HELP metasheet_snapshot_release_channel Snapshot release channel distribution
+# TYPE metasheet_snapshot_release_channel gauge
+# HELP metasheet_protection_rule_evaluations_total Total protection rule evaluations
+# TYPE metasheet_protection_rule_evaluations_total counter
+# HELP metasheet_protection_rule_blocks_total Total operations blocked by protection rules
+# TYPE metasheet_protection_rule_blocks_total counter
+# HELP metasheet_snapshot_protected_skipped_total Total protected snapshots skipped during cleanup
+# TYPE metasheet_snapshot_protected_skipped_total counter
+metasheet_snapshot_protected_skipped_total 0

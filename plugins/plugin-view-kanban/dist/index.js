@@ -1,5 +1,5 @@
 // Minimal build artifact for tests
-module.exports = {
+if (typeof module !== 'undefined' && module.exports) module.exports = {
   activate: async (context) => {
     if (context && context.api && context.api.http && typeof context.api.http.addRoute === 'function') {
       // Boards list route

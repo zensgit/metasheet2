@@ -1,0 +1,152 @@
+name: SafetyGuard E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'packages/core-backend/src/guards/**'
+      - 'packages/core-backend/src/routes/admin-routes.ts'
+      - 'scripts/test-safety-guard-e2e.sh'
+      - '.github/workflows/safety-guard-e2e.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/core-backend/src/guards/**'
+      - 'packages/core-backend/src/routes/admin-routes.ts'
+      - 'scripts/test-safety-guard-e2e.sh'
+      - '.github/workflows/safety-guard-e2e.yml'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: quay.io/enterprisedb/postgresql:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: metasheet
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable corepack / setup pnpm
+        run: |
+          corepack enable
+          pnpm -v || npm i -g pnpm@8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+        run: |
+          pnpm -F @metasheet/core-backend db:list || true
+          pnpm -F @metasheet/core-backend db:migrate
+
+      - name: Seed RBAC for test user
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          SEED_USER_ID: test-admin
+        run: |
+          cd packages/core-backend
+          npx tsx src/seeds/seed-rbac.ts
+          cd ../..
+
+      - name: Start backend
+        env:
+          HOST: 127.0.0.1
+          PORT: 8900
+          JWT_SECRET: 'e2e-test-secret'
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          SAFETY_GUARD_ENABLED: 'true'
+          IDEMPOTENCY_ENABLED: 'true'
+          RATE_LIMIT_ENABLED: 'true'
+        run: |
+          nohup pnpm -F @metasheet/core-backend dev >/tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+
+      - name: Wait for health (with retries)
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          for i in {1..90}; do
+            if curl -fsS "$API/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Health never ready"; tail -n 100 /tmp/server.log; exit 1
+
+      - name: Run SafetyGuard E2E tests
+        env:
+          BASE_URL: http://127.0.0.1:8900
+          JWT_SECRET: 'e2e-test-secret'
+        run: |
+          echo "Running SafetyGuard E2E test suite..."
+          bash scripts/test-safety-guard-e2e.sh
+
+      - name: Verify SafetyGuard metrics
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          curl -fsS "$API/metrics/prom" | tee /tmp/metrics.txt
+          echo '--- SafetyGuard Metrics ---'
+          grep -E 'metasheet_(dangerous_operations|confirmation_requests|blocked_operations|idempotency|rate_limit)' /tmp/metrics.txt || echo 'SafetyGuard metrics check'
+          echo '----------------------------'
+
+          # Assert that SafetyGuard metrics were recorded
+          if ! grep -q 'metasheet_dangerous_operations_total' /tmp/metrics.txt; then
+            echo "::error::SafetyGuard dangerous operations metric not found"
+            exit 1
+          fi
+
+          if ! grep -q 'metasheet_confirmation_requests_total' /tmp/metrics.txt; then
+            echo "::error::SafetyGuard confirmation requests metric not found"
+            exit 1
+          fi
+
+          if ! grep -q 'metasheet_idempotency_hits_total' /tmp/metrics.txt; then
+            echo "::error::Idempotency hits metric not found"
+            exit 1
+          fi
+
+          echo "✓ All SafetyGuard metrics present"
+
+      - name: Collect diagnostics snapshot
+        if: always()
+        run: |
+          echo "=== Health Snapshot ===" > /tmp/diagnostics.txt
+          curl -fsS http://127.0.0.1:8900/health >> /tmp/diagnostics.txt 2>&1 || echo "Health check failed" >> /tmp/diagnostics.txt
+          echo "" >> /tmp/diagnostics.txt
+          echo "=== SafetyGuard Status ===" >> /tmp/diagnostics.txt
+          curl -fsS http://127.0.0.1:8900/api/admin/safety/status >> /tmp/diagnostics.txt 2>&1 || echo "Status check failed" >> /tmp/diagnostics.txt
+          echo "" >> /tmp/diagnostics.txt
+          echo "=== Last 200 Server Logs ===" >> /tmp/diagnostics.txt
+          tail -200 /tmp/server.log >> /tmp/diagnostics.txt 2>&1 || echo "No server logs" >> /tmp/diagnostics.txt
+
+      - name: Upload SafetyGuard artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-guard-e2e-artifacts
+          path: |
+            /tmp/server.log
+            /tmp/metrics.txt
+            /tmp/diagnostics.txt
+          retention-days: 7

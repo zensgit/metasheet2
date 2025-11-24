@@ -1,0 +1,14 @@
+-- 034_create_spreadsheets.sql
+
+CREATE TABLE IF NOT EXISTS spreadsheets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  owner_id TEXT NULL,
+  deleted_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_spreadsheets_deleted ON spreadsheets(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_spreadsheets_owner ON spreadsheets(owner_id);
+

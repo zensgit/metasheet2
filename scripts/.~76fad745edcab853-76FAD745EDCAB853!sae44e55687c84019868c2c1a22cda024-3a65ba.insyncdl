@@ -1,0 +1,282 @@
+#!/bin/bash
+# MetaSheet V2 - macOS M4 最优开发环境启动脚本
+# 数据库在 Docker，API 和前端本地运行
+
+set -e
+
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# 检查系统
+check_system() {
+    echo -e "${CYAN}=== 系统检查 ===${NC}"
+
+    # 检查是否为 M4/Apple Silicon
+    if [[ $(uname -m) == "arm64" ]]; then
+        echo -e "${GREEN}✓ Apple Silicon (M4) 检测到${NC}"
+    else
+        echo -e "${YELLOW}⚠ 非 Apple Silicon 架构: $(uname -m)${NC}"
+    fi
+
+    # 检查 Node.js
+    if command -v node &> /dev/null; then
+        NODE_VERSION=$(node -v)
+        echo -e "${GREEN}✓ Node.js $NODE_VERSION${NC}"
+    else
+        echo -e "${RED}✗ Node.js 未安装${NC}"
+        echo "  请运行: brew install node"
+        exit 1
+    fi
+
+    # 检查 pnpm
+    if command -v pnpm &> /dev/null; then
+        echo -e "${GREEN}✓ pnpm $(pnpm -v)${NC}"
+    else
+        echo -e "${YELLOW}⚠ pnpm 未安装，使用 npm${NC}"
+    fi
+
+    # 检查 Docker
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        echo -e "${GREEN}✓ Docker 运行中${NC}"
+    else
+        echo -e "${RED}✗ Docker Desktop 未运行${NC}"
+        echo "  请启动 Docker Desktop"
+        exit 1
+    fi
+}
+
+# 启动数据库
+start_database() {
+    echo -e "\n${CYAN}=== 启动数据库服务 ===${NC}"
+    cd "$PROJECT_ROOT"
+
+    # 使用精简版 docker-compose
+    docker-compose -f docker-compose.dev.yml up -d
+
+    # 等待数据库就绪
+    echo -n "等待 PostgreSQL 就绪"
+    for i in {1..30}; do
+        if docker-compose -f docker-compose.dev.yml exec -T postgres pg_isready -U metasheet &> /dev/null; then
+            echo -e " ${GREEN}✓${NC}"
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+}
+
+# 设置环境变量
+setup_env() {
+    echo -e "\n${CYAN}=== 配置环境变量 ===${NC}"
+
+    # 后端环境变量
+    cat > "$PROJECT_ROOT/packages/core-backend/.env.development" << EOF
+NODE_ENV=development
+PORT=3000
+DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-key-$(openssl rand -hex 16)
+CORS_ORIGIN=http://localhost:8899
+EOF
+    echo -e "${GREEN}✓ 后端 .env.development 已创建${NC}"
+
+    # 前端环境变量
+    cat > "$PROJECT_ROOT/apps/web/.env.development" << EOF
+VITE_API_BASE_URL=http://localhost:3000
+VITE_WS_URL=ws://localhost:3000
+EOF
+    echo -e "${GREEN}✓ 前端 .env.development 已创建${NC}"
+}
+
+# 安装依赖
+install_deps() {
+    echo -e "\n${CYAN}=== 安装依赖 ===${NC}"
+    cd "$PROJECT_ROOT"
+
+    if command -v pnpm &> /dev/null; then
+        pnpm install
+    else
+        npm install
+    fi
+    echo -e "${GREEN}✓ 依赖安装完成${NC}"
+}
+
+# 运行数据库迁移
+run_migrations() {
+    echo -e "\n${CYAN}=== 运行数据库迁移 ===${NC}"
+    cd "$PROJECT_ROOT/packages/core-backend"
+
+    if [ -d "migrations" ]; then
+        echo "执行迁移脚本..."
+        if command -v pnpm &> /dev/null; then
+            pnpm migrate || echo -e "${YELLOW}迁移命令未配置${NC}"
+        else
+            npm run migrate || echo -e "${YELLOW}迁移命令未配置${NC}"
+        fi
+    else
+        echo -e "${YELLOW}未找到迁移文件夹${NC}"
+    fi
+}
+
+# 启动后端
+start_backend() {
+    echo -e "\n${CYAN}=== 启动后端 API (端口 3000) ===${NC}"
+    cd "$PROJECT_ROOT/packages/core-backend"
+
+    # 终止已存在的进程
+    lsof -ti:3000 | xargs kill -9 2>/dev/null || true
+
+    # 启动后端
+    if command -v pnpm &> /dev/null; then
+        pnpm dev &
+    else
+        npm run dev &
+    fi
+
+    BACKEND_PID=$!
+    echo "后端 PID: $BACKEND_PID"
+
+    # 保存 PID 用于后续停止
+    echo $BACKEND_PID > /tmp/metasheet-backend.pid
+}
+
+# 启动前端
+start_frontend() {
+    echo -e "\n${CYAN}=== 启动前端 (端口 8899) ===${NC}"
+    cd "$PROJECT_ROOT/apps/web"
+
+    # 终止已存在的进程
+    lsof -ti:8899 | xargs kill -9 2>/dev/null || true
+
+    # 启动前端
+    if command -v pnpm &> /dev/null; then
+        pnpm dev &
+    else
+        npm run dev &
+    fi
+
+    FRONTEND_PID=$!
+    echo "前端 PID: $FRONTEND_PID"
+
+    # 保存 PID
+    echo $FRONTEND_PID > /tmp/metasheet-frontend.pid
+}
+
+# 停止所有服务
+stop_all() {
+    echo -e "\n${CYAN}=== 停止所有服务 ===${NC}"
+
+    # 停止本地服务
+    if [ -f /tmp/metasheet-backend.pid ]; then
+        kill $(cat /tmp/metasheet-backend.pid) 2>/dev/null || true
+        rm /tmp/metasheet-backend.pid
+    fi
+
+    if [ -f /tmp/metasheet-frontend.pid ]; then
+        kill $(cat /tmp/metasheet-frontend.pid) 2>/dev/null || true
+        rm /tmp/metasheet-frontend.pid
+    fi
+
+    # 停止 Docker 服务
+    cd "$PROJECT_ROOT"
+    docker-compose -f docker-compose.dev.yml down
+
+    echo -e "${GREEN}✓ 所有服务已停止${NC}"
+}
+
+# 显示状态
+show_status() {
+    echo -e "\n${BLUE}======================================${NC}"
+    echo -e "${BLUE}MetaSheet V2 开发环境已启动${NC}"
+    echo -e "${BLUE}======================================${NC}"
+    echo ""
+    echo -e "${GREEN}服务地址：${NC}"
+    echo -e "  前端: ${CYAN}http://localhost:8899${NC}"
+    echo -e "  API: ${CYAN}http://localhost:3000${NC}"
+    echo -e "  数据库: ${CYAN}postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2${NC}"
+    echo ""
+    echo -e "${YELLOW}提示：${NC}"
+    echo -e "  • 使用 ${CYAN}./scripts/dev-m4.sh stop${NC} 停止所有服务"
+    echo -e "  • 查看后端日志: ${CYAN}tail -f packages/core-backend/logs/*.log${NC}"
+    echo -e "  • 查看数据库日志: ${CYAN}docker-compose -f docker-compose.dev.yml logs postgres${NC}"
+    echo ""
+}
+
+# 主流程
+main() {
+    case "${1:-start}" in
+        start)
+            check_system
+            start_database
+            setup_env
+            install_deps
+            run_migrations
+            start_backend
+            start_frontend
+
+            # 等待服务启动
+            sleep 3
+
+            show_status
+
+            # 保持脚本运行并显示日志
+            echo -e "${YELLOW}按 Ctrl+C 停止所有服务${NC}"
+            wait
+            ;;
+
+        stop)
+            stop_all
+            ;;
+
+        restart)
+            stop_all
+            sleep 2
+            main start
+            ;;
+
+        status)
+            echo -e "${CYAN}=== 服务状态 ===${NC}"
+
+            # 检查数据库
+            if docker-compose -f docker-compose.dev.yml ps | grep -q "Up"; then
+                echo -e "${GREEN}✓ 数据库运行中${NC}"
+            else
+                echo -e "${RED}✗ 数据库未运行${NC}"
+            fi
+
+            # 检查后端
+            if lsof -i:3000 &> /dev/null; then
+                echo -e "${GREEN}✓ 后端 API 运行中 (端口 3000)${NC}"
+            else
+                echo -e "${RED}✗ 后端 API 未运行${NC}"
+            fi
+
+            # 检查前端
+            if lsof -i:8899 &> /dev/null; then
+                echo -e "${GREEN}✓ 前端运行中 (端口 8899)${NC}"
+            else
+                echo -e "${RED}✗ 前端未运行${NC}"
+            fi
+            ;;
+
+        *)
+            echo "用法: $0 {start|stop|restart|status}"
+            exit 1
+            ;;
+    esac
+}
+
+# 捕获 Ctrl+C
+trap stop_all INT
+
+# 运行主流程
+cd "$PROJECT_ROOT"
+main "$@"

@@ -1,57 +1,28 @@
 {
+  "manifestVersion": "2.0.0",
   "name": "plugin-telemetry-otel",
   "version": "1.0.0",
   "displayName": "OpenTelemetry 可观测性",
   "description": "提供 Metrics 和 Tracing 功能的 OpenTelemetry 插件，支持 Prometheus 导出",
-  "type": "service",
-  "main": {
-    "backend": "dist/index.js"
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
   },
-  "contributes": {
-    "services": [
-      {
-        "id": "telemetry-otel",
-        "name": "OpenTelemetry 服务",
-        "description": "提供系统级别的 Metrics 和 Tracing"
-      }
-    ],
-    "apiRoutes": [
-      {
-        "method": "GET",
-        "path": "/metrics",
-        "description": "Prometheus metrics 导出端点"
-      }
-    ]
-  },
-  "permissions": [
-    "system.metrics",
-    "system.tracing",
-    "http.intercept",
-    "api.register"
-  ],
-  "engines": {
+  "engine": {
     "metasheet": ">=2.0.0"
   },
-  "config": {
-    "enabled": {
-      "type": "boolean",
-      "default": false,
-      "description": "是否启用 OpenTelemetry (FEATURE_OTEL)"
+  "main": "dist/index.js",
+  "capabilities": {
+    "views": [],
+    "workflows": [],
+    "functions": []
+  },
+  "permissions": {
+    "database": {},
+    "http": {
+      "internal": true
     },
-    "metricsPort": {
-      "type": "number",
-      "default": 9464,
-      "description": "Prometheus metrics 导出端口"
-    },
-    "serviceName": {
-      "type": "string",
-      "default": "metasheet-v2",
-      "description": "服务名称（用于 tracing）"
-    },
-    "tracingSampleRate": {
-      "type": "number",
-      "default": 0.1,
-      "description": "Tracing 采样率 (0.0-1.0)"
-    }
-  }
+    "filesystem": {}
+  },
+  "license": "MIT"
 }

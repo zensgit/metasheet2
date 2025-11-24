@@ -1,0 +1,13 @@
+# metasheet-v2/scripts
+
+脚本与 CI 入口的占位：
+
+- `approval-concurrency-smoke.sh`：并发 approve 冒烟（期望成功≥1，冲突≥1）
+- `approval-reject-concurrency-smoke.sh`：并发 reject 冒烟
+- `approval-return-concurrency-smoke.sh`：并发 return 冒烟
+- `auth-smoke.js`：认证冒烟
+- `ci-seed-admin-and-login.sh`：CI 种子管理员与登录
+- `openapi-merge.js` / `openapi-validate.js`：OpenAPI 工具
+
+后续将从 v1 脚本迁移并适配 v2 路由与启动命令。
+

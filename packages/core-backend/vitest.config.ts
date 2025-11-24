@@ -6,6 +6,15 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Fix vite SSR transformation issues
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: ['test-db']
+        }
+      }
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],
@@ -35,20 +44,7 @@ export default defineConfig({
     // Better error handling and debugging
     reporter: ['verbose'],
     maxConcurrency: 1, // Reduce concurrency for stability
-    globalTeardown: async () => {
-      // Clean up test fixtures after all tests
-      const fixturesDir = path.join(__dirname, 'tests/fixtures/test-plugins')
-      try {
-        await fs.rm(fixturesDir, { recursive: true, force: true })
-      } catch {
-        // Ignore if doesn't exist
-      }
-
-      // Additional cleanup for potential resource leaks
-      if (global.gc) {
-        global.gc()
-      }
-    }
+    globalTeardown: './tests/globalTeardown.ts'
   },
   resolve: {
     alias: {

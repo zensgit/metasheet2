@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION=${1:-}
+if [ -z "$VERSION" ]; then
+  echo "Usage: $0 v2.0.0-alpha.X" >&2
+  exit 2
+fi
+
+ARTIFACT="metasheet-v2/packages/openapi/dist/combined.openapi.yml"
+if [ ! -f "$ARTIFACT" ]; then
+  echo "Artifact not found: $ARTIFACT. Build it first: pnpm -F @metasheet/openapi build" >&2
+  exit 3
+fi
+
+gh release create "$VERSION" -t "MetaSheet $VERSION" -n "See release notes" || true
+gh release upload "$VERSION" "$ARTIFACT"#metasheet-v2.openapi.yml --clobber
+echo "Uploaded OpenAPI artifact to release $VERSION"
+

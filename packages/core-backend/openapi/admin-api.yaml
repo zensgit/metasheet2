@@ -1,0 +1,1295 @@
+openapi: 3.0.3
+info:
+  title: MetaSheet Admin API
+  description: |
+    Administrative API for MetaSheet platform with SafetyGuard protection.
+
+    **SafetyGuard Integration**:
+    - Dangerous operations require confirmation tokens
+    - Rate limiting: 10 requests per minute per user
+    - Idempotency keys supported via `X-Idempotency-Key` header
+
+    **Risk Levels**:
+    - LOW: Basic validation, optional confirmation
+    - MEDIUM: Standard confirmation required
+    - HIGH: Double confirmation required
+    - CRITICAL: Maximum safeguards applied
+  version: 1.0.0
+  contact:
+    name: MetaSheet Team
+    email: plugins@metasheet.io
+
+servers:
+  - url: http://localhost:8900/api/admin
+    description: Local development server
+
+tags:
+  - name: SafetyGuard
+    description: SafetyGuard management endpoints
+  - name: Plugins
+    description: Plugin lifecycle management
+  - name: Snapshots
+    description: Snapshot management operations
+  - name: Snapshot Protection
+    description: Snapshot labeling and protection operations (Sprint 2)
+  - name: Protection Rules
+    description: Protection rule management and evaluation (Sprint 2)
+  - name: System
+    description: System maintenance operations
+  - name: Data
+    description: Bulk data operations
+
+paths:
+  /safety/status:
+    get:
+      tags:
+        - SafetyGuard
+      summary: Get SafetyGuard status
+      description: Returns SafetyGuard configuration and pending confirmations
+      operationId: getSafetyStatus
+      responses:
+        '200':
+          description: SafetyGuard status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyStatus'
+              example:
+                enabled: true
+                pendingConfirmations: 2
+                config:
+                  tokenExpirationSeconds: 300
+                  allowBypass: false
+
+  /safety/confirm:
+    post:
+      tags:
+        - SafetyGuard
+      summary: Confirm dangerous operation
+      description: |
+        Confirm a pending dangerous operation using its safety token.
+
+        **Rate Limited**: 10 requests per minute per user
+        **Idempotency**: Supports X-Idempotency-Key header
+      operationId: confirmSafetyOperation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmationRequest'
+            example:
+              token: "safety_token_abc123"
+              acknowledged: true
+              typedConfirmation: "DELETE ALL"
+      responses:
+        '200':
+          description: Operation confirmed successfully
+          headers:
+            X-Idempotency-Replayed:
+              schema:
+                type: string
+              description: 'true' if this is a cached response
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+              description: Remaining requests in current window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmationResponse'
+        '400':
+          description: Invalid confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Token not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /safety/enable:
+    post:
+      tags:
+        - SafetyGuard
+      summary: Enable SafetyGuard
+      description: Enables SafetyGuard protection for dangerous operations
+      operationId: enableSafetyGuard
+      responses:
+        '200':
+          description: SafetyGuard enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: "SafetyGuard enabled"
+
+  /safety/disable:
+    post:
+      tags:
+        - SafetyGuard
+      summary: Disable SafetyGuard
+      description: |
+        Disables SafetyGuard protection (requires confirmation).
+
+        **Risk Level**: LOW
+      operationId: disableSafetyGuard
+      responses:
+        '200':
+          description: SafetyGuard disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: "SafetyGuard disabled"
+                warning: "Safety checks are now bypassed"
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+  /plugins/{id}/reload:
+    post:
+      tags:
+        - Plugins
+      summary: Reload a single plugin
+      description: |
+        Reloads a specific plugin by ID.
+
+        **Risk Level**: MEDIUM
+      operationId: reloadPlugin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Plugin ID to reload
+          example: "plugin-view-gantt"
+      responses:
+        '200':
+          description: Plugin reloaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOperationResponse'
+              example:
+                success: true
+                message: "Plugin plugin-view-gantt reloaded successfully"
+                pluginId: "plugin-view-gantt"
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+        '500':
+          description: Plugin reload failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: PluginLoader service not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /plugins/reload-all:
+    post:
+      tags:
+        - Plugins
+      summary: Reload all plugins
+      description: |
+        Reloads all plugins. Service may experience brief unavailability.
+
+        **Risk Level**: HIGH (double confirmation required)
+      operationId: reloadAllPlugins
+      responses:
+        '200':
+          description: All plugins reloaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: "All plugins reloaded successfully"
+                warning: "Service may have experienced brief unavailability"
+        '403':
+          description: Double confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+        '500':
+          description: Reload failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /plugins/{id}:
+    delete:
+      tags:
+        - Plugins
+      summary: Unload a plugin
+      description: |
+        Unloads and removes a plugin from memory.
+
+        **Risk Level**: MEDIUM
+      operationId: unloadPlugin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Plugin ID to unload
+      responses:
+        '200':
+          description: Plugin unloaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOperationResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+        '500':
+          description: Unload failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /snapshots/{id}/restore:
+    post:
+      tags:
+        - Snapshots
+      summary: Restore from snapshot
+      description: |
+        Restores system state from a snapshot. Overwrites current state.
+
+        **Risk Level**: CRITICAL
+      operationId: restoreSnapshot
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Snapshot ID to restore
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+            example:
+              restoreType: "full"
+              itemTypes: ["users", "data"]
+      responses:
+        '200':
+          description: Snapshot restored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+        '500':
+          description: Restore failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /snapshots/{id}:
+    delete:
+      tags:
+        - Snapshots
+      summary: Delete a snapshot
+      description: |
+        Permanently deletes a snapshot.
+
+        **Risk Level**: MEDIUM
+      operationId: deleteSnapshot
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Snapshot ID to delete
+      responses:
+        '200':
+          description: Snapshot deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+  /snapshots/cleanup:
+    post:
+      tags:
+        - Snapshots
+      summary: Cleanup expired snapshots
+      description: |
+        Removes expired snapshots to free storage space.
+
+        **Risk Level**: HIGH
+        **Sprint 2**: Protected and critical snapshots are automatically skipped
+      operationId: cleanupSnapshots
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dryRun:
+                  type: boolean
+                  default: false
+                  description: If true, simulates cleanup without deleting
+      responses:
+        '200':
+          description: Cleanup completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CleanupResponse'
+              example:
+                success: true
+                message: "Cleanup completed: 5 snapshots deleted, 2 protected skipped"
+                deleted: 5
+                skipped: 2
+                freedBytes: 1048576
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+  /snapshots/{id}/tags:
+    put:
+      tags:
+        - Snapshot Protection
+      summary: Add or remove tags from snapshot
+      description: |
+        Add or remove tags from a snapshot. Tags are used for organization,
+        filtering, and protection rule matching.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: updateSnapshotTags
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Snapshot ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add:
+                  type: array
+                  items:
+                    type: string
+                  description: Tags to add
+                remove:
+                  type: array
+                  items:
+                    type: string
+                  description: Tags to remove
+            example:
+              add: ["production", "v1.0.0", "stable"]
+              remove: ["beta"]
+      responses:
+        '200':
+          description: Tags updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotResponse'
+        '404':
+          description: Snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /snapshots/{id}/protection:
+    patch:
+      tags:
+        - Snapshot Protection
+      summary: Set snapshot protection level
+      description: |
+        Set the protection level for a snapshot. Protected and critical
+        snapshots are automatically skipped during cleanup operations.
+
+        **Sprint 2**: Snapshot Protection System
+        **Protection Levels**:
+        - normal: Standard snapshot, eligible for cleanup when expired
+        - protected: Protected from automatic cleanup
+        - critical: Highest protection, never auto-deleted
+      operationId: setSnapshotProtectionLevel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Snapshot ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - level
+              properties:
+                level:
+                  type: string
+                  enum: [normal, protected, critical]
+            example:
+              level: "protected"
+      responses:
+        '200':
+          description: Protection level updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotResponse'
+        '400':
+          description: Invalid protection level
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /snapshots/{id}/release-channel:
+    patch:
+      tags:
+        - Snapshot Protection
+      summary: Set snapshot release channel
+      description: |
+        Set the release channel for a snapshot. Used for managing
+        different deployment stages and protection policies.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: setSnapshotReleaseChannel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Snapshot ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - channel
+              properties:
+                channel:
+                  type: string
+                  enum: [stable, canary, beta, experimental]
+                  nullable: true
+            example:
+              channel: "stable"
+      responses:
+        '200':
+          description: Release channel updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotResponse'
+        '400':
+          description: Invalid release channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Snapshot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /snapshots:
+    get:
+      tags:
+        - Snapshot Protection
+      summary: Query snapshots with filters
+      description: |
+        Query snapshots by tags, protection level, or release channel.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: querySnapshots
+      parameters:
+        - name: tags
+          in: query
+          schema:
+            type: string
+          description: Comma-separated list of tags (matches snapshots with ANY of the tags)
+          example: "production,v1.0.0"
+        - name: protection_level
+          in: query
+          schema:
+            type: string
+            enum: [normal, protected, critical]
+          description: Filter by protection level
+        - name: release_channel
+          in: query
+          schema:
+            type: string
+            enum: [stable, canary, beta, experimental]
+          description: Filter by release channel
+      responses:
+        '200':
+          description: Snapshots matching query
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  snapshots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Snapshot'
+                  count:
+                    type: integer
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /safety/rules:
+    get:
+      tags:
+        - Protection Rules
+      summary: List all protection rules
+      description: |
+        List all protection rules with optional filtering.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: listProtectionRules
+      parameters:
+        - name: target_type
+          in: query
+          schema:
+            type: string
+            enum: [snapshot, plugin, schema, workflow]
+          description: Filter by target entity type
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+          description: Filter by active status
+      responses:
+        '200':
+          description: List of protection rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  rules:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProtectionRule'
+                  count:
+                    type: integer
+    post:
+      tags:
+        - Protection Rules
+      summary: Create a new protection rule
+      description: |
+        Create a new protection rule to enforce policies on operations.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: createProtectionRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProtectionRuleRequest'
+      responses:
+        '201':
+          description: Protection rule created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  rule:
+                    $ref: '#/components/schemas/ProtectionRule'
+                  message:
+                    type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /safety/rules/{id}:
+    get:
+      tags:
+        - Protection Rules
+      summary: Get a single protection rule
+      description: Get details of a specific protection rule
+      operationId: getProtectionRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Protection rule ID
+      responses:
+        '200':
+          description: Protection rule details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  rule:
+                    $ref: '#/components/schemas/ProtectionRule'
+        '404':
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags:
+        - Protection Rules
+      summary: Update a protection rule
+      description: Update an existing protection rule
+      operationId: updateProtectionRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Protection rule ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProtectionRuleRequest'
+      responses:
+        '200':
+          description: Protection rule updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  rule:
+                    $ref: '#/components/schemas/ProtectionRule'
+                  message:
+                    type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - Protection Rules
+      summary: Delete a protection rule
+      description: Delete a protection rule
+      operationId: deleteProtectionRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Protection rule ID
+      responses:
+        '200':
+          description: Protection rule deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /safety/rules/evaluate:
+    post:
+      tags:
+        - Protection Rules
+      summary: Dry-run evaluation of protection rules
+      description: |
+        Test how protection rules would apply to a given operation
+        without actually executing it. Useful for testing and debugging rules.
+
+        **Sprint 2**: Snapshot Protection System
+      operationId: evaluateProtectionRules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleEvaluationRequest'
+      responses:
+        '200':
+          description: Rule evaluation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleEvaluationResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /cache/clear:
+    post:
+      tags:
+        - System
+      summary: Clear application cache
+      description: |
+        Clears all cached data from memory.
+
+        **Risk Level**: LOW
+      operationId: clearCache
+      responses:
+        '200':
+          description: Cache cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+  /metrics/reset:
+    post:
+      tags:
+        - System
+      summary: Reset metrics counters
+      description: |
+        Resets all Prometheus metrics counters to zero.
+
+        **Risk Level**: LOW
+      operationId: resetMetrics
+      responses:
+        '200':
+          description: Metrics reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                success: true
+                message: "Metrics counters reset"
+                warning: "Historical metric data may be lost"
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+  /data/bulk:
+    delete:
+      tags:
+        - Data
+      summary: Bulk delete data
+      description: |
+        Deletes data in bulk based on filters.
+
+        **Risk Level**: CRITICAL
+      operationId: bulkDeleteData
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkDeleteRequest'
+      responses:
+        '200':
+          description: Bulk deletion initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkOperationResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+    put:
+      tags:
+        - Data
+      summary: Bulk update data
+      description: |
+        Updates data in bulk.
+
+        **Risk Level**: HIGH
+      operationId: bulkUpdateData
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkUpdateRequest'
+      responses:
+        '200':
+          description: Bulk update initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkOperationResponse'
+        '403':
+          description: Confirmation required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyCheckRequired'
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: X-Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 255
+      description: Unique key to prevent duplicate operations
+
+  schemas:
+    SafetyStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        pendingConfirmations:
+          type: integer
+        config:
+          type: object
+          properties:
+            tokenExpirationSeconds:
+              type: integer
+            allowBypass:
+              type: boolean
+
+    ConfirmationRequest:
+      type: object
+      required:
+        - token
+        - acknowledged
+      properties:
+        token:
+          type: string
+          description: Safety token from initial request
+        acknowledged:
+          type: boolean
+          description: User acknowledgment of risk
+        typedConfirmation:
+          type: string
+          description: Required for double confirmation operations
+
+    ConfirmationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        operationResult:
+          type: object
+          description: Result of the confirmed operation
+
+    SafetyCheckRequired:
+      type: object
+      properties:
+        requiresConfirmation:
+          type: boolean
+          default: true
+        token:
+          type: string
+          description: Safety token for confirmation
+        operation:
+          type: string
+        riskLevel:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        message:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        requiresDoubleConfirmation:
+          type: boolean
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        warning:
+          type: string
+
+    PluginOperationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        pluginId:
+          type: string
+
+    RestoreRequest:
+      type: object
+      properties:
+        restoreType:
+          type: string
+          enum: [full, partial]
+          default: full
+        itemTypes:
+          type: array
+          items:
+            type: string
+
+    RestoreResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        snapshotId:
+          type: string
+        result:
+          type: object
+        warning:
+          type: string
+
+    CleanupResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        deleted:
+          type: integer
+        skipped:
+          type: integer
+          description: Number of protected snapshots skipped (Sprint 2)
+        freedBytes:
+          type: integer
+        dryRun:
+          type: boolean
+
+    Snapshot:
+      type: object
+      properties:
+        id:
+          type: string
+        view_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        snapshot_data:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        is_locked:
+          type: boolean
+        tags:
+          type: array
+          items:
+            type: string
+          description: Snapshot tags (Sprint 2)
+        protection_level:
+          type: string
+          enum: [normal, protected, critical]
+          description: Protection level (Sprint 2)
+        release_channel:
+          type: string
+          enum: [stable, canary, beta, experimental]
+          nullable: true
+          description: Release channel (Sprint 2)
+
+    SnapshotResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        snapshot:
+          $ref: '#/components/schemas/Snapshot'
+        message:
+          type: string
+
+    ProtectionRule:
+      type: object
+      properties:
+        id:
+          type: string
+        rule_name:
+          type: string
+        description:
+          type: string
+        target_type:
+          type: string
+          enum: [snapshot, plugin, schema, workflow]
+        conditions:
+          type: object
+          description: JSON-based rule conditions
+        effects:
+          type: object
+          description: Effects to apply when rule matches
+        priority:
+          type: integer
+          description: Higher priority rules are evaluated first
+        is_active:
+          type: boolean
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+
+    CreateProtectionRuleRequest:
+      type: object
+      required:
+        - rule_name
+        - target_type
+        - conditions
+        - effects
+      properties:
+        rule_name:
+          type: string
+        description:
+          type: string
+        target_type:
+          type: string
+          enum: [snapshot, plugin, schema, workflow]
+        conditions:
+          type: object
+          description: |
+            JSON conditions with operators: eq, ne, contains, in, gt, lt, gte, lte, exists.
+            Supports composite conditions: all, any, not
+        effects:
+          type: object
+          description: |
+            Effect to apply when rule matches.
+            Actions: allow, block, elevate_risk, require_approval
+        priority:
+          type: integer
+          default: 100
+        is_active:
+          type: boolean
+          default: true
+
+    UpdateProtectionRuleRequest:
+      type: object
+      properties:
+        rule_name:
+          type: string
+        description:
+          type: string
+        conditions:
+          type: object
+        effects:
+          type: object
+        priority:
+          type: integer
+        is_active:
+          type: boolean
+
+    RuleEvaluationRequest:
+      type: object
+      required:
+        - entity_type
+        - entity_id
+        - operation
+      properties:
+        entity_type:
+          type: string
+          enum: [snapshot, plugin, schema, workflow]
+        entity_id:
+          type: string
+        operation:
+          type: string
+        properties:
+          type: object
+          description: Entity properties to match against
+        user_id:
+          type: string
+
+    RuleEvaluationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        result:
+          type: object
+          properties:
+            matched:
+              type: boolean
+            rule_id:
+              type: string
+            rule_name:
+              type: string
+            effects:
+              type: object
+            execution_time_ms:
+              type: number
+        message:
+          type: string
+
+    BulkDeleteRequest:
+      type: object
+      required:
+        - table
+        - filters
+      properties:
+        table:
+          type: string
+        filters:
+          type: object
+        estimatedCount:
+          type: integer
+
+    BulkUpdateRequest:
+      type: object
+      required:
+        - table
+        - updates
+      properties:
+        table:
+          type: string
+        updates:
+          type: object
+        estimatedCount:
+          type: integer
+
+    BulkOperationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        table:
+          type: string
+        estimatedCount:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        success:
+          type: boolean
+          default: false
+        error:
+          type: string
+        details:
+          type: object

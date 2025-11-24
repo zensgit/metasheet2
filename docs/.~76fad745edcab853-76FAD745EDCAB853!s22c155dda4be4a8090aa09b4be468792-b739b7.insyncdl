@@ -1,0 +1,37 @@
+# MetaSheet v2 Release Notes (v2.0.0-alpha.X)
+
+- Highlights
+  - Approvals concurrency: optimistic locking with single-statement atomic update (409 conflicts), paged history; CI concurrency gates.
+  - Security & RBAC: JWT required for /api/** (except /api/auth/*); RBAC guard with denial counter; permission cache (configurable TTL) with hit/miss metrics.
+  - Audit & export: operation_audit_logs admin query (zod validation), CSV/NDJSON export with controlled limit.
+  - Observability & CI gates: HTTP Summary (p50/p90/p99) and http_requests_total; approval/auth/cache metrics; CI gates for P99<0.5s, 5xx<1%, approval success/conflict, RBAC hits/misses.
+  - OpenAPI: modular specs, unified pagination and error responses, method-level diff gate; richer request/response examples.
+
+- Migrations
+  - 030 approval_instances, 031 add version, 032 approval_records
+  - 033 RBAC (roles/permissions/role_permissions/user_roles/user_permissions)
+  - 034 spreadsheets, 035 files, 036 spreadsheet_permissions
+  - Production: run migrations only; do NOT run demo seeds.
+
+- Configuration & Security
+  - Switch JWT to RS256/JWKS (disable dev-secret in prod). Provide JWT_PUBLIC_KEY/JWT_PRIVATE_KEY or JWKS URL.
+  - Postgres >= 15; tune PGPOOL_MAX/PG_IDLE_TIMEOUT_MS/PG_CONN_TIMEOUT_MS.
+
+- Monitoring & Gates
+  - CI gates baseline: P99<0.5s, 5xx<1%; approval success≥1 & conflict≥1; RBAC hits≥1 & misses≥1.
+  - Recommended alerts: auth_failures, rbac_denials, approval_conflict, P99, 5xx.
+
+- Rollout & Rollback
+  - Tag: v2.0.0-alpha.X, upload OpenAPI artifact (see script below).
+  - Observe for 24–48h: error rate, P99, approval conflict share, RBAC cache hit rate.
+  - Rollback: revert to previous tag (DB rollback requires careful audit data evaluation).
+
+- OpenAPI artifact
+  - Built at: metasheet-v2/packages/openapi/dist/combined.openapi.yml
+  - Suggested GitHub CLI commands:
+    - gh release create v2.0.0-alpha.X -t "MetaSheet v2.0.0-alpha.X" -n "See release notes"
+    - gh release upload v2.0.0-alpha.X metasheet-v2/packages/openapi/dist/combined.openapi.yml#metasheet-v2.openapi.yml --clobber
+
+---
+
+Paste and adapt this template when creating the GitHub Release for v2.0.0-alpha.X.

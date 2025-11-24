@@ -1,0 +1,253 @@
+#!/bin/bash
+
+echo "========================================"
+echo "Observability Workflow Validation"
+echo "========================================"
+echo ""
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Track overall status
+OVERALL_STATUS=0
+SERVER_PID=""
+
+# Cleanup function
+cleanup() {
+    if [ ! -z "$SERVER_PID" ]; then
+        echo "Stopping backend server..."
+        kill $SERVER_PID 2>/dev/null
+        wait $SERVER_PID 2>/dev/null
+    fi
+}
+trap cleanup EXIT
+
+# Function to print status
+print_status() {
+    if [ $1 -eq 0 ]; then
+        echo -e "${GREEN}✅ $2${NC}"
+    else
+        echo -e "${RED}❌ $2${NC}"
+        OVERALL_STATUS=1
+    fi
+}
+
+# 1. OpenAPI Build, Validate, and Diff
+echo "1. OpenAPI Build, Validate, and Diff"
+echo "-------------------------------------"
+
+# Build OpenAPI
+cd packages/openapi
+pnpm build 2>&1 | grep -q "Building OpenAPI"
+print_status $? "OpenAPI build"
+
+# Validate OpenAPI
+pnpm validate 2>&1 | grep -q "Validating OpenAPI"
+print_status $? "OpenAPI validation"
+
+# Check if combined OpenAPI exists
+if [ -f dist/combined.openapi.yml ]; then
+    print_status 0 "OpenAPI file generated"
+
+    # Check for required fields
+    grep -q "openapi: 3.0.0" dist/combined.openapi.yml
+    print_status $? "OpenAPI version correct"
+
+    # Simulate diff (no previous version for first run)
+    echo "No previous OpenAPI artifact; skipping diff"
+else
+    print_status 1 "OpenAPI file not found"
+fi
+cd ../..
+echo ""
+
+# 2. Database and Backend Setup
+echo "2. Database and Backend Setup"
+echo "------------------------------"
+
+cd packages/core-backend
+
+# Run migrations
+npm run migrate 2>&1 | grep -q "Running database migrations"
+print_status $? "Database migrations"
+
+# Run RBAC seed
+npm run seed:rbac 2>&1 | grep -q "Seeding RBAC data"
+print_status $? "RBAC seed data"
+
+# Run demo seed
+npm run seed:demo 2>&1 | grep -q "Seeding demo data"
+print_status $? "Demo seed data"
+
+# Start backend server
+echo "Starting backend server..."
+nohup npm run dev > server.log 2>&1 &
+SERVER_PID=$!
+sleep 3
+
+# Check if server is running
+if kill -0 $SERVER_PID 2>/dev/null; then
+    print_status 0 "Backend server started (PID: $SERVER_PID)"
+else
+    print_status 1 "Backend server failed to start"
+    cat server.log
+fi
+
+cd ../..
+echo ""
+
+# 3. Health Check
+echo "3. Health Check"
+echo "---------------"
+HEALTH_RESPONSE=$(curl -s http://localhost:8900/health)
+if echo "$HEALTH_RESPONSE" | grep -q '"status":"ok"'; then
+    print_status 0 "Health check passed"
+else
+    print_status 1 "Health check failed"
+fi
+echo ""
+
+# 4. Generate Token
+echo "4. Generate Development Token"
+echo "-----------------------------"
+export JWT_SECRET="dev-secret"
+TOKEN=$(node scripts/gen-dev-token.js 2>/dev/null)
+if [ ! -z "$TOKEN" ]; then
+    print_status 0 "Token generated"
+    echo "Token (first 20 chars): ${TOKEN:0:20}..."
+else
+    print_status 1 "Token generation failed"
+fi
+echo ""
+
+# 5. Concurrent Smoke Tests
+echo "5. Concurrent Smoke Tests"
+echo "-------------------------"
+
+# Create test approvals for concurrency testing
+echo "Creating test approvals..."
+for i in {1..5}; do
+    curl -s -X POST "http://localhost:8900/api/approvals" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\": \"test-$i\", \"title\": \"Test Approval $i\"}" > /dev/null 2>&1 &
+done
+wait
+
+# Test concurrent approvals (some should succeed, some should conflict)
+echo "Testing concurrent approval attempts..."
+SUCCESS_COUNT=0
+CONFLICT_COUNT=0
+
+for i in {1..5}; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8900/api/approvals/test-1/approve" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"comment": "Approved"}' 2>/dev/null | tail -1)
+
+    if [ "$RESPONSE" = "200" ]; then
+        ((SUCCESS_COUNT++))
+    elif [ "$RESPONSE" = "409" ]; then
+        ((CONFLICT_COUNT++))
+    fi
+done
+
+echo "Approval attempts - Success: $SUCCESS_COUNT, Conflicts: $CONFLICT_COUNT"
+
+if [ $SUCCESS_COUNT -ge 1 ]; then
+    print_status 0 "Approval concurrency test"
+else
+    print_status 1 "Approval concurrency test"
+fi
+
+# Test reject (optional, allow failure)
+curl -s -X POST "http://localhost:8900/api/approvals/test-2/reject" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"reason": "Test reject"}' > /dev/null 2>&1
+echo "Reject test executed (failure allowed)"
+
+# Test return (optional, allow failure)
+curl -s -X POST "http://localhost:8900/api/approvals/test-3/return" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"reason": "Test return"}' > /dev/null 2>&1
+echo "Return test executed (failure allowed)"
+echo ""
+
+# 6. Fetch and Validate Metrics
+echo "6. Fetch and Validate Metrics"
+echo "------------------------------"
+
+# Fetch metrics
+METRICS=$(curl -s http://localhost:8900/metrics/prom)
+echo "$METRICS" > metrics.txt
+
+if [ -f metrics.txt ]; then
+    print_status 0 "Metrics fetched"
+
+    # Parse metrics
+    SUCCESS_METRIC=$(echo "$METRICS" | grep 'metasheet_approval_actions_total{result="success"}' | awk '{print $NF}')
+    CONFLICT_METRIC=$(echo "$METRICS" | grep 'metasheet_approval_conflict_total{}' | awk '{print $NF}')
+
+    echo "Metrics values:"
+    echo "  - Success actions: ${SUCCESS_METRIC:-0}"
+    echo "  - Conflicts: ${CONFLICT_METRIC:-0}"
+
+    # Validate thresholds
+    if [ "${SUCCESS_METRIC:-0}" -ge 1 ]; then
+        print_status 0 "Success metric threshold (≥1)"
+    else
+        print_status 1 "Success metric threshold"
+    fi
+
+    if [ "${CONFLICT_METRIC:-0}" -ge 1 ]; then
+        print_status 0 "Conflict metric threshold (≥1)"
+    else
+        print_status 1 "Conflict metric threshold"
+    fi
+else
+    print_status 1 "Metrics fetch failed"
+fi
+echo ""
+
+# 7. Artifacts
+echo "7. Artifacts"
+echo "------------"
+
+# Check server log
+if [ -f packages/core-backend/server.log ]; then
+    print_status 0 "Server log created"
+    echo "Server log size: $(wc -l packages/core-backend/server.log | awk '{print $1}') lines"
+else
+    print_status 1 "Server log not found"
+fi
+
+# Check metrics file
+if [ -f metrics.txt ]; then
+    print_status 0 "Metrics file created"
+else
+    print_status 1 "Metrics file not found"
+fi
+
+# Check OpenAPI artifact
+if [ -f packages/openapi/dist/combined.openapi.yml ]; then
+    print_status 0 "OpenAPI artifact exists"
+else
+    print_status 1 "OpenAPI artifact not found"
+fi
+echo ""
+
+# Final Status
+echo "========================================"
+if [ $OVERALL_STATUS -eq 0 ]; then
+    echo -e "${GREEN}✅ All Observability validations passed!${NC}"
+else
+    echo -e "${RED}❌ Some Observability validations failed${NC}"
+fi
+echo "========================================"
+
+exit $OVERALL_STATUS

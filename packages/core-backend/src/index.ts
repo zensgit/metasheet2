@@ -22,6 +22,7 @@ import { approvalsRouter } from './routes/approvals'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { rolesRouter } from './routes/roles'
+import { snapshotsRouter } from './routes/snapshots'
 import { permissionsRouter } from './routes/permissions'
 import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
@@ -29,6 +30,8 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
+import { initAdminRoutes, updateAdminServices } from './routes/admin-routes'
+import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 
 class MetaSheetServer {
@@ -42,6 +45,7 @@ class MetaSheetServer {
   private shuttingDown = false
   private wsAdapterType: 'local' | 'redis' = 'local'
   private wsRedis = { enabled: false, attached: false }
+  private snapshotService: SnapshotService
 
   constructor() {
     this.app = express()
@@ -59,6 +63,7 @@ class MetaSheetServer {
     // 创建核心API
     const coreAPI = this.createCoreAPI()
     this.pluginLoader = new PluginLoader(coreAPI)
+    this.snapshotService = new SnapshotService()
 
     this.setupMiddleware()
     this.setupWebSocket()
@@ -248,10 +253,17 @@ class MetaSheetServer {
     // 健康检查
     this.app.get('/health', (req, res) => {
       const stats = getPoolStats()
+      // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
+      let pluginsSummary: any = undefined
+      try {
+        // 与 /api/plugins 的 summary 保持一致结构
+        pluginsSummary = (this.pluginLoader as any).getSummary?.()
+      } catch {}
       res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         plugins: this.pluginLoader.getPlugins().size,
+        pluginsSummary: pluginsSummary || undefined,
         dbPool: stats || undefined,
         wsAdapter: this.wsAdapterType,
         redis: this.wsRedis
@@ -270,6 +282,8 @@ class MetaSheetServer {
     this.app.use(filesRouter())
     this.app.use(spreadsheetsRouter())
     this.app.use(spreadsheetPermissionsRouter())
+    // 路由：快照（Snapshot MVP）
+    this.app.use(snapshotsRouter())
 
     // 路由：事件总线
     this.app.use(eventsRouter())
@@ -279,6 +293,12 @@ class MetaSheetServer {
 
     // 路由：缓存测试端点 (dev only)
     this.app.use('/api/cache-test', cacheTestRouter)
+
+    // 路由：管理员端点 (带 SafetyGuard 保护)
+    this.app.use('/api/admin', initAdminRoutes({
+      pluginLoader: this.pluginLoader,
+      snapshotService: this.snapshotService
+    }))
 
     // V2 测试端点
     this.app.get('/api/v2/hello', (req, res) => {
@@ -306,13 +326,13 @@ class MetaSheetServer {
 
     // 插件信息
     this.app.get('/api/plugins', (req, res) => {
-      const plugins = Array.from(this.pluginLoader.getPlugins().entries()).map(([name, instance]) => ({
-        name,
-        version: instance.manifest.version,
-        displayName: instance.manifest.displayName,
-        status: instance.status
-      }))
-      res.json(plugins)
+      try {
+        const list = this.pluginLoader.getList?.() || []
+        const summary = this.pluginLoader.getSummary?.() || {}
+        res.json({ list, summary })
+      } catch (e: any) {
+        res.json({ list: [], summary: { error: e?.message || String(e) } })
+      }
     })
 
     // Metrics (JSON minimal)
@@ -370,9 +390,19 @@ class MetaSheetServer {
     await initializeEventBusService(coreAPI)
 
     // 加载插件并启动 HTTP 服务
-    this.logger.info('Loading plugins...')
-    await this.pluginLoader.loadPlugins()
+    if (process.env.SKIP_PLUGINS === 'true') {
+      this.logger.warn('Skipping plugin load (SKIP_PLUGINS=true)')
+    } else {
+      this.logger.info('Loading plugins...')
+      try {
+        await this.pluginLoader.loadPlugins()
+        this.logger.info('Plugins loaded successfully')
+      } catch (e) {
+        this.logger.error('Plugin loading failed; continuing startup without full plugin set', e as Error)
+      }
+    }
 
+    this.logger.info('Starting HTTP server listen phase...')
     this.httpServer.listen(this.port, () => {
       this.logger.info(`MetaSheet v2 core listening on http://localhost:${this.port}`)
       this.logger.info(`Health:  http://localhost:${this.port}/health`)

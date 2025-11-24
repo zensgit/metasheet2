@@ -1,0 +1,13 @@
+-- 036_create_spreadsheet_permissions.sql
+
+CREATE TABLE IF NOT EXISTS spreadsheet_permissions (
+  sheet_id TEXT NOT NULL REFERENCES spreadsheets(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  perm_code TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (sheet_id, user_id, perm_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sheet_perms_sheet ON spreadsheet_permissions(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_sheet_perms_user ON spreadsheet_permissions(user_id);
+

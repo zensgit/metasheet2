@@ -104,7 +104,21 @@ export interface PluginManifest {
     actions?: any[]
   }
 
-  permissions?: string[]
+  // Support both old array format and new V2 object format
+  permissions?: string[] | {
+    database?: {
+      read?: string[]
+      write?: string[]
+    }
+    http?: {
+      internal?: boolean
+      external?: string[]
+    }
+    filesystem?: {
+      read?: string[]
+      write?: string[]
+    }
+  }
 
   lifecycle?: {
     install?: string

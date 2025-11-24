@@ -1,0 +1,586 @@
+/**
+ * MetaSheet Backend Core
+ * 后端核心服务器入口
+ */
+
+import express, { Application, Request, Response, NextFunction } from 'express'
+import jwt from 'jsonwebtoken'
+import { createServer } from 'http'
+import { Server as SocketServer } from 'socket.io'
+import cors from 'cors'
+import { EventEmitter } from 'eventemitter3'
+import { PluginLoader } from './core/plugin-loader'
+import { Logger } from './core/logger'
+import { CoreAPI } from './types/plugin'
+import { sanitizeViews } from './utils/views'
+import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware'
+import { installMetrics, requestMetricsMiddleware, metrics } from './metrics/metrics'
+import { getPoolStats } from './db/pg'
+import { pathToFileURL } from 'url'
+import { approvalsRouter } from './routes/approvals'
+import { auditLogsRouter } from './routes/audit-logs'
+import { approvalHistoryRouter } from './routes/approval-history'
+import { rolesRouter } from './routes/roles'
+import { permissionsRouter } from './routes/permissions'
+import { filesRouter } from './routes/files'
+import { spreadsheetsRouter } from './routes/spreadsheets'
+import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
+import viewsRouter from './routes/views'
+import { rbacGuard } from './rbac/rbac'
+
+export interface MetaSheetServerOptions {
+  port?: number
+  pluginDirs?: string[]
+  host?: string
+}
+
+export class MetaSheetServer {
+  private app: Application
+  private httpServer: any
+  private io: SocketServer
+  private pluginLoader: PluginLoader
+  private logger: Logger
+  private eventBus: EventEmitter
+  private port: number
+  private host: string
+  private shuttingDown = false
+  private wsAdapterType: 'local' | 'redis' = 'local'
+  private wsRedis = { enabled: false, attached: false }
+
+  constructor(options?: MetaSheetServerOptions) {
+    this.app = express()
+    this.httpServer = createServer(this.app)
+    this.io = new SocketServer(this.httpServer, {
+      cors: {
+        origin: '*',
+        methods: ['GET', 'POST']
+      }
+    })
+    this.eventBus = new EventEmitter()
+    this.logger = new Logger('MetaSheetServer')
+    this.port = typeof options?.port === 'number' ? options!.port : parseInt(process.env.PORT || '8900')
+    this.host = options?.host || process.env.HOST || '0.0.0.0'
+
+    // 创建核心API
+    const coreAPI = this.createCoreAPI()
+    this.pluginLoader = new PluginLoader(coreAPI, { pluginDirs: options?.pluginDirs })
+
+    this.setupMiddleware()
+    this.setupWebSocket()
+  }
+
+  /**
+   * 创建核心API
+   */
+  private createCoreAPI(): CoreAPI {
+    const routes = new Map<string, any>()
+
+    return {
+      http: {
+        addRoute: (method: string, path: string, handler: any) => {
+          const key = `${method.toUpperCase()}:${path}`
+          routes.set(key, handler)
+
+          // 动态注册路由到Express
+          const methodLower = method.toLowerCase()
+          ;(this.app as any)[methodLower](path,
+            // 保护 /api/**（auth 白名单在全局中间件判定）
+            async (req: Request, res: Response) => {
+              const endTimer = (res as any).__metricsTimer?.({ route: path, method: req.method })
+              try {
+                await handler(req, res)
+              } catch (error) {
+                this.logger.error(`Route handler error: ${path}`, error as Error)
+                if (!res.headersSent) {
+                  res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } })
+                }
+              } finally {
+                // 结束计时（如果已安装指标中间件）
+                if (typeof endTimer === 'function') endTimer(res.statusCode)
+              }
+            }
+          )
+
+          this.logger.info(`Route registered: ${method} ${path}`)
+        },
+        removeRoute: (path: string) => {
+          // Express doesn't support removing routes easily
+          // In production, you'd need a more sophisticated solution
+          this.logger.warn(`Route removal not implemented: ${path}`)
+        },
+        middleware: (name: string) => {
+          // Return middleware by name
+          return undefined
+        },
+        request: async (options: any) => {
+          // Minimal local HTTP client without external deps
+          const ctrl = new AbortController()
+          const timeout = setTimeout(() => ctrl.abort(), Math.max(1000, options?.timeoutMs || 10000))
+          try {
+            const res = await fetch(options.url, {
+              method: options.method,
+              headers: options.headers,
+              body: ['GET','HEAD'].includes(options.method) ? undefined : (typeof options.body === 'string' || options.body instanceof Uint8Array ? options.body : JSON.stringify(options.body)),
+              signal: ctrl.signal
+            })
+            const text = await res.text()
+            const headers: Record<string, string> = {}
+            res.headers.forEach((v, k) => headers[k] = v)
+            let body: any = text
+            try { body = JSON.parse(text) } catch {}
+            return { status: res.status, headers, body }
+          } finally {
+            clearTimeout(timeout)
+          }
+        }
+      },
+
+      database: {
+        query: async (sql: string, params?: any[]) => {
+          try {
+            // Prefer Kysely when configured, otherwise fallback to pg pool
+            const { db } = await import('./db/db')
+            if (db) {
+              // Kysely does not execute raw SQL directly; route via pg client for now
+              const { query } = await import('./db/pg')
+              const res = await query(sql, params)
+              return res.rows as any[]
+            } else {
+              const { query } = await import('./db/pg')
+              const res = await query(sql, params)
+              return res.rows as any[]
+            }
+          } catch (e) {
+            this.logger.error('Database query failed', e as Error)
+            return []
+          }
+        },
+        transaction: async (callback: Function) => {
+          try {
+            const { withTransaction } = await import('./db/pg')
+            return await withTransaction(async (client) => callback(client))
+          } catch (e) {
+            this.logger.error('Database transaction failed', e as Error)
+            return await callback({})
+          }
+        },
+        model: (name: string) => {
+          return {}
+        }
+      },
+
+      auth: {
+        verifyToken: async (token: string) => {
+          // 暂时返回模拟用户
+          return { id: '1', name: 'Test User', email: 'test@metasheet.com' }
+        },
+        checkPermission: (user: any, resource: string, action: string) => {
+          // 暂时全部允许
+          return true
+        },
+        createToken: (user: any, options?: any) => {
+          return 'mock-jwt-token'
+        }
+      },
+
+      events: {
+        on: (event: string, handler: Function) => {
+          this.eventBus.on(event, handler as any)
+        },
+        once: (event: string, handler: Function) => {
+          this.eventBus.once(event, handler as any)
+        },
+        emit: (event: string, data?: any) => {
+          this.eventBus.emit(event, data)
+        },
+        off: (event: string, handler?: Function) => {
+          if (handler) {
+            this.eventBus.off(event, handler as any)
+          } else {
+            this.eventBus.removeAllListeners(event)
+          }
+        }
+      },
+
+      storage: {
+        upload: async (file: Buffer, options: any) => {
+          const fileId = `file_${Date.now()}`
+          this.logger.info(`File uploaded: ${fileId}`)
+          return fileId
+        },
+        download: async (fileId: string) => {
+          return Buffer.from('mock file content')
+        },
+        delete: async (fileId: string) => {
+          this.logger.info(`File deleted: ${fileId}`)
+        },
+        getUrl: (fileId: string) => {
+          return `http://localhost:${this.port}/files/${fileId}`
+        }
+      },
+
+      cache: {
+        get: async (key: string) => {
+          // 暂时用内存缓存
+          return undefined
+        },
+        set: async (key: string, value: any, ttl?: number) => {
+          // 暂时用内存缓存
+        },
+        delete: async (key: string) => {
+          // 暂时用内存缓存
+        },
+        clear: async () => {
+          // 清空缓存
+        }
+      },
+
+      queue: {
+        push: async (job: any) => {
+          const jobId = `job_${Date.now()}`
+          this.logger.info(`Job queued: ${jobId}`)
+          return jobId
+        },
+        process: (type: string, handler: Function) => {
+          this.logger.info(`Queue processor registered: ${type}`)
+        },
+        cancel: async (jobId: string) => {
+          this.logger.info(`Job cancelled: ${jobId}`)
+        }
+      },
+
+      websocket: {
+        broadcast: (event: string, data: any) => {
+          this.logger.debug(`websocket.broadcast: ${event}`, { hasIO: !!this.io, data })
+          if (this.io) {
+            const connected = Object.keys(this.io.sockets.sockets).length
+            this.logger.debug(`websocket.broadcast: emitting to ${connected} sockets`)
+            this.io.emit(event, data)
+          } else {
+            this.logger.error('websocket.broadcast failed: Socket.IO not initialized')
+          }
+        },
+        sendTo: (userId: string, event: string, data: any) => {
+          this.io.to(userId).emit(event, data)
+        },
+        onConnection: (handler: Function) => {
+          this.io.on('connection', handler as any)
+        },
+        join: async (room: string, selector: { userId?: string; socketId?: string }) => {
+          if (!room || room.length > 128) throw new Error('Invalid room name')
+          if (!selector || (!selector.userId && !selector.socketId)) throw new Error('Selector required')
+          if (selector.userId && selector.socketId) throw new Error('Specify either userId or socketId')
+          if (selector.userId) {
+            const sockets = await this.io.in(selector.userId).fetchSockets()
+            const ids = sockets.map(s => s.id)
+            if (ids.length > 0) this.io.in(ids).socketsJoin(room)
+            this.logger.debug(`websocket.join: user=${selector.userId} -> ${room}`, { sockets: ids })
+            return
+          }
+          const sock = this.io.sockets.sockets.get(selector.socketId!)
+          if (sock) {
+            await sock.join(room)
+            this.logger.debug(`websocket.join: socket=${selector.socketId} -> ${room}`)
+          }
+        },
+        leave: async (room: string, selector: { userId?: string; socketId?: string }) => {
+          if (!room || room.length > 128) throw new Error('Invalid room name')
+          if (!selector || (!selector.userId && !selector.socketId)) throw new Error('Selector required')
+          if (selector.userId && selector.socketId) throw new Error('Specify either userId or socketId')
+          if (selector.userId) {
+            const sockets = await this.io.in(selector.userId).fetchSockets()
+            const ids = sockets.map(s => s.id)
+            if (ids.length > 0) this.io.in(ids).socketsLeave(room)
+            this.logger.debug(`websocket.leave: user=${selector.userId} x ${room}`, { sockets: ids })
+            return
+          }
+          const sock = this.io.sockets.sockets.get(selector.socketId!)
+          if (sock) {
+            await sock.leave(room)
+            this.logger.debug(`websocket.leave: socket=${selector.socketId} x ${room}`)
+          }
+        },
+        broadcastTo: (room: string, event: string, data: any) => {
+          if (!room || room.length > 128) throw new Error('Invalid room name')
+          this.logger.debug(`websocket.broadcastTo: ${room} ${event}`)
+          this.io.to(room).emit(event, data)
+        }
+      },
+
+      notification: {
+        send: (target: { userId?: string; room?: string; broadcast?: boolean }, payload: any) => {
+          try {
+            if (target?.broadcast) return this.io.emit('notification', payload)
+            if (target?.room) return this.io.to(target.room).emit('notification', payload)
+            if (target?.userId) return this.io.to(target.userId).emit('notification', payload)
+          } catch (e) {
+            this.logger.warn('notification.send failed', e as any)
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * 配置中间件
+   */
+  private setupMiddleware(): void {
+    // CORS
+    this.app.use(cors())
+
+    // Body parsing
+    this.app.use(express.json({ limit: '10mb' }))
+    this.app.use(express.urlencoded({ extended: true }))
+
+    // 指标端点与请求指标（尽早注册）
+    installMetrics(this.app)
+    this.app.use(requestMetricsMiddleware)
+
+    // 请求日志
+    this.app.use((req, res, next) => {
+      this.logger.info(`${req.method} ${req.path}`)
+      // Count synthetic RBAC queries for permissions health endpoint
+      if (req.path === '/api/permissions/health') {
+        try { metrics.rbacPermQueriesSynth.inc() } catch {}
+      }
+      next()
+    })
+
+    // 全局 JWT 保护 `/api/**`（白名单在中间件内判定）
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      if (isWhitelisted(req.path)) return next()
+
+      // Feature flag: allow Kanban endpoints without JWT in dev/test unless explicitly required
+      const requireKanbanJWT = process.env.KANBAN_AUTH_REQUIRED === 'true'
+      if (!requireKanbanJWT && req.path.startsWith('/api/kanban/')) {
+        // Best-effort dev user from header to keep behavior stable
+        const devUserId = (req.headers['x-user-id'] as string) || 'dev-user'
+        ;(req as any).user = (req as any).user || { id: devUserId }
+        return next()
+      }
+
+      // Feature flag: allow approval endpoints without JWT in CI/test environments
+      const requireApprovalJWT = process.env.APPROVAL_AUTH_REQUIRED === 'true'
+      if (!requireApprovalJWT && req.path.startsWith('/api/approvals/')) {
+        // Create a test user context for approval operations
+        ;(req as any).user = (req as any).user || { id: 'test-approver' }
+        return next()
+      }
+
+      if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
+      return next()
+    })
+
+    // 健康检查
+    this.app.get('/health', async (req, res) => {
+      const stats = getPoolStats()
+
+      // Get database health if Kysely is configured
+      let dbHealth = undefined
+      try {
+        const { getDbHealth } = await import('./db/db')
+        dbHealth = await getDbHealth()
+      } catch {
+        // Database not configured or error
+      }
+
+      res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        plugins: this.pluginLoader.getPlugins().size,
+        dbPool: stats || undefined,
+        db: dbHealth || undefined,
+        wsAdapter: this.wsAdapterType,
+        redis: this.wsRedis
+      })
+    })
+
+    // 路由：审批（示例）
+    this.app.use(approvalsRouter())
+    // 路由：审计日志（管理员）
+    this.app.use(auditLogsRouter())
+    // 路由：审批历史（从审计表衍生）
+    this.app.use(approvalHistoryRouter())
+    // 路由：角色/权限/表/文件/表权限（占位）
+    this.app.use(rolesRouter())
+    this.app.use(permissionsRouter())
+    this.app.use(filesRouter())
+    this.app.use(spreadsheetsRouter())
+    this.app.use(spreadsheetPermissionsRouter())
+    // 路由：视图管理（图库和表单视图）
+    this.app.use('/api/views', viewsRouter)
+
+    // 插件信息
+    this.app.get('/api/plugins', async (req, res) => {
+      const loadedMap = this.pluginLoader.getPlugins()
+      const failedMap = this.pluginLoader.getFailedPlugins()
+
+      const result: any[] = []
+
+      // 先输出已加载的插件
+      for (const [name, instance] of loadedMap.entries()) {
+        const failed = failedMap.get(name)
+        result.push({
+          name,
+          version: instance.manifest.version,
+          displayName: instance.manifest.displayName,
+          status: instance.status === 'error' || failed ? 'failed' : instance.status,
+          error: failed?.error,
+          errorCode: failed?.code,
+          lastAttempt: failed?.lastAttempt,
+          contributes: instance.manifest.contributes
+            ? { views: sanitizeViews((instance.manifest.contributes as any).views) }
+            : undefined
+        })
+      }
+
+      // 再输出仅失败未加载成功的插件（若有）
+      for (const [name, failed] of failedMap.entries()) {
+        if (!loadedMap.has(name)) {
+          result.push({
+            name,
+            status: 'failed',
+            error: failed.error,
+            errorCode: failed.code,
+            lastAttempt: failed.lastAttempt
+          })
+        }
+      }
+
+      // Attach engine/config summary (sanitized) for ops
+      try {
+        const { sanitizeConfig } = await import('./config')
+        const cfg = sanitizeConfig(this.cfg)
+        res.json({ plugins: result, engine: { version: (await import('../package.json') as any).version || 'dev', config: cfg } })
+      } catch {
+        res.json(result)
+      }
+    })
+
+    // CI/dev-only token minting endpoint (whitelisted)
+    this.app.get('/api/auth/dev-token', (req: Request, res: Response) => {
+      const isProd = process.env.NODE_ENV === 'production'
+      if (isProd) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Not available in production' } })
+      try {
+        const secret = process.env.JWT_SECRET || 'dev-secret'
+        const userId = (req.query.userId as string) || 'ci-user'
+        const roles = ((req.query.roles as string) || 'admin').split(',')
+        const perms = ((req.query.perms as string) || '').split(',').filter(Boolean)
+        const token = jwt.sign({ id: userId, roles, perms }, secret, { expiresIn: '2h' })
+        res.json({ ok: true, token })
+      } catch (e: any) {
+        res.status(500).json({ ok: false, error: { code: 'TOKEN_ERROR', message: e?.message || 'token error' } })
+      }
+    })
+
+    // CI-only simple protected test route (no DB dependency)
+    if (process.env.CI_OBSERVABILITY_TEST_ROUTES === 'true') {
+      this.app.get('/api/test/protected', rbacGuard('test', 'read'), (req: Request, res: Response) => {
+        res.json({ ok: true, user: (req as any).user?.id || null, ts: Date.now() })
+      })
+    }
+  }
+
+  /**
+   * 配置WebSocket
+   */
+  private setupWebSocket(): void {
+    if (process.env.WS_REDIS_ENABLED === 'true') {
+      this.wsRedis.enabled = true
+      this.logger.info('WS_REDIS_ENABLED=true; local adapter active (no Redis wiring yet)')
+    }
+    this.io.on('connection', (socket) => {
+      this.logger.info(`WebSocket client connected: ${socket.id}`)
+
+      // Optional: tag socket by userId if provided in query (dev/test only)
+      const userId = (socket.handshake.query?.userId as string) || ''
+      if (userId) {
+        socket.join(userId)
+        this.logger.debug(`socket tagged with userId: ${userId}`)
+      }
+
+      socket.on('disconnect', () => {
+        this.logger.info(`WebSocket client disconnected: ${socket.id}`)
+      })
+
+      // 测试事件
+      socket.on('ping', () => {
+        socket.emit('pong', { timestamp: Date.now() })
+      })
+    })
+  }
+
+  /**
+   * 启动服务器
+   */
+  async start(): Promise<void> {
+    // 加载插件并启动 HTTP 服务
+    this.logger.info('Loading plugins...')
+    await this.pluginLoader.loadPlugins()
+
+    this.httpServer.listen(this.port, this.host, () => {
+      this.logger.info(`MetaSheet v2 core listening on http://${this.host}:${this.port}`)
+      this.logger.info(`Health:  http://${this.host}:${this.port}/health`)
+      this.logger.info(`Metrics: http://${this.host}:${this.port}/metrics/prom`)
+      this.logger.info(`Plugins: http://${this.host}:${this.port}/api/plugins`)
+    })
+
+    const shutdown = async (signal: string) => {
+      if (this.shuttingDown) return
+      this.shuttingDown = true
+      this.logger.info(`Received ${signal}, shutting down...`)
+      try {
+        this.httpServer.close(() => this.logger.info('HTTP server closed'))
+      } catch {}
+      try {
+        const { pool } = await import('./db/pg')
+        if (pool) await pool.end()
+      } catch {}
+      setTimeout(() => process.exit(0), 500)
+    }
+    process.on('SIGTERM', () => shutdown('SIGTERM'))
+    process.on('SIGINT', () => shutdown('SIGINT'))
+  }
+
+  getAddress(): any {
+    return this.httpServer.address()
+  }
+
+  async stop(): Promise<void> {
+    // Close Socket.IO first to stop incoming connections/events
+    await new Promise<void>((resolve) => {
+      try {
+        this.io.close(() => resolve())
+      } catch {
+        resolve()
+      }
+    })
+
+    // Then close the underlying HTTP server
+    await new Promise<void>((resolve) => {
+      try {
+        this.httpServer.close(() => resolve())
+      } catch {
+        resolve()
+      }
+    })
+  }
+}
+
+// 启动（仅在直接运行该文件时）
+const isMain = (() => {
+  try {
+    return import.meta.url === pathToFileURL(process.argv[1] || '').href
+  } catch {
+    return false
+  }
+})()
+
+if (isMain) {
+  const server = new MetaSheetServer()
+  server.start().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('Failed to start MetaSheet v2 core:', err)
+    process.exit(1)
+  })
+}

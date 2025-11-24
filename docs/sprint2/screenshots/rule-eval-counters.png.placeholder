@@ -1,0 +1,9 @@
+# Placeholder for Rule Evaluation Counters Screenshot
+#
+# Will be replaced with actual screenshot showing:
+# - Rule evaluation counts by effect (allow/block/elevate_risk/require_approval)
+# - Evaluation success/failure rates
+# - Rule execution latency distribution
+# - Rate limit counter behavior
+#
+# Status: PENDING - Requires staging credentials

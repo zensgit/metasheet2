@@ -1,18 +1,36 @@
 {
-  "name": "@metasheet/plugin-test-b",
+  "manifestVersion": "2.0.0",
+  "name": "plugin-test-b",
   "version": "1.0.0",
   "displayName": "Test Plugin B",
   "description": "Calls Plugin A via communication API and exposes a probe route.",
-  "engines": {
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
     "metasheet": ">=1.0.0",
     "node": ">=16.0.0"
   },
-  "main": { "backend": "index.js" },
-  "permissions": [
-    "http.addRoute",
-    "database.read",
-    "database.write"
-  ],
-  "activationEvents": ["onStartup"]
+  "main": "index.js",
+  "capabilities": {
+    "views": [],
+    "workflows": [],
+    "functions": []
+  },
+  "permissions": {
+    "database": {
+      "read": [
+        "*"
+      ],
+      "write": [
+        "*"
+      ]
+    },
+    "http": {
+      "internal": true
+    },
+    "filesystem": {}
+  },
+  "license": "MIT"
 }
-

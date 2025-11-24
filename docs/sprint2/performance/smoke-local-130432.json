@@ -1,0 +1,10 @@
+{
+  "base_url": "http://localhost:8900",
+  "samples": 5,
+  "threshold_warning_ms": 150,
+  "threshold_critical_ms": 250,
+  "overall_avg_ms": 0,
+  "endpoints": [
+    {"name": "health", "min_ms": 0, "max_ms": 0, "avg_ms": 0, "errors": 0\nsnapshots_list|0|0|0|0\nsnapshots_stats|0|0|0|0\nrules_list|0|0|0|0\nplugins|0|0|0|0\n, "status_icon": "✅"}
+  ]
+}

@@ -1,0 +1,71 @@
+#!/usr/bin/env node
+
+/**
+ * MetaSheet CLI
+ */
+
+import { Command } from 'commander'
+import chalk from 'chalk'
+import { createCommand } from './commands/create'
+import { devCommand } from './commands/dev'
+import { buildCommand } from './commands/build'
+import { testCommand } from './commands/test'
+
+const program = new Command()
+
+program
+  .name('metasheet')
+  .description('MetaSheet CLI for plugin development')
+  .version('2.0.0-alpha.1')
+
+// 创建插件命令
+program
+  .command('create [name]')
+  .description('Create a new MetaSheet plugin')
+  .option('-t, --type <type>', 'Plugin type (view, field, workflow, integration, datasource)', 'view')
+  .option('-T, --template <template>', 'Template to use')
+  .action(createCommand)
+
+// 开发命令
+program
+  .command('dev [plugin]')
+  .description('Start plugin development server')
+  .option('-p, --port <port>', 'Development server port', '3000')
+  .option('-w, --watch', 'Enable watch mode', true)
+  .action(devCommand)
+
+// 构建命令
+program
+  .command('build [plugin]')
+  .description('Build plugin for production')
+  .option('-m, --minify', 'Minify output', true)
+  .option('-s, --sourcemap', 'Generate sourcemap', false)
+  .action(buildCommand)
+
+// 测试命令
+program
+  .command('test [plugin]')
+  .description('Run plugin tests')
+  .option('-w, --watch', 'Watch mode', false)
+  .option('-c, --coverage', 'Generate coverage report', false)
+  .action(testCommand)
+
+// 帮助信息
+program.on('--help', () => {
+  console.log()
+  console.log('Examples:')
+  console.log()
+  console.log('  $ metasheet create my-plugin')
+  console.log('  $ metasheet create --type view kanban-view')
+  console.log('  $ metasheet dev my-plugin')
+  console.log('  $ metasheet build')
+  console.log()
+})
+
+// 解析命令行参数
+program.parse(process.argv)
+
+// 如果没有提供任何参数，显示帮助
+if (!process.argv.slice(2).length) {
+  program.outputHelp()
+}

@@ -1,0 +1,277 @@
+-- Description: Create tables for script sandbox management and execution
+-- Author: Claude
+-- Date: 2024
+
+-- Ensure pgcrypto for gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Script templates
+CREATE TABLE IF NOT EXISTS script_templates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    language VARCHAR(20) NOT NULL, -- javascript, typescript, python
+    code TEXT NOT NULL,
+    parameters JSONB, -- Parameter definitions
+    context JSONB, -- Default execution context
+    sandbox_options JSONB, -- Sandbox configuration
+
+    -- Usage tracking
+    use_count INTEGER DEFAULT 0,
+    last_used_at TIMESTAMP WITH TIME ZONE,
+    avg_execution_time INTEGER, -- in milliseconds
+
+    -- Security
+    risk_level VARCHAR(20) DEFAULT 'low', -- low, medium, high
+    validated_at TIMESTAMP WITH TIME ZONE,
+    validated_by VARCHAR(100),
+
+    -- Metadata
+    created_by VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    CONSTRAINT unique_script_template_name UNIQUE (name)
+);
+
+CREATE INDEX idx_script_templates_language ON script_templates(language);
+CREATE INDEX idx_script_templates_risk_level ON script_templates(risk_level);
+CREATE INDEX idx_script_templates_created_at ON script_templates(created_at);
+
+-- Script execution history
+CREATE TABLE IF NOT EXISTS script_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_id UUID REFERENCES script_templates(id) ON DELETE SET NULL,
+    script_hash VARCHAR(64), -- SHA256 hash of executed script
+    language VARCHAR(20) NOT NULL,
+
+    -- Execution details
+    status VARCHAR(20) NOT NULL, -- pending, running, completed, failed, timeout
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    execution_time INTEGER, -- in milliseconds
+
+    -- Resource usage
+    memory_used INTEGER, -- in bytes
+    cpu_time INTEGER, -- in milliseconds
+    output_size INTEGER, -- in bytes
+
+    -- Input/Output
+    input_context JSONB,
+    output_data JSONB,
+    logs JSONB, -- Array of log entries
+    error TEXT
+);
+
+-- Security
+CREATE TABLE IF NOT EXISTS script_execution_security (
+    execution_id UUID PRIMARY KEY REFERENCES script_executions(id) ON DELETE CASCADE,
+    policy_violations JSONB, -- Array of security policy violations
+    risk_assessment JSONB,
+
+    -- User info
+    executed_by VARCHAR(100),
+    execution_context JSONB, -- Additional context (e.g., workflow ID, trigger)
+);
+
+CREATE INDEX IF NOT EXISTS idx_script_executions_template ON script_executions(template_id);
+CREATE INDEX IF NOT EXISTS idx_script_executions_status ON script_executions(status);
+CREATE INDEX IF NOT EXISTS idx_script_executions_started ON script_executions(started_at);
+CREATE INDEX IF NOT EXISTS idx_script_executions_user ON script_executions(id);
+
+-- Sandbox pools configuration
+CREATE TABLE IF NOT EXISTS sandbox_pools (
+    id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    options JSONB NOT NULL, -- Sandbox options
+    policy JSONB NOT NULL, -- Security policy
+    max_instances INTEGER DEFAULT 10,
+    active_instances INTEGER DEFAULT 0,
+
+    -- Resource limits
+    max_memory INTEGER DEFAULT 128, -- MB
+    max_cpu INTEGER DEFAULT 5, -- seconds
+    max_execution_time INTEGER DEFAULT 5000, -- milliseconds
+
+    -- Status
+    status VARCHAR(20) DEFAULT 'active', -- active, inactive, maintenance
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    CONSTRAINT unique_pool_name UNIQUE (name)
+);
+
+CREATE INDEX idx_sandbox_pools_status ON sandbox_pools(status);
+
+-- Security policies
+CREATE TABLE IF NOT EXISTS security_policies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    policy_rules JSONB NOT NULL, -- Policy configuration
+
+    -- Limits
+    max_execution_time INTEGER DEFAULT 5000,
+    max_memory INTEGER DEFAULT 128,
+    max_cpu INTEGER DEFAULT 5,
+    max_output_size INTEGER DEFAULT 1048576, -- 1MB
+
+    -- Permissions
+    allow_network BOOLEAN DEFAULT FALSE,
+    allow_file_system BOOLEAN DEFAULT FALSE,
+    allow_child_process BOOLEAN DEFAULT FALSE,
+    allowed_modules JSONB, -- Array of allowed module names
+    blocked_modules JSONB, -- Array of blocked module names
+    blocked_apis JSONB, -- Array of blocked API names
+
+    -- Metadata
+    is_default BOOLEAN DEFAULT FALSE,
+    created_by VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    CONSTRAINT unique_policy_name UNIQUE (name)
+);
+
+CREATE INDEX idx_security_policies_default ON security_policies(is_default);
+
+-- Script validation results
+CREATE TABLE IF NOT EXISTS script_validations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    script_hash VARCHAR(64) NOT NULL,
+    language VARCHAR(20) NOT NULL,
+    policy_id UUID REFERENCES security_policies(id),
+
+    -- Validation results
+    is_valid BOOLEAN NOT NULL,
+    risk_level VARCHAR(20), -- low, medium, high
+    violations JSONB, -- Array of policy violations
+    warnings JSONB, -- Array of warnings
+
+    -- Pattern detection
+    dangerous_patterns JSONB, -- Detected dangerous patterns
+    suspicious_patterns JSONB, -- Detected suspicious patterns
+
+    -- Metadata
+    validated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    cache_expires_at TIMESTAMP WITH TIME ZONE,
+
+    -- Unique constraint for caching
+    CONSTRAINT unique_script_validation UNIQUE (script_hash, policy_id)
+);
+
+CREATE INDEX idx_script_validations_hash ON script_validations(script_hash);
+CREATE INDEX idx_script_validations_expires ON script_validations(cache_expires_at);
+
+-- Execution jobs queue
+CREATE TABLE IF NOT EXISTS execution_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_id UUID REFERENCES script_templates(id) ON DELETE SET NULL,
+    pool_id VARCHAR(100) REFERENCES sandbox_pools(id),
+
+    -- Job details
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, running, completed, failed, cancelled
+    priority INTEGER DEFAULT 5, -- 1-10, higher = more priority
+    scheduled_at TIMESTAMP WITH TIME ZONE,
+    started_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+
+    -- Request data
+    script TEXT,
+    parameters JSONB,
+    context JSONB,
+    language VARCHAR(20),
+
+    -- Result
+    execution_id UUID REFERENCES script_executions(id),
+    result JSONB,
+    error TEXT,
+
+    -- Retry configuration
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    retry_delay INTEGER DEFAULT 1000, -- milliseconds
+
+    -- Metadata
+    created_by VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    callback_url TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_status ON execution_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_priority ON execution_jobs(priority DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_scheduled ON execution_jobs(scheduled_at);
+
+-- Sandbox metrics
+CREATE TABLE IF NOT EXISTS sandbox_metrics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pool_id VARCHAR(100) REFERENCES sandbox_pools(id),
+    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    -- Pool metrics
+    active_instances INTEGER,
+    total_instances INTEGER,
+    queue_length INTEGER,
+    avg_wait_time INTEGER, -- milliseconds
+
+    -- Performance metrics
+    total_executions INTEGER,
+    successful_executions INTEGER,
+    failed_executions INTEGER,
+    timeout_executions INTEGER,
+
+    avg_execution_time INTEGER, -- milliseconds
+    avg_memory_usage INTEGER, -- bytes
+    avg_cpu_time INTEGER, -- milliseconds
+
+    -- Resource utilization
+    cpu_utilization DECIMAL(5, 2), -- percentage
+    memory_utilization DECIMAL(5, 2) -- percentage
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_metrics_pool ON sandbox_metrics(pool_id);
+CREATE INDEX IF NOT EXISTS idx_sandbox_metrics_recorded ON sandbox_metrics(recorded_at);
+
+-- Create update trigger
+CREATE OR REPLACE FUNCTION update_sandbox_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname = 'update_script_templates_updated_at'
+  ) THEN
+    CREATE TRIGGER update_script_templates_updated_at
+      BEFORE UPDATE ON script_templates
+      FOR EACH ROW
+      EXECUTE FUNCTION update_sandbox_timestamp();
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname = 'update_sandbox_pools_updated_at'
+  ) THEN
+    CREATE TRIGGER update_sandbox_pools_updated_at
+      BEFORE UPDATE ON sandbox_pools
+      FOR EACH ROW
+      EXECUTE FUNCTION update_sandbox_timestamp();
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname = 'update_security_policies_updated_at'
+  ) THEN
+    CREATE TRIGGER update_security_policies_updated_at
+      BEFORE UPDATE ON security_policies
+      FOR EACH ROW
+      EXECUTE FUNCTION update_sandbox_timestamp();
+  END IF;
+END $$;

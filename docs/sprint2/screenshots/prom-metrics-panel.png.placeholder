@@ -1,0 +1,11 @@
+# Placeholder for Prometheus Metrics Panel Screenshot
+#
+# Will be replaced with actual screenshot showing:
+# - metasheet_protection_rule_evaluations_total
+# - metasheet_protection_rule_duration_seconds
+# - metasheet_snapshots_protected_total
+# - metasheet_snapshots_by_channel
+# - metasheet_snapshots_by_protection_level
+# - metasheet_snapshot_operations_total
+#
+# Status: PENDING - Requires staging credentials
