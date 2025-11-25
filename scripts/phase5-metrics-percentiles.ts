@@ -265,11 +265,22 @@ async function main() {
     const allHistograms = parsePrometheusMetrics(metricsText);
     console.error(`[INFO] Found ${allHistograms.length} histogram metrics`);
 
-    // Target metrics from thresholds.json
-    const targetMetrics = [
-      'metasheet_plugin_reload_duration_seconds',
-      'metasheet_snapshot_operation_duration_seconds'
-    ];
+    // Load target metrics dynamically from thresholds.json
+    const thresholdsPath = process.env.THRESHOLDS_FILE ||
+      '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json';
+
+    console.error(`[INFO] Loading thresholds from ${thresholdsPath}...`);
+    const thresholdsContent = fs.readFileSync(thresholdsPath, 'utf-8');
+    const thresholdsData = JSON.parse(thresholdsContent);
+
+    // Extract unique prometheus_metric values from latency thresholds
+    const targetMetrics = Array.from(new Set(
+      thresholdsData.thresholds
+        .filter((t: any) => t.kind === 'latency')
+        .map((t: any) => t.prometheus_metric)
+    ));
+
+    console.error(`[INFO] Dynamically loaded ${targetMetrics.length} target metrics: ${targetMetrics.join(', ')}`);
 
     const relevantHistograms = filterHistograms(allHistograms, targetMetrics);
     console.error(`[INFO] Filtered to ${relevantHistograms.length} relevant histograms`);

@@ -329,23 +329,32 @@ assert_threshold() {
     local threshold_type="$3"  # upper_bound or lower_bound
     local threshold_value="$4"
     local unit="$5"
+    local sample_count="${6:-1}"  # optional 6th parameter, default to 1
 
     local pass=false
     local comparison=""
+    local status=""
 
-    if [ "$threshold_type" = "upper_bound" ]; then
-        comparison="≤"
-        if (( $(echo "$actual_value <= $threshold_value" | bc -l) )); then
-            pass=true
+    # Check for NA status: latency metrics with zero samples
+    if [ "$unit" = "seconds" ] && [ "$sample_count" -eq 0 ]; then
+        status="na"
+        comparison="N/A"
+    else
+        # Normal pass/fail logic
+        if [ "$threshold_type" = "upper_bound" ]; then
+            comparison="≤"
+            if (( $(echo "$actual_value <= $threshold_value" | bc -l) )); then
+                pass=true
+            fi
+        else  # lower_bound
+            comparison="≥"
+            if (( $(echo "$actual_value >= $threshold_value" | bc -l) )); then
+                pass=true
+            fi
         fi
-    else  # lower_bound
-        comparison="≥"
-        if (( $(echo "$actual_value >= $threshold_value" | bc -l) )); then
-            pass=true
-        fi
+
+        status=$([ "$pass" = true ] && echo "pass" || echo "fail")
     fi
-
-    local status=$([ "$pass" = true ] && echo "pass" || echo "fail")
 
     # JSON output
     cat <<EOF
@@ -435,6 +444,7 @@ main() {
         local prom_metric=$(echo "$threshold_obj" | jq -r '.prometheus_metric // empty')
 
         local actual_value=0
+        local sample_count=1  # default for non-latency metrics
 
         # Determine actual value based on metric kind and name
         case "$kind" in
@@ -452,9 +462,11 @@ main() {
                         local metric_key="${prom_metric}{${label_str}}"
                         # Use jq --arg to pass metric_key safely (avoids quote escaping issues)
                         actual_value=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                        sample_count=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" '.metrics[$key].count // 0')
                     else
                         # No labels, use metric name directly
                         actual_value=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                        sample_count=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" '.metrics[$key].count // 0')
                     fi
                 fi
                 ;;
@@ -485,7 +497,7 @@ main() {
             assertions+=","
         fi
 
-        assertions+=$(assert_threshold "$metric" "$actual_value" "$type" "$threshold_val" "$unit")
+        assertions+=$(assert_threshold "$metric" "$actual_value" "$type" "$threshold_val" "$unit" "$sample_count")
 
         first_assertion=false
 
@@ -498,6 +510,7 @@ main() {
     # Calculate overall pass/fail
     local pass_count=$(echo "$assertions" | jq '[.[] | select(.status == "pass")] | length')
     local fail_count=$(echo "$assertions" | jq '[.[] | select(.status == "fail")] | length')
+    local na_count=$(echo "$assertions" | jq '[.[] | select(.status == "na")] | length')
     local overall_status=$([ "$fail_count" -eq 0 ] && echo "pass" || echo "fail")
 
     # Construct final JSON
@@ -526,9 +539,10 @@ main() {
   "warnings": $warnings,
   "assertions": $assertions,
   "summary": {
-    "total_checks": $((pass_count + fail_count)),
+    "total_checks": $((pass_count + fail_count + na_count)),
     "passed": $pass_count,
     "failed": $fail_count,
+    "na": $na_count,
     "overall_status": "$overall_status"
   }
 }

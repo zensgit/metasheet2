@@ -149,17 +149,33 @@ EOF
 
 "
 
-    # Snapshot restore latencies
-    local snapshot_p50=$(echo "$json" | jq -r '.percentiles.metasheet_snapshot_restore_duration_seconds.p50 // 0')
-    local snapshot_p95=$(echo "$json" | jq -r '.percentiles.metasheet_snapshot_restore_duration_seconds.p95 // 0')
-    local snapshot_p99=$(echo "$json" | jq -r '.percentiles.metasheet_snapshot_restore_duration_seconds.p99 // 0')
-    local snapshot_count=$(echo "$json" | jq -r '.percentiles.metasheet_snapshot_restore_duration_seconds.count // 0')
+    # Snapshot restore latencies (using labeled histogram key)
+    local snapshot_restore_key='metasheet_snapshot_operation_duration_seconds{operation="restore"}'
+    local snapshot_restore_p50=$(echo "$json" | jq -r --arg key "$snapshot_restore_key" '.percentiles[$key].p50 // 0')
+    local snapshot_restore_p95=$(echo "$json" | jq -r --arg key "$snapshot_restore_key" '.percentiles[$key].p95 // 0')
+    local snapshot_restore_p99=$(echo "$json" | jq -r --arg key "$snapshot_restore_key" '.percentiles[$key].p99 // 0')
+    local snapshot_restore_count=$(echo "$json" | jq -r --arg key "$snapshot_restore_key" '.percentiles[$key].count // 0')
 
     report+="**Snapshot Restore Duration**:
-- P50: ${snapshot_p50}s
-- P95: ${snapshot_p95}s
-- P99: ${snapshot_p99}s
-- Sample Count: $snapshot_count
+- P50: ${snapshot_restore_p50}s
+- P95: ${snapshot_restore_p95}s
+- P99: ${snapshot_restore_p99}s
+- Sample Count: $snapshot_restore_count
+
+"
+
+    # Snapshot create latencies (using labeled histogram key)
+    local snapshot_create_key='metasheet_snapshot_operation_duration_seconds{operation="create"}'
+    local snapshot_create_p50=$(echo "$json" | jq -r --arg key "$snapshot_create_key" '.percentiles[$key].p50 // 0')
+    local snapshot_create_p95=$(echo "$json" | jq -r --arg key "$snapshot_create_key" '.percentiles[$key].p95 // 0')
+    local snapshot_create_p99=$(echo "$json" | jq -r --arg key "$snapshot_create_key" '.percentiles[$key].p99 // 0')
+    local snapshot_create_count=$(echo "$json" | jq -r --arg key "$snapshot_create_key" '.percentiles[$key].count // 0')
+
+    report+="**Snapshot Create Duration**:
+- P50: ${snapshot_create_p50}s
+- P95: ${snapshot_create_p95}s
+- P99: ${snapshot_create_p99}s
+- Sample Count: $snapshot_create_count
 
 "
 
@@ -173,6 +189,7 @@ EOF
     local error_rate=$(echo "$json" | jq -r '.counters.error_rate')
     local raw_fallback=$(echo "$json" | jq -r '.counters.raw_fallback')
     local effective_fallback=$(echo "$json" | jq -r '.counters.effective_fallback')
+    local fallback_effective_ratio=$(echo "$json" | jq -r '.counters.fallback_effective_ratio')
     local memory_rss=$(echo "$json" | jq -r '.counters.memory_rss_mb')
 
     report+="- **Cache Hit Rate**: ${cache_hit_rate}%
@@ -180,6 +197,7 @@ EOF
 - **Error Rate**: ${error_rate}%
 - **Raw Fallback Count**: $raw_fallback
 - **Effective Fallback Count**: $effective_fallback
+- **Fallback Effective Ratio**: $fallback_effective_ratio
 - **Memory RSS**: ${memory_rss}MB
 
 "
@@ -216,6 +234,28 @@ EOF
     report+="- **Fallback Taxonomy**: $taxonomy_icon $([ "$taxonomy_valid" = "true" ] && echo "Valid" || echo "Invalid reasons found")
 
 "
+
+    # Warnings section
+    local warnings=$(echo "$json" | jq -r '.warnings')
+    local warnings_count=$(echo "$warnings" | jq 'length')
+
+    if [ "$warnings_count" -gt 0 ]; then
+        report+="
+### Warnings
+
+| Metric | Issue | Message |
+|--------|-------|---------|
+"
+        for ((i=0; i<warnings_count; i++)); do
+            local warn_metric=$(echo "$warnings" | jq -r ".[$i].metric")
+            local warn_issue=$(echo "$warnings" | jq -r ".[$i].issue")
+            local warn_message=$(echo "$warnings" | jq -r ".[$i].message")
+            report+="| $warn_metric | $warn_issue | $warn_message |
+"
+        done
+        report+="
+"
+    fi
 
     # Configuration
     report+="---
