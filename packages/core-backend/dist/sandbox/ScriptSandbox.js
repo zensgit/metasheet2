@@ -1,15 +1,9 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ScriptSandbox = void 0;
-const worker_threads_1 = require("worker_threads");
-const eventemitter3_1 = require("eventemitter3");
-const path_1 = __importDefault(require("path"));
-const crypto_1 = __importDefault(require("crypto"));
-const promises_1 = __importDefault(require("fs/promises"));
-class ScriptSandbox extends eventemitter3_1.EventEmitter {
+import { Worker } from 'worker_threads';
+import { EventEmitter } from 'eventemitter3';
+import path from 'path';
+import crypto from 'crypto';
+import fs from 'fs/promises';
+export class ScriptSandbox extends EventEmitter {
     options;
     worker = null;
     executionCount = 0;
@@ -52,11 +46,11 @@ class ScriptSandbox extends eventemitter3_1.EventEmitter {
     }
     async initialize() {
         // Create working directory
-        await promises_1.default.mkdir(this.workDir, { recursive: true });
+        await fs.mkdir(this.workDir, { recursive: true });
         // Create worker script
         const workerScript = await this.createWorkerScript();
-        const workerPath = path_1.default.join(this.workDir, 'worker.js');
-        await promises_1.default.writeFile(workerPath, workerScript);
+        const workerPath = path.join(this.workDir, 'worker.js');
+        await fs.writeFile(workerPath, workerScript);
         this.emit('initialized', { workDir: this.workDir });
     }
     async execute(script, context = {}, language = 'javascript') {
@@ -64,7 +58,7 @@ class ScriptSandbox extends eventemitter3_1.EventEmitter {
             throw new Error('Maximum execution limit reached');
         }
         this.executionCount++;
-        const executionId = crypto_1.default.randomBytes(16).toString('hex');
+        const executionId = crypto.randomBytes(16).toString('hex');
         this.emit('execution:start', { id: executionId, language });
         try {
             switch (language) {
@@ -98,8 +92,8 @@ class ScriptSandbox extends eventemitter3_1.EventEmitter {
         const logs = [];
         return new Promise((resolve) => {
             // Create worker for isolation
-            const workerPath = path_1.default.join(__dirname, 'workers', 'javascript.worker.js');
-            const worker = new worker_threads_1.Worker(this.getWorkerCode(), {
+            const workerPath = path.join(__dirname, 'workers', 'javascript.worker.js');
+            const worker = new Worker(this.getWorkerCode(), {
                 eval: true,
                 resourceLimits: {
                     maxOldGenerationSizeMb: this.options.memoryLimit,
@@ -218,8 +212,8 @@ class ScriptSandbox extends eventemitter3_1.EventEmitter {
         const logs = [];
         return new Promise((resolve) => {
             // Write script to temporary file
-            const scriptPath = path_1.default.join(this.workDir, `${executionId}.py`);
-            promises_1.default.writeFile(scriptPath, this.wrapPythonScript(script, context))
+            const scriptPath = path.join(this.workDir, `${executionId}.py`);
+            fs.writeFile(scriptPath, this.wrapPythonScript(script, context))
                 .then(() => {
                 const pythonProcess = spawn('python3', [scriptPath], {
                     env: { ...process.env, ...this.options.env },
@@ -235,7 +229,7 @@ class ScriptSandbox extends eventemitter3_1.EventEmitter {
                 });
                 pythonProcess.on('close', async (code) => {
                     // Clean up temp file
-                    await promises_1.default.unlink(scriptPath).catch(() => { });
+                    await fs.unlink(scriptPath).catch(() => { });
                     if (code === 0) {
                         try {
                             const output = JSON.parse(stdout);
@@ -553,7 +547,7 @@ except Exception as e:
         }
         // Clean up work directory
         try {
-            await promises_1.default.rm(this.workDir, { recursive: true, force: true });
+            await fs.rm(this.workDir, { recursive: true, force: true });
         }
         catch (error) {
             this.emit('cleanup:error', error);
@@ -572,5 +566,4 @@ except Exception as e:
         return this.getWorkerCode();
     }
 }
-exports.ScriptSandbox = ScriptSandbox;
 //# sourceMappingURL=ScriptSandbox.js.map

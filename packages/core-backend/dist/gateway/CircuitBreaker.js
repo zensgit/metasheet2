@@ -1,18 +1,11 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.CircuitBreaker = exports.CircuitState = void 0;
-exports.createCircuitBreaker = createCircuitBreaker;
-exports.createStrictCircuitBreaker = createStrictCircuitBreaker;
-exports.createModerateCircuitBreaker = createModerateCircuitBreaker;
-exports.createRelaxedCircuitBreaker = createRelaxedCircuitBreaker;
-const events_1 = require("events");
-var CircuitState;
+import { EventEmitter } from 'events';
+export var CircuitState;
 (function (CircuitState) {
     CircuitState["CLOSED"] = "CLOSED";
     CircuitState["OPEN"] = "OPEN";
     CircuitState["HALF_OPEN"] = "HALF_OPEN";
-})(CircuitState || (exports.CircuitState = CircuitState = {}));
-class CircuitBreaker extends events_1.EventEmitter {
+})(CircuitState || (CircuitState = {}));
+export class CircuitBreaker extends EventEmitter {
     config;
     state = CircuitState.CLOSED;
     stateChangedAt = new Date();
@@ -235,12 +228,11 @@ class CircuitBreaker extends events_1.EventEmitter {
         return this.state === CircuitState.HALF_OPEN;
     }
 }
-exports.CircuitBreaker = CircuitBreaker;
 // Factory functions
-function createCircuitBreaker(config) {
+export function createCircuitBreaker(config) {
     return new CircuitBreaker(config);
 }
-function createStrictCircuitBreaker() {
+export function createStrictCircuitBreaker() {
     return new CircuitBreaker({
         errorThreshold: 25, // Open at 25% error rate
         volumeThreshold: 20, // Need 20 requests minimum
@@ -248,7 +240,7 @@ function createStrictCircuitBreaker() {
         timeout: 5000 // 5 second timeout
     });
 }
-function createModerateCircuitBreaker() {
+export function createModerateCircuitBreaker() {
     return new CircuitBreaker({
         errorThreshold: 50, // Open at 50% error rate
         volumeThreshold: 10, // Need 10 requests minimum
@@ -256,7 +248,7 @@ function createModerateCircuitBreaker() {
         timeout: 10000 // 10 second timeout
     });
 }
-function createRelaxedCircuitBreaker() {
+export function createRelaxedCircuitBreaker() {
     return new CircuitBreaker({
         errorThreshold: 75, // Open at 75% error rate
         volumeThreshold: 5, // Need 5 requests minimum

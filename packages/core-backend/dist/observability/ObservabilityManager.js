@@ -1,55 +1,17 @@
-"use strict";
 /**
  * Unified Observability Manager
  * Integrates metrics, tracing, logging, and alerting into a single cohesive system
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ObservabilityManager = void 0;
-exports.initializeObservability = initializeObservability;
-exports.getObservability = getObservability;
-const eventemitter3_1 = require("eventemitter3");
-const MetricsCollector_1 = require("./MetricsCollector");
-const DistributedTracing_1 = require("./DistributedTracing");
-const TelemetryService_1 = require("../services/TelemetryService");
-const logger_1 = require("../core/logger");
-const os = __importStar(require("os"));
-const fs = __importStar(require("fs"));
-const path = __importStar(require("path"));
-const crypto = __importStar(require("crypto"));
-class ObservabilityManager extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+import { MetricsCollector } from './MetricsCollector';
+import { DistributedTracing } from './DistributedTracing';
+import { getTelemetry } from '../services/TelemetryService';
+import { Logger } from '../core/logger';
+import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
+export class ObservabilityManager extends EventEmitter {
     config;
     metricsCollector;
     distributedTracing;
@@ -62,7 +24,7 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
     constructor(config) {
         super();
         this.config = config;
-        this.logger = new logger_1.Logger('ObservabilityManager');
+        this.logger = new Logger('ObservabilityManager');
         this.performanceMetrics = {
             requestCount: 0,
             totalResponseTime: 0,
@@ -112,7 +74,7 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
      * Initialize metrics collection
      */
     initializeMetrics() {
-        this.metricsCollector = new MetricsCollector_1.MetricsCollector({
+        this.metricsCollector = new MetricsCollector({
             prefix: `${this.config.serviceName}_`,
             defaultLabels: {
                 environment: this.config.environment,
@@ -133,7 +95,7 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
      * Initialize distributed tracing
      */
     initializeTracing() {
-        this.distributedTracing = new DistributedTracing_1.DistributedTracing({
+        this.distributedTracing = new DistributedTracing({
             serviceName: this.config.serviceName,
             serviceVersion: this.config.version,
             environment: this.config.environment,
@@ -157,7 +119,7 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
      * Initialize telemetry service
      */
     initializeTelemetry() {
-        this.telemetryService = (0, TelemetryService_1.getTelemetry)({
+        this.telemetryService = getTelemetry({
             serviceName: this.config.serviceName,
             serviceVersion: this.config.version,
             environment: this.config.environment,
@@ -203,7 +165,7 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
         this.registerHealthCheck('database', async () => {
             try {
                 // Check database connectivity
-                const { db } = await Promise.resolve().then(() => __importStar(require('../db/db')));
+                const { db } = await import('../db/db');
                 await db.selectFrom('users').select('id').limit(1).execute();
                 return true;
             }
@@ -552,17 +514,16 @@ class ObservabilityManager extends eventemitter3_1.EventEmitter {
         this.logger.info('Observability Manager shut down');
     }
 }
-exports.ObservabilityManager = ObservabilityManager;
 // Singleton instance
 let observabilityManager = null;
-function initializeObservability(config) {
+export function initializeObservability(config) {
     if (!observabilityManager) {
         observabilityManager = new ObservabilityManager(config);
     }
     return observabilityManager;
 }
-function getObservability() {
+export function getObservability() {
     return observabilityManager;
 }
-exports.default = ObservabilityManager;
+export default ObservabilityManager;
 //# sourceMappingURL=ObservabilityManager.js.map

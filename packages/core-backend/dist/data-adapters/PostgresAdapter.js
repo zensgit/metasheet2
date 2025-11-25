@@ -1,17 +1,14 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PostgresAdapter = void 0;
 // @ts-nocheck
-const pg_1 = require("pg");
-const BaseAdapter_1 = require("./BaseAdapter");
-class PostgresAdapter extends BaseAdapter_1.BaseDataAdapter {
+import { Pool } from 'pg';
+import { BaseDataAdapter } from './BaseAdapter';
+export class PostgresAdapter extends BaseDataAdapter {
     pool = null;
     async connect() {
         if (this.connected) {
             return;
         }
         try {
-            this.pool = new pg_1.Pool({
+            this.pool = new Pool({
                 host: this.config.connection.host,
                 port: this.config.connection.port || 5432,
                 database: this.config.connection.database,
@@ -413,6 +410,5 @@ class PostgresAdapter extends BaseAdapter_1.BaseDataAdapter {
         return type;
     }
 }
-exports.PostgresAdapter = PostgresAdapter;
 // @ts-nocheck
 //# sourceMappingURL=PostgresAdapter.js.map

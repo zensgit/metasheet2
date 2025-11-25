@@ -1,0 +1,1 @@
+{\n  "start_timestamp": "20251124-142059",\n  "base_url": "http://localhost:8900",\n  "metrics_url": "http://localhost:8900/metrics/prom",\n  "rate": 80,\n  "concurrency": 20,\n  "duration_seconds": 900,\n  "interval_seconds": 60,\n  "samples": 12,\n  "jwt_provided": false,\n  "cache_miss_counted": false\n}

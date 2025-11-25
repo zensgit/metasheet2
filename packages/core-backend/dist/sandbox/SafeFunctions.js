@@ -1,12 +1,8 @@
-"use strict";
 /**
  * Safe Functions Library
  * Pre-defined safe functions that can be exposed to sandboxed scripts
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.SafeFunctions = exports.SafeValidationFunctions = exports.SafeObjectFunctions = exports.SafeDateFunctions = exports.SafeArrayFunctions = exports.SafeStringFunctions = exports.SafeMathFunctions = void 0;
-exports.createSafeContext = createSafeContext;
-exports.SafeMathFunctions = {
+export const SafeMathFunctions = {
     // Basic math operations
     sum: (arr) => arr.reduce((a, b) => a + b, 0),
     average: (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0,
@@ -45,7 +41,7 @@ exports.SafeMathFunctions = {
         return Math.floor(Math.random() * (max - min + 1)) + min;
     }
 };
-exports.SafeStringFunctions = {
+export const SafeStringFunctions = {
     // String manipulation
     capitalize: (str) => {
         return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
@@ -101,14 +97,14 @@ exports.SafeStringFunctions = {
         return str.trim().split(/\s+/).length;
     }
 };
-exports.SafeArrayFunctions = {
+export const SafeArrayFunctions = {
     // Array manipulation
     unique: (arr) => {
         return [...new Set(arr)];
     },
     flatten: (arr) => {
         return arr.reduce((flat, item) => {
-            return flat.concat(Array.isArray(item) ? exports.SafeArrayFunctions.flatten(item) : item);
+            return flat.concat(Array.isArray(item) ? SafeArrayFunctions.flatten(item) : item);
         }, []);
     },
     chunk: (arr, size) => {
@@ -154,7 +150,7 @@ exports.SafeArrayFunctions = {
         return -1;
     }
 };
-exports.SafeDateFunctions = {
+export const SafeDateFunctions = {
     // Date formatting
     formatDate: (date, format = 'YYYY-MM-DD') => {
         const d = typeof date === 'string' ? new Date(date) : date;
@@ -209,7 +205,7 @@ exports.SafeDateFunctions = {
         return isNaN(date.getTime()) ? null : date;
     }
 };
-exports.SafeObjectFunctions = {
+export const SafeObjectFunctions = {
     // Object manipulation
     pick: (obj, keys) => {
         const result = {};
@@ -266,18 +262,18 @@ exports.SafeObjectFunctions = {
         if (obj instanceof Date)
             return new Date(obj.getTime());
         if (obj instanceof Array) {
-            return obj.map(item => exports.SafeObjectFunctions.deepClone(item, visited));
+            return obj.map(item => SafeObjectFunctions.deepClone(item, visited));
         }
         const clonedObj = {};
         for (const key in obj) {
             if (obj.hasOwnProperty(key)) {
-                clonedObj[key] = exports.SafeObjectFunctions.deepClone(obj[key], visited);
+                clonedObj[key] = SafeObjectFunctions.deepClone(obj[key], visited);
             }
         }
         return clonedObj;
     }
 };
-exports.SafeValidationFunctions = {
+export const SafeValidationFunctions = {
     // Type checking
     isString: (value) => typeof value === 'string',
     isNumber: (value) => typeof value === 'number' && !isNaN(value),
@@ -331,43 +327,43 @@ exports.SafeValidationFunctions = {
     }
 };
 // Export all safe functions
-exports.SafeFunctions = {
-    math: exports.SafeMathFunctions,
-    string: exports.SafeStringFunctions,
-    array: exports.SafeArrayFunctions,
-    date: exports.SafeDateFunctions,
-    object: exports.SafeObjectFunctions,
-    validation: exports.SafeValidationFunctions
+export const SafeFunctions = {
+    math: SafeMathFunctions,
+    string: SafeStringFunctions,
+    array: SafeArrayFunctions,
+    date: SafeDateFunctions,
+    object: SafeObjectFunctions,
+    validation: SafeValidationFunctions
 };
 // Create a context with all safe functions for sandbox execution
-function createSafeContext() {
+export function createSafeContext() {
     return {
         // Math functions
-        sum: exports.SafeMathFunctions.sum,
-        average: exports.SafeMathFunctions.average,
-        median: exports.SafeMathFunctions.median,
-        round: exports.SafeMathFunctions.round,
+        sum: SafeMathFunctions.sum,
+        average: SafeMathFunctions.average,
+        median: SafeMathFunctions.median,
+        round: SafeMathFunctions.round,
         // String functions
-        capitalize: exports.SafeStringFunctions.capitalize,
-        titleCase: exports.SafeStringFunctions.titleCase,
-        isEmail: exports.SafeStringFunctions.isEmail,
-        truncate: exports.SafeStringFunctions.truncate,
+        capitalize: SafeStringFunctions.capitalize,
+        titleCase: SafeStringFunctions.titleCase,
+        isEmail: SafeStringFunctions.isEmail,
+        truncate: SafeStringFunctions.truncate,
         // Array functions
-        unique: exports.SafeArrayFunctions.unique,
-        flatten: exports.SafeArrayFunctions.flatten,
-        chunk: exports.SafeArrayFunctions.chunk,
+        unique: SafeArrayFunctions.unique,
+        flatten: SafeArrayFunctions.flatten,
+        chunk: SafeArrayFunctions.chunk,
         // Date functions
-        formatDate: exports.SafeDateFunctions.formatDate,
-        addDays: exports.SafeDateFunctions.addDays,
-        daysBetween: exports.SafeDateFunctions.daysBetween,
+        formatDate: SafeDateFunctions.formatDate,
+        addDays: SafeDateFunctions.addDays,
+        daysBetween: SafeDateFunctions.daysBetween,
         // Object functions
-        pick: exports.SafeObjectFunctions.pick,
-        omit: exports.SafeObjectFunctions.omit,
-        merge: exports.SafeObjectFunctions.merge,
+        pick: SafeObjectFunctions.pick,
+        omit: SafeObjectFunctions.omit,
+        merge: SafeObjectFunctions.merge,
         // Validation functions
-        isString: exports.SafeValidationFunctions.isString,
-        isNumber: exports.SafeValidationFunctions.isNumber,
-        validateSchema: exports.SafeValidationFunctions.validateSchema
+        isString: SafeValidationFunctions.isString,
+        isNumber: SafeValidationFunctions.isNumber,
+        validateSchema: SafeValidationFunctions.validateSchema
     };
 }
 //# sourceMappingURL=SafeFunctions.js.map

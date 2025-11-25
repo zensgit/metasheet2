@@ -11,7 +11,7 @@
  * - Type-safe operation
  */
 
-import type { Cache, Result } from '../../types/cache'
+import type { Cache, Result } from '../types/cache'
 import { cacheMetrics } from './metrics'
 
 export class CacheRegistry implements Cache {

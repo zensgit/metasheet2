@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Cache Configuration
  *
@@ -7,9 +6,7 @@
  * - CACHE_IMPL: Cache implementation (default: 'null')
  * - CACHE_DEFAULT_TTL: Default TTL in seconds (default: 3600)
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.cacheConfig = void 0;
-exports.cacheConfig = {
+export const cacheConfig = {
     /**
      * Enable cache system
      */

@@ -1,28 +1,26 @@
-"use strict";
 /**
  * Workflow Designer API Routes
  * Visual workflow editor REST endpoints
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const WorkflowDesigner_1 = require("../workflow/WorkflowDesigner");
-const auth_1 = require("../middleware/auth");
-const validation_1 = require("../middleware/validation");
-const express_validator_1 = require("express-validator");
-const logger_1 = require("../core/logger");
-const db_1 = require("../db/db");
-const router = (0, express_1.Router)();
-const logger = new logger_1.Logger('WorkflowDesignerAPI');
-const designer = new WorkflowDesigner_1.WorkflowDesigner();
+import { Router } from 'express';
+import { WorkflowDesigner } from '../workflow/WorkflowDesigner';
+import { authenticate } from '../middleware/auth';
+import { validate } from '../middleware/validation';
+import { body, param, query } from 'express-validator';
+import { Logger } from '../core/logger';
+import { db } from '../db/db';
+const router = Router();
+const logger = new Logger('WorkflowDesignerAPI');
+const designer = new WorkflowDesigner();
 /**
  * GET /api/workflow-designer/node-types
  * Get available workflow node types
  */
-router.get('/node-types', auth_1.authenticate, async (req, res) => {
+router.get('/node-types', authenticate, async (req, res) => {
     try {
         const nodeTypes = designer.getNodeTypes();
         // Also get from database for custom node types
-        const customTypes = await db_1.db
+        const customTypes = await db
             .selectFrom('workflow_node_library')
             .selectAll()
             .where('is_active', '=', true)
@@ -53,10 +51,10 @@ router.get('/node-types', auth_1.authenticate, async (req, res) => {
  * GET /api/workflow-designer/templates
  * Get workflow templates
  */
-router.get('/templates', auth_1.authenticate, (0, express_validator_1.query)('category').optional().isString(), (0, express_validator_1.query)('featured').optional().isBoolean(), validation_1.validate, async (req, res) => {
+router.get('/templates', authenticate, query('category').optional().isString(), query('featured').optional().isBoolean(), validate, async (req, res) => {
     try {
         const { category, featured } = req.query;
-        let query = db_1.db
+        let query = db
             .selectFrom('workflow_templates')
             .selectAll()
             .where('is_public', '=', true);
@@ -92,7 +90,7 @@ router.get('/templates', auth_1.authenticate, (0, express_validator_1.query)('ca
  * POST /api/workflow-designer/workflows
  * Create new workflow
  */
-router.post('/workflows', auth_1.authenticate, (0, express_validator_1.body)('name').isString().notEmpty(), (0, express_validator_1.body)('description').optional().isString(), (0, express_validator_1.body)('category').optional().isString(), (0, express_validator_1.body)('nodes').isArray(), (0, express_validator_1.body)('edges').isArray(), (0, express_validator_1.body)('variables').optional().isObject(), (0, express_validator_1.body)('tags').optional().isArray(), validation_1.validate, async (req, res) => {
+router.post('/workflows', authenticate, body('name').isString().notEmpty(), body('description').optional().isString(), body('category').optional().isString(), body('nodes').isArray(), body('edges').isArray(), body('variables').optional().isObject(), body('tags').optional().isArray(), validate, async (req, res) => {
     try {
         const userId = req.user?.id;
         const workflowDefinition = req.body;
@@ -107,7 +105,7 @@ router.post('/workflows', auth_1.authenticate, (0, express_validator_1.body)('na
         }
         const workflowId = await designer.saveWorkflow(workflowDefinition);
         // Log creation
-        await db_1.db
+        await db
             .insertInto('workflow_analytics')
             .values({
             workflow_id: workflowId,
@@ -140,11 +138,11 @@ router.post('/workflows', auth_1.authenticate, (0, express_validator_1.body)('na
  * GET /api/workflow-designer/workflows
  * List workflows
  */
-router.get('/workflows', auth_1.authenticate, (0, express_validator_1.query)('category').optional().isString(), (0, express_validator_1.query)('status').optional().isIn(['draft', 'published', 'archived']), (0, express_validator_1.query)('search').optional().isString(), validation_1.validate, async (req, res) => {
+router.get('/workflows', authenticate, query('category').optional().isString(), query('status').optional().isIn(['draft', 'published', 'archived']), query('search').optional().isString(), validate, async (req, res) => {
     try {
         const { category, status, search } = req.query;
         const userId = req.user?.id;
-        let query = db_1.db
+        let query = db
             .selectFrom('workflow_designer_definitions')
             .leftJoin('workflow_collaboration', 'workflow_designer_definitions.id', 'workflow_collaboration.workflow_id')
             .select([
@@ -193,7 +191,7 @@ router.get('/workflows', auth_1.authenticate, (0, express_validator_1.query)('ca
  * GET /api/workflow-designer/workflows/:id
  * Get workflow details
  */
-router.get('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), validation_1.validate, async (req, res) => {
+router.get('/workflows/:id', authenticate, param('id').isString(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user?.id;
@@ -205,13 +203,13 @@ router.get('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)
             });
         }
         // Check access permissions
-        const collaboration = await db_1.db
+        const collaboration = await db
             .selectFrom('workflow_collaboration')
             .selectAll()
             .where('workflow_id', '=', id)
             .where('user_id', '=', userId)
             .executeTakeFirst();
-        const workflowInfo = await db_1.db
+        const workflowInfo = await db
             .selectFrom('workflow_designer_definitions')
             .selectAll()
             .where('id', '=', id)
@@ -223,7 +221,7 @@ router.get('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)
             });
         }
         // Log access
-        await db_1.db
+        await db
             .insertInto('workflow_analytics')
             .values({
             workflow_id: id,
@@ -258,19 +256,19 @@ router.get('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)
  * PUT /api/workflow-designer/workflows/:id
  * Update workflow
  */
-router.put('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), (0, express_validator_1.body)('name').optional().isString(), (0, express_validator_1.body)('description').optional().isString(), (0, express_validator_1.body)('nodes').optional().isArray(), (0, express_validator_1.body)('edges').optional().isArray(), (0, express_validator_1.body)('variables').optional().isObject(), validation_1.validate, async (req, res) => {
+router.put('/workflows/:id', authenticate, param('id').isString(), body('name').optional().isString(), body('description').optional().isString(), body('nodes').optional().isArray(), body('edges').optional().isArray(), body('variables').optional().isObject(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user?.id;
         const updates = req.body;
         // Check permissions
-        const collaboration = await db_1.db
+        const collaboration = await db
             .selectFrom('workflow_collaboration')
             .selectAll()
             .where('workflow_id', '=', id)
             .where('user_id', '=', userId)
             .executeTakeFirst();
-        const workflow = await db_1.db
+        const workflow = await db
             .selectFrom('workflow_designer_definitions')
             .selectAll()
             .where('id', '=', id)
@@ -305,7 +303,7 @@ router.put('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)
         }
         await designer.saveWorkflow(updatedDefinition);
         // Log update
-        await db_1.db
+        await db
             .insertInto('workflow_analytics')
             .values({
             workflow_id: id,
@@ -334,7 +332,7 @@ router.put('/workflows/:id', auth_1.authenticate, (0, express_validator_1.param)
  * POST /api/workflow-designer/workflows/:id/validate
  * Validate workflow
  */
-router.post('/workflows/:id/validate', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), validation_1.validate, async (req, res) => {
+router.post('/workflows/:id/validate', authenticate, param('id').isString(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const workflow = await designer.loadWorkflow(id);
@@ -362,18 +360,18 @@ router.post('/workflows/:id/validate', auth_1.authenticate, (0, express_validato
  * POST /api/workflow-designer/workflows/:id/deploy
  * Deploy workflow to execution engine
  */
-router.post('/workflows/:id/deploy', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), validation_1.validate, async (req, res) => {
+router.post('/workflows/:id/deploy', authenticate, param('id').isString(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user?.id;
         // Check deployment permissions
-        const collaboration = await db_1.db
+        const collaboration = await db
             .selectFrom('workflow_collaboration')
             .selectAll()
             .where('workflow_id', '=', id)
             .where('user_id', '=', userId)
             .executeTakeFirst();
-        const workflow = await db_1.db
+        const workflow = await db
             .selectFrom('workflow_designer_definitions')
             .selectAll()
             .where('id', '=', id)
@@ -386,7 +384,7 @@ router.post('/workflows/:id/deploy', auth_1.authenticate, (0, express_validator_
         }
         const deploymentId = await designer.deployWorkflow(id);
         // Update workflow status
-        await db_1.db
+        await db
             .updateTable('workflow_designer_definitions')
             .set({
             status: 'published',
@@ -395,7 +393,7 @@ router.post('/workflows/:id/deploy', auth_1.authenticate, (0, express_validator_
             .where('id', '=', id)
             .execute();
         // Log deployment
-        await db_1.db
+        await db
             .insertInto('workflow_analytics')
             .values({
             workflow_id: id,
@@ -424,7 +422,7 @@ router.post('/workflows/:id/deploy', auth_1.authenticate, (0, express_validator_
  * POST /api/workflow-designer/workflows/:id/test
  * Test workflow execution
  */
-router.post('/workflows/:id/test', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), (0, express_validator_1.body)('variables').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/workflows/:id/test', authenticate, param('id').isString(), body('variables').optional().isObject(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const { variables = {} } = req.body;
@@ -437,7 +435,7 @@ router.post('/workflows/:id/test', auth_1.authenticate, (0, express_validator_1.
             });
         }
         // Create test execution record
-        const executionId = await db_1.db
+        const executionId = await db
             .insertInto('workflow_execution_history')
             .values({
             designer_workflow_id: id,
@@ -451,7 +449,7 @@ router.post('/workflows/:id/test', auth_1.authenticate, (0, express_validator_1.
         // Here you would integrate with actual workflow engine for test execution
         // For now, we'll simulate a successful test
         setTimeout(async () => {
-            await db_1.db
+            await db
                 .updateTable('workflow_execution_history')
                 .set({
                 status: 'completed',
@@ -481,11 +479,11 @@ router.post('/workflows/:id/test', auth_1.authenticate, (0, express_validator_1.
  * GET /api/workflow-designer/workflows/:id/executions
  * Get workflow execution history
  */
-router.get('/workflows/:id/executions', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), (0, express_validator_1.query)('limit').optional().isInt({ min: 1, max: 100 }), validation_1.validate, async (req, res) => {
+router.get('/workflows/:id/executions', authenticate, param('id').isString(), query('limit').optional().isInt({ min: 1, max: 100 }), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const limit = parseInt(req.query.limit) || 50;
-        const executions = await db_1.db
+        const executions = await db
             .selectFrom('workflow_execution_history')
             .selectAll()
             .where('designer_workflow_id', '=', id)
@@ -513,19 +511,19 @@ router.get('/workflows/:id/executions', auth_1.authenticate, (0, express_validat
  * POST /api/workflow-designer/workflows/:id/share
  * Share workflow with other users
  */
-router.post('/workflows/:id/share', auth_1.authenticate, (0, express_validator_1.param)('id').isString(), (0, express_validator_1.body)('userId').isString(), (0, express_validator_1.body)('role').isIn(['viewer', 'editor']), (0, express_validator_1.body)('permissions').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/workflows/:id/share', authenticate, param('id').isString(), body('userId').isString(), body('role').isIn(['viewer', 'editor']), body('permissions').optional().isObject(), validate, async (req, res) => {
     try {
         const { id } = req.params;
         const { userId: targetUserId, role, permissions } = req.body;
         const currentUserId = req.user?.id;
         // Check if user is owner or has sharing permissions
-        const workflow = await db_1.db
+        const workflow = await db
             .selectFrom('workflow_designer_definitions')
             .selectAll()
             .where('id', '=', id)
             .executeTakeFirst();
         if (!workflow || workflow.created_by !== currentUserId) {
-            const collaboration = await db_1.db
+            const collaboration = await db
                 .selectFrom('workflow_collaboration')
                 .selectAll()
                 .where('workflow_id', '=', id)
@@ -539,7 +537,7 @@ router.post('/workflows/:id/share', auth_1.authenticate, (0, express_validator_1
             }
         }
         // Create or update collaboration record
-        await db_1.db
+        await db
             .insertInto('workflow_collaboration')
             .values({
             workflow_id: id,
@@ -562,7 +560,7 @@ router.post('/workflows/:id/share', auth_1.authenticate, (0, express_validator_1
         }))
             .execute();
         // Log sharing
-        await db_1.db
+        await db
             .insertInto('workflow_analytics')
             .values({
             workflow_id: id,
@@ -585,5 +583,5 @@ router.post('/workflows/:id/share', auth_1.authenticate, (0, express_validator_1
         });
     }
 });
-exports.default = router;
+export default router;
 //# sourceMappingURL=workflow-designer.js.map

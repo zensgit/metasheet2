@@ -137,13 +137,14 @@ EOF
 
 "
 
-    # Plugin reload latencies
-    local plugin_p50=$(echo "$json" | jq -r '.percentiles.metasheet_plugin_reload_duration_seconds.p50 // 0')
-    local plugin_p95=$(echo "$json" | jq -r '.percentiles.metasheet_plugin_reload_duration_seconds.p95 // 0')
-    local plugin_p99=$(echo "$json" | jq -r '.percentiles.metasheet_plugin_reload_duration_seconds.p99 // 0')
-    local plugin_count=$(echo "$json" | jq -r '.percentiles.metasheet_plugin_reload_duration_seconds.count // 0')
+    # Plugin reload latencies (using labeled histogram key)
+    local plugin_key='metasheet_plugin_reload_duration_seconds{plugin_name="example-plugin"}'
+    local plugin_p50=$(echo "$json" | jq -r --arg key "$plugin_key" '.percentiles[$key].p50 // 0')
+    local plugin_p95=$(echo "$json" | jq -r --arg key "$plugin_key" '.percentiles[$key].p95 // 0')
+    local plugin_p99=$(echo "$json" | jq -r --arg key "$plugin_key" '.percentiles[$key].p99 // 0')
+    local plugin_count=$(echo "$json" | jq -r --arg key "$plugin_key" '.percentiles[$key].count // 0')
 
-    report+="**Plugin Reload Duration**:
+    report+="**Plugin Reload Duration** (example-plugin):
 - P50: ${plugin_p50}s
 - P95: ${plugin_p95}s
 - P99: ${plugin_p99}s
@@ -205,20 +206,32 @@ EOF
 "
 
     # Fallback breakdown
-    report+="### Fallback Breakdown by Reason
+    report+="### Fallback Metrics
+
+**Summary**:
+- Raw Total: $raw_fallback
+- Effective Total: $effective_fallback
+- Ratio (effective/raw): $fallback_effective_ratio
+
+**Breakdown by Reason** (raw counts):
 
 "
 
     local fallback_by_reason=$(echo "$json" | jq -r '.counters.fallback_by_reason')
     local reasons=$(echo "$fallback_by_reason" | jq -r 'keys[]')
 
-    report+="| Reason | Count |
-|--------|-------|
+    report+="| Reason | Count | Counts as Effective |
+|--------|-------|---------------------|
 "
 
     for reason in $reasons; do
         local count=$(echo "$fallback_by_reason" | jq -r ".$reason")
-        report+="| $reason | $count |
+        # cache_miss does not count as effective when COUNT_CACHE_MISS_AS_FALLBACK=false
+        local effective_flag="Yes"
+        if [ "$reason" = "cache_miss" ]; then
+            effective_flag="No (excluded)"
+        fi
+        report+="| $reason | $count | $effective_flag |
 "
     done
 

@@ -1,26 +1,23 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.auditLogsRouter = auditLogsRouter;
-const express_1 = require("express");
-const pg_1 = require("../db/pg");
-const zod_1 = require("zod");
-const rbac_1 = require("../rbac/rbac");
-function auditLogsRouter() {
-    const r = (0, express_1.Router)();
-    r.get('/api/audit-logs', (0, rbac_1.rbacGuard)('audit', 'read'), async (req, res) => {
-        if (!pg_1.pool)
+import { Router } from 'express';
+import { pool } from '../db/pg';
+import { z } from 'zod';
+import { rbacGuard } from '../rbac/rbac';
+export function auditLogsRouter() {
+    const r = Router();
+    r.get('/api/audit-logs', rbacGuard('audit', 'read'), async (req, res) => {
+        if (!pool)
             return res.status(503).json({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'DB not configured' } });
-        const schema = zod_1.z.object({
-            actorId: zod_1.z.string().optional(),
-            resourceType: zod_1.z.string().optional(),
-            resourceId: zod_1.z.string().optional(),
-            action: zod_1.z.string().optional(),
-            from: zod_1.z.string().datetime().optional(),
-            to: zod_1.z.string().datetime().optional(),
-            page: zod_1.z.string().regex(/^\d+$/).default('1'),
-            pageSize: zod_1.z.string().regex(/^\d+$/).default('50'),
-            format: zod_1.z.enum(['csv', 'ndjson']).optional(),
-            limit: zod_1.z.string().regex(/^\d+$/).optional()
+        const schema = z.object({
+            actorId: z.string().optional(),
+            resourceType: z.string().optional(),
+            resourceId: z.string().optional(),
+            action: z.string().optional(),
+            from: z.string().datetime().optional(),
+            to: z.string().datetime().optional(),
+            page: z.string().regex(/^\d+$/).default('1'),
+            pageSize: z.string().regex(/^\d+$/).default('50'),
+            format: z.enum(['csv', 'ndjson']).optional(),
+            limit: z.string().regex(/^\d+$/).optional()
         });
         const parsed = schema.safeParse(req.query);
         if (!parsed.success) {
@@ -54,7 +51,7 @@ function auditLogsRouter() {
                    FROM operation_audit_logs ${whereSql}
                    ORDER BY occurred_at DESC
                    LIMIT ${limit}`;
-            const { rows } = await pg_1.pool.query(sql, params);
+            const { rows } = await pool.query(sql, params);
             if (q.format === 'csv') {
                 res.setHeader('Content-Type', 'text/csv; charset=utf-8');
                 res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.csv"');
@@ -89,13 +86,13 @@ function auditLogsRouter() {
             }
         }
         const countSql = `SELECT COUNT(*)::int AS c FROM operation_audit_logs ${whereSql}`;
-        const countRes = await pg_1.pool.query(countSql, params);
+        const countRes = await pool.query(countSql, params);
         const total = countRes.rows[0]?.c || 0;
         const sql = `SELECT id, occurred_at, actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent, meta
                  FROM operation_audit_logs ${whereSql}
                  ORDER BY occurred_at DESC
                  LIMIT ${pageSize} OFFSET ${offset}`;
-        const { rows } = await pg_1.pool.query(sql, params);
+        const { rows } = await pool.query(sql, params);
         return res.json({ ok: true, data: { items: rows, page, pageSize, total } });
     });
     return r;

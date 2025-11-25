@@ -1,46 +1,10 @@
-"use strict";
 /**
  * Advanced Metrics Collector
  * Comprehensive metrics collection for Prometheus and other monitoring systems
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.MetricsCollector = void 0;
-const prom_client_1 = require("prom-client");
-const eventemitter3_1 = require("eventemitter3");
-const os = __importStar(require("os"));
+import { Registry, Counter, Gauge, Histogram, Summary, collectDefaultMetrics } from 'prom-client';
+import { EventEmitter } from 'eventemitter3';
+import * as os from 'os';
 const DEFAULT_CONFIG = {
     prefix: 'metasheet_',
     defaultLabels: {},
@@ -49,7 +13,7 @@ const DEFAULT_CONFIG = {
     enableDefaultMetrics: true,
     aggregateInterval: 60000 // 1 minute
 };
-class MetricsCollector extends eventemitter3_1.EventEmitter {
+export class MetricsCollector extends EventEmitter {
     registry;
     config;
     metrics = new Map();
@@ -102,7 +66,7 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
     constructor(config) {
         super();
         this.config = { ...DEFAULT_CONFIG, ...config };
-        this.registry = new prom_client_1.Registry();
+        this.registry = new Registry();
         this.startTime = Date.now();
         this.initializeMetrics();
         this.startAggregation();
@@ -117,36 +81,36 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
         }
         // Collect default Node.js metrics
         if (this.config.enableDefaultMetrics) {
-            (0, prom_client_1.collectDefaultMetrics)({ register: this.registry, prefix: this.config.prefix });
+            collectDefaultMetrics({ register: this.registry, prefix: this.config.prefix });
         }
         // Initialize HTTP metrics
-        this.httpRequestDuration = new prom_client_1.Histogram({
+        this.httpRequestDuration = new Histogram({
             name: `${this.config.prefix}http_request_duration_seconds`,
             help: 'Duration of HTTP requests in seconds',
             labelNames: ['method', 'route', 'status'],
             buckets: this.config.buckets,
             registers: [this.registry]
         });
-        this.httpRequestTotal = new prom_client_1.Counter({
+        this.httpRequestTotal = new Counter({
             name: `${this.config.prefix}http_requests_total`,
             help: 'Total number of HTTP requests',
             labelNames: ['method', 'route', 'status'],
             registers: [this.registry]
         });
-        this.httpRequestErrors = new prom_client_1.Counter({
+        this.httpRequestErrors = new Counter({
             name: `${this.config.prefix}http_request_errors_total`,
             help: 'Total number of HTTP request errors',
             labelNames: ['method', 'route', 'error'],
             registers: [this.registry]
         });
-        this.httpRequestSize = new prom_client_1.Histogram({
+        this.httpRequestSize = new Histogram({
             name: `${this.config.prefix}http_request_size_bytes`,
             help: 'Size of HTTP requests in bytes',
             labelNames: ['method', 'route'],
             buckets: [100, 1000, 10000, 100000, 1000000],
             registers: [this.registry]
         });
-        this.httpResponseSize = new prom_client_1.Histogram({
+        this.httpResponseSize = new Histogram({
             name: `${this.config.prefix}http_response_size_bytes`,
             help: 'Size of HTTP responses in bytes',
             labelNames: ['method', 'route'],
@@ -154,112 +118,112 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
             registers: [this.registry]
         });
         // Initialize Database metrics
-        this.dbQueryDuration = new prom_client_1.Histogram({
+        this.dbQueryDuration = new Histogram({
             name: `${this.config.prefix}db_query_duration_seconds`,
             help: 'Duration of database queries in seconds',
             labelNames: ['operation', 'table'],
             buckets: this.config.buckets,
             registers: [this.registry]
         });
-        this.dbQueryTotal = new prom_client_1.Counter({
+        this.dbQueryTotal = new Counter({
             name: `${this.config.prefix}db_queries_total`,
             help: 'Total number of database queries',
             labelNames: ['operation', 'table'],
             registers: [this.registry]
         });
-        this.dbQueryErrors = new prom_client_1.Counter({
+        this.dbQueryErrors = new Counter({
             name: `${this.config.prefix}db_query_errors_total`,
             help: 'Total number of database query errors',
             labelNames: ['operation', 'table', 'error'],
             registers: [this.registry]
         });
-        this.dbConnectionPool = new prom_client_1.Gauge({
+        this.dbConnectionPool = new Gauge({
             name: `${this.config.prefix}db_connection_pool_size`,
             help: 'Database connection pool size',
             labelNames: ['state'],
             registers: [this.registry]
         });
-        this.dbTransactionDuration = new prom_client_1.Histogram({
+        this.dbTransactionDuration = new Histogram({
             name: `${this.config.prefix}db_transaction_duration_seconds`,
             help: 'Duration of database transactions in seconds',
             buckets: this.config.buckets,
             registers: [this.registry]
         });
         // Initialize Business metrics
-        this.spreadsheetOperations = new prom_client_1.Counter({
+        this.spreadsheetOperations = new Counter({
             name: `${this.config.prefix}spreadsheet_operations_total`,
             help: 'Total number of spreadsheet operations',
             labelNames: ['operation', 'spreadsheet_id'],
             registers: [this.registry]
         });
-        this.workflowExecutions = new prom_client_1.Counter({
+        this.workflowExecutions = new Counter({
             name: `${this.config.prefix}workflow_executions_total`,
             help: 'Total number of workflow executions',
             labelNames: ['workflow_id', 'status'],
             registers: [this.registry]
         });
-        this.approvalProcessing = new prom_client_1.Histogram({
+        this.approvalProcessing = new Histogram({
             name: `${this.config.prefix}approval_processing_duration_seconds`,
             help: 'Duration of approval processing in seconds',
             labelNames: ['approval_type', 'status'],
             buckets: this.config.buckets,
             registers: [this.registry]
         });
-        this.formulaCalculations = new prom_client_1.Histogram({
+        this.formulaCalculations = new Histogram({
             name: `${this.config.prefix}formula_calculation_duration_seconds`,
             help: 'Duration of formula calculations in seconds',
             labelNames: ['formula_type', 'complexity'],
             buckets: [0.001, 0.01, 0.1, 1, 10],
             registers: [this.registry]
         });
-        this.cellUpdates = new prom_client_1.Counter({
+        this.cellUpdates = new Counter({
             name: `${this.config.prefix}cell_updates_total`,
             help: 'Total number of cell updates',
             labelNames: ['spreadsheet_id', 'update_type'],
             registers: [this.registry]
         });
         // Initialize System metrics
-        this.systemCpu = new prom_client_1.Gauge({
+        this.systemCpu = new Gauge({
             name: `${this.config.prefix}system_cpu_usage_percent`,
             help: 'System CPU usage percentage',
             registers: [this.registry]
         });
-        this.systemMemory = new prom_client_1.Gauge({
+        this.systemMemory = new Gauge({
             name: `${this.config.prefix}system_memory_usage_bytes`,
             help: 'System memory usage in bytes',
             labelNames: ['type'],
             registers: [this.registry]
         });
-        this.systemDisk = new prom_client_1.Gauge({
+        this.systemDisk = new Gauge({
             name: `${this.config.prefix}system_disk_usage_bytes`,
             help: 'System disk usage in bytes',
             labelNames: ['path', 'type'],
             registers: [this.registry]
         });
-        this.systemNetwork = new prom_client_1.Counter({
+        this.systemNetwork = new Counter({
             name: `${this.config.prefix}system_network_bytes_total`,
             help: 'Total network bytes transferred',
             labelNames: ['direction', 'interface'],
             registers: [this.registry]
         });
-        this.processMemory = new prom_client_1.Gauge({
+        this.processMemory = new Gauge({
             name: `${this.config.prefix}process_memory_usage_bytes`,
             help: 'Process memory usage in bytes',
             labelNames: ['type'],
             registers: [this.registry]
         });
-        this.processCpu = new prom_client_1.Gauge({
+        this.processCpu = new Gauge({
             name: `${this.config.prefix}process_cpu_usage_percent`,
             help: 'Process CPU usage percentage',
             registers: [this.registry]
         });
-        this.eventLoopLag = new prom_client_1.Histogram({
+        this.eventLoopLag = new Histogram({
             name: `${this.config.prefix}event_loop_lag_seconds`,
             help: 'Event loop lag in seconds',
             buckets: [0.001, 0.01, 0.1, 1],
             registers: [this.registry]
         });
-        this.gcDuration = new prom_client_1.Histogram({
+        this.gcDuration = new Histogram({
             name: `${this.config.prefix}gc_duration_seconds`,
             help: 'Garbage collection duration in seconds',
             labelNames: ['type'],
@@ -267,75 +231,75 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
             registers: [this.registry]
         });
         // Initialize Plugin metrics
-        this.pluginExecutions = new prom_client_1.Counter({
+        this.pluginExecutions = new Counter({
             name: `${this.config.prefix}plugin_executions_total`,
             help: 'Total number of plugin executions',
             labelNames: ['plugin', 'status'],
             registers: [this.registry]
         });
-        this.pluginErrors = new prom_client_1.Counter({
+        this.pluginErrors = new Counter({
             name: `${this.config.prefix}plugin_errors_total`,
             help: 'Total number of plugin errors',
             labelNames: ['plugin', 'error_type'],
             registers: [this.registry]
         });
-        this.pluginDuration = new prom_client_1.Histogram({
+        this.pluginDuration = new Histogram({
             name: `${this.config.prefix}plugin_execution_duration_seconds`,
             help: 'Plugin execution duration in seconds',
             labelNames: ['plugin'],
             buckets: this.config.buckets,
             registers: [this.registry]
         });
-        this.pluginMemoryUsage = new prom_client_1.Gauge({
+        this.pluginMemoryUsage = new Gauge({
             name: `${this.config.prefix}plugin_memory_usage_bytes`,
             help: 'Plugin memory usage in bytes',
             labelNames: ['plugin'],
             registers: [this.registry]
         });
         // Initialize WebSocket metrics
-        this.wsConnections = new prom_client_1.Gauge({
+        this.wsConnections = new Gauge({
             name: `${this.config.prefix}ws_connections_active`,
             help: 'Number of active WebSocket connections',
             registers: [this.registry]
         });
-        this.wsMessages = new prom_client_1.Counter({
+        this.wsMessages = new Counter({
             name: `${this.config.prefix}ws_messages_total`,
             help: 'Total number of WebSocket messages',
             labelNames: ['type', 'direction'],
             registers: [this.registry]
         });
-        this.wsErrors = new prom_client_1.Counter({
+        this.wsErrors = new Counter({
             name: `${this.config.prefix}ws_errors_total`,
             help: 'Total number of WebSocket errors',
             labelNames: ['error_type'],
             registers: [this.registry]
         });
-        this.wsBandwidth = new prom_client_1.Counter({
+        this.wsBandwidth = new Counter({
             name: `${this.config.prefix}ws_bandwidth_bytes_total`,
             help: 'Total WebSocket bandwidth in bytes',
             labelNames: ['direction'],
             registers: [this.registry]
         });
         // Initialize Cache metrics
-        this.cacheHits = new prom_client_1.Counter({
+        this.cacheHits = new Counter({
             name: `${this.config.prefix}cache_hits_total`,
             help: 'Total number of cache hits',
             labelNames: ['cache_name'],
             registers: [this.registry]
         });
-        this.cacheMisses = new prom_client_1.Counter({
+        this.cacheMisses = new Counter({
             name: `${this.config.prefix}cache_misses_total`,
             help: 'Total number of cache misses',
             labelNames: ['cache_name'],
             registers: [this.registry]
         });
-        this.cacheEvictions = new prom_client_1.Counter({
+        this.cacheEvictions = new Counter({
             name: `${this.config.prefix}cache_evictions_total`,
             help: 'Total number of cache evictions',
             labelNames: ['cache_name', 'reason'],
             registers: [this.registry]
         });
-        this.cacheSize = new prom_client_1.Gauge({
+        this.cacheSize = new Gauge({
             name: `${this.config.prefix}cache_size_bytes`,
             help: 'Cache size in bytes',
             labelNames: ['cache_name'],
@@ -524,7 +488,7 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
         let promMetric;
         switch (metric.type) {
             case 'counter':
-                promMetric = new prom_client_1.Counter({
+                promMetric = new Counter({
                     name: `${this.config.prefix}${metric.name}`,
                     help: metric.help,
                     labelNames: metric.labels,
@@ -532,7 +496,7 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
                 });
                 break;
             case 'gauge':
-                promMetric = new prom_client_1.Gauge({
+                promMetric = new Gauge({
                     name: `${this.config.prefix}${metric.name}`,
                     help: metric.help,
                     labelNames: metric.labels,
@@ -540,7 +504,7 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
                 });
                 break;
             case 'histogram':
-                promMetric = new prom_client_1.Histogram({
+                promMetric = new Histogram({
                     name: `${this.config.prefix}${metric.name}`,
                     help: metric.help,
                     labelNames: metric.labels,
@@ -549,7 +513,7 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
                 });
                 break;
             case 'summary':
-                promMetric = new prom_client_1.Summary({
+                promMetric = new Summary({
                     name: `${this.config.prefix}${metric.name}`,
                     help: metric.help,
                     labelNames: metric.labels,
@@ -645,6 +609,5 @@ class MetricsCollector extends eventemitter3_1.EventEmitter {
         this.removeAllListeners();
     }
 }
-exports.MetricsCollector = MetricsCollector;
-exports.default = MetricsCollector;
+export default MetricsCollector;
 //# sourceMappingURL=MetricsCollector.js.map

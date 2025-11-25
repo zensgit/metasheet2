@@ -1,10 +1,7 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.MongoDBAdapter = void 0;
 // @ts-nocheck
-const mongodb_1 = require("mongodb");
-const BaseAdapter_1 = require("./BaseAdapter");
-class MongoDBAdapter extends BaseAdapter_1.BaseDataAdapter {
+import { MongoClient } from 'mongodb';
+import { BaseDataAdapter } from './BaseAdapter';
+export class MongoDBAdapter extends BaseDataAdapter {
     client = null;
     db = null;
     async connect() {
@@ -13,7 +10,7 @@ class MongoDBAdapter extends BaseAdapter_1.BaseDataAdapter {
         }
         try {
             const uri = this.config.connection.uri || this.buildConnectionUri();
-            this.client = new mongodb_1.MongoClient(uri, {
+            this.client = new MongoClient(uri, {
                 maxPoolSize: this.config.poolConfig?.max || 20,
                 minPoolSize: this.config.poolConfig?.min || 2,
                 serverSelectionTimeoutMS: this.config.poolConfig?.acquireTimeout || 30000,
@@ -415,6 +412,5 @@ class MongoDBAdapter extends BaseAdapter_1.BaseDataAdapter {
         }));
     }
 }
-exports.MongoDBAdapter = MongoDBAdapter;
 // @ts-nocheck
 //# sourceMappingURL=MongoDBAdapter.js.map

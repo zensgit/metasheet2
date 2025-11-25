@@ -1,9 +1,9 @@
-import { Cache } from '../../types/cache';
+import { Cache } from '../../src/types/cache';
 /**
  * Singleton managing active cache implementation
  *
  * CacheRegistry provides a central point for cache implementation management:
- * - Starts with NullCache (observability only)
+ * - Starts with NullCache (observability only) or MemoryCache (when FEATURE_CACHE=true)
  * - Supports runtime switching to other implementations (e.g., RedisCache)
  * - Tracks cache statistics for monitoring
  * - Provides status information for debugging
@@ -12,6 +12,10 @@ import { Cache } from '../../types/cache';
  * - Single instance throughout application lifecycle
  * - Global access via getInstance()
  * - Thread-safe (Node.js single-threaded)
+ *
+ * **Environment Configuration**:
+ * - FEATURE_CACHE=true: Use MemoryCache (real caching with metrics)
+ * - FEATURE_CACHE=false or unset: Use NullCache (observability only)
  *
  * **Hot-Swapping**:
  * Implementations can be registered at any time:
@@ -35,7 +39,7 @@ import { Cache } from '../../types/cache';
  * @example Status inspection
  * ```typescript
  * const status = cacheRegistry.getStatus()
- * console.log(status.implName) // "NullCache" or "RedisCache"
+ * console.log(status.implName) // "NullCache" or "MemoryCache"
  * console.log(status.stats.hits) // Total hits since startup
  * ```
  */
@@ -58,6 +62,7 @@ export declare class CacheRegistry {
     private stats;
     /**
      * Private constructor (Singleton pattern)
+     * Initializes cache based on FEATURE_CACHE environment variable
      * @private
      */
     private constructor();

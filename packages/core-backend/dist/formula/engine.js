@@ -1,14 +1,11 @@
-"use strict";
 /**
  * Formula Calculation Engine
  * Handles formula parsing, dependency resolution, and calculation
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.formulaEngine = exports.FormulaEngine = void 0;
-const db_1 = require("../db/db");
-const logger_1 = require("../core/logger");
-const logger = new logger_1.Logger('FormulaEngine');
-class FormulaEngine {
+import { db } from '../db/db';
+import { Logger } from '../core/logger';
+const logger = new Logger('FormulaEngine');
+export class FormulaEngine {
     functions = new Map();
     calculationOrder = [];
     dependencyGraph = new Map();
@@ -238,9 +235,9 @@ class FormulaEngine {
         if (context.cache.has(cacheKey)) {
             return context.cache.get(cacheKey);
         }
-        if (!db_1.db)
+        if (!db)
             return null;
-        const cell = await db_1.db
+        const cell = await db
             .selectFrom('cells')
             .select(['value', 'formula', 'data_type'])
             .where('sheet_id', '=', context.sheetId)
@@ -434,9 +431,9 @@ class FormulaEngine {
      * Build dependency graph for a sheet
      */
     async buildDependencyGraph(sheetId) {
-        if (!db_1.db)
+        if (!db)
             return;
-        const formulas = await db_1.db
+        const formulas = await db
             .selectFrom('formulas')
             .select(['cell_id', 'dependencies', 'dependents'])
             .where('sheet_id', '=', sheetId)
@@ -473,7 +470,6 @@ class FormulaEngine {
         return result;
     }
 }
-exports.FormulaEngine = FormulaEngine;
 // Export singleton instance
-exports.formulaEngine = new FormulaEngine();
+export const formulaEngine = new FormulaEngine();
 //# sourceMappingURL=engine.js.map

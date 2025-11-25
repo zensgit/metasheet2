@@ -1,0 +1,4 @@
+timestamp,http_success_rate,p50_latency,p95_latency,p99_latency,fallback_ratio,error_rate,cpu_percent,mem_percent,request_rate,fallback_total,fallback_http,fallback_message,fallback_cache,http_adapter_ops,message_bus_rpc_attempts,cache_get_attempts,sample_num
+2025-11-24 08:46:56,0.99,0.2,0.4,0.5,0.05,0,0.9,0,0,1,0,0,1,2,3,1,1
+2025-11-24 08:46:58,0.99,0.2,0.4,0.5,0.05,0,0.4,0,0,1,0,0,1,2,3,1,2
+2025-11-24 08:46:59,0.99,0.2,0.4,0.5,0.05,0,1.5,0,0,1,0,0,1,2,3,1,3

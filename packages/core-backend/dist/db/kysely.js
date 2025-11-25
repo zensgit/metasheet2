@@ -1,15 +1,9 @@
-"use strict";
 /**
  * Unified Kysely Database Configuration
  * Central database connection and type-safe query builder
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.qb = exports.db = void 0;
-exports.transaction = transaction;
-exports.checkHealth = checkHealth;
-exports.closeDatabase = closeDatabase;
-const kysely_1 = require("kysely");
-const pg_1 = require("pg");
+import { Kysely, PostgresDialect, CamelCasePlugin } from 'kysely';
+import { Pool } from 'pg';
 // Environment configuration
 const config = {
     database: {
@@ -29,7 +23,7 @@ const config = {
 // Create connection pool
 let pool;
 if (config.database.connectionString) {
-    pool = new pg_1.Pool({
+    pool = new Pool({
         connectionString: config.database.connectionString,
         min: config.database.min,
         max: config.database.max,
@@ -38,7 +32,7 @@ if (config.database.connectionString) {
     });
 }
 else if (config.database.host) {
-    pool = new pg_1.Pool({
+    pool = new Pool({
         host: config.database.host,
         port: config.database.port,
         database: config.database.database,
@@ -51,26 +45,26 @@ else if (config.database.host) {
     });
 }
 // Create Kysely instance
-exports.db = pool
-    ? new kysely_1.Kysely({
-        dialect: new kysely_1.PostgresDialect({ pool }),
-        plugins: [new kysely_1.CamelCasePlugin()], // Convert snake_case to camelCase
+export const db = pool
+    ? new Kysely({
+        dialect: new PostgresDialect({ pool }),
+        plugins: [new CamelCasePlugin()], // Convert snake_case to camelCase
     })
     : undefined;
 /**
  * Transaction helper
  */
-async function transaction(callback) {
-    if (!exports.db) {
+export async function transaction(callback) {
+    if (!db) {
         throw new Error('Database not configured');
     }
-    return await exports.db.transaction().execute(callback);
+    return await db.transaction().execute(callback);
 }
 /**
  * Database health check
  */
-async function checkHealth() {
-    if (!exports.db || !pool) {
+export async function checkHealth() {
+    if (!db || !pool) {
         return {
             connected: false,
             error: 'Database not configured'
@@ -78,7 +72,7 @@ async function checkHealth() {
     }
     try {
         // Simple connectivity test
-        await exports.db.selectFrom('users').select('id').limit(1).execute();
+        await db.selectFrom('users').select('id').limit(1).execute();
         // Get pool statistics
         const poolStats = {
             // @ts-ignore - accessing internal pool properties (Node-Postgres)
@@ -103,7 +97,7 @@ async function checkHealth() {
 /**
  * Graceful shutdown
  */
-async function closeDatabase() {
+export async function closeDatabase() {
     if (pool) {
         await pool.end();
     }
@@ -111,7 +105,7 @@ async function closeDatabase() {
 /**
  * Query builder helpers
  */
-exports.qb = {
+export const qb = {
     /**
      * Build a dynamic where clause
      */
@@ -139,5 +133,5 @@ exports.qb = {
     },
 };
 // Export everything needed
-exports.default = exports.db;
+export default db;
 //# sourceMappingURL=kysely.js.map

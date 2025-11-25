@@ -1,23 +1,20 @@
-"use strict";
 /**
  * 通知服务实现
  * 支持多渠道通知发送，模板管理，订阅管理
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.NotificationServiceImpl = exports.FeishuNotificationChannel = exports.WebhookNotificationChannel = exports.EmailNotificationChannel = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("../core/logger");
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from '../core/logger';
 /**
  * 邮件通知渠道
  */
-class EmailNotificationChannel {
+export class EmailNotificationChannel {
     name = 'email';
     type = 'email';
     config;
     logger;
     constructor(config) {
         this.config = config;
-        this.logger = new logger_1.Logger('EmailChannel');
+        this.logger = new Logger('EmailChannel');
     }
     async sender(notification, recipients) {
         const id = `email_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -61,18 +58,17 @@ class EmailNotificationChannel {
         await new Promise(resolve => setTimeout(resolve, 100));
     }
 }
-exports.EmailNotificationChannel = EmailNotificationChannel;
 /**
  * Webhook 通知渠道
  */
-class WebhookNotificationChannel {
+export class WebhookNotificationChannel {
     name = 'webhook';
     type = 'webhook';
     config;
     logger;
     constructor(config) {
         this.config = config;
-        this.logger = new logger_1.Logger('WebhookChannel');
+        this.logger = new Logger('WebhookChannel');
     }
     async sender(notification, recipients) {
         const id = `webhook_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -131,18 +127,17 @@ class WebhookNotificationChannel {
         }
     }
 }
-exports.WebhookNotificationChannel = WebhookNotificationChannel;
 /**
  * 飞书通知渠道
  */
-class FeishuNotificationChannel {
+export class FeishuNotificationChannel {
     name = 'feishu';
     type = 'feishu';
     config;
     logger;
     constructor(config) {
         this.config = config;
-        this.logger = new logger_1.Logger('FeishuChannel');
+        this.logger = new Logger('FeishuChannel');
     }
     async sender(notification, recipients) {
         const id = `feishu_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -185,11 +180,10 @@ class FeishuNotificationChannel {
         await new Promise(resolve => setTimeout(resolve, 150));
     }
 }
-exports.FeishuNotificationChannel = FeishuNotificationChannel;
 /**
  * 通知服务实现
  */
-class NotificationServiceImpl extends eventemitter3_1.EventEmitter {
+export class NotificationServiceImpl extends EventEmitter {
     channels = new Map();
     templates = new Map();
     history = [];
@@ -197,7 +191,7 @@ class NotificationServiceImpl extends eventemitter3_1.EventEmitter {
     logger;
     constructor() {
         super();
-        this.logger = new logger_1.Logger('NotificationService');
+        this.logger = new Logger('NotificationService');
         // 注册默认通知渠道
         this.registerChannel(new EmailNotificationChannel({}));
         this.registerChannel(new WebhookNotificationChannel({}));
@@ -469,6 +463,5 @@ class NotificationServiceImpl extends eventemitter3_1.EventEmitter {
         }
     }
 }
-exports.NotificationServiceImpl = NotificationServiceImpl;
 // Re-export removed in Phase A to avoid duplicate export conflicts under isolatedModules
 //# sourceMappingURL=NotificationService.js.map

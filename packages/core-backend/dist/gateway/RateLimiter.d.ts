@@ -56,7 +56,7 @@ export declare class RateLimiter extends EventEmitter {
     constructor(config?: RateLimitConfig);
     private defaultKeyGenerator;
     private defaultHandler;
-    middleware(): (req: Request, res: Response, next: NextFunction) => Promise<void>;
+    middleware(): (req: Request, res: Response, next: NextFunction) => Promise<any>;
     reset(key?: string): Promise<void>;
     getInfo(key: string): Promise<RateLimitInfo | null>;
 }

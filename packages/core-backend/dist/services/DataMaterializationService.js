@@ -1,27 +1,24 @@
-"use strict";
 // @ts-nocheck
 /**
  * Data Materialization Service with CDC Support
  * Handles data synchronization between external sources and local tables
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.dataMaterializationService = exports.DataMaterializationService = void 0;
-const events_1 = require("events");
-const cron_1 = require("cron");
-const kysely_1 = require("../db/kysely");
+import { EventEmitter } from 'events';
+import { CronJob } from 'cron';
+import { db } from '../db/kysely';
 // Soft dependency adapters; defer to runtime wiring in Phase B
 // @ts-ignore
-const PostgresAdapter_1 = require("../data-adapters/PostgresAdapter");
+import { PostgresAdapter } from '../data-adapters/PostgresAdapter';
 // @ts-ignore
-const MySQLAdapter_1 = require("../data-adapters/MySQLAdapter");
+import { MySQLAdapter } from '../data-adapters/MySQLAdapter';
 // @ts-ignore
-const MongoDBAdapter_1 = require("../data-adapters/MongoDBAdapter");
+import { MongoDBAdapter } from '../data-adapters/MongoDBAdapter';
 // @ts-ignore
-const HTTPAdapter_1 = require("../data-adapters/HTTPAdapter");
+import { HTTPAdapter } from '../data-adapters/HTTPAdapter';
 /**
  * Data Materialization Service
  */
-class DataMaterializationService extends events_1.EventEmitter {
+export class DataMaterializationService extends EventEmitter {
     adapters = new Map();
     syncJobs = new Map();
     cdcListeners = new Map();
@@ -32,10 +29,10 @@ class DataMaterializationService extends events_1.EventEmitter {
     }
     async initialize() {
         // Load existing materialization configs
-        if (!kysely_1.db)
+        if (!db)
             return;
         try {
-            const configs = await kysely_1.db
+            const configs = await db
                 .selectFrom('external_tables')
                 .innerJoin('data_sources', 'data_sources.id', 'external_tables.data_source_id')
                 .selectAll()
@@ -57,11 +54,11 @@ class DataMaterializationService extends events_1.EventEmitter {
      * Create a new materialization
      */
     async createMaterialization(config) {
-        if (!kysely_1.db)
+        if (!db)
             throw new Error('Database not configured');
         const id = config.id || crypto.randomUUID();
         // Validate data source exists
-        const dataSource = await kysely_1.db
+        const dataSource = await db
             .selectFrom('data_sources')
             .selectAll()
             .where('id', '=', config.sourceId)
@@ -70,7 +67,7 @@ class DataMaterializationService extends events_1.EventEmitter {
             throw new Error(`Data source ${config.sourceId} not found`);
         }
         // Create external table record
-        await kysely_1.db
+        await db
             .insertInto('external_tables')
             .values({
             id,
@@ -147,7 +144,7 @@ class DataMaterializationService extends events_1.EventEmitter {
                     result = await this.performLazySync(config, adapter);
             }
             // Update sync metadata
-            await kysely_1.db
+            await db
                 .updateTable('external_tables')
                 .set({
                 last_sync: new Date(),
@@ -169,11 +166,11 @@ class DataMaterializationService extends events_1.EventEmitter {
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             // Update error state
-            await kysely_1.db
+            await db
                 .updateTable('external_tables')
                 .set({
                 last_error: errorMessage,
-                error_count: kysely_1.db.raw('error_count + 1'),
+                error_count: db.raw('error_count + 1'),
                 updated_at: new Date()
             })
                 .where('id', '=', materializationId)
@@ -209,9 +206,9 @@ class DataMaterializationService extends events_1.EventEmitter {
         try {
             // Clear existing data
             if (config.table_id) {
-                await kysely_1.db
+                await db
                     .deleteFrom('cells')
-                    .where('sheet_id', 'in', kysely_1.db.selectFrom('sheets')
+                    .where('sheet_id', 'in', db.selectFrom('sheets')
                     .select('id')
                     .where('spreadsheet_id', '=', config.table_id))
                     .execute();
@@ -456,7 +453,7 @@ class DataMaterializationService extends events_1.EventEmitter {
             : intervalSeconds < 3600
                 ? `0 */${Math.floor(intervalSeconds / 60)} * * * *` // Every N minutes
                 : `0 0 */${Math.floor(intervalSeconds / 3600)} * * *`; // Every N hours
-        const job = new cron_1.CronJob(cronPattern, async () => {
+        const job = new CronJob(cronPattern, async () => {
             await this.executeMaterialization(materializationId);
         });
         job.start();
@@ -470,7 +467,7 @@ class DataMaterializationService extends events_1.EventEmitter {
         let adapter = this.adapters.get(dataSourceId);
         if (adapter)
             return adapter;
-        const dataSource = await kysely_1.db
+        const dataSource = await db
             .selectFrom('data_sources')
             .selectAll()
             .where('id', '=', dataSourceId)
@@ -481,16 +478,16 @@ class DataMaterializationService extends events_1.EventEmitter {
         // Create adapter based on type
         switch (dataSource.type) {
             case 'POSTGRES':
-                adapter = new PostgresAdapter_1.PostgresAdapter(dataSource.connection_config);
+                adapter = new PostgresAdapter(dataSource.connection_config);
                 break;
             case 'MYSQL':
-                adapter = new MySQLAdapter_1.MySQLAdapter(dataSource.connection_config);
+                adapter = new MySQLAdapter(dataSource.connection_config);
                 break;
             case 'MONGODB':
-                adapter = new MongoDBAdapter_1.MongoDBAdapter(dataSource.connection_config);
+                adapter = new MongoDBAdapter(dataSource.connection_config);
                 break;
             case 'HTTP':
-                adapter = new HTTPAdapter_1.HTTPAdapter(dataSource.connection_config);
+                adapter = new HTTPAdapter(dataSource.connection_config);
                 break;
             default:
                 throw new Error(`Unsupported data source type: ${dataSource.type}`);
@@ -503,7 +500,7 @@ class DataMaterializationService extends events_1.EventEmitter {
      * Load materialization configuration
      */
     async loadMaterializationConfig(id) {
-        return await kysely_1.db
+        return await db
             .selectFrom('external_tables')
             .selectAll()
             .where('id', '=', id)
@@ -587,7 +584,7 @@ class DataMaterializationService extends events_1.EventEmitter {
     }
     async lookupValue(key, table, keyField, valueField) {
         // Lookup value from another table
-        const result = await kysely_1.db
+        const result = await db
             .selectFrom(table)
             .select(valueField)
             .where(keyField, '=', key)
@@ -627,7 +624,6 @@ class DataMaterializationService extends events_1.EventEmitter {
         this.emit('shutdown');
     }
 }
-exports.DataMaterializationService = DataMaterializationService;
 // Export singleton instance
-exports.dataMaterializationService = new DataMaterializationService();
+export const dataMaterializationService = new DataMaterializationService();
 //# sourceMappingURL=DataMaterializationService.js.map

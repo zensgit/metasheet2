@@ -1,0 +1,10 @@
+{
+  "rate": 50,
+  "concurrency": 10,
+  "duration_seconds": 600,
+  "endpoints": "/health,/api/v2/status,/api/v2/plugins,/api/v2/fallback-test",
+  "success": 0,
+  "fail": 0,
+  "avg_latency_ms": 0,
+  "csv": "results/phase5-load-20251124-131535/load-stats.csv"
+}

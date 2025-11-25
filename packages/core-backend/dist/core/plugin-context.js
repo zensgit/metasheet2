@@ -1,15 +1,12 @@
-"use strict";
 /**
  * 插件上下文工厂
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.createPluginContext = createPluginContext;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("./logger");
+import { EventEmitter } from 'eventemitter3';
+import { Logger as LoggerImpl } from './logger';
 /**
  * 创建插件上下文
  */
-function createPluginContext(manifest, coreAPI) {
+export function createPluginContext(manifest, coreAPI) {
     // 创建插件元信息
     const metadata = {
         name: manifest.name,
@@ -26,7 +23,7 @@ function createPluginContext(manifest, coreAPI) {
     // 创建插件通信
     const communication = createPluginCommunication(manifest.name);
     // 创建日志器
-    const logger = new logger_1.Logger(`Plugin:${manifest.name}`);
+    const logger = new LoggerImpl(`Plugin:${manifest.name}`);
     // 创建插件配置
     const config = loadPluginConfig(manifest.name);
     return {
@@ -69,8 +66,45 @@ function expandPermissions(raw) {
     }
     return out;
 }
+/**
+ * Normalize permissions from V2 object format to array format
+ * Supports both old string[] format and new object format
+ */
+function normalizePermissions(perms) {
+    if (!perms) {
+        return [];
+    }
+    // Already in array format
+    if (Array.isArray(perms)) {
+        return perms;
+    }
+    // Convert object format to array format
+    const result = [];
+    if (perms.database) {
+        if (perms.database.read && perms.database.read.length > 0) {
+            result.push('database.read');
+        }
+        if (perms.database.write && perms.database.write.length > 0) {
+            result.push('database.write');
+        }
+    }
+    if (perms.http) {
+        if (perms.http.internal || (perms.http.external && perms.http.external.length > 0)) {
+            result.push('http.register');
+        }
+    }
+    if (perms.filesystem) {
+        if (perms.filesystem.read && perms.filesystem.read.length > 0) {
+            result.push('filesystem.read');
+        }
+        if (perms.filesystem.write && perms.filesystem.write.length > 0) {
+            result.push('filesystem.write');
+        }
+    }
+    return result;
+}
 function createSandboxedAPI(api, manifest) {
-    const rawPerms = manifest.permissions || [];
+    const rawPerms = normalizePermissions(manifest.permissions);
     // '*' means full access
     const full = rawPerms.includes('*');
     const expanded = expandPermissions(rawPerms);
@@ -178,7 +212,7 @@ function createPluginStorage(pluginName) {
  * 创建插件通信
  */
 function createPluginCommunication(pluginName) {
-    const eventBus = new eventemitter3_1.EventEmitter();
+    const eventBus = new EventEmitter();
     const apis = new Map();
     return {
         async call(plugin, method, ...args) {

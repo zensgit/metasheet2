@@ -1,45 +1,7 @@
-"use strict";
 /**
  * OpenTelemetry Service
  * Provides distributed tracing, metrics, and structured logging
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.TelemetryService = exports.MetricsCollector = exports.StructuredLogger = exports.TraceContext = void 0;
-exports.getTelemetry = getTelemetry;
-exports.Trace = Trace;
 // Soft dependencies: these imports may be unavailable in minimal setups.
 // We keep types via 'any' and only load real modules in initialize().
 let NodeSDK, getNodeAutoInstrumentations, Resource, SemanticResourceAttributes;
@@ -69,13 +31,13 @@ const SpanStatusCode = { OK: 1, ERROR: 2 };
 const SpanKind = { INTERNAL: 1, SERVER: 2 };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const metrics = { getMeter: (_n) => ({ createHistogram: () => ({ record: () => { } }), createCounter: () => ({ add: () => { } }), createUpDownCounter: () => ({ add: () => { } }), createObservableGauge: () => ({ addCallback: () => { } }) }) };
-const logger_1 = require("../core/logger");
-const crypto = __importStar(require("crypto"));
-const logger = new logger_1.Logger('TelemetryService');
+import { Logger } from '../core/logger';
+import * as crypto from 'crypto';
+const logger = new Logger('TelemetryService');
 /**
  * Context propagation for distributed tracing
  */
-class TraceContext {
+export class TraceContext {
     static TRACE_HEADER = 'x-trace-id';
     static SPAN_HEADER = 'x-span-id';
     static PARENT_HEADER = 'x-parent-span-id';
@@ -101,11 +63,10 @@ class TraceContext {
         };
     }
 }
-exports.TraceContext = TraceContext;
 /**
  * Structured logger with trace context
  */
-class StructuredLogger {
+export class StructuredLogger {
     name;
     telemetry;
     tracer;
@@ -181,11 +142,10 @@ class StructuredLogger {
         this.correlationId = id;
     }
 }
-exports.StructuredLogger = StructuredLogger;
 /**
  * Custom metrics collectors
  */
-class MetricsCollector {
+export class MetricsCollector {
     httpRequestDuration;
     httpRequestTotal;
     dbQueryDuration;
@@ -249,11 +209,10 @@ class MetricsCollector {
         this.activeConnections.add(delta);
     }
 }
-exports.MetricsCollector = MetricsCollector;
 /**
  * Main Telemetry Service
  */
-class TelemetryService {
+export class TelemetryService {
     sdk = null;
     tracer;
     metricsCollector;
@@ -512,21 +471,20 @@ class TelemetryService {
         };
     }
 }
-exports.TelemetryService = TelemetryService;
 // Export singleton instance
 let telemetryInstance = null;
-function getTelemetry(config) {
+export function getTelemetry(config) {
     if (!telemetryInstance) {
         telemetryInstance = new TelemetryService(config);
     }
     return telemetryInstance;
 }
 // Export decorators
-function Trace(options) {
+export function Trace(options) {
     return function (target, propertyName, descriptor) {
         const telemetry = getTelemetry();
         return telemetry.traceMethod(target, propertyName, descriptor);
     };
 }
-exports.default = getTelemetry;
+export default getTelemetry;
 //# sourceMappingURL=TelemetryService.js.map

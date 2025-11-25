@@ -8,7 +8,7 @@
  * 3. Performance baseline (zero cache overhead)
  */
 
-import type { Cache, Result } from '../../../types/cache'
+import type { Cache, Result } from '../../types/cache'
 
 export class NullCache implements Cache {
   /**

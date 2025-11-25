@@ -1,4 +1,4 @@
-import { Cache, Result } from '../../types/cache'
+import { Cache, Result } from '../../src/types/cache'
 import { metrics } from '../../src/metrics/metrics'
 
 /**

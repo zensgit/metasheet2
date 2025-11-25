@@ -1,14 +1,8 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.SandboxManager = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const ScriptSandbox_1 = require("./ScriptSandbox");
-const SecurityPolicy_1 = require("./SecurityPolicy");
-const crypto_1 = __importDefault(require("crypto"));
-class SandboxManager extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+import { ScriptSandbox } from './ScriptSandbox';
+import { SecurityPolicy } from './SecurityPolicy';
+import crypto from 'crypto';
+export class SandboxManager extends EventEmitter {
     pools = new Map();
     templates = new Map();
     jobs = new Map();
@@ -20,7 +14,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         this.initializeDefaultPool();
     }
     initializeDefaultPool() {
-        const defaultPolicy = new SecurityPolicy_1.SecurityPolicy({
+        const defaultPolicy = new SecurityPolicy({
             maxExecutionTime: 5000,
             maxMemory: 128,
             maxCPU: 5,
@@ -47,7 +41,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         this.pools.set('default', this.defaultPool);
     }
     async createPool(name, options, policy, maxInstances = 10) {
-        const poolId = crypto_1.default.randomBytes(16).toString('hex');
+        const poolId = crypto.randomBytes(16).toString('hex');
         const pool = {
             id: poolId,
             name,
@@ -60,7 +54,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         // Pre-create some sandbox instances
         const preCreateCount = Math.min(2, maxInstances);
         for (let i = 0; i < preCreateCount; i++) {
-            const sandbox = new ScriptSandbox_1.ScriptSandbox(options);
+            const sandbox = new ScriptSandbox(options);
             await sandbox.initialize();
             pool.instances.push(sandbox);
         }
@@ -81,7 +75,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         this.emit('pool:destroyed', { poolId });
     }
     registerTemplate(template) {
-        const templateId = template.id || crypto_1.default.randomBytes(16).toString('hex');
+        const templateId = template.id || crypto.randomBytes(16).toString('hex');
         template.id = templateId;
         this.templates.set(templateId, template);
         this.emit('template:registered', { templateId, name: template.name });
@@ -89,7 +83,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
     }
     async execute(request) {
         const job = {
-            id: crypto_1.default.randomBytes(16).toString('hex'),
+            id: crypto.randomBytes(16).toString('hex'),
             request,
             status: 'pending'
         };
@@ -191,7 +185,7 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         }
         // Create new sandbox if under limit
         if (pool.instances.length < pool.maxInstances) {
-            const sandbox = new ScriptSandbox_1.ScriptSandbox(pool.options);
+            const sandbox = new ScriptSandbox(pool.options);
             await sandbox.initialize();
             pool.instances.push(sandbox);
             pool.activeInstances++;
@@ -312,5 +306,4 @@ class SandboxManager extends eventemitter3_1.EventEmitter {
         this.emit('cleanup:complete');
     }
 }
-exports.SandboxManager = SandboxManager;
 //# sourceMappingURL=SandboxManager.js.map

@@ -1,8 +1,5 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.messageBus = void 0;
-const crypto_1 = require("crypto");
-const metrics_1 = require("../metrics/metrics");
+import { randomUUID } from 'crypto';
+import { coreMetrics } from '../metrics/metrics';
 class MessageBus {
     subs = new Map();
     patternSubs = [];
@@ -11,7 +8,7 @@ class MessageBus {
     pendingRpc = new Map();
     defaultRetries = 2;
     subscribe(topic, handler, plugin) {
-        const sub = { id: `sub_${(0, crypto_1.randomUUID)()}`, topic, handler, plugin };
+        const sub = { id: `sub_${randomUUID()}`, topic, handler, plugin };
         if (!this.subs.has(topic))
             this.subs.set(topic, []);
         this.subs.get(topic).push(sub);
@@ -46,7 +43,7 @@ class MessageBus {
             const escapedExact = pattern.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
             regex = new RegExp('^' + escapedExact + '$');
         }
-        const id = `psub_${(0, crypto_1.randomUUID)()}`;
+        const id = `psub_${randomUUID()}`;
         this.patternSubs.push({ id, pattern, regex, handler, plugin });
         return id;
     }
@@ -93,7 +90,7 @@ class MessageBus {
     }
     async publish(topic, payload, opts = {}) {
         const msg = {
-            id: `msg_${(0, crypto_1.randomUUID)()}`,
+            id: `msg_${randomUUID()}`,
             topic,
             payload,
             priority: opts.priority || 'normal',
@@ -106,7 +103,7 @@ class MessageBus {
         };
         // Immediate expiry short-circuit (avoid enqueuing stale messages)
         if (msg.expiresAt && msg.expiresAt <= Date.now()) {
-            metrics_1.coreMetrics.inc('messagesExpired');
+            coreMetrics.inc('messagesExpired');
             return msg.id;
         }
         this.enqueue(msg);
@@ -138,7 +135,7 @@ class MessageBus {
             const msg = this.queue.shift();
             // expiry check
             if (msg.expiresAt && Date.now() >= msg.expiresAt) {
-                metrics_1.coreMetrics.inc('messagesExpired');
+                coreMetrics.inc('messagesExpired');
                 continue;
             }
             const subs = this.subs.get(msg.topic);
@@ -156,11 +153,11 @@ class MessageBus {
             for (const sub of allSubs) {
                 try {
                     await sub.handler(msg);
-                    metrics_1.coreMetrics.inc('messagesProcessed');
+                    coreMetrics.inc('messagesProcessed');
                 }
                 catch (e) {
                     msg.attempts += 1;
-                    metrics_1.coreMetrics.inc('messagesRetried');
+                    coreMetrics.inc('messagesRetried');
                     if (msg.attempts <= msg.maxRetries) {
                         this.enqueue(msg);
                     }
@@ -176,12 +173,12 @@ class MessageBus {
     }
     // RPC request
     async request(topic, payload, timeoutMs = 3000) {
-        const correlationId = (0, crypto_1.randomUUID)();
+        const correlationId = randomUUID();
         const replyTopic = `__rpc.reply.${correlationId}`;
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 this.pendingRpc.delete(correlationId);
-                metrics_1.coreMetrics.inc('rpcTimeouts');
+                coreMetrics.inc('rpcTimeouts');
                 reject(new Error('RPC timeout'));
             }, timeoutMs);
             this.pendingRpc.set(correlationId, { resolve, reject, timeout });
@@ -214,5 +211,5 @@ class MessageBus {
         }, plugin);
     }
 }
-exports.messageBus = new MessageBus();
+export const messageBus = new MessageBus();
 //# sourceMappingURL=message-bus.js.map

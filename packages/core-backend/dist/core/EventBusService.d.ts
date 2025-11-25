@@ -53,11 +53,17 @@ export declare class EventBusService extends EventEmitter {
     private isProcessing;
     private eventQueue;
     private core?;
+    private degradedMode;
+    private allowDegradation;
     constructor();
     /**
      * Initialize the event bus
      */
     initialize(core: CoreAPI): Promise<void>;
+    /**
+     * Check if error is database schema error (table/relation does not exist)
+     */
+    private isDatabaseSchemaError;
     /**
      * Emit an event
      */

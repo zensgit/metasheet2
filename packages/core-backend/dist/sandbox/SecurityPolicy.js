@@ -1,7 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.SecurityPolicy = void 0;
-class SecurityPolicy {
+export class SecurityPolicy {
     options;
     dangerousPatterns;
     suspiciousPatterns;
@@ -328,5 +325,4 @@ ${script}
         return new SecurityPolicy(this.options);
     }
 }
-exports.SecurityPolicy = SecurityPolicy;
 //# sourceMappingURL=SecurityPolicy.js.map

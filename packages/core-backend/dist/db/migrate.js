@@ -1,16 +1,11 @@
 #!/usr/bin/env tsx
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const fs_1 = __importDefault(require("fs"));
-const path_1 = __importDefault(require("path"));
-const pg_1 = require("./pg");
+import fs from 'fs';
+import path from 'path';
+import { pool } from './pg';
 async function ensureMigrationsTable() {
-    if (!pg_1.pool)
+    if (!pool)
         throw new Error('DATABASE_URL not configured');
-    await pg_1.pool.query(`
+    await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id BIGSERIAL PRIMARY KEY,
       filename TEXT UNIQUE NOT NULL,
@@ -19,28 +14,39 @@ async function ensureMigrationsTable() {
   `);
 }
 async function appliedSet() {
-    const res = await pg_1.pool.query('SELECT filename FROM schema_migrations');
+    const res = await pool.query('SELECT filename FROM schema_migrations');
     return new Set(res.rows.map((r) => r.filename));
 }
 async function main() {
-    if (!pg_1.pool)
+    if (!pool)
         throw new Error('DATABASE_URL not configured');
-    const dir = path_1.default.join(__dirname, '..', '..', 'migrations');
-    if (!fs_1.default.existsSync(dir)) {
+    const dir = path.join(__dirname, '..', '..', 'migrations');
+    if (!fs.existsSync(dir)) {
         console.log('No migrations directory found, skipping');
         return;
     }
     await ensureMigrationsTable();
-    const files = fs_1.default.readdirSync(dir).filter(f => f.endsWith('.sql')).sort();
+    // Support excluding specific migration files via env (comma-separated)
+    const exclude = (process.env.MIGRATION_EXCLUDE || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+    const files = fs.readdirSync(dir)
+        .filter(f => f.endsWith('.sql'))
+        .filter(f => !exclude.includes(f))
+        .sort();
+    if (exclude.length > 0) {
+        console.log(`↷ MIGRATION_EXCLUDE active; skipping: ${exclude.join(', ')}`);
+    }
     const done = await appliedSet();
     for (const file of files) {
         if (done.has(file)) {
             continue;
         }
-        const full = path_1.default.join(dir, file);
-        const sql = fs_1.default.readFileSync(full, 'utf-8');
+        const full = path.join(dir, file);
+        const sql = fs.readFileSync(full, 'utf-8');
         console.log(`Applying migration: ${file}`);
-        const client = await pg_1.pool.connect();
+        const client = await pool.connect();
         try {
             await client.query('BEGIN');
             await client.query(sql);

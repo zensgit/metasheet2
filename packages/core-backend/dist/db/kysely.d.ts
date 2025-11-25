@@ -4,7 +4,7 @@
  */
 import { Kysely } from 'kysely';
 import type { Database } from './types';
-export declare const db: Kysely<Database>;
+export declare const db: Kysely<Database> | undefined;
 export type KyselyDB = typeof db;
 /**
  * Transaction helper

@@ -1,11 +1,8 @@
-"use strict";
 /**
  * Pattern Optimization Demo
  * Issue #28: Demonstrates Trie-based pattern matching performance improvements
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PatternOptimizationDemo = void 0;
-const pattern_manager_1 = require("../messaging/pattern-manager");
+import { PatternManager } from '../messaging/pattern-manager';
 // Mock implementations for demonstration
 const logger = {
     debug: (msg) => console.log(`[DEBUG] ${msg}`),
@@ -18,11 +15,11 @@ const metrics = {
     histogram: (name, value, labels) => console.log(`[METRIC] ${name}: ${value}ms`, labels),
     gauge: (name, value, labels) => console.log(`[METRIC] ${name}: ${value}`, labels)
 };
-class PatternOptimizationDemo {
+export class PatternOptimizationDemo {
     patternManager;
     callbacks = new Map();
     constructor() {
-        this.patternManager = new pattern_manager_1.PatternManager(logger, metrics, {
+        this.patternManager = new PatternManager(logger, metrics, {
             enableMetrics: true,
             optimizationMode: 'speed',
             maxPatterns: 50000,
@@ -109,7 +106,7 @@ class PatternOptimizationDemo {
      * Benchmark Trie-based implementation
      */
     async benchmarkTrieImplementation(patterns, topics) {
-        const manager = new pattern_manager_1.PatternManager(logger, metrics, {
+        const manager = new PatternManager(logger, metrics, {
             enableMetrics: false,
             optimizationMode: 'speed'
         });
@@ -311,7 +308,6 @@ class PatternOptimizationDemo {
         console.log('\n🧹 Cleanup completed');
     }
 }
-exports.PatternOptimizationDemo = PatternOptimizationDemo;
 // Direct execution example
 if (require.main === module) {
     const demo = new PatternOptimizationDemo();

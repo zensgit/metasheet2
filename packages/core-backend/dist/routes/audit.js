@@ -1,12 +1,8 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.auditService = void 0;
-const express_1 = require("express");
-const AuditService_1 = require("../audit/AuditService");
-const AuditRepository_1 = require("../audit/AuditRepository");
-const router = (0, express_1.Router)();
-const auditService = new AuditService_1.AuditService(new AuditRepository_1.AuditRepository());
-exports.auditService = auditService;
+import { Router } from 'express';
+import { AuditService } from '../audit/AuditService';
+import { AuditRepository } from '../audit/AuditRepository';
+const router = Router();
+const auditService = new AuditService(new AuditRepository());
 /**
  * Query audit logs with filters
  */
@@ -247,5 +243,7 @@ function getTopItems(array, key, limit) {
         .slice(0, limit)
         .map(([name, count]) => ({ name, count }));
 }
-exports.default = router;
+export default router;
+// Export service for use in other modules
+export { auditService };
 //# sourceMappingURL=audit.js.map

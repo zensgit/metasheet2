@@ -11,6 +11,7 @@
       "unit": "seconds",
       "type": "upper_bound",
       "prometheus_metric": "metasheet_plugin_reload_duration_seconds",
+      "label_selector": {"plugin_name": "example-plugin"},
       "description": "Plugin reload P95 latency should be under 2s"
     },
     {
@@ -20,6 +21,7 @@
       "unit": "seconds",
       "type": "upper_bound",
       "prometheus_metric": "metasheet_plugin_reload_duration_seconds",
+      "label_selector": {"plugin_name": "example-plugin"},
       "description": "Plugin reload P99 latency should be under 5s"
     },
     {
@@ -68,8 +70,8 @@
       "threshold": 80.0,
       "unit": "percent",
       "type": "lower_bound",
-      "prometheus_metrics": ["cache_hits_total", "cache_misses_total"],
-      "calculation": "cache_hits_total / (cache_hits_total + cache_misses_total) * 100",
+      "prometheus_metrics": ["cache_hits_total", "cache_miss_total"],
+      "calculation": "cache_hits_total / (cache_hits_total + cache_miss_total) * 100",
       "description": "Cache hot hit rate should be at least 80%"
     },
     {

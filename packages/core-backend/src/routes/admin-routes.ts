@@ -270,6 +270,47 @@ router.post('/plugins/reload-all-unsafe', async (req: Request, res: Response) =>
 })
 
 /**
+ * POST /api/admin/plugins/:id/reload-unsafe
+ * Local-only helper to reload a single plugin without SafetyGuard confirmation.
+ * Records metrics for Phase 5 validation.
+ * Guardrails:
+ *  - Requires process.env.ALLOW_UNSAFE_ADMIN === 'true'
+ *  - Requires authenticated user with roles includes 'admin'
+ *  - Returns 403 otherwise
+ *  - Intended for local development visibility only; DO NOT enable in staging/prod
+ */
+router.post('/plugins/:id/reload-unsafe', async (req: Request, res: Response) => {
+  try {
+    if (process.env.ALLOW_UNSAFE_ADMIN !== 'true') {
+      return res.status(403).json({
+        success: false,
+        code: 'UNSAFE_DISABLED',
+        message: 'Unsafe admin route disabled. Set ALLOW_UNSAFE_ADMIN=true to enable (local only).'
+      })
+    }
+    const user = (req as Request & { user?: any }).user
+    const roles: string[] = Array.isArray(user?.roles) ? user.roles : []
+    if (!roles.includes('admin')) {
+      return res.status(403).json({
+        success: false,
+        code: 'ADMIN_REQUIRED',
+        message: 'Admin role required'
+      })
+    }
+    if (!services.pluginLoader) {
+      return res.status(503).json({ success: false, error: 'PluginLoader service not available' })
+    }
+    const { id } = req.params
+    await services.pluginLoader.reloadPlugin(id)
+    return res.json({ success: true, message: `Plugin ${id} reloaded (unsafe local bypass)`, pluginId: id })
+  } catch (error) {
+    const err = error as Error
+    logger.error('Unsafe single plugin reload failed', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+/**
  * DELETE /api/admin/plugins/:id
  * Unload a plugin
  */

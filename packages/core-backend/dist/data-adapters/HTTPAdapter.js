@@ -1,12 +1,6 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.HTTPAdapter = void 0;
-const axios_1 = __importDefault(require("axios"));
-const BaseAdapter_1 = require("./BaseAdapter");
-class HTTPAdapter extends BaseAdapter_1.BaseDataAdapter {
+import axios from 'axios';
+import { BaseDataAdapter } from './BaseAdapter';
+export class HTTPAdapter extends BaseDataAdapter {
     client = null;
     endpoints = new Map();
     async connect() {
@@ -15,7 +9,7 @@ class HTTPAdapter extends BaseAdapter_1.BaseDataAdapter {
         }
         try {
             const baseURL = this.config.connection.baseURL || this.config.connection.url;
-            this.client = axios_1.default.create({
+            this.client = axios.create({
                 baseURL,
                 timeout: this.config.options?.timeout || 30000,
                 headers: {
@@ -426,5 +420,4 @@ class HTTPAdapter extends BaseAdapter_1.BaseDataAdapter {
         return results;
     }
 }
-exports.HTTPAdapter = HTTPAdapter;
 //# sourceMappingURL=HTTPAdapter.js.map

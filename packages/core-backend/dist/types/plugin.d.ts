@@ -68,7 +68,20 @@ export interface PluginManifest {
         triggers?: any[];
         actions?: any[];
     };
-    permissions?: string[];
+    permissions?: string[] | {
+        database?: {
+            read?: string[];
+            write?: string[];
+        };
+        http?: {
+            internal?: boolean;
+            external?: string[];
+        };
+        filesystem?: {
+            read?: string[];
+            write?: string[];
+        };
+    };
     lifecycle?: {
         install?: string;
         activate?: string;

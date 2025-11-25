@@ -1,21 +1,18 @@
-"use strict";
 /**
  * Visual Workflow Designer (n8n Style)
  * BPMN/DAG workflow visual editor backend support
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.WorkflowDesigner = void 0;
-const events_1 = require("events");
-const logger_1 = require("../core/logger");
-const db_1 = require("../db/db");
-const uuid_1 = require("uuid");
-class WorkflowDesigner extends events_1.EventEmitter {
+import { EventEmitter } from 'events';
+import { Logger } from '../core/logger';
+import { db } from '../db/db';
+import { v4 as uuidv4 } from 'uuid';
+export class WorkflowDesigner extends EventEmitter {
     logger;
     nodeTypes;
     templates;
     constructor() {
         super();
-        this.logger = new logger_1.Logger('WorkflowDesigner');
+        this.logger = new Logger('WorkflowDesigner');
         this.nodeTypes = new Map();
         this.templates = new Map();
         this.initializeNodeTypes();
@@ -287,12 +284,12 @@ class WorkflowDesigner extends events_1.EventEmitter {
      * Save workflow definition
      */
     async saveWorkflow(definition) {
-        const workflowId = definition.id || (0, uuid_1.v4)();
+        const workflowId = definition.id || uuidv4();
         try {
             // Convert visual definition to BPMN XML
             const bpmnXml = this.convertToBPMN(definition);
             // Save to database using workflow_definitions table
-            await db_1.db
+            await db
                 .insertInto('workflow_definitions')
                 .values({
                 name: definition.name,
@@ -336,7 +333,7 @@ class WorkflowDesigner extends events_1.EventEmitter {
      */
     async loadWorkflow(workflowId) {
         try {
-            const workflow = await db_1.db
+            const workflow = await db
                 .selectFrom('workflow_definitions')
                 .selectAll()
                 .where('id', '=', workflowId)
@@ -357,7 +354,7 @@ class WorkflowDesigner extends events_1.EventEmitter {
      */
     async listWorkflows(category) {
         try {
-            let query = db_1.db
+            let query = db
                 .selectFrom('workflow_definitions')
                 .select(['id', 'name', 'version', 'type', 'status', 'created_at', 'updated_at']);
             // Note: category filtering would need to be done by parsing definition JSON
@@ -478,7 +475,7 @@ class WorkflowDesigner extends events_1.EventEmitter {
      * Convert visual definition to BPMN XML
      */
     convertToBPMN(definition) {
-        const processId = `process_${definition.id || (0, uuid_1.v4)().replace(/-/g, '_')}`;
+        const processId = `process_${definition.id || uuidv4().replace(/-/g, '_')}`;
         let bpmn = `<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
@@ -663,6 +660,5 @@ class WorkflowDesigner extends events_1.EventEmitter {
         return workflowId;
     }
 }
-exports.WorkflowDesigner = WorkflowDesigner;
-exports.default = WorkflowDesigner;
+export default WorkflowDesigner;
 //# sourceMappingURL=WorkflowDesigner.js.map

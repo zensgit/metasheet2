@@ -1,11 +1,9 @@
-"use strict";
 /**
  * Gantt Chart API Routes
  * Direct integration routes for gantt functionality
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const router = (0, express_1.Router)();
+import { Router } from 'express';
+const router = Router();
 /**
  * GET /api/gantt/:viewId
  * Get gantt data for a specific view
@@ -146,5 +144,5 @@ function calculateTimeline(tasks) {
         hoursPerDay: 8
     };
 }
-exports.default = router;
+export default router;
 //# sourceMappingURL=gantt.js.map

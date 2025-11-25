@@ -1,47 +1,11 @@
-"use strict";
 /**
  * Secret Management Service
  * Provides secure storage and retrieval of sensitive data
  * Supports multiple backends: Vault, AWS KMS, Local encrypted storage
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.secretManager = exports.SecretManager = void 0;
-const crypto = __importStar(require("crypto"));
-const events_1 = require("events");
-const kysely_1 = require("../db/kysely");
+import * as crypto from 'crypto';
+import { EventEmitter } from 'events';
+import { db } from '../db/kysely';
 /**
  * Local encrypted storage provider
  */
@@ -72,9 +36,9 @@ class LocalSecretProvider {
     }
     async init() {
         // Load secrets from database if available
-        if (kysely_1.db) {
+        if (db) {
             try {
-                const credentials = await kysely_1.db
+                const credentials = await db
                     .selectFrom('data_source_credentials')
                     .selectAll()
                     .execute();
@@ -112,9 +76,9 @@ class LocalSecretProvider {
         };
         this.secrets.set(key, secretData);
         // Persist to database
-        if (kysely_1.db) {
+        if (db) {
             try {
-                await kysely_1.db
+                await db
                     .insertInto('data_source_credentials')
                     .values({
                     id: key,
@@ -161,9 +125,9 @@ class LocalSecretProvider {
     async delete(key) {
         const exists = this.secrets.has(key);
         this.secrets.delete(key);
-        if (kysely_1.db && exists) {
+        if (db && exists) {
             try {
-                await kysely_1.db
+                await db
                     .deleteFrom('data_source_credentials')
                     .where('id', '=', key)
                     .execute();
@@ -290,7 +254,7 @@ class VaultSecretProvider {
 /**
  * Main Secret Manager
  */
-class SecretManager extends events_1.EventEmitter {
+export class SecretManager extends EventEmitter {
     providers = new Map();
     defaultProvider = 'local';
     cache = new Map();
@@ -452,7 +416,6 @@ class SecretManager extends events_1.EventEmitter {
         return newHash === originalHash;
     }
 }
-exports.SecretManager = SecretManager;
 // Export singleton instance
-exports.secretManager = new SecretManager();
+export const secretManager = new SecretManager();
 //# sourceMappingURL=SecretManager.js.map

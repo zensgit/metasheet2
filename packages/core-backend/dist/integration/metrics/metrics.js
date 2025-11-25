@@ -1,7 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.coreMetrics = exports.MetricsCollector = void 0;
-class MetricsCollector {
+export class MetricsCollector {
     snapshot = {
         messagesProcessed: 0,
         messagesRetried: 0,
@@ -64,6 +61,5 @@ class MetricsCollector {
         return Object.fromEntries(this.customMetrics);
     }
 }
-exports.MetricsCollector = MetricsCollector;
-exports.coreMetrics = new MetricsCollector();
+export const coreMetrics = new MetricsCollector();
 //# sourceMappingURL=metrics.js.map

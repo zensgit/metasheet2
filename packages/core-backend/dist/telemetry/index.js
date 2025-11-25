@@ -1,25 +1,19 @@
-"use strict";
 /**
  * Telemetry initialization and setup
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.Trace = exports.MetricsCollector = exports.StructuredLogger = void 0;
-exports.initializeTelemetry = initializeTelemetry;
-exports.getTelemetryInstance = getTelemetryInstance;
-exports.restartTelemetryIfNeeded = restartTelemetryIfNeeded;
-const TelemetryService_1 = require("../services/TelemetryService");
-const config_1 = require("../config");
-const metrics_1 = require("../metrics/metrics");
-const logger_1 = require("../core/logger");
-const logger = new logger_1.Logger('Telemetry');
+import { getTelemetry } from '../services/TelemetryService';
+import { getConfig } from '../config';
+import { metrics } from '../metrics/metrics';
+import { Logger } from '../core/logger';
+const logger = new Logger('Telemetry');
 /**
  * Initialize OpenTelemetry
  * Should be called at application startup before any other code
  */
-async function initializeTelemetry() {
+export async function initializeTelemetry() {
     try {
-        const app = (0, config_1.getConfig)();
-        const telemetry = (0, TelemetryService_1.getTelemetry)({
+        const app = getConfig();
+        const telemetry = getTelemetry({
             serviceName: 'metasheet-backend',
             serviceVersion: process.env.npm_package_version || '1.0.0',
             environment: process.env.NODE_ENV || 'development',
@@ -52,13 +46,13 @@ async function initializeTelemetry() {
 /**
  * Get telemetry instance
  */
-function getTelemetryInstance() {
-    return (0, TelemetryService_1.getTelemetry)();
+export function getTelemetryInstance() {
+    return getTelemetry();
 }
 /**
  * Restart telemetry when critical config changes
  */
-async function restartTelemetryIfNeeded(oldCfg, newCfg) {
+export async function restartTelemetryIfNeeded(oldCfg, newCfg) {
     const wasEnabled = oldCfg?.telemetry?.enabled === 'true';
     const nowEnabled = newCfg?.telemetry?.enabled === 'true';
     const criticalKeys = ['jaegerEndpoint', 'prometheusPort', 'tracingEnabled', 'metricsEnabled', 'autoInstrumentation', 'samplingRate'];
@@ -78,13 +72,10 @@ async function restartTelemetryIfNeeded(oldCfg, newCfg) {
     }
     // Update sampling rate gauge (even if disabled set to 0)
     try {
-        metrics_1.metrics.configSamplingRate.set(nowEnabled ? (newCfg.telemetry.samplingRate || 0) : 0);
+        metrics.configSamplingRate.set(nowEnabled ? (newCfg.telemetry.samplingRate || 0) : 0);
     }
     catch { }
     return { restarted, changed };
 }
-var TelemetryService_2 = require("../services/TelemetryService");
-Object.defineProperty(exports, "StructuredLogger", { enumerable: true, get: function () { return TelemetryService_2.StructuredLogger; } });
-Object.defineProperty(exports, "MetricsCollector", { enumerable: true, get: function () { return TelemetryService_2.MetricsCollector; } });
-Object.defineProperty(exports, "Trace", { enumerable: true, get: function () { return TelemetryService_2.Trace; } });
+export { StructuredLogger, MetricsCollector, Trace } from '../services/TelemetryService';
 //# sourceMappingURL=index.js.map

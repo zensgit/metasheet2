@@ -1,0 +1,8 @@
+{
+  "samples": 2,
+  "file": "results/phase5-20251124-115240/metrics.csv",
+  "fallback": { "total": 12, "http": 4, "message": 8, "cache": 0 },
+  "sources": { "http_adapter_ops": 0, "message_bus_rpc_attempts": 18, "cache_get_attempts": 0 },
+  "success_rate_avg": "0.9900",
+  "p99_latency_avg": "0.4000"
+}

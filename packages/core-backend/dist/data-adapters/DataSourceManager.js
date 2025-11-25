@@ -1,12 +1,9 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DataSourceManager = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const PostgresAdapter_1 = require("./PostgresAdapter");
-const MySQLAdapter_1 = require("./MySQLAdapter");
-const HTTPAdapter_1 = require("./HTTPAdapter");
-const MongoDBAdapter_1 = require("./MongoDBAdapter");
-class DataSourceManager extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+import { PostgresAdapter } from './PostgresAdapter';
+import { MySQLAdapter } from './MySQLAdapter';
+import { HTTPAdapter } from './HTTPAdapter';
+import { MongoDBAdapter } from './MongoDBAdapter';
+export class DataSourceManager extends EventEmitter {
     adapters = new Map();
     adapterTypes = new Map();
     connectionPool = new Map();
@@ -15,11 +12,11 @@ class DataSourceManager extends eventemitter3_1.EventEmitter {
         this.registerDefaultAdapters();
     }
     registerDefaultAdapters() {
-        this.registerAdapterType('postgresql', PostgresAdapter_1.PostgresAdapter);
-        this.registerAdapterType('postgres', PostgresAdapter_1.PostgresAdapter);
-        this.registerAdapterType('mysql', MySQLAdapter_1.MySQLAdapter);
-        this.registerAdapterType('http', HTTPAdapter_1.HTTPAdapter);
-        this.registerAdapterType('mongodb', MongoDBAdapter_1.MongoDBAdapter);
+        this.registerAdapterType('postgresql', PostgresAdapter);
+        this.registerAdapterType('postgres', PostgresAdapter);
+        this.registerAdapterType('mysql', MySQLAdapter);
+        this.registerAdapterType('http', HTTPAdapter);
+        this.registerAdapterType('mongodb', MongoDBAdapter);
     }
     registerAdapterType(type, adapterClass) {
         this.adapterTypes.set(type.toLowerCase(), adapterClass);
@@ -239,5 +236,4 @@ class DataSourceManager extends eventemitter3_1.EventEmitter {
         this.removeAllListeners();
     }
 }
-exports.DataSourceManager = DataSourceManager;
 //# sourceMappingURL=DataSourceManager.js.map

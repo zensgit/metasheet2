@@ -1,49 +1,13 @@
-"use strict";
 /**
  * Plugin Isolation Manager
  * Manages isolated execution environments for plugins with resource limits and monitoring
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginIsolationManager = void 0;
-const worker_threads_1 = require("worker_threads");
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs"));
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("./logger");
-const metrics_1 = require("../metrics/metrics");
+import { Worker } from 'worker_threads';
+import * as path from 'path';
+import * as fs from 'fs';
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from './logger';
+import { metrics } from '../metrics/metrics';
 const DEFAULT_ISOLATION_CONFIG = {
     maxMemoryMB: 128,
     maxCpuPercent: 50,
@@ -52,7 +16,7 @@ const DEFAULT_ISOLATION_CONFIG = {
     enableNetworkIsolation: true,
     enableFileSystemIsolation: true
 };
-class PluginIsolationManager extends eventemitter3_1.EventEmitter {
+export class PluginIsolationManager extends EventEmitter {
     logger;
     config;
     workers = new Map();
@@ -60,7 +24,7 @@ class PluginIsolationManager extends eventemitter3_1.EventEmitter {
     workerCode;
     constructor(config) {
         super();
-        this.logger = new logger_1.Logger('PluginIsolationManager');
+        this.logger = new Logger('PluginIsolationManager');
         this.config = { ...DEFAULT_ISOLATION_CONFIG, ...config };
         this.workerCode = this.generateWorkerCode();
         // Pre-warm worker pool
@@ -89,7 +53,7 @@ class PluginIsolationManager extends eventemitter3_1.EventEmitter {
         // Create worker script file
         const workerScriptPath = path.join(__dirname, 'plugin-worker.js');
         await fs.promises.writeFile(workerScriptPath, this.workerCode, 'utf-8');
-        const worker = new worker_threads_1.Worker(workerScriptPath, {
+        const worker = new Worker(workerScriptPath, {
             resourceLimits: {
                 maxOldGenerationSizeMb: this.config.maxMemoryMB,
                 maxYoungGenerationSizeMb: this.config.maxMemoryMB / 4
@@ -275,7 +239,7 @@ process.on('unhandledRejection', (reason) => {
             this.handleWorkerExit(pluginWorker);
         });
         this.workers.set(workerId, pluginWorker);
-        metrics_1.metrics.pluginWorkersActive?.set?.(this.workers.size);
+        metrics.pluginWorkersActive?.set?.(this.workers.size);
         this.logger.info(`Created isolated context for plugin ${pluginId} (worker: ${workerId})`);
         return workerId;
     }
@@ -302,7 +266,7 @@ process.on('unhandledRejection', (reason) => {
                 if (request) {
                     pluginWorker.activeRequests.delete(requestId);
                     request.reject(new Error('Execution timeout'));
-                    metrics_1.metrics.pluginExecutionTimeouts?.inc?.({ plugin: pluginWorker.pluginId });
+                    metrics.pluginExecutionTimeouts?.inc?.({ plugin: pluginWorker.pluginId });
                 }
             }, timeout);
             // Send execution request
@@ -334,7 +298,7 @@ process.on('unhandledRejection', (reason) => {
                     pluginWorker.metrics.totalExecutions++;
                     if (message.type === 'error') {
                         pluginWorker.metrics.totalErrors++;
-                        metrics_1.metrics.pluginErrors?.inc?.({ plugin: pluginWorker.pluginId, type: 'execution' });
+                        metrics.pluginErrors?.inc?.({ plugin: pluginWorker.pluginId, type: 'execution' });
                     }
                     pluginWorker.metrics.averageExecutionTime =
                         (pluginWorker.metrics.averageExecutionTime * (pluginWorker.metrics.totalExecutions - 1) +
@@ -383,7 +347,7 @@ process.on('unhandledRejection', (reason) => {
             pluginId: pluginWorker.pluginId,
             error: error.message
         });
-        metrics_1.metrics.pluginWorkerCrashes?.inc?.({ plugin: pluginWorker.pluginId });
+        metrics.pluginWorkerCrashes?.inc?.({ plugin: pluginWorker.pluginId });
     }
     /**
      * Handle worker exit
@@ -396,7 +360,7 @@ process.on('unhandledRejection', (reason) => {
             request.reject(new Error('Worker exited'));
         }
         ;
-        metrics_1.metrics.pluginWorkersActive?.set?.(this.workers.size);
+        metrics.pluginWorkersActive?.set?.(this.workers.size);
         // Try to refill worker pool
         this.createWorker()
             .then(worker => this.workerPool.push(worker))
@@ -452,7 +416,7 @@ process.on('unhandledRejection', (reason) => {
         await pluginWorker.worker.terminate();
         // Remove from active workers
         this.workers.delete(workerId);
-        metrics_1.metrics.pluginWorkersActive?.set?.(this.workers.size);
+        metrics.pluginWorkersActive?.set?.(this.workers.size);
         this.logger.info(`Terminated worker ${workerId} for plugin ${pluginWorker.pluginId}`);
     }
     /**
@@ -471,7 +435,7 @@ process.on('unhandledRejection', (reason) => {
         await Promise.all(promises);
         this.workers.clear();
         this.workerPool = [];
-        metrics_1.metrics.pluginWorkersActive?.set?.(0);
+        metrics.pluginWorkersActive?.set?.(0);
         this.logger.info('All workers terminated');
     }
     /**
@@ -512,6 +476,5 @@ process.on('unhandledRejection', (reason) => {
         this.logger.info('PluginIsolationManager disposed');
     }
 }
-exports.PluginIsolationManager = PluginIsolationManager;
-exports.default = PluginIsolationManager;
+export default PluginIsolationManager;
 //# sourceMappingURL=PluginIsolationManager.js.map

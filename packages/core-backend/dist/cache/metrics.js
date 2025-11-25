@@ -1,6 +1,9 @@
-"use strict";
 /**
- * Cache Metrics Collection
+ * Cache Metrics Collection (Internal)
+ *
+ * NOTE: These metrics are internal to src/cache/registry.ts.
+ * Main SLO cache metrics are defined in metrics/metrics.ts with labels.
+ * These use different names to avoid Prometheus registration conflicts.
  *
  * Provides comprehensive metrics for cache operations:
  * - Hit/miss rates
@@ -8,50 +11,49 @@
  * - Duration histograms
  * - Implementation switches
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.cacheMetrics = void 0;
-const prom_client_1 = require("prom-client");
+import { Counter, Histogram } from 'prom-client';
 /**
- * Cache metrics container
+ * Cache metrics container (internal use)
+ * Named with _internal suffix to avoid conflict with SLO metrics
  */
-exports.cacheMetrics = {
+export const cacheMetrics = {
     /**
      * Total cache operations (get/set/del)
      */
-    operations: new prom_client_1.Counter({
-        name: 'cache_operations_total',
-        help: 'Total cache operations',
+    operations: new Counter({
+        name: 'cache_internal_operations_total',
+        help: 'Internal cache operations counter',
         labelNames: ['operation', 'status'] // get/set/del, success/error
     }),
     /**
-     * Cache hits
+     * Cache hits (internal)
      */
-    hits: new prom_client_1.Counter({
-        name: 'cache_hits_total',
-        help: 'Total cache hits'
+    hits: new Counter({
+        name: 'cache_internal_hits_total',
+        help: 'Internal cache hits counter'
     }),
     /**
-     * Cache misses
+     * Cache misses (internal)
      */
-    misses: new prom_client_1.Counter({
-        name: 'cache_misses_total',
-        help: 'Total cache misses'
+    misses: new Counter({
+        name: 'cache_internal_misses_total',
+        help: 'Internal cache misses counter'
     }),
     /**
      * Cache operation duration
      */
-    duration: new prom_client_1.Histogram({
-        name: 'cache_operation_duration_milliseconds',
-        help: 'Cache operation duration',
+    duration: new Histogram({
+        name: 'cache_internal_operation_duration_ms',
+        help: 'Internal cache operation duration',
         labelNames: ['operation'],
         buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000]
     }),
     /**
      * Cache implementation switches
      */
-    switchCount: new prom_client_1.Counter({
-        name: 'cache_implementation_switches_total',
-        help: 'Total cache implementation switches',
+    switchCount: new Counter({
+        name: 'cache_internal_switches_total',
+        help: 'Internal cache implementation switches',
         labelNames: ['implementation']
     })
 };

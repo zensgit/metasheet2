@@ -1,0 +1,7 @@
+{
+  "samples": 2,
+  "file": "results/phase5-20251122-164124/metrics.csv",
+  "fallback": { "total": 0, "http": , "message": , "cache":  },
+  "success_rate_avg": "0.9900",
+  "p99_latency_avg": "0.5000"
+}

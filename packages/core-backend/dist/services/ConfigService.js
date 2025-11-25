@@ -1,53 +1,17 @@
-"use strict";
 /**
  * Configuration Management Service
  * Provides a unified interface for application configuration with multiple sources
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.config = exports.ConfigService = exports.SecretManager = exports.DefaultConfigSource = exports.DatabaseConfigSource = exports.FileConfigSource = exports.EnvConfigSource = void 0;
-const logger_1 = require("../core/logger");
-const fs = __importStar(require("fs"));
-const path = __importStar(require("path"));
-const yaml = __importStar(require("js-yaml"));
-const db_1 = require("../db/db");
-const logger = new logger_1.Logger('ConfigService');
+import { Logger } from '../core/logger';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { db } from '../db/db';
+const logger = new Logger('ConfigService');
 /**
  * Environment variables configuration source
  */
-class EnvConfigSource {
+export class EnvConfigSource {
     name = 'environment';
     priority = 100; // Highest priority
     async get(key) {
@@ -89,11 +53,10 @@ class EnvConfigSource {
             .replace(/_/g, '.');
     }
 }
-exports.EnvConfigSource = EnvConfigSource;
 /**
  * File-based configuration source (YAML/JSON)
  */
-class FileConfigSource {
+export class FileConfigSource {
     filePath;
     name = 'file';
     priority = 50;
@@ -142,11 +105,10 @@ class FileConfigSource {
         return key.split('.').reduce((curr, part) => curr?.[part], obj);
     }
 }
-exports.FileConfigSource = FileConfigSource;
 /**
  * Database configuration source
  */
-class DatabaseConfigSource {
+export class DatabaseConfigSource {
     name = 'database';
     priority = 30;
     cache = new Map();
@@ -157,10 +119,10 @@ class DatabaseConfigSource {
         if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
             return cached.value;
         }
-        if (!db_1.db)
+        if (!db)
             return undefined;
         try {
-            const result = await db_1.db
+            const result = await db
                 .selectFrom('system_configs')
                 .select(['value', 'is_encrypted'])
                 .where('key', '=', key)
@@ -183,10 +145,10 @@ class DatabaseConfigSource {
         }
     }
     async set(key, value) {
-        if (!db_1.db)
+        if (!db)
             throw new Error('Database not available');
         const jsonValue = JSON.stringify(value);
-        await db_1.db
+        await db
             .insertInto('system_configs')
             .values({
             key,
@@ -202,10 +164,10 @@ class DatabaseConfigSource {
         this.cache.delete(key);
     }
     async getAll() {
-        if (!db_1.db)
+        if (!db)
             return {};
         try {
-            const rows = await db_1.db
+            const rows = await db
                 .selectFrom('system_configs')
                 .select(['key', 'value', 'is_encrypted'])
                 .execute();
@@ -226,11 +188,10 @@ class DatabaseConfigSource {
         }
     }
 }
-exports.DatabaseConfigSource = DatabaseConfigSource;
 /**
  * Default configuration source
  */
-class DefaultConfigSource {
+export class DefaultConfigSource {
     name = 'default';
     priority = 0; // Lowest priority
     defaults = {
@@ -271,11 +232,10 @@ class DefaultConfigSource {
         return key.split('.').reduce((curr, part) => curr?.[part], obj);
     }
 }
-exports.DefaultConfigSource = DefaultConfigSource;
 /**
  * Secret Manager for handling encrypted values
  */
-class SecretManager {
+export class SecretManager {
     crypto = require('crypto');
     algorithm = 'aes-256-gcm';
     keyDerivationSalt;
@@ -337,10 +297,10 @@ class SecretManager {
     async rotateKey(oldKey, newKey) {
         // Implementation for key rotation
         logger.info('Key rotation initiated');
-        if (!db_1.db)
+        if (!db)
             throw new Error('Database not available');
         // Get all encrypted configs
-        const configs = await db_1.db
+        const configs = await db
             .selectFrom('system_configs')
             .select(['id', 'key', 'value'])
             .where('is_encrypted', '=', true)
@@ -356,7 +316,7 @@ class SecretManager {
                 process.env.ENCRYPTION_KEY = newKey;
                 const encrypted = await this.encrypt(decrypted);
                 // Update database
-                await db_1.db
+                await db
                     .updateTable('system_configs')
                     .set({ value: encrypted, updated_at: new Date() })
                     .where('id', '=', config.id)
@@ -372,11 +332,10 @@ class SecretManager {
         logger.info('Key rotation completed');
     }
 }
-exports.SecretManager = SecretManager;
 /**
  * Main Configuration Service
  */
-class ConfigService {
+export class ConfigService {
     sources = [];
     static instance;
     constructor() {
@@ -465,7 +424,6 @@ class ConfigService {
         };
     }
 }
-exports.ConfigService = ConfigService;
 // Export singleton instance
-exports.config = ConfigService.getInstance();
+export const config = ConfigService.getInstance();
 //# sourceMappingURL=ConfigService.js.map

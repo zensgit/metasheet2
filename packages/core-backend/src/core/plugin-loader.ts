@@ -503,12 +503,26 @@ export class PluginLoader extends EventEmitter {
       throw new Error(`Manifest validation failed for ${name}`)
     }
 
-    // 重新加载插件
+    // 重新加载插件并记录指标
+    const start = process.hrtime.bigint()
     try {
       await this.loadPlugin(manifest)
-      this.logger.info(`Plugin ${name} reloaded successfully`)
+      const durSec = Number(process.hrtime.bigint() - start) / 1e9
+      try {
+        // 动态导入避免潜在循环依赖
+        const { metrics } = await import('../metrics/metrics')
+        metrics.pluginReloadTotal.inc({ plugin_name: name, result: 'success' })
+        metrics.pluginReloadDuration.observe({ plugin_name: name }, durSec)
+      } catch {}
+      this.logger.info(`Plugin ${name} reloaded successfully in ${durSec.toFixed(3)}s`)
       this.emit('plugin:reloaded', name)
     } catch (error) {
+      const durSec = Number(process.hrtime.bigint() - start) / 1e9
+      try {
+        const { metrics } = await import('../metrics/metrics')
+        metrics.pluginReloadTotal.inc({ plugin_name: name, result: 'failure' })
+        metrics.pluginReloadDuration.observe({ plugin_name: name }, durSec)
+      } catch {}
       this.logger.error(`Failed to reload plugin ${name}`, error as Error)
       this.emit('plugin:reload:failed', { name, error })
       throw error

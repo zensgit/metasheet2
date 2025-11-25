@@ -1,23 +1,16 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.getViewById = getViewById;
-exports.getViewConfig = getViewConfig;
-exports.updateViewConfig = updateViewConfig;
-exports.queryGrid = queryGrid;
-exports.queryKanban = queryKanban;
-const db_1 = require("../db/db");
-const metrics_1 = require("../metrics/metrics");
-async function getViewById(viewId) {
-    if (!db_1.db)
+import { db } from '../db/db';
+import { metrics } from '../metrics/metrics';
+export async function getViewById(viewId) {
+    if (!db)
         return null;
     try {
-        return await db_1.db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst();
+        return await db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst();
     }
     catch {
         return null;
     }
 }
-async function getViewConfig(viewId) {
+export async function getViewConfig(viewId) {
     const view = await getViewById(viewId);
     if (!view)
         return null;
@@ -30,11 +23,11 @@ async function getViewConfig(viewId) {
         ...(view.config || {})
     };
 }
-async function updateViewConfig(viewId, config) {
-    if (!db_1.db)
+export async function updateViewConfig(viewId, config) {
+    if (!db)
         return null;
     const { id: _id, name, type, description, createdAt, updatedAt, createdBy, ...configData } = config || {};
-    const updated = await db_1.db
+    const updated = await db
         .updateTable('views')
         .set({ name, type, config: configData })
         .where('id', '=', viewId)
@@ -45,28 +38,28 @@ async function updateViewConfig(viewId, config) {
 function observe(type, status, startNs) {
     try {
         const dur = Number((process.hrtime.bigint() - startNs)) / 1e9;
-        metrics_1.metrics.viewDataLatencySeconds.labels(type, String(status)).observe(dur);
+        metrics.viewDataLatencySeconds.labels(type, String(status)).observe(dur);
     }
     catch { }
 }
-async function queryGrid(args) {
+export async function queryGrid(args) {
     const start = process.hrtime.bigint();
     try {
         const tableId = args.view.table_id;
         const page = Math.max(1, Number(args.page) || 1);
         const pageSize = Math.min(200, Math.max(1, Number(args.pageSize) || 50));
         const offset = (page - 1) * pageSize;
-        if (!db_1.db || !tableId) {
+        if (!db || !tableId) {
             const result = { data: [], meta: { total: 0, page, pageSize, hasMore: false } };
             try {
-                metrics_1.metrics.viewDataRequestsTotal.labels('grid', 'ok').inc();
+                metrics.viewDataRequestsTotal.labels('grid', 'ok').inc();
             }
             catch { }
             observe('grid', '200', start);
             return result;
         }
         // MVP: basic page reads without filters/sorting (to be added next)
-        const rows = await db_1.db
+        const rows = await db
             .selectFrom('table_rows')
             .select(['id', 'data', 'created_at', 'updated_at'])
             .where('table_id', '=', tableId)
@@ -74,7 +67,7 @@ async function queryGrid(args) {
             .limit(pageSize)
             .offset(offset)
             .execute();
-        const totalObj = await db_1.db
+        const totalObj = await db
             .selectFrom('table_rows')
             .select((eb) => eb.fn.countAll().as('c'))
             .where('table_id', '=', tableId)
@@ -82,7 +75,7 @@ async function queryGrid(args) {
         const total = totalObj ? Number(totalObj.c) : 0;
         const result = { data: rows, meta: { total, page, pageSize, hasMore: offset + rows.length < total } };
         try {
-            metrics_1.metrics.viewDataRequestsTotal.labels('grid', 'ok').inc();
+            metrics.viewDataRequestsTotal.labels('grid', 'ok').inc();
         }
         catch { }
         observe('grid', '200', start);
@@ -90,21 +83,21 @@ async function queryGrid(args) {
     }
     catch (e) {
         try {
-            metrics_1.metrics.viewDataRequestsTotal.labels('grid', 'error').inc();
+            metrics.viewDataRequestsTotal.labels('grid', 'error').inc();
         }
         catch { }
         observe('grid', '500', start);
         throw e;
     }
 }
-async function queryKanban(args) {
+export async function queryKanban(args) {
     const start = process.hrtime.bigint();
     try {
         const page = Math.max(1, Number(args.page) || 1);
         const pageSize = Math.min(200, Math.max(1, Number(args.pageSize) || 50));
         const result = { groups: [], groupBy: args.view?.config?.groupBy || 'status', meta: { total: 0, page, pageSize, hasMore: false } };
         try {
-            metrics_1.metrics.viewDataRequestsTotal.labels('kanban', 'ok').inc();
+            metrics.viewDataRequestsTotal.labels('kanban', 'ok').inc();
         }
         catch { }
         observe('kanban', '200', start);
@@ -112,7 +105,7 @@ async function queryKanban(args) {
     }
     catch (e) {
         try {
-            metrics_1.metrics.viewDataRequestsTotal.labels('kanban', 'error').inc();
+            metrics.viewDataRequestsTotal.labels('kanban', 'error').inc();
         }
         catch { }
         observe('kanban', '500', start);

@@ -1,25 +1,20 @@
-"use strict";
 /**
  * Workflow API Routes
  * RESTful endpoints for BPMN workflow management
  */
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const BPMNWorkflowEngine_1 = require("../workflow/BPMNWorkflowEngine");
-const auth_1 = require("../middleware/auth");
-const validation_1 = require("../middleware/validation");
-const express_validator_1 = require("express-validator");
-const logger_1 = require("../core/logger");
-const multer_1 = __importDefault(require("multer"));
-const router = (0, express_1.Router)();
-const logger = new logger_1.Logger('WorkflowAPI');
-const workflowEngine = new BPMNWorkflowEngine_1.BPMNWorkflowEngine();
+import { Router } from 'express';
+import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine';
+import { authenticate } from '../middleware/auth';
+import { validate } from '../middleware/validation';
+import { body, param, query } from 'express-validator';
+import { Logger } from '../core/logger';
+import multer from 'multer';
+const router = Router();
+const logger = new Logger('WorkflowAPI');
+const workflowEngine = new BPMNWorkflowEngine();
 // File upload for BPMN XML
-const upload = (0, multer_1.default)({
-    storage: multer_1.default.memoryStorage(),
+const upload = multer({
+    storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 // Initialize engine
@@ -30,7 +25,7 @@ workflowEngine.initialize().catch(error => {
  * POST /api/workflow/deploy
  * Deploy a new process definition
  */
-router.post('/deploy', auth_1.authenticate, upload.single('bpmnFile'), (0, express_validator_1.body)('key').optional().isString(), (0, express_validator_1.body)('name').isString().notEmpty(), (0, express_validator_1.body)('category').optional().isString(), validation_1.validate, async (req, res) => {
+router.post('/deploy', authenticate, upload.single('bpmnFile'), body('key').optional().isString(), body('name').isString().notEmpty(), body('category').optional().isString(), validate, async (req, res) => {
     try {
         let bpmnXml;
         if (req.file) {
@@ -75,7 +70,7 @@ router.post('/deploy', auth_1.authenticate, upload.single('bpmnFile'), (0, expre
  * GET /api/workflow/definitions
  * List process definitions
  */
-router.get('/definitions', auth_1.authenticate, (0, express_validator_1.query)('category').optional().isString(), (0, express_validator_1.query)('latest').optional().isBoolean(), validation_1.validate, async (req, res) => {
+router.get('/definitions', authenticate, query('category').optional().isString(), query('latest').optional().isBoolean(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { category, latest } = req.query;
@@ -115,7 +110,7 @@ router.get('/definitions', auth_1.authenticate, (0, express_validator_1.query)('
  * POST /api/workflow/start/:key
  * Start a process instance
  */
-router.post('/start/:key', auth_1.authenticate, (0, express_validator_1.param)('key').isString(), (0, express_validator_1.body)('businessKey').optional().isString(), (0, express_validator_1.body)('variables').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/start/:key', authenticate, param('key').isString(), body('businessKey').optional().isString(), body('variables').optional().isObject(), validate, async (req, res) => {
     try {
         const { key } = req.params;
         const { businessKey, variables = {} } = req.body;
@@ -142,7 +137,7 @@ router.post('/start/:key', auth_1.authenticate, (0, express_validator_1.param)('
  * GET /api/workflow/instances
  * List process instances
  */
-router.get('/instances', auth_1.authenticate, (0, express_validator_1.query)('state').optional().isIn(['ACTIVE', 'SUSPENDED', 'COMPLETED']), (0, express_validator_1.query)('processKey').optional().isString(), (0, express_validator_1.query)('businessKey').optional().isString(), validation_1.validate, async (req, res) => {
+router.get('/instances', authenticate, query('state').optional().isIn(['ACTIVE', 'SUSPENDED', 'COMPLETED']), query('processKey').optional().isString(), query('businessKey').optional().isString(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { state, processKey, businessKey } = req.query;
@@ -184,7 +179,7 @@ router.get('/instances', auth_1.authenticate, (0, express_validator_1.query)('st
  * GET /api/workflow/instances/:instanceId
  * Get process instance details
  */
-router.get('/instances/:instanceId', auth_1.authenticate, (0, express_validator_1.param)('instanceId').isUUID(), validation_1.validate, async (req, res) => {
+router.get('/instances/:instanceId', authenticate, param('instanceId').isUUID(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { instanceId } = req.params;
@@ -237,7 +232,7 @@ router.get('/instances/:instanceId', auth_1.authenticate, (0, express_validator_
  * GET /api/workflow/tasks
  * List user tasks
  */
-router.get('/tasks', auth_1.authenticate, (0, express_validator_1.query)('assignee').optional().isString(), (0, express_validator_1.query)('candidateUser').optional().isString(), (0, express_validator_1.query)('candidateGroup').optional().isString(), (0, express_validator_1.query)('processInstanceId').optional().isUUID(), (0, express_validator_1.query)('state').optional().isString(), validation_1.validate, async (req, res) => {
+router.get('/tasks', authenticate, query('assignee').optional().isString(), query('candidateUser').optional().isString(), query('candidateGroup').optional().isString(), query('processInstanceId').optional().isUUID(), query('state').optional().isString(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { assignee, candidateUser, candidateGroup, processInstanceId, state } = req.query;
@@ -296,7 +291,7 @@ router.get('/tasks', auth_1.authenticate, (0, express_validator_1.query)('assign
  * POST /api/workflow/tasks/:taskId/claim
  * Claim a task
  */
-router.post('/tasks/:taskId/claim', auth_1.authenticate, (0, express_validator_1.param)('taskId').isUUID(), validation_1.validate, async (req, res) => {
+router.post('/tasks/:taskId/claim', authenticate, param('taskId').isUUID(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { taskId } = req.params;
@@ -344,7 +339,7 @@ router.post('/tasks/:taskId/claim', auth_1.authenticate, (0, express_validator_1
  * POST /api/workflow/tasks/:taskId/complete
  * Complete a task
  */
-router.post('/tasks/:taskId/complete', auth_1.authenticate, (0, express_validator_1.param)('taskId').isUUID(), (0, express_validator_1.body)('variables').optional().isObject(), (0, express_validator_1.body)('formData').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/tasks/:taskId/complete', authenticate, param('taskId').isUUID(), body('variables').optional().isObject(), body('formData').optional().isObject(), validate, async (req, res) => {
     try {
         const { taskId } = req.params;
         const { variables = {}, formData } = req.body;
@@ -379,7 +374,7 @@ router.post('/tasks/:taskId/complete', auth_1.authenticate, (0, express_validato
  * POST /api/workflow/message
  * Send a message event
  */
-router.post('/message', auth_1.authenticate, (0, express_validator_1.body)('messageName').isString().notEmpty(), (0, express_validator_1.body)('correlationKey').optional().isString(), (0, express_validator_1.body)('variables').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/message', authenticate, body('messageName').isString().notEmpty(), body('correlationKey').optional().isString(), body('variables').optional().isObject(), validate, async (req, res) => {
     try {
         const { messageName, correlationKey, variables } = req.body;
         await workflowEngine.sendMessage(messageName, correlationKey, variables);
@@ -400,7 +395,7 @@ router.post('/message', auth_1.authenticate, (0, express_validator_1.body)('mess
  * POST /api/workflow/signal
  * Broadcast a signal event
  */
-router.post('/signal', auth_1.authenticate, (0, express_validator_1.body)('signalName').isString().notEmpty(), (0, express_validator_1.body)('variables').optional().isObject(), validation_1.validate, async (req, res) => {
+router.post('/signal', authenticate, body('signalName').isString().notEmpty(), body('variables').optional().isObject(), validate, async (req, res) => {
     try {
         const { signalName, variables } = req.body;
         await workflowEngine.broadcastSignal(signalName, variables);
@@ -421,7 +416,7 @@ router.post('/signal', auth_1.authenticate, (0, express_validator_1.body)('signa
  * GET /api/workflow/incidents
  * List incidents (errors)
  */
-router.get('/incidents', auth_1.authenticate, (0, express_validator_1.query)('state').optional().isIn(['OPEN', 'RESOLVED']), (0, express_validator_1.query)('processInstanceId').optional().isUUID(), validation_1.validate, async (req, res) => {
+router.get('/incidents', authenticate, query('state').optional().isIn(['OPEN', 'RESOLVED']), query('processInstanceId').optional().isUUID(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { state = 'OPEN', processInstanceId } = req.query;
@@ -453,7 +448,7 @@ router.get('/incidents', auth_1.authenticate, (0, express_validator_1.query)('st
  * POST /api/workflow/incidents/:incidentId/resolve
  * Resolve an incident
  */
-router.post('/incidents/:incidentId/resolve', auth_1.authenticate, (0, express_validator_1.param)('incidentId').isUUID(), validation_1.validate, async (req, res) => {
+router.post('/incidents/:incidentId/resolve', authenticate, param('incidentId').isUUID(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { incidentId } = req.params;
@@ -484,7 +479,7 @@ router.post('/incidents/:incidentId/resolve', auth_1.authenticate, (0, express_v
  * GET /api/workflow/audit
  * Get audit log
  */
-router.get('/audit', auth_1.authenticate, (0, express_validator_1.query)('processInstanceId').optional().isUUID(), (0, express_validator_1.query)('taskId').optional().isUUID(), (0, express_validator_1.query)('userId').optional().isString(), (0, express_validator_1.query)('from').optional().isISO8601(), (0, express_validator_1.query)('to').optional().isISO8601(), validation_1.validate, async (req, res) => {
+router.get('/audit', authenticate, query('processInstanceId').optional().isUUID(), query('taskId').optional().isUUID(), query('userId').optional().isString(), query('from').optional().isISO8601(), query('to').optional().isISO8601(), validate, async (req, res) => {
     try {
         const { db } = require('../db/db');
         const { processInstanceId, taskId, userId, from, to } = req.query;
@@ -532,5 +527,5 @@ process.on('SIGTERM', async () => {
     logger.info('SIGTERM received, shutting down workflow engine...');
     await workflowEngine.shutdown();
 });
-exports.default = router;
+export default router;
 //# sourceMappingURL=workflow.js.map

@@ -1,15 +1,12 @@
-"use strict";
 /**
  * Permission Metrics Middleware
  * Issue #35: Integrates permission checking with metrics collection
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PermissionMetricsMiddleware = void 0;
-const permission_metrics_1 = require("../metrics/permission-metrics");
+import { permissionMetrics } from '../metrics/permission-metrics';
 /**
  * Middleware to track permission metrics
  */
-class PermissionMetricsMiddleware {
+export class PermissionMetricsMiddleware {
     /**
      * Track request timing
      */
@@ -27,30 +24,30 @@ class PermissionMetricsMiddleware {
             const statusCode = res.statusCode;
             if (statusCode === 401) {
                 const reason = req.headers.authorization ? 'invalid_token' : 'no_token';
-                permission_metrics_1.permissionMetrics.incrementAuthFailure(reason, req.path, req.method);
-                permission_metrics_1.permissionMetrics.incrementApiRequest(req.path, req.method, 401);
+                permissionMetrics.incrementAuthFailure(reason, req.path, req.method);
+                permissionMetrics.incrementApiRequest(req.path, req.method, 401);
             }
             else if (statusCode === 403) {
                 const reason = data?.reason || 'permission_denied';
-                permission_metrics_1.permissionMetrics.incrementAuthFailure(reason, req.path, req.method);
-                permission_metrics_1.permissionMetrics.incrementApiRequest(req.path, req.method, 403);
+                permissionMetrics.incrementAuthFailure(reason, req.path, req.method);
+                permissionMetrics.incrementApiRequest(req.path, req.method, 403);
                 // If we have user info, track RBAC denial
                 if (req.user) {
                     const resourceType = extractResourceType(req.path);
                     const action = mapMethodToAction(req.method);
-                    permission_metrics_1.permissionMetrics.incrementRbacDenial(resourceType, action, req.user.role, reason);
+                    permissionMetrics.incrementRbacDenial(resourceType, action, req.user.role, reason);
                 }
             }
             // Track successful requests
             if (statusCode >= 200 && statusCode < 300) {
-                permission_metrics_1.permissionMetrics.incrementApiRequest(req.path, req.method, statusCode);
+                permissionMetrics.incrementApiRequest(req.path, req.method, statusCode);
             }
             // Track permission check duration
             if (req.startTime) {
                 const duration = Date.now() - req.startTime;
                 const resourceType = extractResourceType(req.path);
                 const action = mapMethodToAction(req.method);
-                permission_metrics_1.permissionMetrics.recordPermissionCheckDuration(resourceType, action, duration);
+                permissionMetrics.recordPermissionCheckDuration(resourceType, action, duration);
             }
             return originalSend.call(this, data);
         };
@@ -62,7 +59,7 @@ class PermissionMetricsMiddleware {
     static async validateToken(req, res, next) {
         const authHeader = req.headers.authorization;
         if (!authHeader) {
-            permission_metrics_1.permissionMetrics.incrementTokenValidation(false, 'missing_header');
+            permissionMetrics.incrementTokenValidation(false, 'missing_header');
             res.status(401).json({ error: 'No authorization header' });
             return;
         }
@@ -71,25 +68,25 @@ class PermissionMetricsMiddleware {
             // Simulated token validation
             const decoded = await validateJWT(token);
             if (isTokenExpired(decoded)) {
-                permission_metrics_1.permissionMetrics.incrementTokenValidation(false, 'token_expired');
-                permission_metrics_1.permissionMetrics.incrementAuthFailure('token_expired', req.path, req.method);
+                permissionMetrics.incrementTokenValidation(false, 'token_expired');
+                permissionMetrics.incrementAuthFailure('token_expired', req.path, req.method);
                 res.status(401).json({ error: 'Token expired' });
                 return;
             }
             if (isTokenRevoked(token)) {
-                permission_metrics_1.permissionMetrics.incrementTokenValidation(false, 'token_revoked');
-                permission_metrics_1.permissionMetrics.incrementAuthFailure('token_revoked', req.path, req.method);
+                permissionMetrics.incrementTokenValidation(false, 'token_revoked');
+                permissionMetrics.incrementAuthFailure('token_revoked', req.path, req.method);
                 res.status(401).json({ error: 'Token revoked' });
                 return;
             }
             // Token is valid
-            permission_metrics_1.permissionMetrics.incrementTokenValidation(true);
+            permissionMetrics.incrementTokenValidation(true);
             req.user = decoded.user;
             next();
         }
         catch (error) {
-            permission_metrics_1.permissionMetrics.incrementTokenValidation(false, 'invalid_token');
-            permission_metrics_1.permissionMetrics.incrementAuthFailure('invalid_token', req.path, req.method);
+            permissionMetrics.incrementTokenValidation(false, 'invalid_token');
+            permissionMetrics.incrementAuthFailure('invalid_token', req.path, req.method);
             res.status(401).json({ error: 'Invalid token' });
             return;
         }
@@ -100,14 +97,14 @@ class PermissionMetricsMiddleware {
     static checkPermission(requiredPermission) {
         return (req, res, next) => {
             if (!req.user) {
-                permission_metrics_1.permissionMetrics.incrementAuthFailure('no_user', req.path, req.method);
+                permissionMetrics.incrementAuthFailure('no_user', req.path, req.method);
                 res.status(401).json({ error: 'Not authenticated' });
                 return;
             }
             const hasPermission = checkUserPermission(req.user, requiredPermission);
             if (!hasPermission) {
                 const [resource, action] = requiredPermission.split(':');
-                permission_metrics_1.permissionMetrics.incrementRbacDenial(resource, action, req.user.role, 'insufficient_permission');
+                permissionMetrics.incrementRbacDenial(resource, action, req.user.role, 'insufficient_permission');
                 res.status(403).json({
                     error: 'Insufficient permissions',
                     reason: 'insufficient_permission',
@@ -117,7 +114,7 @@ class PermissionMetricsMiddleware {
             }
             // Check cache performance
             const cacheHit = Math.random() > 0.3; // Simulate 70% cache hit rate
-            permission_metrics_1.permissionMetrics.incrementPermissionCache(cacheHit);
+            permissionMetrics.incrementPermissionCache(cacheHit);
             next();
         };
     }
@@ -127,15 +124,15 @@ class PermissionMetricsMiddleware {
     static checkDepartmentAccess(allowedDepartments) {
         return (req, res, next) => {
             if (!req.user?.department) {
-                permission_metrics_1.permissionMetrics.incrementAuthFailure('no_department', req.path, req.method);
+                permissionMetrics.incrementAuthFailure('no_department', req.path, req.method);
                 res.status(403).json({ error: 'Department information missing' });
                 return;
             }
             if (!allowedDepartments.includes(req.user.department)) {
                 const resourceType = extractResourceType(req.path);
                 const action = mapMethodToAction(req.method);
-                permission_metrics_1.permissionMetrics.incrementDepartmentDenial(req.user.department, resourceType, action);
-                permission_metrics_1.permissionMetrics.incrementRbacDenial(resourceType, action, req.user.role, 'department_restricted');
+                permissionMetrics.incrementDepartmentDenial(req.user.department, resourceType, action);
+                permissionMetrics.incrementRbacDenial(resourceType, action, req.user.role, 'department_restricted');
                 res.status(403).json({
                     error: 'Department not authorized',
                     reason: 'department_restricted'
@@ -149,7 +146,7 @@ class PermissionMetricsMiddleware {
      * Export metrics endpoint
      */
     static metricsEndpoint(req, res) {
-        const metrics = permission_metrics_1.permissionMetrics.toPrometheusFormat();
+        const metrics = permissionMetrics.toPrometheusFormat();
         res.set('Content-Type', 'text/plain; version=0.0.4');
         res.send(metrics);
     }
@@ -159,10 +156,9 @@ class PermissionMetricsMiddleware {
     static trackSession(action) {
         // In production, this would track actual session count
         const currentSessions = Math.floor(Math.random() * 100) + 1;
-        permission_metrics_1.permissionMetrics.setActiveSessions(currentSessions);
+        permissionMetrics.setActiveSessions(currentSessions);
     }
 }
-exports.PermissionMetricsMiddleware = PermissionMetricsMiddleware;
 // Helper functions
 function extractResourceType(path) {
     const segments = path.split('/').filter(Boolean);
@@ -228,5 +224,5 @@ function checkUserPermission(user, requiredPermission) {
     const [resource, action] = requiredPermission.split(':');
     return userPermissions.includes(`${resource}:all`) || userPermissions.includes('*:*');
 }
-exports.default = PermissionMetricsMiddleware;
+export default PermissionMetricsMiddleware;
 //# sourceMappingURL=permission-metrics-middleware.js.map

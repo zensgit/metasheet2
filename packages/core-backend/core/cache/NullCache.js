@@ -1,7 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.NullCache = void 0;
-const metrics_1 = require("../../src/metrics/metrics");
+import { metrics } from '../../src/metrics/metrics';
 /**
  * No-op cache implementation for observability
  *
@@ -25,7 +22,7 @@ const metrics_1 = require("../../src/metrics/metrics");
  * const result = await cache.get('key') // Always returns null
  * ```
  */
-class NullCache {
+export class NullCache {
     /**
      * Always returns null (cache miss)
      * Records cache_miss_total metric
@@ -33,7 +30,7 @@ class NullCache {
     async get(key) {
         // Record miss metric with key pattern
         const keyPattern = this.extractKeyPattern(key);
-        metrics_1.metrics.cache_miss_total.inc({ impl: 'null', key_pattern: keyPattern });
+        metrics.cache_miss_total.inc({ impl: 'null', key_pattern: keyPattern });
         // Always miss - no caching
         return { ok: true, value: null };
     }
@@ -44,7 +41,7 @@ class NullCache {
     async set(key, value, ttl) {
         // Record set metric with key pattern
         const keyPattern = this.extractKeyPattern(key);
-        metrics_1.metrics.cache_set_total.inc({ impl: 'null', key_pattern: keyPattern });
+        metrics.cache_set_total.inc({ impl: 'null', key_pattern: keyPattern });
         // No-op - don't store anything
         return { ok: true, value: undefined };
     }
@@ -55,7 +52,7 @@ class NullCache {
     async del(key) {
         // Record del metric with key pattern
         const keyPattern = this.extractKeyPattern(key);
-        metrics_1.metrics.cache_del_total.inc({ impl: 'null', key_pattern: keyPattern });
+        metrics.cache_del_total.inc({ impl: 'null', key_pattern: keyPattern });
         // No-op - nothing to delete
         return { ok: true, value: undefined };
     }
@@ -74,5 +71,4 @@ class NullCache {
         return parts[0] || 'unknown';
     }
 }
-exports.NullCache = NullCache;
 //# sourceMappingURL=NullCache.js.map

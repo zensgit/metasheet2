@@ -24,7 +24,7 @@ export { NullCache } from './implementations/null-cache'
 export { cacheMetrics } from './metrics'
 
 // Re-export types
-export type { Cache, Result } from '../../types/cache'
+export type { Cache, Result } from '../types/cache'
 
 // Create and export default cache instance
 import { CacheRegistry } from './registry'

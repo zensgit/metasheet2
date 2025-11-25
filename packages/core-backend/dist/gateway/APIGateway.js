@@ -1,15 +1,9 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.APIGateway = void 0;
-const express_1 = require("express");
-const events_1 = require("events");
-const crypto_1 = __importDefault(require("crypto"));
-const RateLimiter_1 = require("./RateLimiter");
-const CircuitBreaker_1 = require("./CircuitBreaker");
-class APIGateway extends events_1.EventEmitter {
+import { Router } from 'express';
+import { EventEmitter } from 'events';
+import crypto from 'crypto';
+import { RateLimiter } from './RateLimiter';
+import { CircuitBreaker } from './CircuitBreaker';
+export class APIGateway extends EventEmitter {
     app;
     router;
     config;
@@ -27,7 +21,7 @@ class APIGateway extends events_1.EventEmitter {
     constructor(app, config = {}) {
         super();
         this.app = app;
-        this.router = (0, express_1.Router)();
+        this.router = Router();
         this.config = {
             basePath: config.basePath || '/api',
             defaultRateLimit: config.defaultRateLimit || {
@@ -111,7 +105,7 @@ class APIGateway extends events_1.EventEmitter {
     requestIdMiddleware() {
         return (req, res, next) => {
             const requestId = req.headers['x-request-id']?.toString() ||
-                crypto_1.default.randomBytes(16).toString('hex');
+                crypto.randomBytes(16).toString('hex');
             req.requestId = requestId;
             res.setHeader('X-Request-ID', requestId);
             next();
@@ -194,11 +188,11 @@ class APIGateway extends events_1.EventEmitter {
         this.endpoints.set(key, endpoint);
         // Create rate limiter if needed
         if (endpoint.rateLimits) {
-            this.rateLimiters.set(key, new RateLimiter_1.RateLimiter(endpoint.rateLimits));
+            this.rateLimiters.set(key, new RateLimiter(endpoint.rateLimits));
         }
         // Create circuit breaker if needed
         if (endpoint.circuitBreaker && this.config.enableCircuitBreaker) {
-            this.circuitBreakers.set(key, new CircuitBreaker_1.CircuitBreaker({
+            this.circuitBreakers.set(key, new CircuitBreaker({
                 timeout: endpoint.timeout || this.config.timeout,
                 errorThreshold: 50,
                 resetTimeout: 30000
@@ -528,5 +522,4 @@ class APIGateway extends events_1.EventEmitter {
         this.registerEndpoint(versionedEndpoint);
     }
 }
-exports.APIGateway = APIGateway;
 //# sourceMappingURL=APIGateway.js.map

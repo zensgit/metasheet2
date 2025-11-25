@@ -9,6 +9,7 @@ export declare class PluginLoader extends EventEmitter {
     private coreAPI;
     private logger;
     private manifestValidator;
+    private lastSummary;
     constructor(coreAPI: CoreAPI);
     /**
      * 加载所有插件
@@ -54,6 +55,30 @@ export declare class PluginLoader extends EventEmitter {
      * 获取所有插件
      */
     getPlugins(): Map<string, PluginInstance>;
+    /**
+     * 获取插件加载摘要
+     */
+    getSummary(): {
+        scannedDirs: number;
+        manifests: number;
+        validManifests: number;
+        loaded: number;
+        activated: number;
+        errors: Array<{
+            plugin?: string;
+            message: string;
+        }>;
+        timestamp: string;
+    };
+    /**
+     * 获取扁平列表（用于HTTP返回）
+     */
+    getList(): {
+        name: string;
+        version: string;
+        displayName: string | undefined;
+        status: "loaded" | "active" | "inactive" | "error";
+    }[];
     /**
      * 获取单个插件
      */

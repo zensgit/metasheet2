@@ -1,14 +1,11 @@
-"use strict";
 /**
  * 插件系统核心类型定义
  * Last updated: 2025-11-03 (Batch 1 完成)
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PERMISSION_GROUPS = exports.PERMISSION_WHITELIST = exports.CAPABILITY_PERMISSIONS = exports.PluginCapability = exports.PluginStatus = void 0;
 /**
  * 插件状态
  */
-var PluginStatus;
+export var PluginStatus;
 (function (PluginStatus) {
     PluginStatus["DISCOVERED"] = "discovered";
     PluginStatus["LOADING"] = "loading";
@@ -17,11 +14,11 @@ var PluginStatus;
     PluginStatus["DISABLED"] = "disabled";
     PluginStatus["UPDATING"] = "updating";
     PluginStatus["ERROR"] = "error";
-})(PluginStatus || (exports.PluginStatus = PluginStatus = {}));
+})(PluginStatus || (PluginStatus = {}));
 /**
  * 插件能力标识
  */
-var PluginCapability;
+export var PluginCapability;
 (function (PluginCapability) {
     PluginCapability["DATABASE"] = "database";
     PluginCapability["HTTP"] = "http";
@@ -36,11 +33,11 @@ var PluginCapability;
     PluginCapability["ACTION_PROVIDER"] = "action_provider";
     PluginCapability["API_ENDPOINT"] = "api_endpoint";
     PluginCapability["MENU_ITEM"] = "menu_item";
-})(PluginCapability || (exports.PluginCapability = PluginCapability = {}));
+})(PluginCapability || (PluginCapability = {}));
 /**
  * 能力权限映射
  */
-exports.CAPABILITY_PERMISSIONS = {
+export const CAPABILITY_PERMISSIONS = {
     [PluginCapability.DATABASE]: ['database.read', 'database.write'],
     [PluginCapability.HTTP]: ['http.request'],
     [PluginCapability.WEBSOCKET]: ['websocket.broadcast', 'websocket.send'],
@@ -61,7 +58,7 @@ exports.CAPABILITY_PERMISSIONS = {
  * 扩展至35+权限，覆盖10个功能类别
  * @version 2.0 - Expanded from 24 to 37 permissions
  */
-exports.PERMISSION_WHITELIST = [
+export const PERMISSION_WHITELIST = [
     // 数据库权限 (4)
     'database.read',
     'database.write',
@@ -119,7 +116,7 @@ exports.PERMISSION_WHITELIST = [
  *
  * @version 2.0 - Updated with expanded permission whitelist
  */
-exports.PERMISSION_GROUPS = {
+export const PERMISSION_GROUPS = {
     /**
      * 只读权限组 - 适用于数据分析、监控、报表类插件
      * 提供基础的读取权限和身份验证能力

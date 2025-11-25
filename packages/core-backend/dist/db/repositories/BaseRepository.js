@@ -1,20 +1,17 @@
-"use strict";
 // @ts-nocheck
 /**
  * Base Repository Pattern Implementation
  * Provides common CRUD operations for all entities
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.BaseRepository = void 0;
-const kysely_1 = require("../kysely");
-class BaseRepository {
+import { db, transaction } from '../kysely';
+export class BaseRepository {
     db;
     tableName;
     constructor(tableName) {
-        if (!kysely_1.db) {
+        if (!db) {
             throw new Error('Database not initialized');
         }
-        this.db = kysely_1.db;
+        this.db = db;
         this.tableName = tableName;
     }
     /**
@@ -145,7 +142,7 @@ class BaseRepository {
      * Execute in transaction
      */
     async withTransaction(callback) {
-        return await (0, kysely_1.transaction)(callback);
+        return await transaction(callback);
     }
     /**
      * Check if record exists
@@ -183,6 +180,5 @@ class BaseRepository {
         };
     }
 }
-exports.BaseRepository = BaseRepository;
 // @ts-nocheck
 //# sourceMappingURL=BaseRepository.js.map

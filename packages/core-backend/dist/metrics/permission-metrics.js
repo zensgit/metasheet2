@@ -1,11 +1,8 @@
-"use strict";
 /**
  * Permission Metrics Implementation
  * Issue #35: Permission denied metric test enhancement
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.permissionMetrics = exports.PermissionMetrics = void 0;
-class PermissionMetrics {
+export class PermissionMetrics {
     metrics = new Map();
     /**
      * Track authentication failures
@@ -246,7 +243,6 @@ class PermissionMetrics {
         return `{${labelPairs}}`;
     }
 }
-exports.PermissionMetrics = PermissionMetrics;
 // Singleton instance for global metrics
-exports.permissionMetrics = new PermissionMetrics();
+export const permissionMetrics = new PermissionMetrics();
 //# sourceMappingURL=permission-metrics.js.map

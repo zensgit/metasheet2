@@ -1,0 +1,300 @@
+# HELP process_cpu_user_seconds_total Total user CPU time spent in seconds.
+# TYPE process_cpu_user_seconds_total counter
+process_cpu_user_seconds_total 0.26064
+
+# HELP process_cpu_system_seconds_total Total system CPU time spent in seconds.
+# TYPE process_cpu_system_seconds_total counter
+process_cpu_system_seconds_total 0.088877
+
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 0.34951699999999997
+
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1763978588
+
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 96976896
+
+# HELP nodejs_eventloop_lag_seconds Lag of event loop in seconds.
+# TYPE nodejs_eventloop_lag_seconds gauge
+nodejs_eventloop_lag_seconds 0.000537959
+
+# HELP nodejs_eventloop_lag_min_seconds The minimum recorded event loop delay.
+# TYPE nodejs_eventloop_lag_min_seconds gauge
+nodejs_eventloop_lag_min_seconds 0.010231808
+
+# HELP nodejs_eventloop_lag_max_seconds The maximum recorded event loop delay.
+# TYPE nodejs_eventloop_lag_max_seconds gauge
+nodejs_eventloop_lag_max_seconds 0.011141119
+
+# HELP nodejs_eventloop_lag_mean_seconds The mean of the recorded event loop delays.
+# TYPE nodejs_eventloop_lag_mean_seconds gauge
+nodejs_eventloop_lag_mean_seconds 0.010900626285714286
+
+# HELP nodejs_eventloop_lag_stddev_seconds The standard deviation of the recorded event loop delays.
+# TYPE nodejs_eventloop_lag_stddev_seconds gauge
+nodejs_eventloop_lag_stddev_seconds 0.00029615859886106114
+
+# HELP nodejs_eventloop_lag_p50_seconds The 50th percentile of the recorded event loop delays.
+# TYPE nodejs_eventloop_lag_p50_seconds gauge
+nodejs_eventloop_lag_p50_seconds 0.011042815
+
+# HELP nodejs_eventloop_lag_p90_seconds The 90th percentile of the recorded event loop delays.
+# TYPE nodejs_eventloop_lag_p90_seconds gauge
+nodejs_eventloop_lag_p90_seconds 0.011075583
+
+# HELP nodejs_eventloop_lag_p99_seconds The 99th percentile of the recorded event loop delays.
+# TYPE nodejs_eventloop_lag_p99_seconds gauge
+nodejs_eventloop_lag_p99_seconds 0.011141119
+
+# HELP nodejs_active_resources Number of active resources that are currently keeping the event loop alive, grouped by async resource type.
+# TYPE nodejs_active_resources gauge
+nodejs_active_resources{type="TCPServerWrap"} 1
+nodejs_active_resources{type="TCPSocketWrap"} 1
+nodejs_active_resources{type="Timeout"} 5
+nodejs_active_resources{type="Immediate"} 1
+
+# HELP nodejs_active_resources_total Total number of active resources.
+# TYPE nodejs_active_resources_total gauge
+nodejs_active_resources_total 8
+
+# HELP nodejs_active_handles Number of active libuv handles grouped by handle type. Every handle type is C++ class name.
+# TYPE nodejs_active_handles gauge
+nodejs_active_handles{type="Server"} 1
+nodejs_active_handles{type="Socket"} 1
+
+# HELP nodejs_active_handles_total Total number of active handles.
+# TYPE nodejs_active_handles_total gauge
+nodejs_active_handles_total 2
+
+# HELP nodejs_active_requests Number of active libuv requests grouped by request type. Every request type is C++ class name.
+# TYPE nodejs_active_requests gauge
+
+# HELP nodejs_active_requests_total Total number of active requests.
+# TYPE nodejs_active_requests_total gauge
+nodejs_active_requests_total 0
+
+# HELP nodejs_heap_size_total_bytes Process heap size from Node.js in bytes.
+# TYPE nodejs_heap_size_total_bytes gauge
+nodejs_heap_size_total_bytes 38486016
+
+# HELP nodejs_heap_size_used_bytes Process heap size used from Node.js in bytes.
+# TYPE nodejs_heap_size_used_bytes gauge
+nodejs_heap_size_used_bytes 34158736
+
+# HELP nodejs_external_memory_bytes Node.js external memory size in bytes.
+# TYPE nodejs_external_memory_bytes gauge
+nodejs_external_memory_bytes 4865871
+
+# HELP nodejs_heap_space_size_total_bytes Process heap space size total from Node.js in bytes.
+# TYPE nodejs_heap_space_size_total_bytes gauge
+nodejs_heap_space_size_total_bytes{space="read_only"} 0
+nodejs_heap_space_size_total_bytes{space="new"} 2097152
+nodejs_heap_space_size_total_bytes{space="old"} 28311552
+nodejs_heap_space_size_total_bytes{space="code"} 2359296
+nodejs_heap_space_size_total_bytes{space="shared"} 0
+nodejs_heap_space_size_total_bytes{space="trusted"} 2965504
+nodejs_heap_space_size_total_bytes{space="new_large_object"} 0
+nodejs_heap_space_size_total_bytes{space="large_object"} 2539520
+nodejs_heap_space_size_total_bytes{space="code_large_object"} 212992
+nodejs_heap_space_size_total_bytes{space="shared_large_object"} 0
+nodejs_heap_space_size_total_bytes{space="trusted_large_object"} 0
+
+# HELP nodejs_heap_space_size_used_bytes Process heap space size used from Node.js in bytes.
+# TYPE nodejs_heap_space_size_used_bytes gauge
+nodejs_heap_space_size_used_bytes{space="read_only"} 0
+nodejs_heap_space_size_used_bytes{space="new"} 723544
+nodejs_heap_space_size_used_bytes{space="old"} 26469392
+nodejs_heap_space_size_used_bytes{space="code"} 1837120
+nodejs_heap_space_size_used_bytes{space="shared"} 0
+nodejs_heap_space_size_used_bytes{space="trusted"} 2546248
+nodejs_heap_space_size_used_bytes{space="new_large_object"} 0
+nodejs_heap_space_size_used_bytes{space="large_object"} 2430904
+nodejs_heap_space_size_used_bytes{space="code_large_object"} 155328
+nodejs_heap_space_size_used_bytes{space="shared_large_object"} 0
+nodejs_heap_space_size_used_bytes{space="trusted_large_object"} 0
+
+# HELP nodejs_heap_space_size_available_bytes Process heap space size available from Node.js in bytes.
+# TYPE nodejs_heap_space_size_available_bytes gauge
+nodejs_heap_space_size_available_bytes{space="read_only"} 0
+nodejs_heap_space_size_available_bytes{space="new"} 307368
+nodejs_heap_space_size_available_bytes{space="old"} 1318544
+nodejs_heap_space_size_available_bytes{space="code"} 79808
+nodejs_heap_space_size_available_bytes{space="shared"} 0
+nodejs_heap_space_size_available_bytes{space="trusted"} 366024
+nodejs_heap_space_size_available_bytes{space="new_large_object"} 1048576
+nodejs_heap_space_size_available_bytes{space="large_object"} 0
+nodejs_heap_space_size_available_bytes{space="code_large_object"} 0
+nodejs_heap_space_size_available_bytes{space="shared_large_object"} 0
+nodejs_heap_space_size_available_bytes{space="trusted_large_object"} 0
+
+# HELP nodejs_version_info Node.js version info.
+# TYPE nodejs_version_info gauge
+nodejs_version_info{version="v22.17.0",major="22",minor="17",patch="0"} 1
+
+# HELP nodejs_gc_duration_seconds Garbage collection duration by kind, one of major, minor, incremental or weakcb.
+# TYPE nodejs_gc_duration_seconds histogram
+nodejs_gc_duration_seconds_bucket{le="0.001",kind="minor"} 2
+nodejs_gc_duration_seconds_bucket{le="0.01",kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="0.1",kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="1",kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="2",kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="5",kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="+Inf",kind="minor"} 3
+nodejs_gc_duration_seconds_sum{kind="minor"} 0.0023993330001831053
+nodejs_gc_duration_seconds_count{kind="minor"} 3
+nodejs_gc_duration_seconds_bucket{le="0.001",kind="incremental"} 1
+nodejs_gc_duration_seconds_bucket{le="0.01",kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="0.1",kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="1",kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="2",kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="5",kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="+Inf",kind="incremental"} 2
+nodejs_gc_duration_seconds_sum{kind="incremental"} 0.0018208760023117065
+nodejs_gc_duration_seconds_count{kind="incremental"} 2
+nodejs_gc_duration_seconds_bucket{le="0.001",kind="major"} 0
+nodejs_gc_duration_seconds_bucket{le="0.01",kind="major"} 2
+nodejs_gc_duration_seconds_bucket{le="0.1",kind="major"} 2
+nodejs_gc_duration_seconds_bucket{le="1",kind="major"} 2
+nodejs_gc_duration_seconds_bucket{le="2",kind="major"} 2
+nodejs_gc_duration_seconds_bucket{le="5",kind="major"} 2
+nodejs_gc_duration_seconds_bucket{le="+Inf",kind="major"} 2
+nodejs_gc_duration_seconds_sum{kind="major"} 0.00949704098701477
+nodejs_gc_duration_seconds_count{kind="major"} 2
+
+# HELP http_server_requests_seconds HTTP server request duration in seconds
+# TYPE http_server_requests_seconds histogram
+
+# HELP http_server_requests_seconds_summary HTTP request duration summary
+# TYPE http_server_requests_seconds_summary summary
+
+# HELP http_requests_total Total HTTP requests by method and status
+# TYPE http_requests_total counter
+
+# HELP metasheet_fallback_total Total degraded fallback responses served
+# TYPE metasheet_fallback_total counter
+
+# HELP metasheet_http_adapter_ops_total HTTP adapter operations (successful primary responses)
+# TYPE metasheet_http_adapter_ops_total counter
+
+# HELP metasheet_message_bus_rpc_attempts_total Message bus RPC attempts
+# TYPE metasheet_message_bus_rpc_attempts_total counter
+
+# HELP metasheet_cache_get_attempts_total Cache get attempts total
+# TYPE metasheet_cache_get_attempts_total counter
+
+# HELP jwt_auth_fail_total Total JWT auth failures
+# TYPE jwt_auth_fail_total counter
+
+# HELP metasheet_approval_actions_total Approval actions count
+# TYPE metasheet_approval_actions_total counter
+
+# HELP metasheet_approval_conflict_total Approval version conflicts
+# TYPE metasheet_approval_conflict_total counter
+
+# HELP rbac_perm_cache_hits_total RBAC permission cache hits
+# TYPE rbac_perm_cache_hits_total counter
+rbac_perm_cache_hits_total 0
+
+# HELP rbac_perm_cache_miss_total RBAC permission cache misses
+# TYPE rbac_perm_cache_miss_total counter
+rbac_perm_cache_miss_total 0
+
+# HELP rbac_perm_cache_misses_total RBAC permission cache misses (alias)
+# TYPE rbac_perm_cache_misses_total counter
+rbac_perm_cache_misses_total 0
+
+# HELP metasheet_rbac_denials_total Total RBAC permission denials
+# TYPE metasheet_rbac_denials_total counter
+metasheet_rbac_denials_total 0
+
+# HELP metasheet_auth_failures_total Total authentication failures (alias)
+# TYPE metasheet_auth_failures_total counter
+metasheet_auth_failures_total 0
+
+# HELP metasheet_events_emitted_total Total events emitted via EventBus
+# TYPE metasheet_events_emitted_total counter
+metasheet_events_emitted_total 0
+
+# HELP metasheet_messages_processed_total Total messages processed via MessageBus
+# TYPE metasheet_messages_processed_total counter
+metasheet_messages_processed_total 0
+
+# HELP metasheet_messages_retried_total Total message retries
+# TYPE metasheet_messages_retried_total counter
+metasheet_messages_retried_total 0
+
+# HELP metasheet_messages_expired_total Total messages expired (dropped before processing)
+# TYPE metasheet_messages_expired_total counter
+metasheet_messages_expired_total 0
+
+# HELP metasheet_permission_denied_total Total permission denied (sandbox) occurrences
+# TYPE metasheet_permission_denied_total counter
+metasheet_permission_denied_total 0
+
+# HELP metasheet_rpc_timeouts_total Total RPC timeouts
+# TYPE metasheet_rpc_timeouts_total counter
+metasheet_rpc_timeouts_total 0
+
+# HELP metasheet_plugin_reload_total Total plugin reload operations
+# TYPE metasheet_plugin_reload_total counter
+
+# HELP metasheet_plugin_reload_duration_seconds Plugin reload duration in seconds
+# TYPE metasheet_plugin_reload_duration_seconds histogram
+
+# HELP metasheet_snapshot_create_total Total snapshot create operations
+# TYPE metasheet_snapshot_create_total counter
+
+# HELP metasheet_snapshot_restore_total Total snapshot restore operations
+# TYPE metasheet_snapshot_restore_total counter
+
+# HELP metasheet_snapshot_operation_duration_seconds Snapshot operation duration in seconds
+# TYPE metasheet_snapshot_operation_duration_seconds histogram
+
+# HELP metasheet_snapshot_cleanup_total Total snapshot cleanup operations
+# TYPE metasheet_snapshot_cleanup_total counter
+
+# HELP metasheet_snapshot_tags_total Total count of snapshot tags usage
+# TYPE metasheet_snapshot_tags_total counter
+
+# HELP metasheet_snapshot_protection_level Snapshot protection level distribution
+# TYPE metasheet_snapshot_protection_level gauge
+
+# HELP metasheet_snapshot_release_channel Snapshot release channel distribution
+# TYPE metasheet_snapshot_release_channel gauge
+
+# HELP metasheet_protection_rule_evaluations_total Total protection rule evaluations
+# TYPE metasheet_protection_rule_evaluations_total counter
+
+# HELP metasheet_protection_rule_blocks_total Total operations blocked by protection rules
+# TYPE metasheet_protection_rule_blocks_total counter
+
+# HELP metasheet_snapshot_protected_skipped_total Total protected snapshots skipped during cleanup
+# TYPE metasheet_snapshot_protected_skipped_total counter
+metasheet_snapshot_protected_skipped_total 0
+
+# HELP cache_hits_total Total cache hits
+# TYPE cache_hits_total counter
+
+# HELP cache_miss_total Total cache misses
+# TYPE cache_miss_total counter
+
+# HELP cache_set_total Total cache sets
+# TYPE cache_set_total counter
+
+# HELP cache_del_total Total cache deletions
+# TYPE cache_del_total counter
+
+# HELP cache_errors_total Total cache errors
+# TYPE cache_errors_total counter
+
+# HELP cache_invalidate_total Total cache invalidations
+# TYPE cache_invalidate_total counter
+
+# HELP cache_enabled Whether cache is enabled (1=enabled, 0=disabled)
+# TYPE cache_enabled gauge
+
+# HELP cache_candidate_requests Requests that could benefit from caching

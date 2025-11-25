@@ -1,48 +1,12 @@
-"use strict";
 /**
  * 插件配置管理器
  * 提供插件配置的统一管理、验证、持久化和变更通知功能
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DatabaseConfigStorage = exports.FileSystemConfigStorage = exports.PluginConfigManager = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs/promises"));
-const zod_1 = require("zod");
-const logger_1 = require("./logger");
+import { EventEmitter } from 'eventemitter3';
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import { z } from 'zod';
+import { Logger } from './logger';
 /**
  * 文件系统配置存储
  */
@@ -53,7 +17,7 @@ class FileSystemConfigStorage {
     constructor(basePath = './config/plugins') {
         this.basePath = basePath;
         this.backupPath = path.join(basePath, '.backups');
-        this.logger = new logger_1.Logger('FileSystemConfigStorage');
+        this.logger = new Logger('FileSystemConfigStorage');
     }
     async load(pluginName) {
         try {
@@ -151,7 +115,6 @@ class FileSystemConfigStorage {
         }
     }
 }
-exports.FileSystemConfigStorage = FileSystemConfigStorage;
 /**
  * 数据库配置存储
  */
@@ -160,7 +123,7 @@ class DatabaseConfigStorage {
     logger;
     constructor(db) {
         this.db = db;
-        this.logger = new logger_1.Logger('DatabaseConfigStorage');
+        this.logger = new Logger('DatabaseConfigStorage');
     }
     async load(pluginName) {
         try {
@@ -281,11 +244,10 @@ class DatabaseConfigStorage {
         }
     }
 }
-exports.DatabaseConfigStorage = DatabaseConfigStorage;
 /**
  * 插件配置管理器
  */
-class PluginConfigManager extends eventemitter3_1.EventEmitter {
+export class PluginConfigManager extends EventEmitter {
     storage;
     validationService;
     logger;
@@ -295,7 +257,7 @@ class PluginConfigManager extends eventemitter3_1.EventEmitter {
         super();
         this.storage = storage || new FileSystemConfigStorage();
         this.validationService = validationService;
-        this.logger = new logger_1.Logger('PluginConfigManager');
+        this.logger = new Logger('PluginConfigManager');
     }
     /**
      * 注册插件配置模式
@@ -563,7 +525,7 @@ class PluginConfigManager extends eventemitter3_1.EventEmitter {
     convertToZodSchema(schema) {
         // 这里应该实现 ConfigSchema 到 Zod schema 的转换
         // 简化实现，返回一个基本的对象模式
-        return zod_1.z.object({});
+        return z.object({});
     }
     /**
      * 清除缓存
@@ -599,5 +561,5 @@ class PluginConfigManager extends eventemitter3_1.EventEmitter {
         return new FileSystemConfigStorage(basePath);
     }
 }
-exports.PluginConfigManager = PluginConfigManager;
+export { FileSystemConfigStorage, DatabaseConfigStorage };
 //# sourceMappingURL=plugin-config-manager.js.map

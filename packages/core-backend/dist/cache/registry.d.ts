@@ -10,7 +10,7 @@
  * - Automatic metrics collection
  * - Type-safe operation
  */
-import type { Cache, Result } from '../types/cache';
+import type { Cache, Result } from '../../types/cache';
 export declare class CacheRegistry implements Cache {
     private activeCache;
     private implementations;

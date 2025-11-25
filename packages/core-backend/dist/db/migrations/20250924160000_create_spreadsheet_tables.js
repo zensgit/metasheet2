@@ -1,38 +1,34 @@
-"use strict";
 /**
  * Create spreadsheet core tables
  * Including spreadsheets, sheets, cells, formulas
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.up = up;
-exports.down = down;
-const kysely_1 = require("kysely");
-async function up(db) {
+import { sql } from 'kysely';
+export async function up(db) {
     // Ensure pgcrypto for gen_random_uuid()
-    await (0, kysely_1.sql) `CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db);
+    await sql `CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db);
     // Create spreadsheets table
     await db.schema
         .createTable('spreadsheets')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('name', 'varchar(255)', col => col.notNull())
         .addColumn('description', 'text')
         .addColumn('owner_id', 'uuid')
         .addColumn('workspace_id', 'uuid')
         .addColumn('is_template', 'boolean', col => col.defaultTo(false))
         .addColumn('template_id', 'uuid')
-        .addColumn('settings', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('metadata', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
+        .addColumn('settings', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
+        .addColumn('metadata', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
         .addColumn('created_by', 'uuid')
-        .addColumn('created_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
-        .addColumn('updated_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
+        .addColumn('updated_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .addColumn('deleted_at', 'timestamptz')
         .execute();
     // Create sheets table (worksheets within a spreadsheet)
     await db.schema
         .createTable('sheets')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('spreadsheet_id', 'uuid', col => col.notNull())
         .addColumn('name', 'varchar(255)', col => col.notNull())
         .addColumn('order_index', 'integer', col => col.defaultTo(0))
@@ -40,16 +36,16 @@ async function up(db) {
         .addColumn('column_count', 'integer', col => col.defaultTo(26))
         .addColumn('frozen_rows', 'integer', col => col.defaultTo(0))
         .addColumn('frozen_columns', 'integer', col => col.defaultTo(0))
-        .addColumn('hidden_rows', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'[]'::jsonb`))
-        .addColumn('hidden_columns', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'[]'::jsonb`))
-        .addColumn('row_heights', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('column_widths', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('config', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('created_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
-        .addColumn('updated_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('hidden_rows', 'jsonb', col => col.defaultTo(sql `'[]'::jsonb`))
+        .addColumn('hidden_columns', 'jsonb', col => col.defaultTo(sql `'[]'::jsonb`))
+        .addColumn('row_heights', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
+        .addColumn('column_widths', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
+        .addColumn('config', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
+        .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
+        .addColumn('updated_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .execute();
     // Add foreign key constraint only if spreadsheets.id is UUID type (not TEXT from migration 034)
-    await (0, kysely_1.sql) `
+    await sql `
     DO $$ BEGIN
       IF EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -68,7 +64,7 @@ async function up(db) {
     await db.schema
         .createTable('cells')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('sheet_id', 'uuid', col => col.notNull().references('sheets.id').onDelete('cascade'))
         .addColumn('row_index', 'integer', col => col.notNull())
         .addColumn('column_index', 'integer', col => col.notNull())
@@ -79,41 +75,41 @@ async function up(db) {
         // data_type: text, number, date, datetime, boolean, formula, array, object
         .addColumn('formula', 'text')
         .addColumn('formula_result', 'jsonb')
-        .addColumn('format', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
+        .addColumn('format', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
         // format includes: numberFormat, dateFormat, font, color, background, borders, alignment
         .addColumn('validation', 'jsonb')
-        .addColumn('metadata', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
+        .addColumn('metadata', 'jsonb', col => col.defaultTo(sql `'{}'::jsonb`))
         .addColumn('locked', 'boolean', col => col.defaultTo(false))
         .addColumn('comment', 'text')
         .addColumn('updated_by', 'uuid')
-        .addColumn('updated_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('updated_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .execute();
     // Create formulas table (formula dependencies and calculation order)
     await db.schema
         .createTable('formulas')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('cell_id', 'uuid', col => col.notNull().references('cells.id').onDelete('cascade'))
         .addColumn('sheet_id', 'uuid', col => col.notNull().references('sheets.id').onDelete('cascade'))
         .addColumn('formula_text', 'text', col => col.notNull())
         .addColumn('parsed_ast', 'jsonb') // Abstract Syntax Tree
-        .addColumn('dependencies', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'[]'::jsonb`))
+        .addColumn('dependencies', 'jsonb', col => col.defaultTo(sql `'[]'::jsonb`))
         // Array of cell references this formula depends on
-        .addColumn('dependents', 'jsonb', col => col.defaultTo((0, kysely_1.sql) `'[]'::jsonb`))
+        .addColumn('dependents', 'jsonb', col => col.defaultTo(sql `'[]'::jsonb`))
         // Array of cells that depend on this formula
         .addColumn('calculation_order', 'integer')
         .addColumn('is_volatile', 'boolean', col => col.defaultTo(false))
         // Volatile formulas (NOW(), RAND()) need recalculation on every change
         .addColumn('last_calculated_at', 'timestamptz')
         .addColumn('error_message', 'text')
-        .addColumn('created_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
-        .addColumn('updated_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
+        .addColumn('updated_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .execute();
     // Create cell_versions table (version history)
     await db.schema
         .createTable('cell_versions')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('cell_id', 'uuid', col => col.notNull().references('cells.id').onDelete('cascade'))
         .addColumn('sheet_id', 'uuid', col => col.notNull().references('sheets.id').onDelete('cascade'))
         .addColumn('version_number', 'integer', col => col.notNull())
@@ -124,13 +120,13 @@ async function up(db) {
         .addColumn('change_type', 'varchar(20)')
         // change_type: create, update, delete, formula_change, format_change
         .addColumn('change_summary', 'text')
-        .addColumn('created_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .execute();
     // Create named_ranges table
     await db.schema
         .createTable('named_ranges')
         .ifNotExists()
-        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('spreadsheet_id', 'uuid', col => col.notNull())
         .addColumn('sheet_id', 'uuid')
         .addColumn('name', 'varchar(255)', col => col.notNull())
@@ -138,10 +134,10 @@ async function up(db) {
         // range format: Sheet1!A1:B10 or just A1:B10 for current sheet
         .addColumn('description', 'text')
         .addColumn('created_by', 'uuid')
-        .addColumn('created_at', 'timestamptz', col => col.defaultTo((0, kysely_1.sql) `CURRENT_TIMESTAMP`))
+        .addColumn('created_at', 'timestamptz', col => col.defaultTo(sql `CURRENT_TIMESTAMP`))
         .execute();
     // Add foreign key constraints for named_ranges only if compatible types exist
-    await (0, kysely_1.sql) `
+    await sql `
     DO $$ BEGIN
       IF EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -156,7 +152,7 @@ async function up(db) {
       END IF;
     END $$;
   `.execute(db);
-    await (0, kysely_1.sql) `
+    await sql `
     DO $$ BEGIN
       IF EXISTS (
         SELECT 1 FROM information_schema.tables
@@ -223,7 +219,7 @@ async function up(db) {
         .unique()
         .execute();
     // Create triggers for updated_at
-    await (0, kysely_1.sql) `
+    await sql `
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -232,28 +228,28 @@ async function up(db) {
     END;
     $$ language 'plpgsql';
   `.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_spreadsheets_updated_at ON spreadsheets`.execute(db);
-    await (0, kysely_1.sql) `CREATE TRIGGER update_spreadsheets_updated_at BEFORE UPDATE
+    await sql `DROP TRIGGER IF EXISTS update_spreadsheets_updated_at ON spreadsheets`.execute(db);
+    await sql `CREATE TRIGGER update_spreadsheets_updated_at BEFORE UPDATE
     ON spreadsheets FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_sheets_updated_at ON sheets`.execute(db);
-    await (0, kysely_1.sql) `CREATE TRIGGER update_sheets_updated_at BEFORE UPDATE
+    await sql `DROP TRIGGER IF EXISTS update_sheets_updated_at ON sheets`.execute(db);
+    await sql `CREATE TRIGGER update_sheets_updated_at BEFORE UPDATE
     ON sheets FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`.execute(db);
-    await (0, kysely_1.sql) `
+    await sql `
     CREATE TRIGGER update_cells_updated_at BEFORE UPDATE
     ON cells FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
   `.execute(db);
-    await (0, kysely_1.sql) `
+    await sql `
     CREATE TRIGGER update_formulas_updated_at BEFORE UPDATE
     ON formulas FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
   `.execute(db);
 }
-async function down(db) {
+export async function down(db) {
     // Drop triggers
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_spreadsheets_updated_at ON spreadsheets`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_sheets_updated_at ON sheets`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_cells_updated_at ON cells`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_formulas_updated_at ON formulas`.execute(db);
-    await (0, kysely_1.sql) `DROP FUNCTION IF EXISTS update_updated_at_column()`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_spreadsheets_updated_at ON spreadsheets`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_sheets_updated_at ON sheets`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_cells_updated_at ON cells`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_formulas_updated_at ON formulas`.execute(db);
+    await sql `DROP FUNCTION IF EXISTS update_updated_at_column()`.execute(db);
     // Drop indexes
     await db.schema.dropIndex('idx_named_ranges_spreadsheet').execute();
     await db.schema.dropIndex('idx_cell_versions_cell_id').execute();

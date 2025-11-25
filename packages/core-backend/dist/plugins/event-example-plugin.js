@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Example Event Bus Plugin
  * 事件总线插件示例
@@ -6,10 +5,7 @@
  * This plugin demonstrates how to use the Event Bus System for inter-plugin communication.
  * 此插件演示如何使用事件总线系统进行插件间通信。
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.EventExamplePlugin = void 0;
-exports.default = createPlugin;
-class EventExamplePlugin {
+export class EventExamplePlugin {
     manifest = {
         name: 'event-example-plugin',
         version: '1.0.0',
@@ -393,9 +389,8 @@ class EventExamplePlugin {
         });
     }
 }
-exports.EventExamplePlugin = EventExamplePlugin;
 // Export plugin factory
-function createPlugin() {
+export default function createPlugin() {
     return new EventExamplePlugin();
 }
 //# sourceMappingURL=event-example-plugin.js.map

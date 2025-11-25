@@ -1,23 +1,19 @@
-"use strict";
 /**
  * 插件管理器
  * 整合所有插件相关功能的顶层管理器
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginManager = void 0;
-exports.createPluginManager = createPluginManager;
-const eventemitter3_1 = require("eventemitter3");
-const plugin_1 = require("../types/plugin");
-const plugin_registry_1 = require("./plugin-registry");
-const plugin_loader_1 = require("./plugin-loader");
-const plugin_config_manager_1 = require("./plugin-config-manager");
-const plugin_service_factory_1 = require("./plugin-service-factory");
-const enhanced_plugin_context_1 = require("./enhanced-plugin-context");
-const logger_1 = require("./logger");
+import { EventEmitter } from 'eventemitter3';
+import { PluginStatus } from '../types/plugin';
+import { PluginRegistry } from './plugin-registry';
+import { PluginLoader } from './plugin-loader';
+import { PluginConfigManager } from './plugin-config-manager';
+import { PluginServiceFactory } from './plugin-service-factory';
+import { createEnhancedPluginContext } from './enhanced-plugin-context';
+import { Logger } from './logger';
 /**
  * 插件管理器
  */
-class PluginManager extends eventemitter3_1.EventEmitter {
+export class PluginManager extends EventEmitter {
     registry;
     loader;
     configManager;
@@ -38,19 +34,19 @@ class PluginManager extends eventemitter3_1.EventEmitter {
             },
             ...config
         };
-        this.logger = new logger_1.Logger('PluginManager');
+        this.logger = new Logger('PluginManager');
         // 创建服务工厂
-        this.serviceFactory = new plugin_service_factory_1.PluginServiceFactory(config.services);
+        this.serviceFactory = new PluginServiceFactory(config.services);
         // 创建注册中心
-        this.registry = new plugin_registry_1.PluginRegistry(coreAPI);
+        this.registry = new PluginRegistry(coreAPI);
         // 创建加载器（支持自定义插件目录）
-        this.loader = new plugin_loader_1.PluginLoader(coreAPI, {
+        this.loader = new PluginLoader(coreAPI, {
             pluginDirs: config.pluginDirectories
         });
         // 创建配置管理器
-        this.configManager = new plugin_config_manager_1.PluginConfigManager(config.configStorage === 'database'
-            ? plugin_config_manager_1.PluginConfigManager.createDatabaseStorage(null) // 需要传入实际的db实例
-            : plugin_config_manager_1.PluginConfigManager.createFileSystemStorage(config.configPath));
+        this.configManager = new PluginConfigManager(config.configStorage === 'database'
+            ? PluginConfigManager.createDatabaseStorage(null) // 需要传入实际的db实例
+            : PluginConfigManager.createFileSystemStorage(config.configPath));
         this.setupEventListeners();
     }
     /**
@@ -116,7 +112,7 @@ class PluginManager extends eventemitter3_1.EventEmitter {
      * 启动已安装的插件
      */
     async startInstalledPlugins() {
-        const installedPlugins = this.registry.getPluginsByStatus(plugin_1.PluginStatus.INSTALLED);
+        const installedPlugins = this.registry.getPluginsByStatus(PluginStatus.INSTALLED);
         for (const registration of installedPlugins) {
             try {
                 await this.startPlugin(registration.manifest.name);
@@ -156,7 +152,7 @@ class PluginManager extends eventemitter3_1.EventEmitter {
             if (!registration) {
                 throw new Error(`Plugin not found: ${pluginName}`);
             }
-            if (registration.status === plugin_1.PluginStatus.ENABLED) {
+            if (registration.status === PluginStatus.ENABLED) {
                 this.logger.warn(`Plugin ${pluginName} is already running`);
                 return;
             }
@@ -164,7 +160,7 @@ class PluginManager extends eventemitter3_1.EventEmitter {
             await this.registry.enablePlugin(pluginName);
             // 2. 创建增强的插件上下文
             if (this.services) {
-                const context = (0, enhanced_plugin_context_1.createEnhancedPluginContext)(registration.manifest, this.createCoreAPIForPlugin(registration), this.services);
+                const context = createEnhancedPluginContext(registration.manifest, this.createCoreAPIForPlugin(registration), this.services);
                 // 更新加载器中的插件实例
                 const instance = this.loader.getPlugin(pluginName);
                 if (instance) {
@@ -200,7 +196,7 @@ class PluginManager extends eventemitter3_1.EventEmitter {
         try {
             // 1. 停止插件
             const registration = this.registry.getPlugin(pluginName);
-            if (registration && registration.status === plugin_1.PluginStatus.ENABLED) {
+            if (registration && registration.status === PluginStatus.ENABLED) {
                 await this.stopPlugin(pluginName);
             }
             // 2. 删除配置
@@ -313,7 +309,7 @@ class PluginManager extends eventemitter3_1.EventEmitter {
         this.logger.info('Destroying plugin manager...');
         try {
             // 停止所有运行的插件
-            const enabledPlugins = this.registry.getPluginsByStatus(plugin_1.PluginStatus.ENABLED);
+            const enabledPlugins = this.registry.getPluginsByStatus(PluginStatus.ENABLED);
             for (const plugin of enabledPlugins) {
                 try {
                     await this.stopPlugin(plugin.manifest.name);
@@ -373,11 +369,10 @@ class PluginManager extends eventemitter3_1.EventEmitter {
         return {};
     }
 }
-exports.PluginManager = PluginManager;
 /**
  * 创建插件管理器的便捷方法
  */
-async function createPluginManager(coreAPI, config) {
+export async function createPluginManager(coreAPI, config) {
     const manager = new PluginManager(coreAPI, config);
     await manager.initialize();
     return manager;
