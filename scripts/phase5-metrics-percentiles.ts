@@ -54,7 +54,7 @@ async function fetchMetrics(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
 
-    client.get(url, (res) => {
+    const req = client.get(url, (res) => {
       let data = '';
 
       res.on('data', (chunk) => {
@@ -68,7 +68,15 @@ async function fetchMetrics(url: string): Promise<string> {
           resolve(data);
         }
       });
-    }).on('error', (err) => {
+    });
+
+    // Add timeout protection (15 seconds)
+    req.setTimeout(15000, () => {
+      req.destroy();
+      reject(new Error(`Request timeout after 15s: ${url}`));
+    });
+
+    req.on('error', (err) => {
       reject(err);
     });
   });

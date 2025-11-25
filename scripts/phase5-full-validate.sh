@@ -145,22 +145,79 @@ calculate_cache_hit_rate() {
     fi
 }
 
+# Calculate HTTP metrics (success rate and error rate)
+calculate_http_metrics() {
+    local raw_file="$1"
+
+    log_info "Calculating HTTP metrics..."
+
+    # Parse all http_requests_total lines and extract status codes
+    local total_2xx=0 total_3xx=0 total_4xx=0 total_5xx=0
+
+    # Use awk to extract status from labels and aggregate counts
+    while IFS= read -r line; do
+        # Extract status code and count
+        local status=$(echo "$line" | grep -oE 'status="[0-9]+"' | cut -d'"' -f2)
+        local count=$(echo "$line" | awk '{print $NF}')
+
+        # Aggregate by status class
+        case "$status" in
+            2*) total_2xx=$(echo "$total_2xx + $count" | bc);;
+            3*) total_3xx=$(echo "$total_3xx + $count" | bc);;
+            4*) total_4xx=$(echo "$total_4xx + $count" | bc);;
+            5*) total_5xx=$(echo "$total_5xx + $count" | bc);;
+        esac
+    done < <(grep '^http_requests_total{' "$raw_file" | grep -v '^#')
+
+    # Calculate rates
+    local total_requests=$(echo "$total_2xx + $total_3xx + $total_4xx + $total_5xx" | bc)
+
+    local http_success_rate=0
+    local error_rate=0
+
+    if (( $(echo "$total_requests > 0" | bc -l) )); then
+        http_success_rate=$(echo "scale=2; ($total_2xx + $total_3xx) * 100 / $total_requests" | bc)
+        error_rate=$(echo "scale=2; ($total_4xx + $total_5xx) * 100 / $total_requests" | bc)
+    fi
+
+    # Return as JSON
+    cat <<EOF
+{
+  "success_rate": $http_success_rate,
+  "error_rate": $error_rate,
+  "counts": {
+    "2xx": $total_2xx,
+    "3xx": $total_3xx,
+    "4xx": $total_4xx,
+    "5xx": $total_5xx,
+    "total": $total_requests
+  }
+}
+EOF
+}
+
 # Extract fallback metrics by reason
 extract_fallback_by_reason() {
     local raw_file="$1"
 
     local result="{"
 
-    # Valid fallback reasons from thresholds.json
-    local reasons=("http_timeout" "http_error" "message_timeout" "message_error" "cache_miss" "circuit_breaker")
+    # Load valid fallback reasons from thresholds.json (canonical source)
+    local reasons_json=$(jq -r '.validation_rules.fallback_taxonomy.valid_reasons[]' "$THRESHOLDS_FILE")
 
-    for reason in "${reasons[@]}"; do
+    local first=true
+    while IFS= read -r reason; do
         local count=$(grep "metasheet_fallback_total.*reason=\"${reason}\"" "$raw_file" | awk '{print $2}' | head -1 || echo "0")
-        result+="\"${reason}\":${count},"
-    done
 
-    # Remove trailing comma and close brace
-    result="${result%,}}"
+        if [ "$first" = true ]; then
+            result+="\"${reason}\":${count}"
+            first=false
+        else
+            result+=",\"${reason}\":${count}"
+        fi
+    done <<< "$reasons_json"
+
+    result+="}"
 
     echo "$result"
 }
@@ -187,11 +244,17 @@ validate_fallback_taxonomy() {
 
     log_info "Validating fallback taxonomy..."
 
-    # Extract all reason labels
-    local reasons=$(grep "metasheet_fallback_total.*reason=" "$raw_file" | grep -oP 'reason="[^"]*"' | cut -d'"' -f2 | sort -u)
+    # Extract all reason labels (using grep -oE for macOS compatibility)
+    local reasons=$(grep "metasheet_fallback_total.*reason=" "$raw_file" | grep -oE 'reason="[^"]*"' | cut -d'"' -f2 | sort -u)
 
-    # Valid reasons from thresholds.json
-    local valid_reasons=("http_timeout" "http_error" "message_timeout" "message_error" "cache_miss" "circuit_breaker")
+    # Load valid reasons from thresholds.json (canonical source)
+    local valid_reasons_json=$(jq -r '.validation_rules.fallback_taxonomy.valid_reasons[]' "$THRESHOLDS_FILE")
+
+    # Convert to array
+    local valid_reasons=()
+    while IFS= read -r vr; do
+        valid_reasons+=("$vr")
+    done <<< "$valid_reasons_json"
 
     local invalid_found=false
 
@@ -220,6 +283,39 @@ validate_fallback_taxonomy() {
     else
         echo "false"
     fi
+}
+
+# Detect empty histogram samples and generate warnings
+detect_empty_histograms() {
+    local percentiles_json="$1"
+
+    local warnings="["
+    local first=true
+
+    # Check each histogram metric
+    for metric in $(echo "$percentiles_json" | jq -r '.metrics | keys[]'); do
+        local count=$(echo "$percentiles_json" | jq -r ".metrics[\"$metric\"].count // 0")
+
+        if [ "$count" -eq 0 ]; then
+            if [ "$first" = false ]; then
+                warnings+=","
+            fi
+
+            warnings+=$(cat <<EOF
+{
+  "metric": "$metric",
+  "issue": "no_samples",
+  "message": "Histogram has 0 samples - cannot validate latency SLO reliably"
+}
+EOF
+)
+            first=false
+        fi
+    done
+
+    warnings+="]"
+
+    echo "$warnings"
 }
 
 # Assert threshold and generate violation
@@ -297,60 +393,91 @@ main() {
     local raw_fallback=$(extract_metric "$temp_raw" "metasheet_fallback_total")
     local effective_fallback=$(calculate_effective_fallback "$temp_raw" "$fallback_by_reason")
 
-    log_info "Raw fallback: $raw_fallback, Effective fallback: $effective_fallback"
-
-    # Extract HTTP success rate and error rate
-    local http_2xx=$(extract_metric "$temp_raw" "http_requests_total.*status=\"2")
-    local http_3xx=$(extract_metric "$temp_raw" "http_requests_total.*status=\"3")
-    local http_4xx=$(extract_metric "$temp_raw" "http_requests_total.*status=\"4")
-    local http_5xx=$(extract_metric "$temp_raw" "http_requests_total.*status=\"5")
-    local http_total=$((http_2xx + http_3xx + http_4xx + http_5xx))
-
-    local http_success_rate=0
-    local error_rate=0
-
-    if [ "$http_total" -gt 0 ]; then
-        http_success_rate=$(echo "scale=2; ($http_2xx + $http_3xx) * 100 / $http_total" | bc)
-        error_rate=$(echo "scale=2; ($http_4xx + $http_5xx) * 100 / $http_total" | bc)
+    # Calculate fallback_effective_ratio
+    local fallback_effective_ratio=0
+    if [ "$raw_fallback" -gt 0 ]; then
+        fallback_effective_ratio=$(echo "scale=4; $effective_fallback / $raw_fallback" | bc)
     fi
 
-    # Extract memory RSS P95 (requires histogram parsing or direct gauge)
+    log_info "Raw fallback: $raw_fallback, Effective fallback: $effective_fallback, Ratio: $fallback_effective_ratio"
+
+    # Calculate HTTP metrics (success rate and error rate)
+    local http_metrics_json=$(calculate_http_metrics "$temp_raw")
+    local http_success_rate=$(echo "$http_metrics_json" | jq -r '.success_rate')
+    local error_rate=$(echo "$http_metrics_json" | jq -r '.error_rate')
+
+    log_info "HTTP success rate: ${http_success_rate}%, Error rate: ${error_rate}%"
+
+    # Extract memory RSS (gauge metric, not histogram)
     local memory_rss_bytes=$(extract_metric "$temp_raw" "process_resident_memory_bytes")
     local memory_rss_mb=$(echo "scale=2; $memory_rss_bytes / 1024 / 1024" | bc)
 
-    # Load thresholds
-    local thresholds=$(jq -r '.thresholds' "$THRESHOLDS_FILE")
+    # Detect empty histograms and generate warnings
+    local warnings=$(detect_empty_histograms "$percentiles_json")
 
-    # Generate assertions
+    # Generate assertions dynamically from thresholds.json
+    log_info "Generating dynamic assertions from thresholds..."
+
     local assertions="["
+    local first_assertion=true
 
-    # Plugin reload P95/P99 (from percentiles)
-    local plugin_p95=$(echo "$percentiles_json" | jq -r '.metrics.metasheet_plugin_reload_duration_seconds.p95 // 0')
-    local plugin_p99=$(echo "$percentiles_json" | jq -r '.metrics.metasheet_plugin_reload_duration_seconds.p99 // 0')
+    # Iterate through thresholds and generate assertions
+    while IFS= read -r threshold_obj; do
+        local metric=$(echo "$threshold_obj" | jq -r '.metric')
+        local kind=$(echo "$threshold_obj" | jq -r '.kind')
+        local threshold_val=$(echo "$threshold_obj" | jq -r '.threshold')
+        local unit=$(echo "$threshold_obj" | jq -r '.unit')
+        local type=$(echo "$threshold_obj" | jq -r '.type')
+        local prom_metric=$(echo "$threshold_obj" | jq -r '.prometheus_metric // empty')
 
-    assertions+=$(assert_threshold "plugin_reload_latency_p95" "$plugin_p95" "upper_bound" "2.0" "seconds")","
-    assertions+=$(assert_threshold "plugin_reload_latency_p99" "$plugin_p99" "upper_bound" "5.0" "seconds")","
+        local actual_value=0
 
-    # Snapshot restore P95/P99
-    local snapshot_p95=$(echo "$percentiles_json" | jq -r '.metrics.metasheet_snapshot_restore_duration_seconds.p95 // 0')
-    local snapshot_p99=$(echo "$percentiles_json" | jq -r '.metrics.metasheet_snapshot_restore_duration_seconds.p99 // 0')
+        # Determine actual value based on metric kind and name
+        case "$kind" in
+            latency)
+                # Extract percentile from metric name (e.g., plugin_reload_latency_p95 → p95)
+                local percentile_type=$(echo "$metric" | grep -oE 'p[0-9]+' | tail -1)
 
-    assertions+=$(assert_threshold "snapshot_restore_latency_p95" "$snapshot_p95" "upper_bound" "5.0" "seconds")","
-    assertions+=$(assert_threshold "snapshot_restore_latency_p99" "$snapshot_p99" "upper_bound" "8.0" "seconds")","
+                if [ -n "$prom_metric" ] && [ -n "$percentile_type" ]; then
+                    actual_value=$(echo "$percentiles_json" | jq -r ".metrics[\"$prom_metric\"].$percentile_type // 0")
+                fi
+                ;;
+            percentage)
+                # Map metric names to calculated values
+                case "$metric" in
+                    cache_hit_rate) actual_value=$cache_hit_rate;;
+                    http_success_rate) actual_value=$http_success_rate;;
+                    error_rate) actual_value=$error_rate;;
+                esac
+                ;;
+            ratio)
+                # Handle fallback_effective_ratio
+                case "$metric" in
+                    fallback_effective_ratio) actual_value=$fallback_effective_ratio;;
+                esac
+                ;;
+            memory)
+                # Memory RSS
+                case "$metric" in
+                    memory_rss) actual_value=$memory_rss_mb;;
+                esac
+                ;;
+        esac
 
-    # Cache hit rate
-    assertions+=$(assert_threshold "cache_hit_rate" "$cache_hit_rate" "lower_bound" "80.0" "percent")","
+        # Add assertion
+        if [ "$first_assertion" = false ]; then
+            assertions+=","
+        fi
 
-    # HTTP success rate
-    assertions+=$(assert_threshold "http_success_rate" "$http_success_rate" "lower_bound" "98.0" "percent")","
+        assertions+=$(assert_threshold "$metric" "$actual_value" "$type" "$threshold_val" "$unit")
 
-    # Error rate
-    assertions+=$(assert_threshold "error_rate" "$error_rate" "upper_bound" "1.0" "percent")","
+        first_assertion=false
 
-    # Memory RSS (using gauge, not P95 for now)
-    assertions+=$(assert_threshold "memory_rss" "$memory_rss_mb" "upper_bound" "500.0" "megabytes")
+    done < <(jq -c '.thresholds[]' "$THRESHOLDS_FILE")
 
     assertions+="]"
+
+    log_success "Dynamic assertions generated ($(echo "$assertions" | jq 'length') checks)"
 
     # Calculate overall pass/fail
     local pass_count=$(echo "$assertions" | jq '[.[] | select(.status == "pass")] | length')
@@ -371,6 +498,7 @@ main() {
     "cache_hit_rate": $cache_hit_rate,
     "raw_fallback": $raw_fallback,
     "effective_fallback": $effective_fallback,
+    "fallback_effective_ratio": $fallback_effective_ratio,
     "http_success_rate": $http_success_rate,
     "error_rate": $error_rate,
     "memory_rss_mb": $memory_rss_mb,
@@ -379,6 +507,7 @@ main() {
   "validation": {
     "fallback_taxonomy_valid": $fallback_taxonomy_valid
   },
+  "warnings": $warnings,
   "assertions": $assertions,
   "summary": {
     "total_checks": $((pass_count + fail_count)),
