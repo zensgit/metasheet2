@@ -28,7 +28,8 @@
       "threshold": 5.0,
       "unit": "seconds",
       "type": "upper_bound",
-      "prometheus_metric": "metasheet_snapshot_restore_duration_seconds",
+      "prometheus_metric": "metasheet_snapshot_operation_duration_seconds",
+      "label_selector": {"operation": "restore"},
       "description": "Snapshot restore P95 latency should be under 5s"
     },
     {
@@ -37,8 +38,29 @@
       "threshold": 8.0,
       "unit": "seconds",
       "type": "upper_bound",
-      "prometheus_metric": "metasheet_snapshot_restore_duration_seconds",
+      "prometheus_metric": "metasheet_snapshot_operation_duration_seconds",
+      "label_selector": {"operation": "restore"},
       "description": "Snapshot restore P99 latency should be under 8s"
+    },
+    {
+      "metric": "snapshot_create_latency_p95",
+      "kind": "latency",
+      "threshold": 5.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_snapshot_operation_duration_seconds",
+      "label_selector": {"operation": "create"},
+      "description": "Snapshot create P95 latency should be under 5s"
+    },
+    {
+      "metric": "snapshot_create_latency_p99",
+      "kind": "latency",
+      "threshold": 8.0,
+      "unit": "seconds",
+      "type": "upper_bound",
+      "prometheus_metric": "metasheet_snapshot_operation_duration_seconds",
+      "label_selector": {"operation": "create"},
+      "description": "Snapshot create P99 latency should be under 8s"
     },
     {
       "metric": "cache_hit_rate",
@@ -112,9 +134,9 @@
   "percentile_sources": {
     "histogram_metrics": [
       "metasheet_plugin_reload_duration_seconds",
-      "metasheet_snapshot_restore_duration_seconds",
-      "metasheet_snapshot_create_duration_seconds"
+      "metasheet_snapshot_operation_duration_seconds"
     ],
-    "calculation_method": "parse histogram buckets and calculate p50/p95/p99 from cumulative distribution"
+    "calculation_method": "parse histogram buckets and calculate p50/p95/p99 from cumulative distribution",
+    "note": "metasheet_snapshot_operation_duration_seconds has operation label (restore|create) for filtering"
   }
 }

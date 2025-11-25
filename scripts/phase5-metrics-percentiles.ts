@@ -268,8 +268,7 @@ async function main() {
     // Target metrics from thresholds.json
     const targetMetrics = [
       'metasheet_plugin_reload_duration_seconds',
-      'metasheet_snapshot_restore_duration_seconds',
-      'metasheet_snapshot_create_duration_seconds'
+      'metasheet_snapshot_operation_duration_seconds'
     ];
 
     const relevantHistograms = filterHistograms(allHistograms, targetMetrics);
@@ -278,7 +277,11 @@ async function main() {
     const metrics: Record<string, PercentileResult> = {};
 
     for (const histogram of relevantHistograms) {
-      const key = histogram.metric;
+      // Create key with labels for labeled metrics (e.g., metric{operation="restore"})
+      const labelStr = Object.keys(histogram.labels).length > 0
+        ? `{${Object.entries(histogram.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
+        : '';
+      const key = `${histogram.metric}${labelStr}`;
       const result = calculatePercentiles(histogram);
 
       console.error(`[INFO] ${key}:`);

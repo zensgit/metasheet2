@@ -232,6 +232,10 @@ calculate_effective_fallback() {
 
     if [ "$COUNT_CACHE_MISS_AS_FALLBACK" = "false" ]; then
         local effective=$((raw_total - cache_miss))
+        # Guard against negative values (defensive programming)
+        if [ "$effective" -lt 0 ]; then
+            effective=0
+        fi
         echo "$effective"
     else
         echo "$raw_total"
@@ -294,7 +298,7 @@ detect_empty_histograms() {
 
     # Check each histogram metric
     for metric in $(echo "$percentiles_json" | jq -r '.metrics | keys[]'); do
-        local count=$(echo "$percentiles_json" | jq -r ".metrics[\"$metric\"].count // 0")
+        local count=$(echo "$percentiles_json" | jq -r --arg key "$metric" '.metrics[$key].count // 0')
 
         if [ "$count" -eq 0 ]; then
             if [ "$first" = false ]; then
@@ -439,7 +443,19 @@ main() {
                 local percentile_type=$(echo "$metric" | grep -oE 'p[0-9]+' | tail -1)
 
                 if [ -n "$prom_metric" ] && [ -n "$percentile_type" ]; then
-                    actual_value=$(echo "$percentiles_json" | jq -r ".metrics[\"$prom_metric\"].$percentile_type // 0")
+                    # Check if metric has label selector (for labeled histograms)
+                    local label_selector=$(echo "$threshold_obj" | jq -r '.label_selector // empty')
+
+                    if [ -n "$label_selector" ]; then
+                        # Build metric key with labels: metric{label1="value1",label2="value2"}
+                        local label_str=$(echo "$label_selector" | jq -r 'to_entries | map("\(.key)=\"\(.value)\"") | join(",")')
+                        local metric_key="${prom_metric}{${label_str}}"
+                        # Use jq --arg to pass metric_key safely (avoids quote escaping issues)
+                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$metric_key" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                    else
+                        # No labels, use metric name directly
+                        actual_value=$(echo "$percentiles_json" | jq -r --arg key "$prom_metric" --arg ptype "$percentile_type" '.metrics[$key][$ptype] // 0')
+                    fi
                 fi
                 ;;
             percentage)
