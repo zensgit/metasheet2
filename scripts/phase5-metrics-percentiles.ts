@@ -16,6 +16,7 @@
 import * as fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
+import * as path from 'path';
 
 interface HistogramBucket {
   le: number; // less than or equal to
@@ -267,7 +268,7 @@ async function main() {
 
     // Load target metrics dynamically from thresholds.json
     const thresholdsPath = process.env.THRESHOLDS_FILE ||
-      '/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json';
+      path.join(process.cwd(), 'scripts', 'phase5-thresholds.json');
 
     console.error(`[INFO] Loading thresholds from ${thresholdsPath}...`);
     const thresholdsContent = fs.readFileSync(thresholdsPath, 'utf-8');

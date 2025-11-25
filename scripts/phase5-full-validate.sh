@@ -559,9 +559,10 @@ EOF
 
     # Print summary
     log_info "=== Validation Summary ==="
-    log_info "Total checks: $((pass_count + fail_count))"
+    log_info "Total checks: $((pass_count + fail_count + na_count))"
     log_info "Passed: ${GREEN}$pass_count${NC}"
     log_info "Failed: ${RED}$fail_count${NC}"
+    log_info "N/A: ${YELLOW}$na_count${NC}"
     log_info "Overall status: $([ "$overall_status" = "pass" ] && echo -e "${GREEN}PASS${NC}" || echo -e "${RED}FAIL${NC}")"
 
     # Exit code based on overall status

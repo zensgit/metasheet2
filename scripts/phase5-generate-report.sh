@@ -49,6 +49,7 @@ main() {
     local overall_status=$(echo "$json" | jq -r '.summary.overall_status')
     local passed=$(echo "$json" | jq -r '.summary.passed')
     local failed=$(echo "$json" | jq -r '.summary.failed')
+    local na=$(echo "$json" | jq -r '.summary.na')
     local total=$(echo "$json" | jq -r '.summary.total_checks')
 
     # Status icon
@@ -72,6 +73,7 @@ main() {
 | Total Checks | $total |
 | Passed | ✅ $passed |
 | Failed | ❌ $failed |
+| N/A | ⚪ $na |
 | Overall Status | $status_icon $status_text |
 
 ---
