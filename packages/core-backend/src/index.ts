@@ -297,6 +297,14 @@ class MetaSheetServer {
 
     // 路由：内部调试端点 (dev/staging only)
     this.app.use('/internal', internalRouter)
+    // 路由：降级测试端点 (dev only)
+    try {
+      import('./routes/fallback-test')
+        .then(m => {
+          this.app.use(m.default)
+        })
+        .catch(() => {})
+    } catch {}
 
     // 路由：缓存测试端点 (dev only)
     this.app.use('/api/cache-test', cacheTestRouter)

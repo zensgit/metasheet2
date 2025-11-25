@@ -1,48 +1,12 @@
-"use strict";
 /**
  * Event Bus Service
  * Central event distribution system for plugin communication and system events
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.eventBus = exports.EventBusService = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const db_1 = require("../db/db");
-const logger_1 = require("./logger");
-const Ajv = __importStar(require("ajv"));
-class EventBusService extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+import { db } from '../db/db';
+import { Logger } from './logger';
+import * as Ajv from 'ajv';
+export class EventBusService extends EventEmitter {
     logger;
     ajv;
     subscriptions = new Map();
@@ -54,10 +18,13 @@ class EventBusService extends eventemitter3_1.EventEmitter {
     isProcessing = false;
     eventQueue = [];
     core;
+    degradedMode = false;
+    allowDegradation = false;
     constructor() {
         super();
-        this.logger = new logger_1.Logger('EventBus');
+        this.logger = new Logger('EventBus');
         this.ajv = new Ajv.default({ allErrors: true });
+        this.allowDegradation = process.env.EVENT_BUS_OPTIONAL === '1';
         this.setupInternalHandlers();
     }
     /**
@@ -66,24 +33,61 @@ class EventBusService extends eventemitter3_1.EventEmitter {
     async initialize(core) {
         this.logger.info('Initializing EventBus service');
         this.core = core;
-        // Load event types
-        await this.loadEventTypes();
-        // Load subscriptions
-        await this.loadSubscriptions();
-        // Load plugin permissions
-        await this.loadPluginPermissions();
-        // Start processors
-        this.startEventProcessor();
-        this.startCleanupProcessor();
-        this.startMetricsProcessor();
-        // Register system events
-        await this.registerSystemEvents();
-        this.logger.info('EventBus service initialized');
+        try {
+            // Load event types
+            await this.loadEventTypes();
+            // Load subscriptions
+            await this.loadSubscriptions();
+            // Load plugin permissions
+            await this.loadPluginPermissions();
+            // Start processors
+            this.startEventProcessor();
+            this.startCleanupProcessor();
+            this.startMetricsProcessor();
+            // Register system events
+            await this.registerSystemEvents();
+            this.logger.info('EventBus service initialized successfully');
+        }
+        catch (error) {
+            // Check if this is a "table does not exist" error (PostgreSQL error code 42P01)
+            const isTableMissing = this.isDatabaseSchemaError(error);
+            if (isTableMissing && this.allowDegradation) {
+                this.degradedMode = true;
+                this.logger.warn('⚠️  EventBus initialized in DEGRADED mode - database tables not found');
+                this.logger.warn('⚠️  Event publishing and subscription will be no-ops');
+                this.logger.warn('⚠️  Set EVENT_BUS_OPTIONAL=1 environment variable is active');
+                return;
+            }
+            // If degradation not allowed or different error, re-throw
+            this.logger.error('Failed to initialize EventBus service:', error);
+            throw error;
+        }
+    }
+    /**
+     * Check if error is database schema error (table/relation does not exist)
+     */
+    isDatabaseSchemaError(error) {
+        // PostgreSQL error code 42P01: "relation does not exist"
+        if (error?.code === '42P01') {
+            return true;
+        }
+        // Also check error message for common patterns
+        if (error?.message && typeof error.message === 'string') {
+            const message = error.message.toLowerCase();
+            return message.includes('relation') && message.includes('does not exist') ||
+                message.includes('table') && message.includes('does not exist');
+        }
+        return false;
     }
     /**
      * Emit an event
      */
     async emit(eventName, payload, options) {
+        // In degraded mode, return a fake event ID without actually emitting
+        if (this.degradedMode) {
+            this.logger.debug(`[DEGRADED] Skipping event emission: ${eventName}`);
+            return `evt_degraded_${Date.now()}`;
+        }
         const eventId = this.generateEventId();
         // Validate permission
         if (options?.source_type === 'plugin') {
@@ -126,6 +130,11 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Subscribe to events
      */
     async subscribe(subscriberId, eventPattern, handler, options) {
+        // In degraded mode, return a fake subscription ID without actually subscribing
+        if (this.degradedMode) {
+            this.logger.debug(`[DEGRADED] Skipping event subscription: ${subscriberId} -> ${eventPattern}`);
+            return `sub_degraded_${Date.now()}`;
+        }
         // Validate permission
         if (options?.subscriber_type === 'plugin') {
             await this.validatePluginPermission(subscriberId, 'subscribe', eventPattern);
@@ -171,7 +180,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      */
     async unsubscribe(subscriptionId) {
         // Remove from database
-        await db_1.db
+        await db
             .deleteFrom('event_subscriptions')
             .where('id', '=', subscriptionId)
             .execute();
@@ -193,7 +202,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Register an event type
      */
     async registerEventType(eventName, options) {
-        await db_1.db
+        await db
             .insertInto('event_types')
             .values({
             event_name: eventName,
@@ -222,7 +231,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
     async replayEvents(criteria, reason) {
         const replayId = this.generateReplayId();
         // Create replay record
-        await db_1.db
+        await db
             .insertInto('event_replays')
             .values({
             id: replayId,
@@ -246,7 +255,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Get event metrics
      */
     async getMetrics(eventName, timeRange) {
-        let query = db_1.db
+        let query = db
             .selectFrom('event_aggregates')
             .selectAll();
         if (eventName) {
@@ -266,7 +275,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Set plugin permissions
      */
     async setPluginPermissions(pluginId, permissions) {
-        await db_1.db
+        await db
             .insertInto('plugin_event_permissions')
             .values({
             plugin_id: pluginId,
@@ -344,7 +353,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
             }
         }
         // Update event status
-        await db_1.db
+        await db
             .updateTable('event_store')
             .set({
             status: 'processed',
@@ -404,7 +413,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Persist event
      */
     async persistEvent(event, eventType) {
-        await db_1.db
+        await db
             .insertInto('event_store')
             .values({
             event_id: event.event_id,
@@ -506,7 +515,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Log delivery
      */
     async logDelivery(eventId, subscriptionId, success, duration, error) {
-        await db_1.db
+        await db
             .insertInto('event_deliveries')
             .values({
             event_id: eventId,
@@ -523,11 +532,11 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Update subscription stats
      */
     async updateSubscriptionStats(subscriptionId, success) {
-        await db_1.db
+        await db
             .updateTable('event_subscriptions')
             .set({
-            total_events_processed: db_1.db.raw('total_events_processed + 1'),
-            total_events_failed: success ? db_1.db.raw('total_events_failed') : db_1.db.raw('total_events_failed + 1'),
+            total_events_processed: db.raw('total_events_processed + 1'),
+            total_events_failed: success ? db.raw('total_events_failed') : db.raw('total_events_failed + 1'),
             last_event_at: new Date()
         })
             .where('id', '=', subscriptionId)
@@ -537,7 +546,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Add to dead letter queue
      */
     async addToDeadLetter(event, subscriptionId, error) {
-        await db_1.db
+        await db
             .insertInto('event_dead_letters')
             .values({
             event_id: event.event_id,
@@ -552,7 +561,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
             .onConflict((oc) => oc
             .columns(['event_id', 'subscription_id'])
             .doUpdateSet({
-            failure_count: db_1.db.raw('failure_count + 1'),
+            failure_count: db.raw('failure_count + 1'),
             last_failed_at: new Date(),
             error_message: error
         }))
@@ -562,7 +571,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Check rate limit
      */
     async checkRateLimit(pluginId, limit) {
-        const permissions = await db_1.db
+        const permissions = await db
             .selectFrom('plugin_event_permissions')
             .select(['events_emitted_today'])
             .where('plugin_id', '=', pluginId)
@@ -570,10 +579,10 @@ class EventBusService extends eventemitter3_1.EventEmitter {
         if (permissions && permissions.events_emitted_today >= limit) {
             throw new Error(`Rate limit exceeded for plugin ${pluginId}`);
         }
-        await db_1.db
+        await db
             .updateTable('plugin_event_permissions')
             .set({
-            events_emitted_today: db_1.db.raw('events_emitted_today + 1')
+            events_emitted_today: db.raw('events_emitted_today + 1')
         })
             .where('plugin_id', '=', pluginId)
             .execute();
@@ -582,7 +591,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Load event types
      */
     async loadEventTypes() {
-        const types = await db_1.db
+        const types = await db
             .selectFrom('event_types')
             .selectAll()
             .where('is_active', '=', true)
@@ -593,7 +602,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Load subscriptions
      */
     async loadSubscriptions() {
-        const subs = await db_1.db
+        const subs = await db
             .selectFrom('event_subscriptions')
             .selectAll()
             .where('is_active', '=', true)
@@ -620,7 +629,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Load plugin permissions
      */
     async loadPluginPermissions() {
-        const permissions = await db_1.db
+        const permissions = await db
             .selectFrom('plugin_event_permissions')
             .selectAll()
             .where('is_active', '=', true)
@@ -636,7 +645,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Get event type
      */
     async getEventType(eventName) {
-        const type = await db_1.db
+        const type = await db
             .selectFrom('event_types')
             .selectAll()
             .where('event_name', '=', eventName)
@@ -654,7 +663,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      * Private: Store subscription
      */
     async storeSubscription(subscription) {
-        await db_1.db
+        await db
             .insertInto('event_subscriptions')
             .values({
             id: subscription.id,
@@ -715,7 +724,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
     async startReplay(replayId, criteria) {
         // This would be implemented as an async task
         // For now, just update status
-        await db_1.db
+        await db
             .updateTable('event_replays')
             .set({
             status: 'running',
@@ -724,7 +733,7 @@ class EventBusService extends eventemitter3_1.EventEmitter {
             .where('id', '=', replayId)
             .execute();
         // Replay logic would go here...
-        await db_1.db
+        await db
             .updateTable('event_replays')
             .set({
             status: 'completed',
@@ -831,25 +840,25 @@ class EventBusService extends eventemitter3_1.EventEmitter {
      */
     async cleanupOldEvents() {
         // Archive old events
-        await db_1.db
+        await db
             .updateTable('event_store')
             .set({ status: 'archived' })
             .where('status', '=', 'processed')
             .where('processed_at', '<', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
             .execute();
         // Delete archived events
-        await db_1.db
+        await db
             .deleteFrom('event_store')
             .where('status', '=', 'archived')
             .where('processed_at', '<', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
             .execute();
         // Delete old deliveries
-        await db_1.db
+        await db
             .deleteFrom('event_deliveries')
             .where('completed_at', '<', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
             .execute();
         // Reset quotas
-        await db_1.db
+        await db
             .updateTable('plugin_event_permissions')
             .set({
             events_emitted_today: 0,
@@ -909,7 +918,6 @@ class EventBusService extends eventemitter3_1.EventEmitter {
         this.logger.info('EventBus shutdown complete');
     }
 }
-exports.EventBusService = EventBusService;
 // Export singleton instance
-exports.eventBus = new EventBusService();
+export const eventBus = new EventBusService();
 //# sourceMappingURL=EventBusService.js.map

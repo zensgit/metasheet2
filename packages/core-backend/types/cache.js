@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Unified Cache interface - Foundation for all cache implementations
  *
@@ -7,5 +6,5 @@
  *
  * @packageDocumentation
  */
-Object.defineProperty(exports, "__esModule", { value: true });
+export {};
 //# sourceMappingURL=cache.js.map

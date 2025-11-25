@@ -1,95 +1,59 @@
-"use strict";
 /**
  * Event Bus REST API Endpoints
  * 事件总线REST API端点
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.eventsRouter = eventsRouter;
-const express_1 = require("express");
-const EventBusService_1 = require("../core/EventBusService");
-const zod_1 = require("zod");
+import { Router } from 'express';
+import { EventBusService } from '../core/EventBusService';
+import { z } from 'zod';
 // Validation schemas
-const EmitEventSchema = zod_1.z.object({
-    eventName: zod_1.z.string().min(1).max(100),
-    payload: zod_1.z.any(),
-    options: zod_1.z.object({
-        priority: zod_1.z.enum(['low', 'normal', 'high', 'critical']).optional(),
-        deliveryMode: zod_1.z.enum(['at-most-once', 'at-least-once', 'exactly-once']).optional(),
-        targetPlugins: zod_1.z.array(zod_1.z.string()).optional(),
-        metadata: zod_1.z.record(zod_1.z.any()).optional(),
-        scheduleAt: zod_1.z.string().datetime().optional(),
-        expireAt: zod_1.z.string().datetime().optional()
+const EmitEventSchema = z.object({
+    eventName: z.string().min(1).max(100),
+    payload: z.any(),
+    options: z.object({
+        priority: z.enum(['low', 'normal', 'high', 'critical']).optional(),
+        deliveryMode: z.enum(['at-most-once', 'at-least-once', 'exactly-once']).optional(),
+        targetPlugins: z.array(z.string()).optional(),
+        metadata: z.record(z.any()).optional(),
+        scheduleAt: z.string().datetime().optional(),
+        expireAt: z.string().datetime().optional()
     }).optional()
 });
-const SubscribeEventSchema = zod_1.z.object({
-    subscriberId: zod_1.z.string().min(1),
-    eventPattern: zod_1.z.string().min(1),
-    options: zod_1.z.object({
-        filter: zod_1.z.string().optional(),
-        priority: zod_1.z.number().min(1).max(100).optional(),
-        maxRetries: zod_1.z.number().min(0).max(10).optional()
+const SubscribeEventSchema = z.object({
+    subscriberId: z.string().min(1),
+    eventPattern: z.string().min(1),
+    options: z.object({
+        filter: z.string().optional(),
+        priority: z.number().min(1).max(100).optional(),
+        maxRetries: z.number().min(0).max(10).optional()
     }).optional()
 });
-const ReplayEventsSchema = zod_1.z.object({
-    criteria: zod_1.z.object({
-        eventPattern: zod_1.z.string().optional(),
-        fromTimestamp: zod_1.z.string().datetime().optional(),
-        toTimestamp: zod_1.z.string().datetime().optional(),
-        eventIds: zod_1.z.array(zod_1.z.string()).optional(),
-        status: zod_1.z.enum(['pending', 'delivered', 'failed', 'expired']).optional()
+const ReplayEventsSchema = z.object({
+    criteria: z.object({
+        eventPattern: z.string().optional(),
+        fromTimestamp: z.string().datetime().optional(),
+        toTimestamp: z.string().datetime().optional(),
+        eventIds: z.array(z.string()).optional(),
+        status: z.enum(['pending', 'delivered', 'failed', 'expired']).optional()
     }),
-    reason: zod_1.z.string().min(1)
+    reason: z.string().min(1)
 });
-const QueryEventsSchema = zod_1.z.object({
-    eventName: zod_1.z.string().optional(),
-    status: zod_1.z.enum(['pending', 'delivered', 'failed', 'expired']).optional(),
-    fromTime: zod_1.z.string().datetime().optional(),
-    toTime: zod_1.z.string().datetime().optional(),
-    subscriberId: zod_1.z.string().optional(),
-    limit: zod_1.z.number().min(1).max(1000).default(100),
-    offset: zod_1.z.number().min(0).default(0)
+const QueryEventsSchema = z.object({
+    eventName: z.string().optional(),
+    status: z.enum(['pending', 'delivered', 'failed', 'expired']).optional(),
+    fromTime: z.string().datetime().optional(),
+    toTime: z.string().datetime().optional(),
+    subscriberId: z.string().optional(),
+    limit: z.number().min(1).max(1000).default(100),
+    offset: z.number().min(0).default(0)
 });
-function eventsRouter() {
-    const router = (0, express_1.Router)();
+export function eventsRouter() {
+    const router = Router();
     let eventBus = null;
     // Initialize event bus service
     const getEventBus = async () => {
         if (!eventBus) {
-            const { pool } = await Promise.resolve().then(() => __importStar(require('../db/pg')));
-            eventBus = new EventBusService_1.EventBusService(pool);
+            const { pool } = await import('../db/pg');
+            eventBus = new EventBusService(pool);
             await eventBus.initialize();
         }
         return eventBus;
@@ -106,7 +70,7 @@ function eventsRouter() {
             });
         }
         catch (error) {
-            if (error instanceof zod_1.z.ZodError) {
+            if (error instanceof z.ZodError) {
                 return res.status(400).json({
                     ok: false,
                     error: { code: 'VALIDATION_ERROR', details: error.errors }
@@ -153,7 +117,7 @@ function eventsRouter() {
             });
         }
         catch (error) {
-            if (error instanceof zod_1.z.ZodError) {
+            if (error instanceof z.ZodError) {
                 return res.status(400).json({
                     ok: false,
                     error: { code: 'VALIDATION_ERROR', details: error.errors }
@@ -197,7 +161,7 @@ function eventsRouter() {
             });
         }
         catch (error) {
-            if (error instanceof zod_1.z.ZodError) {
+            if (error instanceof z.ZodError) {
                 return res.status(400).json({
                     ok: false,
                     error: { code: 'VALIDATION_ERROR', details: error.errors }
@@ -215,7 +179,7 @@ function eventsRouter() {
         try {
             const validated = QueryEventsSchema.parse(req.query);
             const service = await getEventBus();
-            const { pool } = await Promise.resolve().then(() => __importStar(require('../db/pg')));
+            const { pool } = await import('../db/pg');
             // Build query
             let sql = `
         SELECT
@@ -269,7 +233,7 @@ function eventsRouter() {
             });
         }
         catch (error) {
-            if (error instanceof zod_1.z.ZodError) {
+            if (error instanceof z.ZodError) {
                 return res.status(400).json({
                     ok: false,
                     error: { code: 'VALIDATION_ERROR', details: error.errors }
@@ -303,7 +267,7 @@ function eventsRouter() {
     // GET /api/events/types - Get registered event types
     router.get('/api/events/types', async (req, res) => {
         try {
-            const { pool } = await Promise.resolve().then(() => __importStar(require('../db/pg')));
+            const { pool } = await import('../db/pg');
             const result = await pool.query(`
         SELECT
           name,

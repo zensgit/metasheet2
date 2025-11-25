@@ -1,13 +1,10 @@
-"use strict";
 /**
  * Pattern Manager with Trie Optimization
  * Issue #28: High-performance pattern matching with prefix tree
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PatternManager = void 0;
-const pattern_trie_1 = require("./pattern-trie");
-const events_1 = require("events");
-class PatternManager extends events_1.EventEmitter {
+import { PatternTrie } from './pattern-trie';
+import { EventEmitter } from 'events';
+export class PatternManager extends EventEmitter {
     trie;
     logger;
     metrics;
@@ -24,7 +21,7 @@ class PatternManager extends events_1.EventEmitter {
             maxPatterns: config.maxPatterns ?? 10000,
             cleanupIntervalMs: config.cleanupIntervalMs ?? 300000 // 5 minutes
         };
-        this.trie = new pattern_trie_1.PatternTrie();
+        this.trie = new PatternTrie();
         this.matchCache = new Map();
         this.startCleanupTimer();
         this.setupMetrics();
@@ -327,5 +324,4 @@ class PatternManager extends events_1.EventEmitter {
         return estimates[event]?.[field] || 0;
     }
 }
-exports.PatternManager = PatternManager;
 //# sourceMappingURL=pattern-manager.js.map

@@ -21,7 +21,7 @@
 export { CacheRegistry } from './registry';
 export { NullCache } from './implementations/null-cache';
 export { cacheMetrics } from './metrics';
-export type { Cache, Result } from '../types/cache';
+export type { Cache, Result } from '../../types/cache';
 import { CacheRegistry } from './registry';
 export declare const cache: CacheRegistry;
 //# sourceMappingURL=index.d.ts.map

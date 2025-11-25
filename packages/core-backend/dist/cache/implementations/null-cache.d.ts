@@ -7,7 +7,7 @@
  * 2. Observing cache call patterns and frequency
  * 3. Performance baseline (zero cache overhead)
  */
-import type { Cache, Result } from '../../types/cache';
+import type { Cache, Result } from '../../../types/cache';
 export declare class NullCache implements Cache {
     /**
      * Always returns cache miss

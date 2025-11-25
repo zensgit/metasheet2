@@ -1,19 +1,13 @@
-"use strict";
 // @ts-nocheck
 /**
  * 安全服务实现
  * 提供插件安全功能，包括权限验证、沙箱、加密、审计等
  */
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RateLimiter = exports.PluginSandboxImpl = exports.SecurityServiceImpl = void 0;
-const crypto_1 = require("crypto");
-const eventemitter3_1 = require("eventemitter3");
-const vm_1 = __importDefault(require("vm"));
-const logger_1 = require("../core/logger");
-const plugin_1 = require("../types/plugin");
+import { createHash, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { EventEmitter } from 'eventemitter3';
+import vm from 'vm';
+import { Logger } from '../core/logger';
+import { PERMISSION_WHITELIST } from '../types/plugin';
 /**
  * 插件沙箱实现
  */
@@ -29,7 +23,7 @@ class PluginSandboxImpl {
         this.allowedAPIs = allowedAPIs;
         this.resourceLimits = resourceLimits;
         this.environment = environment;
-        this.logger = new logger_1.Logger(`Sandbox:${pluginName}`);
+        this.logger = new Logger(`Sandbox:${pluginName}`);
         // 创建受限的执行上下文
         this.context = this.createContext();
     }
@@ -81,9 +75,9 @@ class PluginSandboxImpl {
             ...this.environment
         };
         // 移除危险的全局对象
-        const context = vm_1.default.createContext(sandbox);
+        const context = vm.createContext(sandbox);
         // 禁用对全局对象的访问
-        vm_1.default.runInContext(`
+        vm.runInContext(`
       delete this.global;
       delete this.process;
       delete this.require;
@@ -115,7 +109,7 @@ class PluginSandboxImpl {
                 }
             }
             // 执行代码
-            const result = vm_1.default.runInContext(code, this.context, options);
+            const result = vm.runInContext(code, this.context, options);
             this.logger.debug(`Code executed successfully for plugin ${this.pluginName}`);
             return result;
         }
@@ -195,7 +189,6 @@ class PluginSandboxImpl {
         };
     }
 }
-exports.PluginSandboxImpl = PluginSandboxImpl;
 /**
  * 速率限制器
  */
@@ -242,11 +235,10 @@ class RateLimiter {
         }
     }
 }
-exports.RateLimiter = RateLimiter;
 /**
  * 安全服务实现
  */
-class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
+export class SecurityServiceImpl extends EventEmitter {
     sandboxes = new Map();
     auditLog = [];
     rateLimiter = new RateLimiter();
@@ -255,11 +247,11 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
     encryptionKey;
     constructor(encryptionKey) {
         super();
-        this.logger = new logger_1.Logger('SecurityService');
+        this.logger = new Logger('SecurityService');
         // 生成或使用提供的加密密钥
         this.encryptionKey = encryptionKey ?
-            (0, crypto_1.scryptSync)(encryptionKey, 'metasheet-salt', 32) :
-            (0, crypto_1.randomBytes)(32);
+            scryptSync(encryptionKey, 'metasheet-salt', 32) :
+            randomBytes(32);
         // 定期清理
         setInterval(() => {
             this.cleanup();
@@ -268,7 +260,7 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
     async checkPermission(pluginName, permission) {
         try {
             // 检查权限是否在白名单中
-            const allowed = plugin_1.PERMISSION_WHITELIST.includes(permission);
+            const allowed = PERMISSION_WHITELIST.includes(permission);
             await this.audit({
                 id: `perm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                 pluginName,
@@ -334,9 +326,9 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
     }
     async encrypt(data, key) {
         try {
-            const encryptionKey = key ? (0, crypto_1.scryptSync)(key, 'metasheet-salt', 32) : this.encryptionKey;
-            const iv = (0, crypto_1.randomBytes)(16);
-            const cipher = (0, crypto_1.createCipheriv)('aes-256-gcm', encryptionKey, iv);
+            const encryptionKey = key ? scryptSync(key, 'metasheet-salt', 32) : this.encryptionKey;
+            const iv = randomBytes(16);
+            const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv);
             let encrypted = cipher.update(data, 'utf8', 'hex');
             encrypted += cipher.final('hex');
             const authTag = cipher.getAuthTag();
@@ -354,10 +346,10 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
             if (!ivHex || !authTagHex || !encrypted) {
                 throw new Error('Invalid encrypted data format');
             }
-            const encryptionKey = key ? (0, crypto_1.scryptSync)(key, 'metasheet-salt', 32) : this.encryptionKey;
+            const encryptionKey = key ? scryptSync(key, 'metasheet-salt', 32) : this.encryptionKey;
             const iv = Buffer.from(ivHex, 'hex');
             const authTag = Buffer.from(authTagHex, 'hex');
-            const decipher = (0, crypto_1.createDecipheriv)('aes-256-gcm', encryptionKey, iv);
+            const decipher = createDecipheriv('aes-256-gcm', encryptionKey, iv);
             decipher.setAuthTag(authTag);
             let decrypted = decipher.update(encrypted, 'hex', 'utf8');
             decrypted += decipher.final('utf8');
@@ -370,7 +362,7 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
     }
     async hash(data, algorithm = 'sha256') {
         try {
-            const hash = (0, crypto_1.createHash)(algorithm);
+            const hash = createHash(algorithm);
             hash.update(data);
             return hash.digest('hex');
         }
@@ -539,6 +531,6 @@ class SecurityServiceImpl extends eventemitter3_1.EventEmitter {
         };
     }
 }
-exports.SecurityServiceImpl = SecurityServiceImpl;
+export { PluginSandboxImpl, RateLimiter };
 // @ts-nocheck
 //# sourceMappingURL=SecurityService.js.map

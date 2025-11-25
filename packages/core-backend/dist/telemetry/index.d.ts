@@ -5,7 +5,7 @@
  * Initialize OpenTelemetry
  * Should be called at application startup before any other code
  */
-export declare function initializeTelemetry(): Promise<import("../services/TelemetryService").TelemetryService>;
+export declare function initializeTelemetry(): Promise<import("../services/TelemetryService").TelemetryService | null>;
 /**
  * Get telemetry instance
  */

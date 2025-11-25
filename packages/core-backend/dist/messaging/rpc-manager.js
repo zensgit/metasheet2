@@ -1,12 +1,9 @@
-"use strict";
 /**
  * RPC Manager with Timeout Cleanup
  * Issues #27 & #30: RPC timeout cleanup and error handling
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RPCManager = void 0;
-const events_1 = require("events");
-class RPCManager extends events_1.EventEmitter {
+import { EventEmitter } from 'events';
+export class RPCManager extends EventEmitter {
     requests = new Map();
     responses = new Map();
     subscriptions = new Map();
@@ -362,5 +359,4 @@ class RPCManager extends events_1.EventEmitter {
         this.logger.info('RPC manager shutdown complete');
     }
 }
-exports.RPCManager = RPCManager;
 //# sourceMappingURL=rpc-manager.js.map

@@ -1,24 +1,21 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.up = up;
-const kysely_1 = require("kysely");
-async function up(db) {
+import { sql } from 'kysely';
+export async function up(db) {
     // Create operation_audit_logs table (minimal placeholder to satisfy startup writes)
     await db.schema
         .createTable('operation_audit_logs')
         .ifNotExists()
-        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
-        .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `now()`))
+        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
+        .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `now()`))
         .addColumn('actor_id', 'varchar(100)')
         .addColumn('actor_type', 'varchar(50)')
         .addColumn('action', 'varchar(100)', (col) => col.notNull())
         .addColumn('resource_type', 'varchar(100)')
         .addColumn('resource_id', 'varchar(200)')
-        .addColumn('metadata', 'jsonb', (col) => col.notNull().defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
+        .addColumn('metadata', 'jsonb', (col) => col.notNull().defaultTo(sql `'{}'::jsonb`))
         .execute();
     // Indexes (conditional on column existence)
     // Check if created_at column exists before creating index
-    const hasCreatedAt = await (0, kysely_1.sql) `
+    const hasCreatedAt = await sql `
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_name = 'operation_audit_logs'
@@ -34,7 +31,7 @@ async function up(db) {
             .execute();
     }
     // Check if actor_id column exists before creating index
-    const hasActorId = await (0, kysely_1.sql) `
+    const hasActorId = await sql `
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_name = 'operation_audit_logs'
@@ -50,7 +47,7 @@ async function up(db) {
             .execute();
     }
     // Check if resource_type column exists before creating index
-    const hasResourceColumns = await (0, kysely_1.sql) `
+    const hasResourceColumns = await sql `
     SELECT EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_name = 'operation_audit_logs'
@@ -68,7 +65,7 @@ async function up(db) {
             .execute();
     }
     // Add commonly used audit columns if missing
-    await (0, kysely_1.sql) `ALTER TABLE operation_audit_logs
+    await sql `ALTER TABLE operation_audit_logs
     ADD COLUMN IF NOT EXISTS request_id varchar(100),
     ADD COLUMN IF NOT EXISTS ip_address varchar(64),
     ADD COLUMN IF NOT EXISTS ip varchar(64),

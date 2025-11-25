@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Views API routes
  * Handles gallery and form view configurations, data loading, and form submissions
@@ -7,59 +6,25 @@
  * - Uses ViewService RBAC-aware methods for permission-controlled operations
  * - Controlled by FEATURE_TABLE_RBAC_ENABLED flag
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const db_1 = require("../db/db");
-const pg_1 = require("../db/pg");
-const logger_1 = require("../core/logger");
-const uuid_1 = require("uuid");
-const viewService = __importStar(require("../services/view-service"));
-const table_perms_1 = require("../rbac/table-perms");
-const router = (0, express_1.Router)();
-const logger = new logger_1.Logger('ViewsAPI');
+import { Router } from 'express';
+import { db } from '../db/db';
+import { query as pgQuery } from '../db/pg';
+import { Logger } from '../core/logger';
+import { v4 as uuidv4 } from 'uuid';
+import * as viewService from '../services/view-service';
+import { canReadTable, canWriteTable } from '../rbac/table-perms';
+const router = Router();
+const logger = new Logger('ViewsAPI');
 // Helper function to get user ID from request
 function getUserId(req) {
     // Extract from JWT token or dev header
     return req.headers['x-user-id'] || 'dev-user';
 }
 async function getViewById(viewId) {
-    if (!db_1.db)
+    if (!db)
         return null;
     try {
-        return await db_1.db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst();
+        return await db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst();
     }
     catch {
         return null;
@@ -73,7 +38,7 @@ async function getViewById(viewId) {
 router.get('/:viewId/config', async (req, res) => {
     try {
         const { viewId } = req.params;
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
@@ -86,7 +51,7 @@ router.get('/:viewId/config', async (req, res) => {
         // Table-level RBAC
         const user = req.user || { id: getUserId(req), roles: req.user?.roles };
         const tableId = view.table_id;
-        if (tableId && !(await (0, table_perms_1.canReadTable)(user, tableId))) {
+        if (tableId && !(await canReadTable(user, tableId))) {
             return res.status(403).json({ success: false, error: 'Forbidden' });
         }
         const config = {
@@ -117,7 +82,7 @@ router.put('/:viewId/config', async (req, res) => {
         const { viewId } = req.params;
         const config = req.body;
         const user = getUser(req);
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
@@ -133,7 +98,7 @@ router.put('/:viewId/config', async (req, res) => {
         {
             const tableId = current.table_id;
             const user = req.user || { id: userId, roles: req.user?.roles };
-            if (tableId && !(await (0, table_perms_1.canWriteTable)(user, tableId))) {
+            if (tableId && !(await canWriteTable(user, tableId))) {
                 return res.status(403).json({ success: false, error: 'Forbidden' });
             }
         }
@@ -143,11 +108,11 @@ router.put('/:viewId/config', async (req, res) => {
         {
             const tableId = current.table_id;
             const user = req.user || { id: userId, roles: req.user?.roles };
-            if (tableId && !(await (0, table_perms_1.canWriteTable)(user, tableId))) {
+            if (tableId && !(await canWriteTable(user, tableId))) {
                 return res.status(403).json({ success: false, error: 'Forbidden' });
             }
         }
-        const updated = await db_1.db
+        const updated = await db
             .updateTable('views')
             .set({ name, type, config: configData })
             .where('id', '=', viewId)
@@ -190,7 +155,7 @@ router.get('/:viewId/data', async (req, res) => {
         const pageSizeNum = parseInt(pageSize, 10);
         const filtersObj = JSON.parse(filters);
         const sortingArr = JSON.parse(sorting);
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 data: [],
@@ -211,14 +176,14 @@ router.get('/:viewId/data', async (req, res) => {
         {
             const user = req.user || { id: getUserId(req), roles: req.user?.roles };
             const tableId = view.table_id;
-            if (tableId && !(await (0, table_perms_1.canReadTable)(user, tableId))) {
+            if (tableId && !(await canReadTable(user, tableId))) {
                 return res.status(403).json({ success: false, data: [], meta: { total: 0, page: pageNum, pageSize: pageSizeNum, hasMore: false }, error: 'Forbidden' });
             }
         }
         {
             const user = req.user || { id: getUserId(req), roles: req.user?.roles };
             const tableId = view.table_id;
-            if (tableId && !(await (0, table_perms_1.canReadTable)(user, tableId))) {
+            if (tableId && !(await canReadTable(user, tableId))) {
                 return res.status(403).json({ success: false, data: [], meta: { total: 0, page: pageNum, pageSize: pageSizeNum, hasMore: false }, error: 'Forbidden' });
             }
         }
@@ -264,10 +229,10 @@ router.get('/:viewId/state', async (req, res) => {
     try {
         const { viewId } = req.params;
         const userId = getUserId(req);
-        if (!db_1.db) {
+        if (!db) {
             return res.status(404).json({});
         }
-        const row = await db_1.db
+        const row = await db
             .selectFrom('view_states')
             .select(['state'])
             .where('view_id', '=', viewId)
@@ -292,13 +257,13 @@ router.post('/:viewId/state', async (req, res) => {
         const { viewId } = req.params;
         const state = req.body;
         const userId = getUserId(req);
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
             });
         }
-        await (0, pg_1.query)(`INSERT INTO view_states (view_id, user_id, state, updated_at)
+        await pgQuery(`INSERT INTO view_states (view_id, user_id, state, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (view_id, user_id)
        DO UPDATE SET state = $3, updated_at = NOW()`, [viewId, userId, JSON.stringify(state)]);
@@ -320,8 +285,8 @@ router.post('/', async (req, res) => {
     try {
         const { tableId, type, name, description, ...configData } = req.body;
         const user = req.user || { id: getUserId(req), roles: req.user?.roles };
-        const viewId = (0, uuid_1.v4)();
-        if (!db_1.db) {
+        const viewId = uuidv4();
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
@@ -329,9 +294,9 @@ router.post('/', async (req, res) => {
         }
         if (!tableId)
             return res.status(400).json({ success: false, error: 'tableId required' });
-        if (!(await (0, table_perms_1.canWriteTable)(user, String(tableId))))
+        if (!(await canWriteTable(user, String(tableId))))
             return res.status(403).json({ success: false, error: 'Forbidden' });
-        const inserted = await db_1.db
+        const inserted = await db
             .insertInto('views')
             .values({ id: viewId, table_id: String(tableId), name, type, config: configData, created_at: new Date(), updated_at: new Date() })
             .returningAll()
@@ -354,17 +319,17 @@ router.delete('/:viewId', async (req, res) => {
     try {
         const { viewId } = req.params;
         const user = req.user || { id: getUserId(req), roles: req.user?.roles };
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({ success: false, error: 'Database not available' });
         }
         const current = await getViewById(viewId);
         if (!current)
             return res.status(404).json({ success: false, error: 'View not found' });
         const tableId = current.table_id;
-        if (tableId && !(await (0, table_perms_1.canWriteTable)(user, tableId))) {
+        if (tableId && !(await canWriteTable(user, tableId))) {
             return res.status(403).json({ success: false, error: 'Forbidden' });
         }
-        const del = await db_1.db.deleteFrom('views').where('id', '=', viewId).executeTakeFirst();
+        const del = await db.deleteFrom('views').where('id', '=', viewId).executeTakeFirst();
         const affected = del?.numDeletedRows ? Number(del.numDeletedRows) : 1;
         if (!affected) {
             return res.status(404).json({ success: false, error: 'View not found or access denied' });
@@ -388,15 +353,15 @@ router.post('/:viewId/submit', async (req, res) => {
         const { viewId } = req.params;
         const { data } = req.body;
         const userId = getUserId(req);
-        const responseId = (0, uuid_1.v4)();
-        if (!db_1.db) {
+        const responseId = uuidv4();
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
             });
         }
         // Verify view exists and is a form
-        const viewResult = await db_1.db.query('SELECT * FROM view_configs WHERE id = $1 AND type = $2 AND deleted_at IS NULL', [viewId, 'form']);
+        const viewResult = await db.query('SELECT * FROM view_configs WHERE id = $1 AND type = $2 AND deleted_at IS NULL', [viewId, 'form']);
         if (viewResult.rows.length === 0) {
             return res.status(404).json({
                 success: false,
@@ -416,7 +381,7 @@ router.post('/:viewId/submit', async (req, res) => {
         const ipAddress = req.ip || req.connection.remoteAddress;
         const userAgent = req.headers['user-agent'];
         // Save form response
-        await db_1.db.query(`INSERT INTO form_responses (id, form_id, response_data, submitted_by, ip_address, user_agent, submitted_at, status)
+        await db.query(`INSERT INTO form_responses (id, form_id, response_data, submitted_by, ip_address, user_agent, submitted_at, status)
        VALUES ($1, $2, $3, $4, $5, $6, NOW(), 'submitted')`, [responseId, viewId, JSON.stringify(data), userId, ipAddress, userAgent]);
         res.json({
             success: true,
@@ -446,7 +411,7 @@ router.get('/:viewId/responses', async (req, res) => {
         const pageNum = parseInt(page, 10);
         const pageSizeNum = parseInt(pageSize, 10);
         const offset = (pageNum - 1) * pageSizeNum;
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 data: [],
@@ -455,7 +420,7 @@ router.get('/:viewId/responses', async (req, res) => {
             });
         }
         // Verify user has access to view responses (form creator)
-        const viewResult = await db_1.db.query('SELECT * FROM view_configs WHERE id = $1 AND created_by = $2 AND deleted_at IS NULL', [viewId, userId]);
+        const viewResult = await db.query('SELECT * FROM view_configs WHERE id = $1 AND created_by = $2 AND deleted_at IS NULL', [viewId, userId]);
         if (viewResult.rows.length === 0) {
             return res.status(403).json({
                 success: false,
@@ -465,10 +430,10 @@ router.get('/:viewId/responses', async (req, res) => {
             });
         }
         // Get total count
-        const countResult = await db_1.db.query('SELECT COUNT(*) FROM form_responses WHERE form_id = $1', [viewId]);
+        const countResult = await db.query('SELECT COUNT(*) FROM form_responses WHERE form_id = $1', [viewId]);
         const total = parseInt(countResult.rows[0].count, 10);
         // Get responses
-        const responsesResult = await db_1.db.query(`SELECT id, response_data, submitted_by, ip_address, submitted_at, status
+        const responsesResult = await db.query(`SELECT id, response_data, submitted_by, ip_address, submitted_at, status
        FROM form_responses
        WHERE form_id = $1
        ORDER BY submitted_at DESC
@@ -512,8 +477,8 @@ router.post('/gallery', async (req, res) => {
     try {
         const config = req.body;
         const user = req.user || { id: getUserId(req), roles: req.user?.roles };
-        const viewId = (0, uuid_1.v4)();
-        if (!db_1.db) {
+        const viewId = uuidv4();
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
@@ -521,9 +486,9 @@ router.post('/gallery', async (req, res) => {
         }
         if (!config.tableId)
             return res.status(400).json({ success: false, error: 'tableId required' });
-        if (!(await (0, table_perms_1.canWriteTable)(user, String(config.tableId))))
+        if (!(await canWriteTable(user, String(config.tableId))))
             return res.status(403).json({ success: false, error: 'Forbidden' });
-        const inserted = await db_1.db
+        const inserted = await db
             .insertInto('views')
             .values({ id: viewId, table_id: String(config.tableId), name: config.name, type: 'gallery', config: config, created_at: new Date(), updated_at: new Date() })
             .returningAll()
@@ -546,8 +511,8 @@ router.post('/form', async (req, res) => {
     try {
         const config = req.body;
         const user = req.user || { id: getUserId(req), roles: req.user?.roles };
-        const viewId = (0, uuid_1.v4)();
-        if (!db_1.db) {
+        const viewId = uuidv4();
+        if (!db) {
             return res.status(503).json({
                 success: false,
                 error: 'Database not available'
@@ -555,9 +520,9 @@ router.post('/form', async (req, res) => {
         }
         if (!config.tableId)
             return res.status(400).json({ success: false, error: 'tableId required' });
-        if (!(await (0, table_perms_1.canWriteTable)(user, String(config.tableId))))
+        if (!(await canWriteTable(user, String(config.tableId))))
             return res.status(403).json({ success: false, error: 'Forbidden' });
-        const inserted = await db_1.db
+        const inserted = await db
             .insertInto('views')
             .values({ id: viewId, table_id: String(config.tableId), name: config.name, type: 'form', config: config, created_at: new Date(), updated_at: new Date() })
             .returningAll()
@@ -572,5 +537,5 @@ router.post('/form', async (req, res) => {
         });
     }
 });
-exports.default = router;
+export default router;
 //# sourceMappingURL=views.js.map

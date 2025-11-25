@@ -1,19 +1,7 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RateLimiter = exports.RedisRateLimitStore = exports.MemoryRateLimitStore = void 0;
-exports.createRateLimiter = createRateLimiter;
-exports.createStrictRateLimiter = createStrictRateLimiter;
-exports.createModerateRateLimiter = createModerateRateLimiter;
-exports.createRelaxedRateLimiter = createRelaxedRateLimiter;
-exports.createApiRateLimiter = createApiRateLimiter;
-exports.createUserRateLimiter = createUserRateLimiter;
-const crypto_1 = __importDefault(require("crypto"));
-const events_1 = __importDefault(require("events"));
+import crypto from 'crypto';
+import EventEmitter from 'events';
 // Memory store for rate limiting
-class MemoryRateLimitStore {
+export class MemoryRateLimitStore {
     store = new Map();
     timers = new Map();
     async get(key) {
@@ -70,9 +58,8 @@ class MemoryRateLimitStore {
         this.timers.clear();
     }
 }
-exports.MemoryRateLimitStore = MemoryRateLimitStore;
 // Redis store for distributed rate limiting
-class RedisRateLimitStore {
+export class RedisRateLimitStore {
     redis; // Redis client type
     constructor(redisClient) {
         this.redis = redisClient;
@@ -132,8 +119,7 @@ class RedisRateLimitStore {
         }
     }
 }
-exports.RedisRateLimitStore = RedisRateLimitStore;
-class RateLimiter extends events_1.default {
+export class RateLimiter extends EventEmitter {
     config;
     store;
     constructor(config = {}) {
@@ -249,12 +235,11 @@ class RateLimiter extends events_1.default {
         };
     }
 }
-exports.RateLimiter = RateLimiter;
 // Utility functions for creating common rate limiters
-function createRateLimiter(options) {
+export function createRateLimiter(options) {
     return new RateLimiter(options);
 }
-function createStrictRateLimiter() {
+export function createStrictRateLimiter() {
     return new RateLimiter({
         windowMs: 60000, // 1 minute
         maxRequests: 10, // 10 requests per minute
@@ -262,7 +247,7 @@ function createStrictRateLimiter() {
         legacyHeaders: false
     });
 }
-function createModerateRateLimiter() {
+export function createModerateRateLimiter() {
     return new RateLimiter({
         windowMs: 60000, // 1 minute
         maxRequests: 60, // 60 requests per minute
@@ -270,7 +255,7 @@ function createModerateRateLimiter() {
         legacyHeaders: false
     });
 }
-function createRelaxedRateLimiter() {
+export function createRelaxedRateLimiter() {
     return new RateLimiter({
         windowMs: 60000, // 1 minute
         maxRequests: 200, // 200 requests per minute
@@ -279,7 +264,7 @@ function createRelaxedRateLimiter() {
     });
 }
 // API-specific rate limiters
-function createApiRateLimiter() {
+export function createApiRateLimiter() {
     return new RateLimiter({
         windowMs: 15 * 60 * 1000, // 15 minutes
         maxRequests: 100,
@@ -288,13 +273,13 @@ function createApiRateLimiter() {
             // Use API key if present, otherwise use IP
             const apiKey = req.headers['x-api-key']?.toString();
             if (apiKey) {
-                return `api:${crypto_1.default.createHash('sha256').update(apiKey).digest('hex')}`;
+                return `api:${crypto.createHash('sha256').update(apiKey).digest('hex')}`;
             }
             return req.ip || 'unknown';
         }
     });
 }
-function createUserRateLimiter() {
+export function createUserRateLimiter() {
     return new RateLimiter({
         windowMs: 60000,
         maxRequests: 100,

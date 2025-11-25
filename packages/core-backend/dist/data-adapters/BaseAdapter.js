@@ -1,8 +1,5 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.BaseDataAdapter = void 0;
-const eventemitter3_1 = require("eventemitter3");
-class BaseDataAdapter extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+export class BaseDataAdapter extends EventEmitter {
     config;
     connected = false;
     pool;
@@ -100,5 +97,4 @@ class BaseDataAdapter extends eventemitter3_1.EventEmitter {
         return this.config.type;
     }
 }
-exports.BaseDataAdapter = BaseDataAdapter;
 //# sourceMappingURL=BaseAdapter.js.map

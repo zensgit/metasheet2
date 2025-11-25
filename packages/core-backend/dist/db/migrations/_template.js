@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Migration Template
  *
@@ -15,11 +14,8 @@
  *
  * Example filename: 20251029120000_create_user_preferences.ts
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.up = up;
-exports.down = down;
-const kysely_1 = require("kysely");
-const _patterns_1 = require("./_patterns");
+import { sql } from 'kysely';
+import { checkTableExists } from './_patterns';
 /**
  * Apply the migration
  *
@@ -29,9 +25,9 @@ const _patterns_1 = require("./_patterns");
  * - Migrate data if needed
  * - Use IF NOT EXISTS where possible
  */
-async function up(db) {
+export async function up(db) {
     // 1. Check if table already exists (using helper from _patterns.ts)
-    const tableExists = await (0, _patterns_1.checkTableExists)(db, 'your_table_name');
+    const tableExists = await checkTableExists(db, 'your_table_name');
     if (tableExists) {
         console.log('[Migration] Table your_table_name already exists, skipping creation');
         return;
@@ -42,7 +38,7 @@ async function up(db) {
         .createTable('your_table_name')
         .ifNotExists()
         // Primary key with UUID default
-        .addColumn('id', 'text', col => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()::text`))
+        .addColumn('id', 'text', col => col.primaryKey().defaultTo(sql `gen_random_uuid()::text`))
         // Required text column
         .addColumn('name', 'text', col => col.notNull())
         // Optional text column
@@ -52,8 +48,8 @@ async function up(db) {
         // Boolean with default
         .addColumn('is_active', 'boolean', col => col.notNull().defaultTo(true))
         // Timestamps
-        .addColumn('created_at', 'timestamptz', col => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
-        .addColumn('updated_at', 'timestamptz', col => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
+        .addColumn('created_at', 'timestamptz', col => col.notNull().defaultTo(sql `NOW()`))
+        .addColumn('updated_at', 'timestamptz', col => col.notNull().defaultTo(sql `NOW()`))
         .execute();
     console.log('[Migration] Table created successfully');
     // 3. Create indexes (separate statements)
@@ -83,7 +79,7 @@ async function up(db) {
         .ifNotExists()
         .on('your_table_name')
         .column('name')
-        .where(kysely_1.sql.ref('is_active'), '=', true)
+        .where(sql.ref('is_active'), '=', true)
         .execute();
     console.log('[Migration] Indexes created successfully');
     // 4. Add constraints (optional)
@@ -121,7 +117,7 @@ async function up(db) {
  * - Use IF EXISTS where possible
  * - Be safe to run multiple times
  */
-async function down(db) {
+export async function down(db) {
     console.log('[Migration] Rolling back: dropping your_table_name');
     // 1. Drop triggers (if any)
     /*

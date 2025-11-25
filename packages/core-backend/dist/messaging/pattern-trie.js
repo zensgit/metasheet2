@@ -1,10 +1,7 @@
-"use strict";
 /**
  * Pattern Trie for Efficient Wildcard Matching
  * Issue #28: Implement prefix tree for efficient wildcard pattern matching
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PatternTrie = void 0;
 class TrieNode {
     children = new Map();
     subscriptions = new Set();
@@ -33,7 +30,7 @@ class TrieNode {
         return size;
     }
 }
-class PatternTrie {
+export class PatternTrie {
     root = new TrieNode();
     exactPatterns = new Map();
     wildcardPatterns = new Map();
@@ -355,5 +352,4 @@ class PatternTrie {
         });
     }
 }
-exports.PatternTrie = PatternTrie;
 //# sourceMappingURL=pattern-trie.js.map

@@ -1,50 +1,14 @@
-"use strict";
 /**
  * Enhanced Plugin Context Manager
  * Provides isolated execution context and capability management for plugins
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginContext = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const vm2_1 = require("vm2");
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs"));
-const logger_1 = require("./logger");
-const metrics_1 = require("../metrics/metrics");
-class PluginContext extends eventemitter3_1.EventEmitter {
+import { EventEmitter } from 'eventemitter3';
+import { VM } from 'vm2';
+import * as path from 'path';
+import * as fs from 'fs';
+import { Logger } from './logger';
+import { metrics } from '../metrics/metrics';
+export class PluginContext extends EventEmitter {
     pluginId;
     coreAPI;
     vm;
@@ -60,7 +24,7 @@ class PluginContext extends eventemitter3_1.EventEmitter {
         super();
         this.pluginId = pluginId;
         this.coreAPI = coreAPI;
-        this.logger = new logger_1.Logger(`PluginContext:${pluginId}`);
+        this.logger = new Logger(`PluginContext:${pluginId}`);
         this.capabilities = options.capabilities;
         this.resourceLimits = {
             memory: options.memory || 128,
@@ -74,7 +38,7 @@ class PluginContext extends eventemitter3_1.EventEmitter {
      */
     initializeSandbox() {
         try {
-            this.vm = new vm2_1.VM({
+            this.vm = new VM({
                 timeout: this.resourceLimits.timeout,
                 sandbox: this.createSandboxedAPI(),
                 fixAsync: true,
@@ -182,12 +146,12 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                 }
                 try {
                     const result = await this.coreAPI.database.query(sql, params);
-                    metrics_1.metrics.pluginDatabaseQueries?.inc?.({ plugin: this.pluginId, operation: 'query' });
+                    metrics.pluginDatabaseQueries?.inc?.({ plugin: this.pluginId, operation: 'query' });
                     return result;
                 }
                 catch (error) {
                     ;
-                    metrics_1.metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'database' });
+                    metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'database' });
                     throw error;
                 }
             },
@@ -225,12 +189,12 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                             'X-Plugin-ID': this.pluginId
                         }
                     });
-                    metrics_1.metrics.pluginHttpRequests?.inc?.({ plugin: this.pluginId, domain: urlObj.hostname });
+                    metrics.pluginHttpRequests?.inc?.({ plugin: this.pluginId, domain: urlObj.hostname });
                     return result;
                 }
                 catch (error) {
                     ;
-                    metrics_1.metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'http' });
+                    metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'http' });
                     throw error;
                 }
             }
@@ -251,7 +215,7 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                     event,
                     data
                 });
-                metrics_1.metrics.pluginEvents?.inc?.({ plugin: this.pluginId, event, type: 'emit' });
+                metrics.pluginEvents?.inc?.({ plugin: this.pluginId, event, type: 'emit' });
             },
             on: (event, handler) => {
                 if (!events?.listen?.includes(event)) {
@@ -260,7 +224,7 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                 this.on(event, (data) => {
                     this.executeInSandbox(handler, [data]);
                 });
-                metrics_1.metrics.pluginEvents?.inc?.({ plugin: this.pluginId, event, type: 'listen' });
+                metrics.pluginEvents?.inc?.({ plugin: this.pluginId, event, type: 'listen' });
             }
         };
     }
@@ -279,12 +243,12 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                 }
                 try {
                     const content = await fs.promises.readFile(resolvedPath, 'utf-8');
-                    metrics_1.metrics.pluginFileOperations?.inc?.({ plugin: this.pluginId, operation: 'read' });
+                    metrics.pluginFileOperations?.inc?.({ plugin: this.pluginId, operation: 'read' });
                     return content;
                 }
                 catch (error) {
                     ;
-                    metrics_1.metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'filesystem' });
+                    metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'filesystem' });
                     throw error;
                 }
             },
@@ -297,11 +261,11 @@ class PluginContext extends eventemitter3_1.EventEmitter {
                 }
                 try {
                     await fs.promises.writeFile(resolvedPath, content, 'utf-8');
-                    metrics_1.metrics.pluginFileOperations?.inc?.({ plugin: this.pluginId, operation: 'write' });
+                    metrics.pluginFileOperations?.inc?.({ plugin: this.pluginId, operation: 'write' });
                 }
                 catch (error) {
                     ;
-                    metrics_1.metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'filesystem' });
+                    metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'filesystem' });
                     throw error;
                 }
             }
@@ -357,13 +321,13 @@ class PluginContext extends eventemitter3_1.EventEmitter {
             this.metrics.executionCount++;
             this.metrics.totalExecutionTime += Date.now() - startTime;
             this.metrics.lastExecution = new Date();
-            metrics_1.metrics.pluginExecutions?.inc?.({ plugin: this.pluginId, status: 'success' });
+            metrics.pluginExecutions?.inc?.({ plugin: this.pluginId, status: 'success' });
             return result;
         }
         catch (error) {
             this.metrics.errorCount++;
-            metrics_1.metrics.pluginExecutions?.inc?.({ plugin: this.pluginId, status: 'error' });
-            metrics_1.metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'execution' });
+            metrics.pluginExecutions?.inc?.({ plugin: this.pluginId, status: 'error' });
+            metrics.pluginErrors?.inc?.({ plugin: this.pluginId, type: 'execution' });
             this.logger.error(`Plugin execution error: ${error}`);
             throw error;
         }
@@ -443,6 +407,5 @@ class PluginContext extends eventemitter3_1.EventEmitter {
         this.logger.info(`Plugin context destroyed: ${this.pluginId}`);
     }
 }
-exports.PluginContext = PluginContext;
-exports.default = PluginContext;
+export default PluginContext;
 //# sourceMappingURL=PluginContext.js.map

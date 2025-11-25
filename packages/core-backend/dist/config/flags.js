@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Feature Flags Configuration
  *
@@ -9,11 +8,7 @@
  *   import { FEATURE_FLAGS, isFeatureEnabled } from './config/flags'
  *   if (isFeatureEnabled('FEATURE_VIEWSERVICE_UNIFICATION')) { ... }
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.FEATURE_FLAGS = void 0;
-exports.isFeatureEnabled = isFeatureEnabled;
-exports.getEnabledFeatures = getEnabledFeatures;
-exports.FEATURE_FLAGS = {
+export const FEATURE_FLAGS = {
     // ViewService Unification (PR #246 Track)
     FEATURE_VIEWSERVICE_UNIFICATION: process.env.FEATURE_VIEWSERVICE_UNIFICATION === 'true',
     FEATURE_TABLE_RBAC_ENABLED: process.env.FEATURE_TABLE_RBAC_ENABLED === 'true',
@@ -32,14 +27,14 @@ exports.FEATURE_FLAGS = {
  * @param flag - The feature flag key
  * @returns boolean - true if enabled, false otherwise
  */
-function isFeatureEnabled(flag) {
-    return exports.FEATURE_FLAGS[flag] === true;
+export function isFeatureEnabled(flag) {
+    return FEATURE_FLAGS[flag] === true;
 }
 /**
  * Get all enabled features (for debugging/monitoring)
  */
-function getEnabledFeatures() {
-    return Object.entries(exports.FEATURE_FLAGS)
+export function getEnabledFeatures() {
+    return Object.entries(FEATURE_FLAGS)
         .filter(([_, enabled]) => enabled)
         .map(([flag]) => flag);
 }

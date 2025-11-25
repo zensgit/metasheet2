@@ -1,66 +1,32 @@
-"use strict";
 /**
  * 插件加载器
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginLoader = void 0;
-const path = __importStar(require("path"));
-const fs = __importStar(require("fs/promises"));
-const glob_1 = require("glob");
-const eventemitter3_1 = require("eventemitter3");
-const plugin_context_1 = require("./plugin-context");
-const logger_1 = require("./logger");
-const PluginManifestValidator_1 = require("./PluginManifestValidator");
-class PluginLoader extends eventemitter3_1.EventEmitter {
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import { glob } from 'glob';
+import { EventEmitter } from 'eventemitter3';
+import { createPluginContext } from './plugin-context';
+import { Logger } from './logger';
+import { ManifestValidator } from './PluginManifestValidator';
+export class PluginLoader extends EventEmitter {
     plugins = new Map();
     loadOrder = [];
     coreAPI;
     logger;
     manifestValidator;
+    lastSummary = { scannedDirs: 0, manifests: 0, validManifests: 0, loaded: 0, activated: 0, errors: [], timestamp: new Date().toISOString() };
     constructor(coreAPI) {
         super();
         this.coreAPI = coreAPI;
-        this.logger = new logger_1.Logger('PluginLoader');
-        this.manifestValidator = new PluginManifestValidator_1.ManifestValidator();
+        this.logger = new Logger('PluginLoader');
+        this.manifestValidator = new ManifestValidator();
     }
     /**
      * 加载所有插件
      */
     async loadPlugins() {
         this.logger.info('Starting plugin loading...');
+        const summaryErrors = [];
         try {
             // 1. 扫描插件目录
             const pluginDirs = await this.scanPluginDirectories();
@@ -73,17 +39,50 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
             this.logger.info(`${validManifests.length} plugins passed validation`);
             // 4. 解析依赖关系并排序
             const sortedManifests = this.topologicalSort(validManifests);
-            // 5. 按序加载插件
+            // 5. 按序加载插件（单个失败不影响整体）
             for (const manifest of sortedManifests) {
-                await this.loadPlugin(manifest);
+                try {
+                    await this.loadPlugin(manifest);
+                }
+                catch (e) {
+                    const msg = (e && e.message) ? e.message : String(e);
+                    summaryErrors.push({ plugin: manifest.name, message: msg });
+                    // continue
+                }
             }
-            // 6. 激活所有插件
-            await this.activatePlugins();
+            // 6. 激活所有插件（激活失败也仅记录）
+            try {
+                await this.activatePlugins();
+            }
+            catch (e) {
+                const msg = (e && e.message) ? e.message : String(e);
+                summaryErrors.push({ message: `activate: ${msg}` });
+            }
             this.logger.info(`Successfully loaded ${this.plugins.size} plugins`);
+            this.lastSummary = {
+                scannedDirs: pluginDirs.length,
+                manifests: manifests.length,
+                validManifests: validManifests.length,
+                loaded: this.plugins.size,
+                activated: Array.from(this.plugins.values()).filter(p => p.status === 'active').length,
+                errors: summaryErrors.slice(0, 10),
+                timestamp: new Date().toISOString()
+            };
         }
         catch (error) {
-            this.logger.error('Failed to load plugins', error);
-            throw error;
+            this.logger.error('Failed to load plugins (top-level)', error);
+            const msg = error?.message || String(error);
+            summaryErrors.push({ message: msg });
+            this.lastSummary = {
+                scannedDirs: this.lastSummary.scannedDirs,
+                manifests: this.lastSummary.manifests,
+                validManifests: this.lastSummary.validManifests,
+                loaded: this.plugins.size,
+                activated: Array.from(this.plugins.values()).filter(p => p.status === 'active').length,
+                errors: summaryErrors.slice(0, 10),
+                timestamp: new Date().toISOString()
+            };
+            // 不再抛出，保证启动继续
         }
     }
     /**
@@ -94,16 +93,17 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
         const rootDir = path.resolve(process.cwd(), '../../');
         const patterns = [
             path.join(rootDir, 'plugins', '*'),
+            path.resolve(process.cwd(), 'plugins', '*'), // Local plugins in core-backend/plugins
             path.join(process.cwd(), 'node_modules', '@metasheet', 'plugin-*')
         ];
         const dirs = [];
         for (const pattern of patterns) {
             try {
-                const matches = await (0, glob_1.glob)(pattern);
+                const matches = await glob(pattern);
                 // Filter to only directories
                 const dirMatches = [];
                 for (const match of matches) {
-                    const stat = await Promise.resolve().then(() => __importStar(require('fs'))).then(fs => fs.promises.stat(match));
+                    const stat = await import('fs').then(fs => fs.promises.stat(match));
                     if (stat.isDirectory()) {
                         dirMatches.push(match);
                     }
@@ -206,7 +206,7 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
             // 检查权限
             this.checkPermissions(manifest);
             // 创建插件上下文
-            const context = (0, plugin_context_1.createPluginContext)(manifest, this.coreAPI);
+            const context = createPluginContext(manifest, this.coreAPI);
             // 解析插件入口：支持纯 JS 源码 main，或 main.backend，或 dist/index.js
             let pluginPath;
             if (typeof manifest.main === 'string') {
@@ -218,7 +218,7 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
             else {
                 pluginPath = path.join(manifest.path || manifest.name, 'dist', 'index.js');
             }
-            const pluginModule = await Promise.resolve(`${pluginPath}`).then(s => __importStar(require(s)));
+            const pluginModule = await import(pluginPath);
             const PluginClass = pluginModule.default || pluginModule;
             // 创建插件实例
             let plugin;
@@ -263,11 +263,47 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
      * 检查权限
      */
     checkPermissions(manifest) {
-        // TODO: 实现权限检查逻辑
-        const requiredPermissions = manifest.permissions || [];
-        for (const permission of requiredPermissions) {
-            this.logger.debug(`Checking permission: ${permission}`);
-            // 验证权限是否合法
+        const perms = manifest.permissions;
+        if (!perms) {
+            this.logger.debug(`No permissions declared for ${manifest.name}`);
+            return;
+        }
+        // Support both old array format and new V2 object format
+        if (Array.isArray(perms)) {
+            // Old format: string[]
+            for (const permission of perms) {
+                this.logger.debug(`Checking permission: ${permission}`);
+            }
+        }
+        else {
+            // New V2 format: object with database/http/filesystem
+            if (perms.database) {
+                const dbPerms = perms.database;
+                if (dbPerms.read) {
+                    this.logger.debug(`Database read permissions: ${dbPerms.read.join(', ')}`);
+                }
+                if (dbPerms.write) {
+                    this.logger.debug(`Database write permissions: ${dbPerms.write.join(', ')}`);
+                }
+            }
+            if (perms.http) {
+                const httpPerms = perms.http;
+                if (httpPerms.internal) {
+                    this.logger.debug(`HTTP internal access: enabled`);
+                }
+                if (httpPerms.external) {
+                    this.logger.debug(`HTTP external domains: ${httpPerms.external.join(', ')}`);
+                }
+            }
+            if (perms.filesystem) {
+                const fsPerms = perms.filesystem;
+                if (fsPerms.read) {
+                    this.logger.debug(`Filesystem read paths: ${fsPerms.read.join(', ')}`);
+                }
+                if (fsPerms.write) {
+                    this.logger.debug(`Filesystem write paths: ${fsPerms.write.join(', ')}`);
+                }
+            }
         }
     }
     /**
@@ -329,8 +365,8 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
         // 事件 / 消息 订阅清理（按插件名）
         try {
             // Lazy import to avoid circular issues
-            const { eventBus } = await Promise.resolve().then(() => __importStar(require('../integration/events/event-bus')));
-            const { messageBus } = await Promise.resolve().then(() => __importStar(require('../integration/messaging/message-bus')));
+            const { eventBus } = await import('../integration/events/event-bus');
+            const { messageBus } = await import('../integration/messaging/message-bus');
             const evRemoved = eventBus.unsubscribeByPlugin(name);
             const msgRemoved = messageBus.unsubscribeByPlugin(name);
             this.logger.info(`Cleaned subscriptions for ${name}`, { events: evRemoved, messages: msgRemoved });
@@ -348,6 +384,23 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
         return new Map(this.plugins);
     }
     /**
+     * 获取插件加载摘要
+     */
+    getSummary() {
+        return { ...this.lastSummary };
+    }
+    /**
+     * 获取扁平列表（用于HTTP返回）
+     */
+    getList() {
+        return Array.from(this.plugins.entries()).map(([name, instance]) => ({
+            name,
+            version: instance.manifest.version,
+            displayName: instance.manifest.displayName,
+            status: instance.status
+        }));
+    }
+    /**
      * 获取单个插件
      */
     getPlugin(name) {
@@ -357,9 +410,64 @@ class PluginLoader extends eventemitter3_1.EventEmitter {
      * 重新加载插件
      */
     async reloadPlugin(name) {
+        const instance = this.plugins.get(name);
+        if (!instance) {
+            throw new Error(`Plugin ${name} not found for reload`);
+        }
+        // 保存插件路径信息用于重新加载
+        const pluginPath = instance.manifest.path;
+        if (!pluginPath) {
+            throw new Error(`Plugin ${name} has no path information for reload`);
+        }
+        this.logger.info(`Reloading plugin: ${name}`);
+        this.emit('plugin:reloading', name);
+        // 卸载插件
         await this.unloadPlugin(name);
-        // TODO: 重新扫描并加载插件
+        // 重新加载 manifest
+        const manifestPath = path.join(pluginPath, 'plugin.json');
+        let manifest;
+        try {
+            const content = await fs.readFile(manifestPath, 'utf-8');
+            manifest = JSON.parse(content);
+            manifest.path = pluginPath;
+        }
+        catch (error) {
+            this.logger.error(`Failed to reload manifest for ${name}`, error);
+            this.emit('plugin:reload:failed', { name, error });
+            throw new Error(`Failed to reload manifest for ${name}: ${error.message}`);
+        }
+        // 验证 manifest
+        if (!this.validateManifest(manifest)) {
+            this.emit('plugin:reload:failed', { name, error: 'Manifest validation failed' });
+            throw new Error(`Manifest validation failed for ${name}`);
+        }
+        // 重新加载插件并记录指标
+        const start = process.hrtime.bigint();
+        try {
+            await this.loadPlugin(manifest);
+            const durSec = Number(process.hrtime.bigint() - start) / 1e9;
+            try {
+                // 动态导入避免潜在循环依赖
+                const { metrics } = await import('../metrics/metrics');
+                metrics.pluginReloadTotal.inc({ plugin_name: name, result: 'success' });
+                metrics.pluginReloadDuration.observe({ plugin_name: name }, durSec);
+            }
+            catch { }
+            this.logger.info(`Plugin ${name} reloaded successfully in ${durSec.toFixed(3)}s`);
+            this.emit('plugin:reloaded', name);
+        }
+        catch (error) {
+            const durSec = Number(process.hrtime.bigint() - start) / 1e9;
+            try {
+                const { metrics } = await import('../metrics/metrics');
+                metrics.pluginReloadTotal.inc({ plugin_name: name, result: 'failure' });
+                metrics.pluginReloadDuration.observe({ plugin_name: name }, durSec);
+            }
+            catch { }
+            this.logger.error(`Failed to reload plugin ${name}`, error);
+            this.emit('plugin:reload:failed', { name, error });
+            throw error;
+        }
     }
 }
-exports.PluginLoader = PluginLoader;
 //# sourceMappingURL=plugin-loader.js.map

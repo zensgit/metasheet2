@@ -1,10 +1,7 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.AuditRepository = void 0;
-const pg_1 = require("../db/pg");
-class AuditRepository {
+import { query, pool } from '../db/pg';
+export class AuditRepository {
     dbPool;
-    constructor(dbPool = pg_1.pool) {
+    constructor(dbPool = pool) {
         this.dbPool = dbPool;
         if (!this.dbPool) {
             throw new Error('Database pool not initialized');
@@ -79,7 +76,7 @@ class AuditRepository {
             data.correlationId,
             data.parentEventId
         ];
-        const result = await (0, pg_1.query)(sql, values);
+        const result = await query(sql, values);
         return result.rows[0].id;
     }
     /**
@@ -104,7 +101,7 @@ class AuditRepository {
           $${paramIndex++}, $${paramIndex++})`);
             values.push(auditLogId, change.tableName, change.recordId, change.operation, change.fieldName, change.oldValue !== undefined ? JSON.stringify(change.oldValue) : null, change.newValue !== undefined ? JSON.stringify(change.newValue) : null, change.valueType, change.changeReason, change.changeApprovedBy);
         }
-        await (0, pg_1.query)(sql + placeholders.join(', '), values);
+        await query(sql + placeholders.join(', '), values);
     }
     /**
      * Log security events
@@ -131,7 +128,7 @@ class AuditRepository {
             data.alertSent,
             data.alertRecipients
         ];
-        await (0, pg_1.query)(sql, values);
+        await query(sql, values);
     }
     /**
      * Log compliance-related events
@@ -168,7 +165,7 @@ class AuditRepository {
             data.dataTransferCountry,
             data.transferMechanism
         ];
-        await (0, pg_1.query)(sql, values);
+        await query(sql, values);
     }
     /**
      * Query audit logs with filters
@@ -218,7 +215,7 @@ class AuditRepository {
             sql += ` OFFSET $${paramIndex++}`;
             values.push(filters.offset);
         }
-        const result = await (0, pg_1.query)(sql, values);
+        const result = await query(sql, values);
         return result.rows;
     }
     /**
@@ -237,7 +234,7 @@ class AuditRepository {
       WHERE user_id = $1
         AND created_at > CURRENT_TIMESTAMP - INTERVAL '${days} days'
     `;
-        const result = await (0, pg_1.query)(sql, [userId]);
+        const result = await query(sql, [userId]);
         return result.rows[0];
     }
     /**
@@ -256,7 +253,7 @@ class AuditRepository {
       GROUP BY se.security_event_type, se.threat_level
       ORDER BY count DESC
     `;
-        const result = await (0, pg_1.query)(sql);
+        const result = await query(sql);
         return result.rows;
     }
     /**
@@ -280,15 +277,14 @@ class AuditRepository {
       WHERE id IN (SELECT id FROM archived)
       RETURNING id
     `;
-        const result = await (0, pg_1.query)(sql);
+        const result = await query(sql);
         return result.rowCount || 0;
     }
     /**
      * Create new partition for next month
      */
     async createMonthlyPartition() {
-        await (0, pg_1.query)('SELECT create_audit_partition()');
+        await query('SELECT create_audit_partition()');
     }
 }
-exports.AuditRepository = AuditRepository;
 //# sourceMappingURL=AuditRepository.js.map

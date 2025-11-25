@@ -1,20 +1,14 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.MySQLAdapter = void 0;
 // @ts-nocheck
-const promise_1 = __importDefault(require("mysql2/promise"));
-const BaseAdapter_1 = require("./BaseAdapter");
-class MySQLAdapter extends BaseAdapter_1.BaseDataAdapter {
+import mysql from 'mysql2/promise';
+import { BaseDataAdapter } from './BaseAdapter';
+export class MySQLAdapter extends BaseDataAdapter {
     pool = null;
     async connect() {
         if (this.connected) {
             return;
         }
         try {
-            this.pool = promise_1.default.createPool({
+            this.pool = mysql.createPool({
                 host: this.config.connection.host,
                 port: this.config.connection.port || 3306,
                 database: this.config.connection.database,
@@ -439,6 +433,5 @@ class MySQLAdapter extends BaseAdapter_1.BaseDataAdapter {
         return type;
     }
 }
-exports.MySQLAdapter = MySQLAdapter;
 // @ts-nocheck
 //# sourceMappingURL=MySQLAdapter.js.map

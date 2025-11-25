@@ -1,5 +1,9 @@
 /**
- * Cache Metrics Collection
+ * Cache Metrics Collection (Internal)
+ *
+ * NOTE: These metrics are internal to src/cache/registry.ts.
+ * Main SLO cache metrics are defined in metrics/metrics.ts with labels.
+ * These use different names to avoid Prometheus registration conflicts.
  *
  * Provides comprehensive metrics for cache operations:
  * - Hit/miss rates
@@ -9,7 +13,8 @@
  */
 import { Counter, Histogram } from 'prom-client';
 /**
- * Cache metrics container
+ * Cache metrics container (internal use)
+ * Named with _internal suffix to avoid conflict with SLO metrics
  */
 export declare const cacheMetrics: {
     /**
@@ -17,11 +22,11 @@ export declare const cacheMetrics: {
      */
     operations: Counter<"status" | "operation">;
     /**
-     * Cache hits
+     * Cache hits (internal)
      */
     hits: Counter<string>;
     /**
-     * Cache misses
+     * Cache misses (internal)
      */
     misses: Counter<string>;
     /**

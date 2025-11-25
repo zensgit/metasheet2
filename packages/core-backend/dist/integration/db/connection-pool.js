@@ -1,13 +1,10 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.poolManager = void 0;
-const pg_1 = require("pg");
+import { Pool } from 'pg';
 class ConnectionPool {
     pool;
     slowMs;
     name;
     constructor(opts) {
-        this.pool = new pg_1.Pool(opts);
+        this.pool = new Pool(opts);
         this.slowMs = opts.slowQueryMs || parseInt(process.env.DB_SLOW_MS || '500', 10);
         this.name = opts.name || 'main';
     }
@@ -70,5 +67,5 @@ class PoolManager {
         await Promise.all(Array.from(this.pools.values()).map(p => p.healthCheck()));
     }
 }
-exports.poolManager = new PoolManager();
+export const poolManager = new PoolManager();
 //# sourceMappingURL=connection-pool.js.map

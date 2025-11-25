@@ -1,14 +1,9 @@
-"use strict";
 // plugin-sandbox.ts
 // Optional sandbox wrapper for plugin execution (flag gated)
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.NoopSandbox = void 0;
-exports.createSandbox = createSandbox;
-class NoopSandbox {
+export class NoopSandbox {
     wrap(plugin) { return plugin; }
 }
-exports.NoopSandbox = NoopSandbox;
-function createSandbox() {
+export function createSandbox() {
     const enabled = process.env.PLUGIN_SANDBOX_ENABLED === 'true';
     if (!enabled)
         return new NoopSandbox();

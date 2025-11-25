@@ -1,71 +1,36 @@
-"use strict";
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
  */
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = __importDefault(require("express"));
-const http_1 = require("http");
-const socket_io_1 = require("socket.io");
-const cors_1 = __importDefault(require("cors"));
-const eventemitter3_1 = require("eventemitter3");
-const plugin_loader_1 = require("./core/plugin-loader");
-const logger_1 = require("./core/logger");
-const connection_pool_1 = require("./integration/db/connection-pool");
-const event_bus_1 = require("./integration/events/event-bus");
-const event_bus_service_1 = require("./integration/events/event-bus-service");
-const message_bus_1 = require("./integration/messaging/message-bus");
-const jwt_middleware_1 = require("./auth/jwt-middleware");
-const metrics_1 = require("./metrics/metrics");
-const pg_1 = require("./db/pg");
-const approvals_1 = require("./routes/approvals");
-const audit_logs_1 = require("./routes/audit-logs");
-const approval_history_1 = require("./routes/approval-history");
-const roles_1 = require("./routes/roles");
-const permissions_1 = require("./routes/permissions");
-const files_1 = require("./routes/files");
-const spreadsheets_1 = require("./routes/spreadsheets");
-const spreadsheet_permissions_1 = require("./routes/spreadsheet-permissions");
-const events_1 = require("./routes/events");
-const internal_1 = __importDefault(require("./routes/internal"));
-const cache_test_1 = __importDefault(require("./routes/cache-test"));
-const CacheRegistry_1 = require("../core/cache/CacheRegistry");
+import express from 'express';
+import { createServer } from 'http';
+import { Server as SocketServer } from 'socket.io';
+import cors from 'cors';
+import { EventEmitter } from 'eventemitter3';
+import { PluginLoader } from './core/plugin-loader';
+import { Logger } from './core/logger';
+import { poolManager } from './integration/db/connection-pool';
+import { eventBus } from './integration/events/event-bus';
+import { initializeEventBusService } from './integration/events/event-bus-service';
+import { messageBus } from './integration/messaging/message-bus';
+import { jwtAuthMiddleware, isWhitelisted } from './auth/jwt-middleware';
+import { installMetrics, requestMetricsMiddleware } from './metrics/metrics';
+import { getPoolStats } from './db/pg';
+import { approvalsRouter } from './routes/approvals';
+import { auditLogsRouter } from './routes/audit-logs';
+import { approvalHistoryRouter } from './routes/approval-history';
+import { rolesRouter } from './routes/roles';
+import { snapshotsRouter } from './routes/snapshots';
+import { permissionsRouter } from './routes/permissions';
+import { filesRouter } from './routes/files';
+import { spreadsheetsRouter } from './routes/spreadsheets';
+import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions';
+import { eventsRouter } from './routes/events';
+import internalRouter from './routes/internal';
+import cacheTestRouter from './routes/cache-test';
+import { initAdminRoutes } from './routes/admin-routes';
+import { SnapshotService } from './services/SnapshotService';
+import { cacheRegistry } from '../core/cache/CacheRegistry';
 class MetaSheetServer {
     app;
     httpServer;
@@ -77,21 +42,23 @@ class MetaSheetServer {
     shuttingDown = false;
     wsAdapterType = 'local';
     wsRedis = { enabled: false, attached: false };
+    snapshotService;
     constructor() {
-        this.app = (0, express_1.default)();
-        this.httpServer = (0, http_1.createServer)(this.app);
-        this.io = new socket_io_1.Server(this.httpServer, {
+        this.app = express();
+        this.httpServer = createServer(this.app);
+        this.io = new SocketServer(this.httpServer, {
             cors: {
                 origin: '*',
                 methods: ['GET', 'POST']
             }
         });
-        this.eventBus = new eventemitter3_1.EventEmitter();
-        this.logger = new logger_1.Logger('MetaSheetServer');
+        this.eventBus = new EventEmitter();
+        this.logger = new Logger('MetaSheetServer');
         this.port = parseInt(process.env.PORT || '8900');
         // 创建核心API
         const coreAPI = this.createCoreAPI();
-        this.pluginLoader = new plugin_loader_1.PluginLoader(coreAPI);
+        this.pluginLoader = new PluginLoader(coreAPI);
+        this.snapshotService = new SnapshotService();
         this.setupMiddleware();
         this.setupWebSocket();
         this.initializeCache();
@@ -141,10 +108,10 @@ class MetaSheetServer {
             },
             database: {
                 query: async (sql, params) => {
-                    return (await connection_pool_1.poolManager.get().query(sql, params)).rows;
+                    return (await poolManager.get().query(sql, params)).rows;
                 },
                 transaction: async (callback) => {
-                    return connection_pool_1.poolManager.get().transaction(async (client) => callback(client));
+                    return poolManager.get().transaction(async (client) => callback(client));
                 },
                 model: (_name) => ({})
             },
@@ -162,17 +129,17 @@ class MetaSheetServer {
                 }
             },
             events: {
-                on: (evt, handler) => event_bus_1.eventBus.subscribe(evt, handler),
+                on: (evt, handler) => eventBus.subscribe(evt, handler),
                 once: (evt, handler) => {
                     const wrappedHandler = (data) => {
                         handler(data);
-                        event_bus_1.eventBus.unsubscribe(subscriptionId);
+                        eventBus.unsubscribe(subscriptionId);
                     };
-                    const subscriptionId = event_bus_1.eventBus.subscribe(evt, wrappedHandler);
+                    const subscriptionId = eventBus.subscribe(evt, wrappedHandler);
                     return subscriptionId;
                 },
-                emit: (evt, data) => event_bus_1.eventBus.emit(evt, data),
-                off: (idOrPlugin) => event_bus_1.eventBus.unsubscribe(idOrPlugin)
+                emit: (evt, data) => eventBus.emit(evt, data),
+                off: (idOrPlugin) => eventBus.unsubscribe(idOrPlugin)
             },
             storage: {
                 upload: async (file, options) => {
@@ -230,12 +197,12 @@ class MetaSheetServer {
                 }
             },
             messaging: {
-                publish: (topic, payload, opts) => message_bus_1.messageBus.publish(topic, payload, opts),
-                subscribe: (topic, handler) => message_bus_1.messageBus.subscribe(topic, handler),
-                subscribePattern: (pattern, handler) => message_bus_1.messageBus.subscribePattern(pattern, handler),
-                unsubscribe: (id) => message_bus_1.messageBus.unsubscribe(id),
-                request: (topic, payload, timeoutMs) => message_bus_1.messageBus.request(topic, payload, timeoutMs),
-                rpcHandler: (topic, handler) => message_bus_1.messageBus.createRpcHandler(topic, handler)
+                publish: (topic, payload, opts) => messageBus.publish(topic, payload, opts),
+                subscribe: (topic, handler) => messageBus.subscribe(topic, handler),
+                subscribePattern: (pattern, handler) => messageBus.subscribePattern(pattern, handler),
+                unsubscribe: (id) => messageBus.unsubscribe(id),
+                request: (topic, payload, timeoutMs) => messageBus.request(topic, payload, timeoutMs),
+                rpcHandler: (topic, handler) => messageBus.createRpcHandler(topic, handler)
             }
         };
     }
@@ -244,13 +211,13 @@ class MetaSheetServer {
      */
     setupMiddleware() {
         // CORS
-        this.app.use((0, cors_1.default)());
+        this.app.use(cors());
         // Body parsing
-        this.app.use(express_1.default.json({ limit: '10mb' }));
-        this.app.use(express_1.default.urlencoded({ extended: true }));
+        this.app.use(express.json({ limit: '10mb' }));
+        this.app.use(express.urlencoded({ extended: true }));
         // 指标端点与请求指标（尽早注册）
-        (0, metrics_1.installMetrics)(this.app);
-        this.app.use(metrics_1.requestMetricsMiddleware);
+        installMetrics(this.app);
+        this.app.use(requestMetricsMiddleware);
         // 请求日志
         this.app.use((req, res, next) => {
             this.logger.info(`${req.method} ${req.path}`);
@@ -258,77 +225,130 @@ class MetaSheetServer {
         });
         // 全局 JWT 保护 `/api/**`（白名单在中间件内判定）
         this.app.use((req, res, next) => {
-            if ((0, jwt_middleware_1.isWhitelisted)(req.path))
+            if (isWhitelisted(req.path))
                 return next();
             if (req.path.startsWith('/api/'))
-                return (0, jwt_middleware_1.jwtAuthMiddleware)(req, res, next);
+                return jwtAuthMiddleware(req, res, next);
             return next();
         });
         // 健康检查
         this.app.get('/health', (req, res) => {
-            const stats = (0, pg_1.getPoolStats)();
-            res.json({
-                status: 'ok',
-                timestamp: new Date().toISOString(),
-                plugins: this.pluginLoader.getPlugins().size,
-                dbPool: stats || undefined,
-                wsAdapter: this.wsAdapterType,
-                redis: this.wsRedis
-            });
+            const endTimer = res.__metricsTimer?.({ route: '/health', method: 'GET' });
+            try {
+                const stats = getPoolStats();
+                // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
+                let pluginsSummary = undefined;
+                try {
+                    // 与 /api/plugins 的 summary 保持一致结构
+                    pluginsSummary = this.pluginLoader.getSummary?.();
+                }
+                catch { }
+                res.json({
+                    status: 'ok',
+                    timestamp: new Date().toISOString(),
+                    plugins: this.pluginLoader.getPlugins().size,
+                    pluginsSummary: pluginsSummary || undefined,
+                    dbPool: stats || undefined,
+                    wsAdapter: this.wsAdapterType,
+                    redis: this.wsRedis
+                });
+                endTimer?.(200);
+            }
+            catch (err) {
+                endTimer?.(500);
+                throw err;
+            }
         });
         // 路由：审批（示例）
-        this.app.use((0, approvals_1.approvalsRouter)());
+        this.app.use(approvalsRouter());
         // 路由：审计日志（管理员）
-        this.app.use((0, audit_logs_1.auditLogsRouter)());
+        this.app.use(auditLogsRouter());
         // 路由：审批历史（从审计表衍生）
-        this.app.use((0, approval_history_1.approvalHistoryRouter)());
+        this.app.use(approvalHistoryRouter());
         // 路由：角色/权限/表/文件/表权限（占位）
-        this.app.use((0, roles_1.rolesRouter)());
-        this.app.use((0, permissions_1.permissionsRouter)());
-        this.app.use((0, files_1.filesRouter)());
-        this.app.use((0, spreadsheets_1.spreadsheetsRouter)());
-        this.app.use((0, spreadsheet_permissions_1.spreadsheetPermissionsRouter)());
+        this.app.use(rolesRouter());
+        this.app.use(permissionsRouter());
+        this.app.use(filesRouter());
+        this.app.use(spreadsheetsRouter());
+        this.app.use(spreadsheetPermissionsRouter());
+        // 路由：快照（Snapshot MVP）
+        this.app.use(snapshotsRouter());
         // 路由：事件总线
-        this.app.use((0, events_1.eventsRouter)());
+        this.app.use(eventsRouter());
         // 路由：内部调试端点 (dev/staging only)
-        this.app.use('/internal', internal_1.default);
+        this.app.use('/internal', internalRouter);
+        // 路由：降级测试端点 (dev only)
+        try {
+            import('./routes/fallback-test')
+                .then(m => { this.app.use(m.default); })
+                .catch(() => {});
+        }
+        catch { }
         // 路由：缓存测试端点 (dev only)
-        this.app.use('/api/cache-test', cache_test_1.default);
+        this.app.use('/api/cache-test', cacheTestRouter);
+        // 路由：管理员端点 (带 SafetyGuard 保护)
+        this.app.use('/api/admin', initAdminRoutes({
+            pluginLoader: this.pluginLoader,
+            snapshotService: this.snapshotService
+        }));
         // V2 测试端点
         this.app.get('/api/v2/hello', (req, res) => {
-            res.json({ ok: true, message: 'Hello from MetaSheet V2!', version: '2.0.0-alpha.1' });
+            const endTimer = res.__metricsTimer?.({ route: '/api/v2/hello', method: 'GET' });
+            try {
+                res.json({ ok: true, message: 'Hello from MetaSheet V2!', version: '2.0.0-alpha.1' });
+                endTimer?.(200);
+            }
+            catch (err) {
+                endTimer?.(500);
+                throw err;
+            }
         });
         this.app.get('/api/v2/rpc-test', async (req, res) => {
+            const endTimer = res.__metricsTimer?.({ route: '/api/v2/rpc-test', method: 'GET' });
             try {
                 // 测试 RPC 功能
                 const testTopic = 'test.rpc';
                 const testPayload = { message: 'ping' };
                 // 创建测试 RPC handler
-                message_bus_1.messageBus.createRpcHandler(testTopic, async (payload) => {
+                messageBus.createRpcHandler(testTopic, async (payload) => {
                     return { ok: true, echo: payload, timestamp: Date.now() };
                 });
                 // 发送 RPC 请求
-                const result = await message_bus_1.messageBus.request(testTopic, testPayload, 1000);
+                const result = await messageBus.request(testTopic, testPayload, 1000);
                 res.json({ ok: true, rpcTest: 'passed', result });
+                endTimer?.(200);
             }
             catch (error) {
                 res.json({ ok: true, rpcTest: 'skipped', reason: error.message });
+                endTimer?.(200);
             }
         });
         // 插件信息
         this.app.get('/api/plugins', (req, res) => {
-            const plugins = Array.from(this.pluginLoader.getPlugins().entries()).map(([name, instance]) => ({
-                name,
-                version: instance.manifest.version,
-                displayName: instance.manifest.displayName,
-                status: instance.status
-            }));
-            res.json(plugins);
+            const endTimer = res.__metricsTimer?.({ route: '/api/plugins', method: 'GET' });
+            try {
+                const list = this.pluginLoader.getList?.() || [];
+                const summary = this.pluginLoader.getSummary?.() || {};
+                res.json({ list, summary });
+                endTimer?.(200);
+            }
+            catch (e) {
+                res.json({ list: [], summary: { error: e?.message || String(e) } });
+                endTimer?.(500);
+            }
         });
         // Metrics (JSON minimal)
         this.app.get('/internal/metrics', async (_req, res) => {
-            const { coreMetrics } = await Promise.resolve().then(() => __importStar(require('./integration/metrics/metrics')));
-            res.json(coreMetrics.get());
+            const endTimer = res.__metricsTimer?.({ route: '/internal/metrics', method: 'GET' });
+            try {
+                const { coreMetrics } = await import('./integration/metrics/metrics');
+                res.json(coreMetrics.get());
+                endTimer?.(200);
+            }
+            catch (err) {
+                endTimer?.(500);
+                throw err;
+            }
         });
         // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
     }
@@ -360,7 +380,7 @@ class MetaSheetServer {
     initializeCache() {
         // Phase 1: NullCache is already default in CacheRegistry
         const enabled = process.env.FEATURE_CACHE === 'true';
-        this.logger.info(`Cache: ${enabled ? 'observing' : 'disabled'} (impl: ${CacheRegistry_1.cacheRegistry.getStatus().implName})`);
+        this.logger.info(`Cache: ${enabled ? 'observing' : 'disabled'} (impl: ${cacheRegistry.getStatus().implName})`);
         // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
     }
     /**
@@ -370,10 +390,22 @@ class MetaSheetServer {
         // 初始化EventBusService
         this.logger.info('Initializing EventBusService...');
         const coreAPI = this.createCoreAPI();
-        await (0, event_bus_service_1.initializeEventBusService)(coreAPI);
+        await initializeEventBusService(coreAPI);
         // 加载插件并启动 HTTP 服务
-        this.logger.info('Loading plugins...');
-        await this.pluginLoader.loadPlugins();
+        if (process.env.SKIP_PLUGINS === 'true') {
+            this.logger.warn('Skipping plugin load (SKIP_PLUGINS=true)');
+        }
+        else {
+            this.logger.info('Loading plugins...');
+            try {
+                await this.pluginLoader.loadPlugins();
+                this.logger.info('Plugins loaded successfully');
+            }
+            catch (e) {
+                this.logger.error('Plugin loading failed; continuing startup without full plugin set', e);
+            }
+        }
+        this.logger.info('Starting HTTP server listen phase...');
         this.httpServer.listen(this.port, () => {
             this.logger.info(`MetaSheet v2 core listening on http://localhost:${this.port}`);
             this.logger.info(`Health:  http://localhost:${this.port}/health`);
@@ -391,7 +423,7 @@ class MetaSheetServer {
             }
             catch { }
             try {
-                const { pool } = await Promise.resolve().then(() => __importStar(require('./db/pg')));
+                const { pool } = await import('./db/pg');
                 if (pool)
                     await pool.end();
             }

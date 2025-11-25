@@ -1,4 +1,3 @@
-"use strict";
 /**
  * NullCache - No-op cache implementation
  *
@@ -8,9 +7,7 @@
  * 2. Observing cache call patterns and frequency
  * 3. Performance baseline (zero cache overhead)
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.NullCache = void 0;
-class NullCache {
+export class NullCache {
     /**
      * Always returns cache miss
      */
@@ -30,5 +27,4 @@ class NullCache {
         return { ok: true, value: undefined };
     }
 }
-exports.NullCache = NullCache;
 //# sourceMappingURL=null-cache.js.map

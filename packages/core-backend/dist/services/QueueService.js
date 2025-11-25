@@ -1,13 +1,10 @@
-"use strict";
 // @ts-nocheck
 /**
  * 队列服务实现
  * 支持 Bull/BullMQ 和内存队列，提供完整的任务队列管理
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.BullQueueProvider = exports.MemoryQueueProvider = exports.QueueServiceImpl = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("../core/logger");
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from '../core/logger';
 /**
  * 内存队列实现
  */
@@ -15,7 +12,7 @@ class MemoryQueueProvider {
     queues = new Map();
     logger;
     constructor() {
-        this.logger = new logger_1.Logger('MemoryQueueProvider');
+        this.logger = new Logger('MemoryQueueProvider');
     }
     getQueue(queueName) {
         if (!this.queues.has(queueName)) {
@@ -93,11 +90,10 @@ class MemoryQueueProvider {
         queue.off(event, handler);
     }
 }
-exports.MemoryQueueProvider = MemoryQueueProvider;
 /**
  * 内存队列实现类
  */
-class MemoryQueue extends eventemitter3_1.EventEmitter {
+class MemoryQueue extends EventEmitter {
     name;
     waiting = [];
     active = [];
@@ -112,7 +108,7 @@ class MemoryQueue extends eventemitter3_1.EventEmitter {
     constructor(name) {
         super();
         this.name = name;
-        this.logger = new logger_1.Logger(`MemoryQueue:${name}`);
+        this.logger = new Logger(`MemoryQueue:${name}`);
         // 启动处理循环
         setImmediate(() => this.processNext());
         // 处理延迟任务
@@ -418,7 +414,7 @@ class BullQueueProvider {
     constructor(Bull, redisConnection) {
         this.Bull = Bull;
         this.redisConnection = redisConnection;
-        this.logger = new logger_1.Logger('BullQueueProvider');
+        this.logger = new Logger('BullQueueProvider');
     }
     getQueue(queueName) {
         if (!this.queues.has(queueName)) {
@@ -590,18 +586,17 @@ class BullQueueProvider {
         };
     }
 }
-exports.BullQueueProvider = BullQueueProvider;
 /**
  * 统一队列服务实现
  */
-class QueueServiceImpl extends eventemitter3_1.EventEmitter {
+export class QueueServiceImpl extends EventEmitter {
     provider;
     logger;
     metrics = { totalJobs: 0, completedJobs: 0, failedJobs: 0 };
     constructor(provider) {
         super();
         this.provider = provider || new MemoryQueueProvider();
-        this.logger = new logger_1.Logger('QueueService');
+        this.logger = new Logger('QueueService');
         // 设置全局事件监听用于统计
         this.setupGlobalListeners();
     }
@@ -774,6 +769,6 @@ class QueueServiceImpl extends eventemitter3_1.EventEmitter {
         return new QueueServiceImpl(new MemoryQueueProvider());
     }
 }
-exports.QueueServiceImpl = QueueServiceImpl;
+export { MemoryQueueProvider, BullQueueProvider };
 // @ts-nocheck
 //# sourceMappingURL=QueueService.js.map

@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Migration Pattern Library
  *
@@ -35,19 +34,7 @@
  * }
  * ```
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkColumnExists = checkColumnExists;
-exports.checkTableExists = checkTableExists;
-exports.addColumnIfNotExists = addColumnIfNotExists;
-exports.dropColumnIfExists = dropColumnIfExists;
-exports.createIndexIfNotExists = createIndexIfNotExists;
-exports.dropIndexIfExists = dropIndexIfExists;
-exports.renameColumnIfExists = renameColumnIfExists;
-exports.migrateDataSafely = migrateDataSafely;
-exports.createTableWithDefaults = createTableWithDefaults;
-exports.createUpdatedAtTrigger = createUpdatedAtTrigger;
-exports.addForeignKeyIfNotExists = addForeignKeyIfNotExists;
-const kysely_1 = require("kysely");
+import { sql } from 'kysely';
 /**
  * Logger for migration operations
  */
@@ -60,9 +47,9 @@ const log = {
 /**
  * Helper function to check if a column exists (for Kysely < 0.29.0)
  */
-async function checkColumnExists(db, tableName, columnName) {
-    const result = await db.selectFrom((0, kysely_1.sql) `information_schema.columns`.as('columns'))
-        .select((0, kysely_1.sql) `count(*)`.as('count'))
+export async function checkColumnExists(db, tableName, columnName) {
+    const result = await db.selectFrom(sql `information_schema.columns`.as('columns'))
+        .select(sql `count(*)`.as('count'))
         .where('table_name', '=', tableName)
         .where('column_name', '=', columnName)
         .executeTakeFirst();
@@ -71,9 +58,9 @@ async function checkColumnExists(db, tableName, columnName) {
 /**
  * Helper function to check if a table exists (for Kysely < 0.29.0)
  */
-async function checkTableExists(db, tableName) {
-    const result = await db.selectFrom((0, kysely_1.sql) `information_schema.tables`.as('tables'))
-        .select((0, kysely_1.sql) `count(*)`.as('count'))
+export async function checkTableExists(db, tableName) {
+    const result = await db.selectFrom(sql `information_schema.tables`.as('tables'))
+        .select(sql `count(*)`.as('count'))
         .where('table_name', '=', tableName)
         .executeTakeFirst();
     return result ? parseInt(result.count, 10) > 0 : false;
@@ -87,7 +74,7 @@ async function checkTableExists(db, tableName) {
  * @param columnType - SQL type of the column
  * @param options - Column constraints and options
  */
-async function addColumnIfNotExists(db, tableName, columnName, columnType, options = {}) {
+export async function addColumnIfNotExists(db, tableName, columnName, columnType, options = {}) {
     try {
         // Check if column exists
         const hasColumn = await checkColumnExists(db, tableName, columnName);
@@ -108,7 +95,7 @@ async function addColumnIfNotExists(db, tableName, columnName, columnType, optio
             if (options.defaultTo !== undefined) {
                 if (typeof options.defaultTo === 'string' && options.defaultTo.startsWith('sql:')) {
                     // SQL expression
-                    builder = builder.defaultTo(kysely_1.sql.raw(options.defaultTo.slice(4)));
+                    builder = builder.defaultTo(sql.raw(options.defaultTo.slice(4)));
                 }
                 else {
                     // Literal value
@@ -141,7 +128,7 @@ async function addColumnIfNotExists(db, tableName, columnName, columnType, optio
  * @param tableName - Name of the table
  * @param columnName - Name of the column to drop
  */
-async function dropColumnIfExists(db, tableName, columnName) {
+export async function dropColumnIfExists(db, tableName, columnName) {
     try {
         const hasColumn = await checkColumnExists(db, tableName, columnName);
         if (!hasColumn) {
@@ -166,10 +153,10 @@ async function dropColumnIfExists(db, tableName, columnName) {
  * @param columns - Column(s) to index (string or array)
  * @param options - Index options
  */
-async function createIndexIfNotExists(db, indexName, tableName, columns, options = {}) {
+export async function createIndexIfNotExists(db, indexName, tableName, columns, options = {}) {
     try {
         // Check if index exists (PostgreSQL specific)
-        const result = await (0, kysely_1.sql) `
+        const result = await sql `
       SELECT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE tablename = ${tableName}
@@ -212,10 +199,10 @@ async function createIndexIfNotExists(db, indexName, tableName, columns, options
  * @param db - Kysely database instance
  * @param indexName - Name of the index
  */
-async function dropIndexIfExists(db, indexName) {
+export async function dropIndexIfExists(db, indexName) {
     try {
         // Check if index exists
-        const result = await (0, kysely_1.sql) `
+        const result = await sql `
       SELECT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE indexname = ${indexName}
@@ -243,7 +230,7 @@ async function dropIndexIfExists(db, indexName) {
  * @param oldColumnName - Current column name
  * @param newColumnName - New column name
  */
-async function renameColumnIfExists(db, tableName, oldColumnName, newColumnName) {
+export async function renameColumnIfExists(db, tableName, oldColumnName, newColumnName) {
     try {
         const hasOldColumn = await checkColumnExists(db, tableName, oldColumnName);
         const hasNewColumn = await checkColumnExists(db, tableName, newColumnName);
@@ -272,7 +259,7 @@ async function renameColumnIfExists(db, tableName, oldColumnName, newColumnName)
  * @param transformFn - Function to transform each batch of rows
  * @param options - Migration options
  */
-async function migrateDataSafely(db, tableName, transformFn, options = {}) {
+export async function migrateDataSafely(db, tableName, transformFn, options = {}) {
     const { batchSize = 1000, whereClause, dryRun = false } = options;
     try {
         log.info(`Starting data migration for ${tableName} (batch size: ${batchSize})`);
@@ -342,7 +329,7 @@ async function migrateDataSafely(db, tableName, transformFn, options = {}) {
  * @param buildColumns - Function to define table columns
  * @param options - Table options
  */
-async function createTableWithDefaults(db, tableName, buildColumns, options = {}) {
+export async function createTableWithDefaults(db, tableName, buildColumns, options = {}) {
     const { withTimestamps = true, withSoftDelete = false } = options;
     try {
         const tableExists = await checkTableExists(db, tableName);
@@ -354,14 +341,14 @@ async function createTableWithDefaults(db, tableName, buildColumns, options = {}
         let createTable = db.schema
             .createTable(tableName)
             .ifNotExists()
-            .addColumn('id', 'text', (col) => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()::text`));
+            .addColumn('id', 'text', (col) => col.primaryKey().defaultTo(sql `gen_random_uuid()::text`));
         // Add custom columns
         createTable = buildColumns(createTable);
         // Add timestamps
         if (withTimestamps) {
             createTable = createTable
-                .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
-                .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`));
+                .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `NOW()`))
+                .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `NOW()`));
         }
         // Add soft delete
         if (withSoftDelete) {
@@ -385,10 +372,10 @@ async function createTableWithDefaults(db, tableName, buildColumns, options = {}
  * @param db - Kysely database instance
  * @param tableName - Name of the table
  */
-async function createUpdatedAtTrigger(db, tableName) {
+export async function createUpdatedAtTrigger(db, tableName) {
     try {
         // Create trigger function (idempotent)
-        await (0, kysely_1.sql) `
+        await sql `
       CREATE OR REPLACE FUNCTION update_timestamp()
       RETURNS TRIGGER AS $$
       BEGIN
@@ -398,10 +385,10 @@ async function createUpdatedAtTrigger(db, tableName) {
       $$ LANGUAGE plpgsql;
     `.execute(db);
         // Create trigger
-        await (0, kysely_1.sql) `
-      DROP TRIGGER IF EXISTS trigger_${kysely_1.sql.raw(tableName)}_updated_at ON ${kysely_1.sql.table(tableName)};
-      CREATE TRIGGER trigger_${kysely_1.sql.raw(tableName)}_updated_at
-      BEFORE UPDATE ON ${kysely_1.sql.table(tableName)}
+        await sql `
+      DROP TRIGGER IF EXISTS trigger_${sql.raw(tableName)}_updated_at ON ${sql.table(tableName)};
+      CREATE TRIGGER trigger_${sql.raw(tableName)}_updated_at
+      BEFORE UPDATE ON ${sql.table(tableName)}
       FOR EACH ROW
       EXECUTE FUNCTION update_timestamp();
     `.execute(db);
@@ -423,10 +410,10 @@ async function createUpdatedAtTrigger(db, tableName) {
  * @param refColumn - Referenced column
  * @param options - Constraint options
  */
-async function addForeignKeyIfNotExists(db, constraintName, tableName, columnName, refTable, refColumn, options = {}) {
+export async function addForeignKeyIfNotExists(db, constraintName, tableName, columnName, refTable, refColumn, options = {}) {
     try {
         // Check if constraint exists
-        const result = await (0, kysely_1.sql) `
+        const result = await sql `
       SELECT EXISTS (
         SELECT 1 FROM information_schema.table_constraints
         WHERE constraint_name = ${constraintName}

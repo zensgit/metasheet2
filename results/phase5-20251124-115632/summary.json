@@ -1,0 +1,15 @@
+{
+  "samples": 1,
+  "file": "results/phase5-20251124-115632/metrics.csv",
+  "fallback": { "raw_total": 12, "effective_total": 12, "http": 4, "message": 8, "cache": 0 },
+  "sources": { "http_adapter_ops": 0, "message_bus_rpc_attempts": 18, "cache_get_attempts": 0 },
+  "success_rate_avg": "0.990000",
+  "p99_latency_avg": "0.500000",
+  "fallback_ratio_avg": "0.000000",
+  "error_rate_avg": "0.000000",
+  "error_rate_4xx_avg": "0.000000",
+  "error_rate_5xx_avg": "0.000000",
+  "fb_http_ratio_avg": "0.000000",
+  "fb_message_ratio_avg": "0.000000",
+  "fb_cache_ratio_avg": "0.444444"
+}

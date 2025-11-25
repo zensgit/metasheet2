@@ -1,12 +1,9 @@
-"use strict";
 /**
  * 缓存服务实现
  * 支持 Redis 和内存缓存，提供完整的缓存操作
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RedisCacheProvider = exports.MemoryCacheProvider = exports.CacheServiceImpl = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("../core/logger");
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from '../core/logger';
 /**
  * 内存缓存提供者
  */
@@ -15,7 +12,7 @@ class MemoryCacheProvider {
     tagIndex = new Map();
     logger;
     constructor() {
-        this.logger = new logger_1.Logger('MemoryCacheProvider');
+        this.logger = new Logger('MemoryCacheProvider');
         // 定期清理过期缓存
         setInterval(() => {
             this.cleanExpired();
@@ -144,7 +141,6 @@ class MemoryCacheProvider {
         }
     }
 }
-exports.MemoryCacheProvider = MemoryCacheProvider;
 /**
  * Redis 缓存提供者
  */
@@ -153,7 +149,7 @@ class RedisCacheProvider {
     logger;
     constructor(redisClient) {
         this.redis = redisClient;
-        this.logger = new logger_1.Logger('RedisCacheProvider');
+        this.logger = new Logger('RedisCacheProvider');
     }
     async get(key) {
         try {
@@ -317,18 +313,17 @@ class RedisCacheProvider {
         }
     }
 }
-exports.RedisCacheProvider = RedisCacheProvider;
 /**
  * 统一缓存服务实现
  */
-class CacheServiceImpl extends eventemitter3_1.EventEmitter {
+export class CacheServiceImpl extends EventEmitter {
     provider;
     logger;
     metrics = { hits: 0, misses: 0, operations: 0 };
     constructor(provider) {
         super();
         this.provider = provider || new MemoryCacheProvider();
-        this.logger = new logger_1.Logger('CacheService');
+        this.logger = new Logger('CacheService');
     }
     async get(key) {
         try {
@@ -551,5 +546,5 @@ class CacheServiceImpl extends eventemitter3_1.EventEmitter {
         return new CacheServiceImpl(new MemoryCacheProvider());
     }
 }
-exports.CacheServiceImpl = CacheServiceImpl;
+export { MemoryCacheProvider, RedisCacheProvider };
 //# sourceMappingURL=CacheService.js.map

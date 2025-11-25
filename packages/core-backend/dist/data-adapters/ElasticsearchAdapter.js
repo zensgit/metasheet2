@@ -1,13 +1,10 @@
-"use strict";
 /**
  * Elasticsearch Data Source Adapter
  * Provides access to Elasticsearch search engine
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ElasticsearchAdapter = void 0;
-const BaseAdapter_1 = require("./BaseAdapter");
-const elasticsearch_1 = require("@elastic/elasticsearch");
-class ElasticsearchAdapter extends BaseAdapter_1.DataSourceAdapter {
+import { DataSourceAdapter } from './BaseAdapter';
+import { Client } from '@elastic/elasticsearch';
+export class ElasticsearchAdapter extends DataSourceAdapter {
     client = null;
     config;
     constructor(config) {
@@ -34,7 +31,7 @@ class ElasticsearchAdapter extends BaseAdapter_1.DataSourceAdapter {
             if (this.config.ssl) {
                 clientConfig.ssl = this.config.ssl;
             }
-            this.client = new elasticsearch_1.Client(clientConfig);
+            this.client = new Client(clientConfig);
             // Test connection
             await this.client.ping();
             this.emit('connected');
@@ -479,5 +476,4 @@ class ElasticsearchAdapter extends BaseAdapter_1.DataSourceAdapter {
         });
     }
 }
-exports.ElasticsearchAdapter = ElasticsearchAdapter;
 //# sourceMappingURL=ElasticsearchAdapter.js.map

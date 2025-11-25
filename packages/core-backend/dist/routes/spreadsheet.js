@@ -1,15 +1,13 @@
-"use strict";
 /**
  * Spreadsheet CRUD API routes
  * Handles spreadsheets, sheets, cells, and formulas
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const db_1 = require("../db/db");
-const uuid_1 = require("uuid");
-const logger_1 = require("../core/logger");
-const router = (0, express_1.Router)();
-const logger = new logger_1.Logger('SpreadsheetAPI');
+import { Router } from 'express';
+import { db } from '../db/db';
+import { v4 as uuidv4 } from 'uuid';
+import { Logger } from '../core/logger';
+const router = Router();
+const logger = new Logger('SpreadsheetAPI');
 // Utility to convert column index to letter (0 -> A, 1 -> B, 25 -> Z, 26 -> AA)
 function columnIndexToLetter(index) {
     let letter = '';
@@ -40,14 +38,14 @@ function parseCellRef(ref) {
  */
 router.get('/spreadsheets', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
             });
         }
         const { workspace_id, owner_id, is_template } = req.query;
-        let query = db_1.db.selectFrom('spreadsheets').selectAll();
+        let query = db.selectFrom('spreadsheets').selectAll();
         if (workspace_id) {
             query = query.where('workspace_id', '=', workspace_id);
         }
@@ -79,7 +77,7 @@ router.get('/spreadsheets', async (req, res) => {
  */
 router.post('/spreadsheets', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
@@ -87,12 +85,12 @@ router.post('/spreadsheets', async (req, res) => {
         }
         const { name = 'Untitled Spreadsheet', description, owner_id, workspace_id, template_id, initial_sheets = [{ name: 'Sheet1' }] } = req.body;
         // Start transaction
-        const result = await db_1.db.transaction().execute(async (trx) => {
+        const result = await db.transaction().execute(async (trx) => {
             // Create spreadsheet
             const spreadsheet = await trx
                 .insertInto('spreadsheets')
                 .values({
-                id: (0, uuid_1.v4)(),
+                id: uuidv4(),
                 name,
                 description,
                 owner_id,
@@ -113,7 +111,7 @@ router.post('/spreadsheets', async (req, res) => {
                 const sheet = await trx
                     .insertInto('sheets')
                     .values({
-                    id: (0, uuid_1.v4)(),
+                    id: uuidv4(),
                     spreadsheet_id: spreadsheet.id,
                     name: initial_sheets[i].name || `Sheet${i + 1}`,
                     order_index: i,
@@ -154,14 +152,14 @@ router.post('/spreadsheets', async (req, res) => {
  */
 router.get('/spreadsheets/:id', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
             });
         }
         const { id } = req.params;
-        const spreadsheet = await db_1.db
+        const spreadsheet = await db
             .selectFrom('spreadsheets')
             .selectAll()
             .where('id', '=', id)
@@ -173,7 +171,7 @@ router.get('/spreadsheets/:id', async (req, res) => {
                 error: { code: 'NOT_FOUND', message: 'Spreadsheet not found' }
             });
         }
-        const sheets = await db_1.db
+        const sheets = await db
             .selectFrom('sheets')
             .selectAll()
             .where('spreadsheet_id', '=', id)
@@ -201,7 +199,7 @@ router.get('/spreadsheets/:id', async (req, res) => {
  */
 router.put('/spreadsheets/:id', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
@@ -218,7 +216,7 @@ router.put('/spreadsheets/:id', async (req, res) => {
             updates.settings = settings;
         if (metadata !== undefined)
             updates.metadata = metadata;
-        const spreadsheet = await db_1.db
+        const spreadsheet = await db
             .updateTable('spreadsheets')
             .set(updates)
             .where('id', '=', id)
@@ -250,14 +248,14 @@ router.put('/spreadsheets/:id', async (req, res) => {
  */
 router.delete('/spreadsheets/:id', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
             });
         }
         const { id } = req.params;
-        const spreadsheet = await db_1.db
+        const spreadsheet = await db
             .updateTable('spreadsheets')
             .set({
             deleted_at: new Date(),
@@ -292,7 +290,7 @@ router.delete('/spreadsheets/:id', async (req, res) => {
  */
 router.get('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
@@ -300,7 +298,7 @@ router.get('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
         }
         const { sheetId } = req.params;
         const { startRow = 0, endRow = 100, startCol = 0, endCol = 26 } = req.query;
-        const cells = await db_1.db
+        const cells = await db
             .selectFrom('cells')
             .selectAll()
             .where('sheet_id', '=', sheetId)
@@ -347,7 +345,7 @@ router.get('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
  */
 router.put('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
@@ -361,7 +359,7 @@ router.put('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
                 error: { code: 'INVALID_INPUT', message: 'cells must be an array' }
             });
         }
-        const result = await db_1.db.transaction().execute(async (trx) => {
+        const result = await db.transaction().execute(async (trx) => {
             const updatedCells = [];
             for (const cellData of cells) {
                 const { row, col, value, formula, format, dataType } = cellData;
@@ -394,7 +392,7 @@ router.put('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
                     await trx
                         .insertInto('cell_versions')
                         .values({
-                        id: (0, uuid_1.v4)(),
+                        id: uuidv4(),
                         cell_id: existingCell.id,
                         sheet_id: sheetId,
                         version_number: 1, // TODO: Increment properly
@@ -411,7 +409,7 @@ router.put('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
                     cell = await trx
                         .insertInto('cells')
                         .values({
-                        id: (0, uuid_1.v4)(),
+                        id: uuidv4(),
                         sheet_id: sheetId,
                         row_index: row,
                         column_index: col,
@@ -455,7 +453,7 @@ router.put('/spreadsheets/:spreadsheetId/sheets/:sheetId/cells', async (req, res
  */
 router.post('/spreadsheets/:spreadsheetId/sheets', async (req, res) => {
     try {
-        if (!db_1.db) {
+        if (!db) {
             return res.status(503).json({
                 ok: false,
                 error: { code: 'DB_UNAVAILABLE', message: 'Database not configured' }
@@ -464,16 +462,16 @@ router.post('/spreadsheets/:spreadsheetId/sheets', async (req, res) => {
         const { spreadsheetId } = req.params;
         const { name = 'New Sheet', rowCount = 1000, columnCount = 26 } = req.body;
         // Get max order index
-        const maxOrderResult = await db_1.db
+        const maxOrderResult = await db
             .selectFrom('sheets')
-            .select(db_1.db.fn.max('order_index').as('max_order'))
+            .select(db.fn.max('order_index').as('max_order'))
             .where('spreadsheet_id', '=', spreadsheetId)
             .executeTakeFirst();
         const orderIndex = (maxOrderResult?.max_order ?? -1) + 1;
-        const sheet = await db_1.db
+        const sheet = await db
             .insertInto('sheets')
             .values({
-            id: (0, uuid_1.v4)(),
+            id: uuidv4(),
             spreadsheet_id: spreadsheetId,
             name,
             order_index: orderIndex,
@@ -531,7 +529,7 @@ async function handleFormula(trx, cellId, sheetId, formulaText) {
         await trx
             .insertInto('formulas')
             .values({
-            id: (0, uuid_1.v4)(),
+            id: uuidv4(),
             cell_id: cellId,
             sheet_id: sheetId,
             formula_text: formulaText,
@@ -561,5 +559,5 @@ function isVolatileFormula(formula) {
     const volatileFunctions = ['NOW', 'TODAY', 'RAND', 'RANDBETWEEN'];
     return volatileFunctions.some(fn => formula.toUpperCase().includes(fn));
 }
-exports.default = router;
+export default router;
 //# sourceMappingURL=spreadsheet.js.map

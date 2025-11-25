@@ -1,43 +1,40 @@
-"use strict";
 /**
  * Plugin Capability Manager
  * Manages and validates plugin capability declarations
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginCapabilityManager = exports.CAPABILITY_TEMPLATES = exports.CapabilityLevel = exports.PluginCapabilitiesSchema = void 0;
-const zod_1 = require("zod");
-const logger_1 = require("./logger");
+import { z } from 'zod';
+import { Logger } from './logger';
 // Capability validation schemas
-const DatabaseCapabilitySchema = zod_1.z.object({
-    read: zod_1.z.array(zod_1.z.string()).optional(),
-    write: zod_1.z.array(zod_1.z.string()).optional(),
-    execute: zod_1.z.boolean().optional()
+const DatabaseCapabilitySchema = z.object({
+    read: z.array(z.string()).optional(),
+    write: z.array(z.string()).optional(),
+    execute: z.boolean().optional()
 }).optional();
-const HttpCapabilitySchema = zod_1.z.object({
-    internal: zod_1.z.boolean().optional(),
-    external: zod_1.z.boolean().optional(),
-    allowedDomains: zod_1.z.array(zod_1.z.string()).optional()
+const HttpCapabilitySchema = z.object({
+    internal: z.boolean().optional(),
+    external: z.boolean().optional(),
+    allowedDomains: z.array(z.string()).optional()
 }).optional();
-const FilesystemCapabilitySchema = zod_1.z.object({
-    read: zod_1.z.array(zod_1.z.string()).optional(),
-    write: zod_1.z.array(zod_1.z.string()).optional(),
-    temp: zod_1.z.boolean().optional()
+const FilesystemCapabilitySchema = z.object({
+    read: z.array(z.string()).optional(),
+    write: z.array(z.string()).optional(),
+    temp: z.boolean().optional()
 }).optional();
-const EventsCapabilitySchema = zod_1.z.object({
-    emit: zod_1.z.array(zod_1.z.string()).optional(),
-    listen: zod_1.z.array(zod_1.z.string()).optional()
+const EventsCapabilitySchema = z.object({
+    emit: z.array(z.string()).optional(),
+    listen: z.array(z.string()).optional()
 }).optional();
-const SystemCapabilitySchema = zod_1.z.object({
-    env: zod_1.z.array(zod_1.z.string()).optional(),
-    spawn: zod_1.z.boolean().optional(),
-    network: zod_1.z.boolean().optional()
+const SystemCapabilitySchema = z.object({
+    env: z.array(z.string()).optional(),
+    spawn: z.boolean().optional(),
+    network: z.boolean().optional()
 }).optional();
-const UICapabilitySchema = zod_1.z.object({
-    views: zod_1.z.boolean().optional(),
-    modals: zod_1.z.boolean().optional(),
-    notifications: zod_1.z.boolean().optional()
+const UICapabilitySchema = z.object({
+    views: z.boolean().optional(),
+    modals: z.boolean().optional(),
+    notifications: z.boolean().optional()
 }).optional();
-exports.PluginCapabilitiesSchema = zod_1.z.object({
+export const PluginCapabilitiesSchema = z.object({
     database: DatabaseCapabilitySchema,
     http: HttpCapabilitySchema,
     filesystem: FilesystemCapabilitySchema,
@@ -46,15 +43,15 @@ exports.PluginCapabilitiesSchema = zod_1.z.object({
     ui: UICapabilitySchema
 });
 // Capability levels for progressive enhancement
-var CapabilityLevel;
+export var CapabilityLevel;
 (function (CapabilityLevel) {
     CapabilityLevel["MINIMAL"] = "minimal";
     CapabilityLevel["STANDARD"] = "standard";
     CapabilityLevel["ENHANCED"] = "enhanced";
     CapabilityLevel["PRIVILEGED"] = "privileged"; // Full system access
-})(CapabilityLevel || (exports.CapabilityLevel = CapabilityLevel = {}));
+})(CapabilityLevel || (CapabilityLevel = {}));
 // Predefined capability templates
-exports.CAPABILITY_TEMPLATES = {
+export const CAPABILITY_TEMPLATES = {
     [CapabilityLevel.MINIMAL]: {
         database: {
             read: ['spreadsheets', 'users']
@@ -158,13 +155,13 @@ const DEFAULT_SECURITY_POLICY = {
     allowNetworkAccess: true,
     requireSignature: true
 };
-class PluginCapabilityManager {
+export class PluginCapabilityManager {
     logger;
     policy;
     capabilityCache = new Map();
     approvedCapabilities = new Map();
     constructor(policy) {
-        this.logger = new logger_1.Logger('PluginCapabilityManager');
+        this.logger = new Logger('PluginCapabilityManager');
         this.policy = { ...DEFAULT_SECURITY_POLICY, ...policy };
     }
     /**
@@ -173,12 +170,12 @@ class PluginCapabilityManager {
     validateCapabilities(pluginId, capabilities, level) {
         try {
             // Parse with Zod schema
-            const parsed = exports.PluginCapabilitiesSchema.parse(capabilities);
+            const parsed = PluginCapabilitiesSchema.parse(capabilities);
             // Apply security policy
             this.applySecurityPolicy(parsed);
             // If level specified, merge with template
             if (level) {
-                const template = exports.CAPABILITY_TEMPLATES[level];
+                const template = CAPABILITY_TEMPLATES[level];
                 const merged = this.mergeCapabilities(template, parsed);
                 this.capabilityCache.set(pluginId, merged);
                 return merged;
@@ -434,6 +431,5 @@ class PluginCapabilityManager {
         this.approvedCapabilities.clear();
     }
 }
-exports.PluginCapabilityManager = PluginCapabilityManager;
-exports.default = PluginCapabilityManager;
+export default PluginCapabilityManager;
 //# sourceMappingURL=PluginCapabilityManager.js.map

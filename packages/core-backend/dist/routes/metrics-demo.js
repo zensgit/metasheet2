@@ -1,18 +1,13 @@
-"use strict";
 /**
  * Metrics Demo Routes
  * Issue #35: Demonstrates permission metrics in action
  */
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const permission_metrics_middleware_1 = __importDefault(require("../middleware/permission-metrics-middleware"));
-const router = (0, express_1.Router)();
+import { Router } from 'express';
+import PermissionMetricsMiddleware from '../middleware/permission-metrics-middleware';
+const router = Router();
 // Apply timing middleware to all routes
-router.use(permission_metrics_middleware_1.default.startTimer);
-router.use(permission_metrics_middleware_1.default.trackAuthFailure);
+router.use(PermissionMetricsMiddleware.startTimer);
+router.use(PermissionMetricsMiddleware.trackAuthFailure);
 /**
  * Public endpoint - no auth required
  */
@@ -22,7 +17,7 @@ router.get('/public/health', (req, res) => {
 /**
  * Protected endpoint - requires authentication
  */
-router.get('/api/user/profile', permission_metrics_middleware_1.default.validateToken, (req, res) => {
+router.get('/api/user/profile', PermissionMetricsMiddleware.validateToken, (req, res) => {
     res.json({
         user: req.user,
         message: 'Profile retrieved successfully'
@@ -31,7 +26,7 @@ router.get('/api/user/profile', permission_metrics_middleware_1.default.validate
 /**
  * Admin endpoint - requires admin role
  */
-router.get('/api/admin/users', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkPermission('admin:read'), (req, res) => {
+router.get('/api/admin/users', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkPermission('admin:read'), (req, res) => {
     res.json({
         users: [
             { id: '1', name: 'Admin User', role: 'admin' },
@@ -42,7 +37,7 @@ router.get('/api/admin/users', permission_metrics_middleware_1.default.validateT
 /**
  * Department-restricted endpoint
  */
-router.get('/api/hr/employees', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkDepartmentAccess(['hr', 'admin']), (req, res) => {
+router.get('/api/hr/employees', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkDepartmentAccess(['hr', 'admin']), (req, res) => {
     res.json({
         employees: [
             { id: 'emp1', name: 'John Doe', department: 'hr' },
@@ -53,20 +48,20 @@ router.get('/api/hr/employees', permission_metrics_middleware_1.default.validate
 /**
  * Spreadsheet operations - various permission levels
  */
-router.get('/api/spreadsheets/:id', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkPermission('spreadsheet:read'), (req, res) => {
+router.get('/api/spreadsheets/:id', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkPermission('spreadsheet:read'), (req, res) => {
     res.json({
         id: req.params.id,
         name: 'Sample Spreadsheet',
         data: [[1, 2, 3], [4, 5, 6]]
     });
 });
-router.put('/api/spreadsheets/:id', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkPermission('spreadsheet:write'), (req, res) => {
+router.put('/api/spreadsheets/:id', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkPermission('spreadsheet:write'), (req, res) => {
     res.json({
         id: req.params.id,
         message: 'Spreadsheet updated successfully'
     });
 });
-router.delete('/api/spreadsheets/:id', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkPermission('spreadsheet:delete'), (req, res) => {
+router.delete('/api/spreadsheets/:id', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkPermission('spreadsheet:delete'), (req, res) => {
     // Only admins and owners can delete
     const user = req.user;
     if (user.role !== 'admin') {
@@ -83,7 +78,7 @@ router.delete('/api/spreadsheets/:id', permission_metrics_middleware_1.default.v
 /**
  * Workflow operations
  */
-router.post('/api/workflows', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkPermission('workflow:create'), (req, res) => {
+router.post('/api/workflows', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkPermission('workflow:create'), (req, res) => {
     res.status(201).json({
         id: 'wf-' + Date.now(),
         message: 'Workflow created successfully'
@@ -92,7 +87,7 @@ router.post('/api/workflows', permission_metrics_middleware_1.default.validateTo
 /**
  * Approval operations - department restricted
  */
-router.get('/api/approvals/finance', permission_metrics_middleware_1.default.validateToken, permission_metrics_middleware_1.default.checkDepartmentAccess(['finance', 'admin']), (req, res) => {
+router.get('/api/approvals/finance', PermissionMetricsMiddleware.validateToken, PermissionMetricsMiddleware.checkDepartmentAccess(['finance', 'admin']), (req, res) => {
     res.json({
         approvals: [
             { id: 'apr1', type: 'expense', amount: 5000 },
@@ -103,7 +98,7 @@ router.get('/api/approvals/finance', permission_metrics_middleware_1.default.val
 /**
  * Metrics endpoint
  */
-router.get('/metrics', permission_metrics_middleware_1.default.metricsEndpoint);
+router.get('/metrics', PermissionMetricsMiddleware.metricsEndpoint);
 /**
  * Demo endpoints to trigger various failures
  */
@@ -141,15 +136,15 @@ router.get('/demo/trigger-failures', async (req, res) => {
  * Session simulation endpoints
  */
 router.post('/api/auth/login', (req, res) => {
-    permission_metrics_middleware_1.default.trackSession('login');
+    PermissionMetricsMiddleware.trackSession('login');
     res.json({
         token: 'sample-token-' + Date.now(),
         user: { id: 'user123', role: 'editor' }
     });
 });
-router.post('/api/auth/logout', permission_metrics_middleware_1.default.validateToken, (req, res) => {
-    permission_metrics_middleware_1.default.trackSession('logout');
+router.post('/api/auth/logout', PermissionMetricsMiddleware.validateToken, (req, res) => {
+    PermissionMetricsMiddleware.trackSession('logout');
     res.json({ message: 'Logged out successfully' });
 });
-exports.default = router;
+export default router;
 //# sourceMappingURL=metrics-demo.js.map

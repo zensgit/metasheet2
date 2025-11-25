@@ -1,18 +1,13 @@
-"use strict";
 /**
  * WebSocket 服务实现
  * 提供实时通信功能，支持房间管理、权限控制等
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.WebSocketServiceImpl = exports.SocketInfoImpl = void 0;
-exports.createAuthMiddleware = createAuthMiddleware;
-exports.createRateLimitMiddleware = createRateLimitMiddleware;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("../core/logger");
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from '../core/logger';
 /**
  * Socket 连接信息实现
  */
-class SocketInfoImpl {
+export class SocketInfoImpl {
     id;
     userId;
     rooms = [];
@@ -28,11 +23,10 @@ class SocketInfoImpl {
         this.lastSeen = new Date();
     }
 }
-exports.SocketInfoImpl = SocketInfoImpl;
 /**
  * WebSocket 服务实现
  */
-class WebSocketServiceImpl extends eventemitter3_1.EventEmitter {
+export class WebSocketServiceImpl extends EventEmitter {
     sockets = new Map();
     rooms = new Map(); // room -> socket IDs
     userSockets = new Map(); // user ID -> socket IDs
@@ -41,7 +35,7 @@ class WebSocketServiceImpl extends eventemitter3_1.EventEmitter {
     ioInstance; // Socket.IO instance
     constructor(ioInstance) {
         super();
-        this.logger = new logger_1.Logger('WebSocketService');
+        this.logger = new Logger('WebSocketService');
         this.ioInstance = ioInstance;
         // 如果提供了 Socket.IO 实例，设置事件监听
         if (ioInstance) {
@@ -472,11 +466,10 @@ class WebSocketServiceImpl extends eventemitter3_1.EventEmitter {
         this.setupSocketIOListeners(ioInstance);
     }
 }
-exports.WebSocketServiceImpl = WebSocketServiceImpl;
 /**
  * 认证中间件
  */
-function createAuthMiddleware(verifyToken) {
+export function createAuthMiddleware(verifyToken) {
     return async (socket, next) => {
         try {
             const token = socket.metadata.token;
@@ -499,7 +492,7 @@ function createAuthMiddleware(verifyToken) {
 /**
  * 速率限制中间件
  */
-function createRateLimitMiddleware(maxRequests, windowMs) {
+export function createRateLimitMiddleware(maxRequests, windowMs) {
     const requests = new Map();
     return (socket, next) => {
         const now = Date.now();

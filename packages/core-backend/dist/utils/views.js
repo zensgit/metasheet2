@@ -1,7 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.sanitizeViews = sanitizeViews;
-function sanitizeViews(input) {
+export function sanitizeViews(input) {
     if (!Array.isArray(input))
         return [];
     const out = [];

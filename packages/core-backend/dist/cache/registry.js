@@ -1,4 +1,3 @@
-"use strict";
 /**
  * CacheRegistry - Central cache management
  *
@@ -11,13 +10,11 @@
  * - Automatic metrics collection
  * - Type-safe operation
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.CacheRegistry = void 0;
-const metrics_1 = require("./metrics");
-class CacheRegistry {
+import { cacheMetrics } from './metrics';
+export class CacheRegistry {
     activeCache;
     implementations = new Map();
-    metrics = metrics_1.cacheMetrics;
+    metrics = cacheMetrics;
     constructor(defaultImpl) {
         this.activeCache = defaultImpl;
     }
@@ -109,5 +106,4 @@ class CacheRegistry {
         return Array.from(this.implementations.keys());
     }
 }
-exports.CacheRegistry = CacheRegistry;
 //# sourceMappingURL=registry.js.map

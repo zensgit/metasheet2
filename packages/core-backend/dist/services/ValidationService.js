@@ -1,14 +1,11 @@
-"use strict";
 /**
  * 验证服务实现
  * 基于 Zod 提供强大的数据验证和转换功能
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.OptionalSchemaImpl = exports.UnionSchemaImpl = exports.ArraySchemaImpl = exports.ObjectSchemaImpl = exports.BooleanSchemaImpl = exports.NumberSchemaImpl = exports.StringSchemaImpl = exports.ZodSchemaWrapper = exports.ValidationServiceImpl = void 0;
 // @ts-nocheck
-const zod_1 = require("zod");
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("../core/logger");
+import { z } from 'zod';
+import { EventEmitter } from 'eventemitter3';
+import { Logger } from '../core/logger';
 /**
  * Zod Schema 包装器
  */
@@ -51,13 +48,12 @@ class ZodSchemaWrapper {
         return new ZodSchemaWrapper(this.zodSchema.default(value));
     }
 }
-exports.ZodSchemaWrapper = ZodSchemaWrapper;
 /**
  * 字符串 Schema 实现
  */
 class StringSchemaImpl extends ZodSchemaWrapper {
     baseSchema;
-    constructor(baseSchema = zod_1.z.string()) {
+    constructor(baseSchema = z.string()) {
         super(baseSchema);
         this.baseSchema = baseSchema;
     }
@@ -83,13 +79,12 @@ class StringSchemaImpl extends ZodSchemaWrapper {
         return new StringSchemaImpl(this.baseSchema.uuid());
     }
 }
-exports.StringSchemaImpl = StringSchemaImpl;
 /**
  * 数字 Schema 实现
  */
 class NumberSchemaImpl extends ZodSchemaWrapper {
     baseSchema;
-    constructor(baseSchema = zod_1.z.number()) {
+    constructor(baseSchema = z.number()) {
         super(baseSchema);
         this.baseSchema = baseSchema;
     }
@@ -112,22 +107,20 @@ class NumberSchemaImpl extends ZodSchemaWrapper {
         return new NumberSchemaImpl(this.baseSchema.nonnegative());
     }
 }
-exports.NumberSchemaImpl = NumberSchemaImpl;
 /**
  * 布尔 Schema 实现
  */
 class BooleanSchemaImpl extends ZodSchemaWrapper {
     constructor() {
-        super(zod_1.z.boolean());
+        super(z.boolean());
     }
 }
-exports.BooleanSchemaImpl = BooleanSchemaImpl;
 /**
  * 对象 Schema 实现
  */
 class ObjectSchemaImpl extends ZodSchemaWrapper {
     baseSchema;
-    constructor(baseSchema = zod_1.z.object({})) {
+    constructor(baseSchema = z.object({})) {
         super(baseSchema);
         this.baseSchema = baseSchema;
     }
@@ -136,7 +129,7 @@ class ObjectSchemaImpl extends ZodSchemaWrapper {
         for (const [key, schema] of Object.entries(shape)) {
             zodShape[key] = schema.zodSchema || schema;
         }
-        return new ObjectSchemaImpl(zod_1.z.object(zodShape));
+        return new ObjectSchemaImpl(z.object(zodShape));
     }
     pick(keys) {
         return new ObjectSchemaImpl(this.baseSchema.pick(Object.fromEntries(keys.map(k => [k, true]))));
@@ -154,19 +147,18 @@ class ObjectSchemaImpl extends ZodSchemaWrapper {
         return new ObjectSchemaImpl(this.baseSchema.strict());
     }
 }
-exports.ObjectSchemaImpl = ObjectSchemaImpl;
 /**
  * 数组 Schema 实现
  */
 class ArraySchemaImpl extends ZodSchemaWrapper {
     baseSchema;
-    constructor(baseSchema = zod_1.z.array(zod_1.z.unknown())) {
+    constructor(baseSchema = z.array(z.unknown())) {
         super(baseSchema);
         this.baseSchema = baseSchema;
     }
     element(schema) {
         const zodSchema = schema.zodSchema || schema;
-        return new ArraySchemaImpl(zod_1.z.array(zodSchema));
+        return new ArraySchemaImpl(z.array(zodSchema));
     }
     min(length) {
         return new ArraySchemaImpl(this.baseSchema.min(length));
@@ -181,7 +173,6 @@ class ArraySchemaImpl extends ZodSchemaWrapper {
         return new ArraySchemaImpl(this.baseSchema.nonempty());
     }
 }
-exports.ArraySchemaImpl = ArraySchemaImpl;
 /**
  * 联合 Schema 实现
  */
@@ -193,10 +184,9 @@ class UnionSchemaImpl extends ZodSchemaWrapper {
     }
     or(schema) {
         const zodSchema = schema.zodSchema || schema;
-        return new UnionSchemaImpl(zod_1.z.union([this.baseSchema, zodSchema]));
+        return new UnionSchemaImpl(z.union([this.baseSchema, zodSchema]));
     }
 }
-exports.UnionSchemaImpl = UnionSchemaImpl;
 /**
  * 可选 Schema 实现
  */
@@ -206,17 +196,16 @@ class OptionalSchemaImpl extends ZodSchemaWrapper {
         super(zodSchema.optional());
     }
 }
-exports.OptionalSchemaImpl = OptionalSchemaImpl;
 /**
  * 验证服务实现
  */
-class ValidationServiceImpl extends eventemitter3_1.EventEmitter {
+export class ValidationServiceImpl extends EventEmitter {
     schemas = new Map();
     validators = new Map();
     logger;
     constructor() {
         super();
-        this.logger = new logger_1.Logger('ValidationService');
+        this.logger = new Logger('ValidationService');
         // 注册一些常用的自定义验证器
         this.setupCommonValidators();
     }
@@ -307,7 +296,7 @@ class ValidationServiceImpl extends eventemitter3_1.EventEmitter {
     }
     union() {
         // 创建一个基础的联合类型，需要调用 or() 来添加选项
-        return new UnionSchemaImpl(zod_1.z.union([zod_1.z.never(), zod_1.z.never()]));
+        return new UnionSchemaImpl(z.union([z.never(), z.never()]));
     }
     optional(schema) {
         return new OptionalSchemaImpl(schema);
@@ -316,37 +305,37 @@ class ValidationServiceImpl extends eventemitter3_1.EventEmitter {
      * 创建自定义验证 Schema
      */
     custom(validator) {
-        return new ZodSchemaWrapper(zod_1.z.custom(validator));
+        return new ZodSchemaWrapper(z.custom(validator));
     }
     /**
      * 创建枚举 Schema
      */
     enum(values) {
-        return new ZodSchemaWrapper(zod_1.z.enum(values));
+        return new ZodSchemaWrapper(z.enum(values));
     }
     /**
      * 创建字面值 Schema
      */
     literal(value) {
-        return new ZodSchemaWrapper(zod_1.z.literal(value));
+        return new ZodSchemaWrapper(z.literal(value));
     }
     /**
      * 创建日期 Schema
      */
     date() {
-        return new ZodSchemaWrapper(zod_1.z.date());
+        return new ZodSchemaWrapper(z.date());
     }
     /**
      * 创建 JSON Schema（任意对象）
      */
     json() {
-        return new ZodSchemaWrapper(zod_1.z.any());
+        return new ZodSchemaWrapper(z.any());
     }
     /**
      * 创建递归 Schema
      */
     lazy(fn) {
-        return new ZodSchemaWrapper(zod_1.z.lazy(() => {
+        return new ZodSchemaWrapper(z.lazy(() => {
             const schema = fn();
             return schema.zodSchema || schema;
         }));
@@ -471,5 +460,5 @@ class ValidationServiceImpl extends eventemitter3_1.EventEmitter {
         this.emit('service:cleared');
     }
 }
-exports.ValidationServiceImpl = ValidationServiceImpl;
+export { ZodSchemaWrapper, StringSchemaImpl, NumberSchemaImpl, BooleanSchemaImpl, ObjectSchemaImpl, ArraySchemaImpl, UnionSchemaImpl, OptionalSchemaImpl };
 //# sourceMappingURL=ValidationService.js.map

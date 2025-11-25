@@ -1,132 +1,129 @@
-"use strict";
 /**
  * 插件能力系统
  * 定义和管理插件的各种能力，提供能力验证和权限检查
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.CapabilityUtils = exports.PluginCapabilityManager = exports.CAPABILITY_DESCRIPTIONS = exports.CAPABILITY_PRIORITY = exports.CAPABILITY_CONFLICTS = exports.CAPABILITY_DEPENDENCIES = void 0;
-const eventemitter3_1 = require("eventemitter3");
+import { EventEmitter } from 'eventemitter3';
 // Use value imports for runtime enums/constants; Phase A tolerates any typing looseness
-const plugin_1 = require("../types/plugin");
-const logger_1 = require("../core/logger");
+import { PluginCapability, CAPABILITY_PERMISSIONS } from '../types/plugin';
+import { Logger } from '../core/logger';
 /**
  * 能力依赖关系定义
  */
-exports.CAPABILITY_DEPENDENCIES = {
-    [plugin_1.PluginCapability.VIEW_PROVIDER]: [plugin_1.PluginCapability.CUSTOM_COMPONENT],
-    [plugin_1.PluginCapability.CUSTOM_COMPONENT]: [],
-    [plugin_1.PluginCapability.WORKFLOW_NODE]: [plugin_1.PluginCapability.DATA_SOURCE],
-    [plugin_1.PluginCapability.TRIGGER_PROVIDER]: [],
-    [plugin_1.PluginCapability.ACTION_PROVIDER]: [plugin_1.PluginCapability.NOTIFICATION_CHANNEL],
-    [plugin_1.PluginCapability.DATA_SOURCE]: [],
-    [plugin_1.PluginCapability.FORMULA_FUNCTION]: [],
-    [plugin_1.PluginCapability.FIELD_TYPE]: [],
-    [plugin_1.PluginCapability.API_ENDPOINT]: [],
-    [plugin_1.PluginCapability.WEBHOOK_HANDLER]: [plugin_1.PluginCapability.API_ENDPOINT],
-    [plugin_1.PluginCapability.EXTERNAL_AUTH]: [plugin_1.PluginCapability.AUTH_PROVIDER],
-    [plugin_1.PluginCapability.NOTIFICATION_CHANNEL]: [],
-    [plugin_1.PluginCapability.EMAIL_TEMPLATE]: [plugin_1.PluginCapability.NOTIFICATION_CHANNEL],
-    [plugin_1.PluginCapability.AUTH_PROVIDER]: [],
-    [plugin_1.PluginCapability.PERMISSION_PROVIDER]: [plugin_1.PluginCapability.AUTH_PROVIDER],
-    [plugin_1.PluginCapability.BACKGROUND_TASK]: [plugin_1.PluginCapability.SCHEDULED_JOB],
-    [plugin_1.PluginCapability.SCHEDULED_JOB]: [],
-    [plugin_1.PluginCapability.CACHE_PROVIDER]: [],
-    [plugin_1.PluginCapability.MENU_ITEM]: [plugin_1.PluginCapability.CUSTOM_COMPONENT],
-    [plugin_1.PluginCapability.TOOLBAR_BUTTON]: [plugin_1.PluginCapability.CUSTOM_COMPONENT],
-    [plugin_1.PluginCapability.CONTEXT_MENU]: [plugin_1.PluginCapability.CUSTOM_COMPONENT],
-    [plugin_1.PluginCapability.SETTINGS_PAGE]: [plugin_1.PluginCapability.CUSTOM_COMPONENT]
+export const CAPABILITY_DEPENDENCIES = {
+    [PluginCapability.VIEW_PROVIDER]: [PluginCapability.CUSTOM_COMPONENT],
+    [PluginCapability.CUSTOM_COMPONENT]: [],
+    [PluginCapability.WORKFLOW_NODE]: [PluginCapability.DATA_SOURCE],
+    [PluginCapability.TRIGGER_PROVIDER]: [],
+    [PluginCapability.ACTION_PROVIDER]: [PluginCapability.NOTIFICATION_CHANNEL],
+    [PluginCapability.DATA_SOURCE]: [],
+    [PluginCapability.FORMULA_FUNCTION]: [],
+    [PluginCapability.FIELD_TYPE]: [],
+    [PluginCapability.API_ENDPOINT]: [],
+    [PluginCapability.WEBHOOK_HANDLER]: [PluginCapability.API_ENDPOINT],
+    [PluginCapability.EXTERNAL_AUTH]: [PluginCapability.AUTH_PROVIDER],
+    [PluginCapability.NOTIFICATION_CHANNEL]: [],
+    [PluginCapability.EMAIL_TEMPLATE]: [PluginCapability.NOTIFICATION_CHANNEL],
+    [PluginCapability.AUTH_PROVIDER]: [],
+    [PluginCapability.PERMISSION_PROVIDER]: [PluginCapability.AUTH_PROVIDER],
+    [PluginCapability.BACKGROUND_TASK]: [PluginCapability.SCHEDULED_JOB],
+    [PluginCapability.SCHEDULED_JOB]: [],
+    [PluginCapability.CACHE_PROVIDER]: [],
+    [PluginCapability.MENU_ITEM]: [PluginCapability.CUSTOM_COMPONENT],
+    [PluginCapability.TOOLBAR_BUTTON]: [PluginCapability.CUSTOM_COMPONENT],
+    [PluginCapability.CONTEXT_MENU]: [PluginCapability.CUSTOM_COMPONENT],
+    [PluginCapability.SETTINGS_PAGE]: [PluginCapability.CUSTOM_COMPONENT]
 };
 /**
  * 能力冲突定义（互斥的能力）
  */
-exports.CAPABILITY_CONFLICTS = {
-    [plugin_1.PluginCapability.VIEW_PROVIDER]: [],
-    [plugin_1.PluginCapability.CUSTOM_COMPONENT]: [],
-    [plugin_1.PluginCapability.WORKFLOW_NODE]: [],
-    [plugin_1.PluginCapability.TRIGGER_PROVIDER]: [],
-    [plugin_1.PluginCapability.ACTION_PROVIDER]: [],
-    [plugin_1.PluginCapability.DATA_SOURCE]: [],
-    [plugin_1.PluginCapability.FORMULA_FUNCTION]: [],
-    [plugin_1.PluginCapability.FIELD_TYPE]: [],
-    [plugin_1.PluginCapability.API_ENDPOINT]: [],
-    [plugin_1.PluginCapability.WEBHOOK_HANDLER]: [],
-    [plugin_1.PluginCapability.EXTERNAL_AUTH]: [plugin_1.PluginCapability.AUTH_PROVIDER], // 外部认证与内置认证冲突
-    [plugin_1.PluginCapability.NOTIFICATION_CHANNEL]: [],
-    [plugin_1.PluginCapability.EMAIL_TEMPLATE]: [],
-    [plugin_1.PluginCapability.AUTH_PROVIDER]: [plugin_1.PluginCapability.EXTERNAL_AUTH], // 内置认证与外部认证冲突
-    [plugin_1.PluginCapability.PERMISSION_PROVIDER]: [],
-    [plugin_1.PluginCapability.BACKGROUND_TASK]: [],
-    [plugin_1.PluginCapability.SCHEDULED_JOB]: [],
-    [plugin_1.PluginCapability.CACHE_PROVIDER]: [],
-    [plugin_1.PluginCapability.MENU_ITEM]: [],
-    [plugin_1.PluginCapability.TOOLBAR_BUTTON]: [],
-    [plugin_1.PluginCapability.CONTEXT_MENU]: [],
-    [plugin_1.PluginCapability.SETTINGS_PAGE]: []
+export const CAPABILITY_CONFLICTS = {
+    [PluginCapability.VIEW_PROVIDER]: [],
+    [PluginCapability.CUSTOM_COMPONENT]: [],
+    [PluginCapability.WORKFLOW_NODE]: [],
+    [PluginCapability.TRIGGER_PROVIDER]: [],
+    [PluginCapability.ACTION_PROVIDER]: [],
+    [PluginCapability.DATA_SOURCE]: [],
+    [PluginCapability.FORMULA_FUNCTION]: [],
+    [PluginCapability.FIELD_TYPE]: [],
+    [PluginCapability.API_ENDPOINT]: [],
+    [PluginCapability.WEBHOOK_HANDLER]: [],
+    [PluginCapability.EXTERNAL_AUTH]: [PluginCapability.AUTH_PROVIDER], // 外部认证与内置认证冲突
+    [PluginCapability.NOTIFICATION_CHANNEL]: [],
+    [PluginCapability.EMAIL_TEMPLATE]: [],
+    [PluginCapability.AUTH_PROVIDER]: [PluginCapability.EXTERNAL_AUTH], // 内置认证与外部认证冲突
+    [PluginCapability.PERMISSION_PROVIDER]: [],
+    [PluginCapability.BACKGROUND_TASK]: [],
+    [PluginCapability.SCHEDULED_JOB]: [],
+    [PluginCapability.CACHE_PROVIDER]: [],
+    [PluginCapability.MENU_ITEM]: [],
+    [PluginCapability.TOOLBAR_BUTTON]: [],
+    [PluginCapability.CONTEXT_MENU]: [],
+    [PluginCapability.SETTINGS_PAGE]: []
 };
 /**
  * 能力优先级定义（用于解决冲突时的选择）
  */
-exports.CAPABILITY_PRIORITY = {
-    [plugin_1.PluginCapability.AUTH_PROVIDER]: 10,
-    [plugin_1.PluginCapability.PERMISSION_PROVIDER]: 9,
-    [plugin_1.PluginCapability.DATA_SOURCE]: 8,
-    [plugin_1.PluginCapability.CACHE_PROVIDER]: 7,
-    [plugin_1.PluginCapability.NOTIFICATION_CHANNEL]: 6,
-    [plugin_1.PluginCapability.API_ENDPOINT]: 5,
-    [plugin_1.PluginCapability.VIEW_PROVIDER]: 4,
-    [plugin_1.PluginCapability.WORKFLOW_NODE]: 3,
-    [plugin_1.PluginCapability.TRIGGER_PROVIDER]: 3,
-    [plugin_1.PluginCapability.ACTION_PROVIDER]: 3,
-    [plugin_1.PluginCapability.EXTERNAL_AUTH]: 2,
-    [plugin_1.PluginCapability.WEBHOOK_HANDLER]: 2,
-    [plugin_1.PluginCapability.SCHEDULED_JOB]: 2,
-    [plugin_1.PluginCapability.BACKGROUND_TASK]: 2,
-    [plugin_1.PluginCapability.FORMULA_FUNCTION]: 1,
-    [plugin_1.PluginCapability.FIELD_TYPE]: 1,
-    [plugin_1.PluginCapability.EMAIL_TEMPLATE]: 1,
-    [plugin_1.PluginCapability.CUSTOM_COMPONENT]: 1,
-    [plugin_1.PluginCapability.MENU_ITEM]: 0,
-    [plugin_1.PluginCapability.TOOLBAR_BUTTON]: 0,
-    [plugin_1.PluginCapability.CONTEXT_MENU]: 0,
-    [plugin_1.PluginCapability.SETTINGS_PAGE]: 0
+export const CAPABILITY_PRIORITY = {
+    [PluginCapability.AUTH_PROVIDER]: 10,
+    [PluginCapability.PERMISSION_PROVIDER]: 9,
+    [PluginCapability.DATA_SOURCE]: 8,
+    [PluginCapability.CACHE_PROVIDER]: 7,
+    [PluginCapability.NOTIFICATION_CHANNEL]: 6,
+    [PluginCapability.API_ENDPOINT]: 5,
+    [PluginCapability.VIEW_PROVIDER]: 4,
+    [PluginCapability.WORKFLOW_NODE]: 3,
+    [PluginCapability.TRIGGER_PROVIDER]: 3,
+    [PluginCapability.ACTION_PROVIDER]: 3,
+    [PluginCapability.EXTERNAL_AUTH]: 2,
+    [PluginCapability.WEBHOOK_HANDLER]: 2,
+    [PluginCapability.SCHEDULED_JOB]: 2,
+    [PluginCapability.BACKGROUND_TASK]: 2,
+    [PluginCapability.FORMULA_FUNCTION]: 1,
+    [PluginCapability.FIELD_TYPE]: 1,
+    [PluginCapability.EMAIL_TEMPLATE]: 1,
+    [PluginCapability.CUSTOM_COMPONENT]: 1,
+    [PluginCapability.MENU_ITEM]: 0,
+    [PluginCapability.TOOLBAR_BUTTON]: 0,
+    [PluginCapability.CONTEXT_MENU]: 0,
+    [PluginCapability.SETTINGS_PAGE]: 0
 };
 /**
  * 能力描述
  */
-exports.CAPABILITY_DESCRIPTIONS = {
-    [plugin_1.PluginCapability.VIEW_PROVIDER]: '提供自定义视图（如看板、甘特图等）',
-    [plugin_1.PluginCapability.CUSTOM_COMPONENT]: '提供自定义UI组件',
-    [plugin_1.PluginCapability.WORKFLOW_NODE]: '提供工作流节点',
-    [plugin_1.PluginCapability.TRIGGER_PROVIDER]: '提供触发器',
-    [plugin_1.PluginCapability.ACTION_PROVIDER]: '提供动作执行器',
-    [plugin_1.PluginCapability.DATA_SOURCE]: '提供数据源连接',
-    [plugin_1.PluginCapability.FORMULA_FUNCTION]: '提供自定义公式函数',
-    [plugin_1.PluginCapability.FIELD_TYPE]: '提供自定义字段类型',
-    [plugin_1.PluginCapability.API_ENDPOINT]: '提供API端点',
-    [plugin_1.PluginCapability.WEBHOOK_HANDLER]: '处理Webhook请求',
-    [plugin_1.PluginCapability.EXTERNAL_AUTH]: '提供外部认证集成',
-    [plugin_1.PluginCapability.NOTIFICATION_CHANNEL]: '提供通知渠道',
-    [plugin_1.PluginCapability.EMAIL_TEMPLATE]: '提供邮件模板',
-    [plugin_1.PluginCapability.AUTH_PROVIDER]: '提供认证服务',
-    [plugin_1.PluginCapability.PERMISSION_PROVIDER]: '提供权限控制',
-    [plugin_1.PluginCapability.BACKGROUND_TASK]: '提供后台任务',
-    [plugin_1.PluginCapability.SCHEDULED_JOB]: '提供定时任务',
-    [plugin_1.PluginCapability.CACHE_PROVIDER]: '提供缓存服务',
-    [plugin_1.PluginCapability.MENU_ITEM]: '提供菜单项',
-    [plugin_1.PluginCapability.TOOLBAR_BUTTON]: '提供工具栏按钮',
-    [plugin_1.PluginCapability.CONTEXT_MENU]: '提供上下文菜单',
-    [plugin_1.PluginCapability.SETTINGS_PAGE]: '提供设置页面'
+export const CAPABILITY_DESCRIPTIONS = {
+    [PluginCapability.VIEW_PROVIDER]: '提供自定义视图（如看板、甘特图等）',
+    [PluginCapability.CUSTOM_COMPONENT]: '提供自定义UI组件',
+    [PluginCapability.WORKFLOW_NODE]: '提供工作流节点',
+    [PluginCapability.TRIGGER_PROVIDER]: '提供触发器',
+    [PluginCapability.ACTION_PROVIDER]: '提供动作执行器',
+    [PluginCapability.DATA_SOURCE]: '提供数据源连接',
+    [PluginCapability.FORMULA_FUNCTION]: '提供自定义公式函数',
+    [PluginCapability.FIELD_TYPE]: '提供自定义字段类型',
+    [PluginCapability.API_ENDPOINT]: '提供API端点',
+    [PluginCapability.WEBHOOK_HANDLER]: '处理Webhook请求',
+    [PluginCapability.EXTERNAL_AUTH]: '提供外部认证集成',
+    [PluginCapability.NOTIFICATION_CHANNEL]: '提供通知渠道',
+    [PluginCapability.EMAIL_TEMPLATE]: '提供邮件模板',
+    [PluginCapability.AUTH_PROVIDER]: '提供认证服务',
+    [PluginCapability.PERMISSION_PROVIDER]: '提供权限控制',
+    [PluginCapability.BACKGROUND_TASK]: '提供后台任务',
+    [PluginCapability.SCHEDULED_JOB]: '提供定时任务',
+    [PluginCapability.CACHE_PROVIDER]: '提供缓存服务',
+    [PluginCapability.MENU_ITEM]: '提供菜单项',
+    [PluginCapability.TOOLBAR_BUTTON]: '提供工具栏按钮',
+    [PluginCapability.CONTEXT_MENU]: '提供上下文菜单',
+    [PluginCapability.SETTINGS_PAGE]: '提供设置页面'
 };
 /**
  * 插件能力管理器
  */
-class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
+export class PluginCapabilityManager extends EventEmitter {
     registrations = new Map();
     pluginCapabilities = new Map();
     logger;
     constructor() {
         super();
-        this.logger = new logger_1.Logger('PluginCapabilityManager');
+        this.logger = new Logger('PluginCapabilityManager');
     }
     /**
      * 验证插件能力
@@ -184,7 +181,7 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
             pluginName,
             capability,
             implementation,
-            priority: exports.CAPABILITY_PRIORITY[capability],
+            priority: CAPABILITY_PRIORITY[capability],
             metadata,
             registeredAt: new Date()
         };
@@ -289,7 +286,7 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
         const toProcess = [...capabilities];
         while (toProcess.length > 0) {
             const current = toProcess.shift();
-            const dependencies = exports.CAPABILITY_DEPENDENCIES[current] || [];
+            const dependencies = CAPABILITY_DEPENDENCIES[current] || [];
             for (const dep of dependencies) {
                 if (!resolved.has(dep)) {
                     resolved.add(dep);
@@ -306,7 +303,7 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
         const conflicts = [];
         for (let i = 0; i < capabilities.length; i++) {
             const capability = capabilities[i];
-            const conflictsWith = exports.CAPABILITY_CONFLICTS[capability] || [];
+            const conflictsWith = CAPABILITY_CONFLICTS[capability] || [];
             for (const conflict of conflictsWith) {
                 if (capabilities.includes(conflict) && !conflicts.includes(conflict)) {
                     conflicts.push(conflict);
@@ -321,7 +318,7 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
     getRequiredPermissions(capabilities) {
         const permissions = [];
         for (const capability of capabilities) {
-            const capabilityPermissions = plugin_1.CAPABILITY_PERMISSIONS[capability] || [];
+            const capabilityPermissions = CAPABILITY_PERMISSIONS[capability] || [];
             permissions.push(...capabilityPermissions);
         }
         return permissions;
@@ -332,37 +329,37 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
     validateCapabilityImplementation(manifest, capability) {
         const result = { valid: true, errors: [], warnings: [] };
         switch (capability) {
-            case plugin_1.PluginCapability.VIEW_PROVIDER:
+            case PluginCapability.VIEW_PROVIDER:
                 if (!manifest.contributes?.views || manifest.contributes.views.length === 0) {
                     result.errors.push('VIEW_PROVIDER capability requires views contribution in manifest');
                     result.valid = false;
                 }
                 break;
-            case plugin_1.PluginCapability.FORMULA_FUNCTION:
+            case PluginCapability.FORMULA_FUNCTION:
                 if (!manifest.contributes?.formulas || manifest.contributes.formulas.length === 0) {
                     result.errors.push('FORMULA_FUNCTION capability requires formulas contribution in manifest');
                     result.valid = false;
                 }
                 break;
-            case plugin_1.PluginCapability.FIELD_TYPE:
+            case PluginCapability.FIELD_TYPE:
                 if (!manifest.contributes?.fieldTypes || manifest.contributes.fieldTypes.length === 0) {
                     result.errors.push('FIELD_TYPE capability requires fieldTypes contribution in manifest');
                     result.valid = false;
                 }
                 break;
-            case plugin_1.PluginCapability.WORKFLOW_NODE:
+            case PluginCapability.WORKFLOW_NODE:
                 if (!manifest.contributes?.triggers && !manifest.contributes?.actions) {
                     result.errors.push('WORKFLOW_NODE capability requires triggers or actions contribution in manifest');
                     result.valid = false;
                 }
                 break;
-            case plugin_1.PluginCapability.API_ENDPOINT:
+            case PluginCapability.API_ENDPOINT:
                 if (!manifest.main?.backend) {
                     result.errors.push('API_ENDPOINT capability requires backend entry point in manifest');
                     result.valid = false;
                 }
                 break;
-            case plugin_1.PluginCapability.SETTINGS_PAGE:
+            case PluginCapability.SETTINGS_PAGE:
                 if (!manifest.contributes?.configuration) {
                     result.warnings.push('SETTINGS_PAGE capability should include configuration contribution in manifest');
                 }
@@ -418,48 +415,47 @@ class PluginCapabilityManager extends eventemitter3_1.EventEmitter {
         this.emit('capabilities:cleared');
     }
 }
-exports.PluginCapabilityManager = PluginCapabilityManager;
 /**
  * 能力工具函数
  */
-exports.CapabilityUtils = {
+export const CapabilityUtils = {
     /**
      * 获取能力的描述
      */
     getDescription(capability) {
-        return exports.CAPABILITY_DESCRIPTIONS[capability] || '未知能力';
+        return CAPABILITY_DESCRIPTIONS[capability] || '未知能力';
     },
     /**
      * 获取能力的优先级
      */
     getPriority(capability) {
-        return exports.CAPABILITY_PRIORITY[capability] || 0;
+        return CAPABILITY_PRIORITY[capability] || 0;
     },
     /**
      * 检查两个能力是否冲突
      */
     areConflicting(cap1, cap2) {
-        const conflicts1 = exports.CAPABILITY_CONFLICTS[cap1] || [];
-        const conflicts2 = exports.CAPABILITY_CONFLICTS[cap2] || [];
+        const conflicts1 = CAPABILITY_CONFLICTS[cap1] || [];
+        const conflicts2 = CAPABILITY_CONFLICTS[cap2] || [];
         return conflicts1.includes(cap2) || conflicts2.includes(cap1);
     },
     /**
      * 获取能力的依赖
      */
     getDependencies(capability) {
-        return exports.CAPABILITY_DEPENDENCIES[capability] || [];
+        return CAPABILITY_DEPENDENCIES[capability] || [];
     },
     /**
      * 获取能力所需的权限
      */
     getRequiredPermissions(capability) {
-        return plugin_1.CAPABILITY_PERMISSIONS[capability] || [];
+        return CAPABILITY_PERMISSIONS[capability] || [];
     },
     /**
      * 按优先级排序能力
      */
     sortByPriority(capabilities) {
-        return capabilities.sort((a, b) => exports.CAPABILITY_PRIORITY[b] - exports.CAPABILITY_PRIORITY[a]);
+        return capabilities.sort((a, b) => CAPABILITY_PRIORITY[b] - CAPABILITY_PRIORITY[a]);
     }
 };
 //# sourceMappingURL=PluginCapabilities.js.map

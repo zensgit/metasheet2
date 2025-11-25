@@ -10,136 +10,136 @@ export declare const PluginCapabilitiesSchema: z.ZodObject<{
         write: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         execute: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        read?: string[];
-        write?: string[];
-        execute?: boolean;
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        execute?: boolean | undefined;
     }, {
-        read?: string[];
-        write?: string[];
-        execute?: boolean;
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        execute?: boolean | undefined;
     }>>;
     http: z.ZodOptional<z.ZodObject<{
         internal: z.ZodOptional<z.ZodBoolean>;
         external: z.ZodOptional<z.ZodBoolean>;
         allowedDomains: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     }, "strip", z.ZodTypeAny, {
-        internal?: boolean;
-        external?: boolean;
-        allowedDomains?: string[];
+        internal?: boolean | undefined;
+        external?: boolean | undefined;
+        allowedDomains?: string[] | undefined;
     }, {
-        internal?: boolean;
-        external?: boolean;
-        allowedDomains?: string[];
+        internal?: boolean | undefined;
+        external?: boolean | undefined;
+        allowedDomains?: string[] | undefined;
     }>>;
     filesystem: z.ZodOptional<z.ZodObject<{
         read: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         write: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         temp: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        read?: string[];
-        write?: string[];
-        temp?: boolean;
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        temp?: boolean | undefined;
     }, {
-        read?: string[];
-        write?: string[];
-        temp?: boolean;
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        temp?: boolean | undefined;
     }>>;
     events: z.ZodOptional<z.ZodObject<{
         emit: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         listen: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     }, "strip", z.ZodTypeAny, {
-        emit?: string[];
-        listen?: string[];
+        emit?: string[] | undefined;
+        listen?: string[] | undefined;
     }, {
-        emit?: string[];
-        listen?: string[];
+        emit?: string[] | undefined;
+        listen?: string[] | undefined;
     }>>;
     system: z.ZodOptional<z.ZodObject<{
         env: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
         spawn: z.ZodOptional<z.ZodBoolean>;
         network: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        env?: string[];
-        spawn?: boolean;
-        network?: boolean;
+        env?: string[] | undefined;
+        spawn?: boolean | undefined;
+        network?: boolean | undefined;
     }, {
-        env?: string[];
-        spawn?: boolean;
-        network?: boolean;
+        env?: string[] | undefined;
+        spawn?: boolean | undefined;
+        network?: boolean | undefined;
     }>>;
     ui: z.ZodOptional<z.ZodObject<{
         views: z.ZodOptional<z.ZodBoolean>;
         modals: z.ZodOptional<z.ZodBoolean>;
         notifications: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        views?: boolean;
-        modals?: boolean;
-        notifications?: boolean;
+        views?: boolean | undefined;
+        modals?: boolean | undefined;
+        notifications?: boolean | undefined;
     }, {
-        views?: boolean;
-        modals?: boolean;
-        notifications?: boolean;
+        views?: boolean | undefined;
+        modals?: boolean | undefined;
+        notifications?: boolean | undefined;
     }>>;
 }, "strip", z.ZodTypeAny, {
     database?: {
-        read?: string[];
-        write?: string[];
-        execute?: boolean;
-    };
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        execute?: boolean | undefined;
+    } | undefined;
     http?: {
-        internal?: boolean;
-        external?: boolean;
-        allowedDomains?: string[];
-    };
-    events?: {
-        emit?: string[];
-        listen?: string[];
-    };
-    system?: {
-        env?: string[];
-        spawn?: boolean;
-        network?: boolean;
-    };
+        internal?: boolean | undefined;
+        external?: boolean | undefined;
+        allowedDomains?: string[] | undefined;
+    } | undefined;
     filesystem?: {
-        read?: string[];
-        write?: string[];
-        temp?: boolean;
-    };
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        temp?: boolean | undefined;
+    } | undefined;
+    events?: {
+        emit?: string[] | undefined;
+        listen?: string[] | undefined;
+    } | undefined;
+    system?: {
+        env?: string[] | undefined;
+        spawn?: boolean | undefined;
+        network?: boolean | undefined;
+    } | undefined;
     ui?: {
-        views?: boolean;
-        modals?: boolean;
-        notifications?: boolean;
-    };
+        views?: boolean | undefined;
+        modals?: boolean | undefined;
+        notifications?: boolean | undefined;
+    } | undefined;
 }, {
     database?: {
-        read?: string[];
-        write?: string[];
-        execute?: boolean;
-    };
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        execute?: boolean | undefined;
+    } | undefined;
     http?: {
-        internal?: boolean;
-        external?: boolean;
-        allowedDomains?: string[];
-    };
-    events?: {
-        emit?: string[];
-        listen?: string[];
-    };
-    system?: {
-        env?: string[];
-        spawn?: boolean;
-        network?: boolean;
-    };
+        internal?: boolean | undefined;
+        external?: boolean | undefined;
+        allowedDomains?: string[] | undefined;
+    } | undefined;
     filesystem?: {
-        read?: string[];
-        write?: string[];
-        temp?: boolean;
-    };
+        read?: string[] | undefined;
+        write?: string[] | undefined;
+        temp?: boolean | undefined;
+    } | undefined;
+    events?: {
+        emit?: string[] | undefined;
+        listen?: string[] | undefined;
+    } | undefined;
+    system?: {
+        env?: string[] | undefined;
+        spawn?: boolean | undefined;
+        network?: boolean | undefined;
+    } | undefined;
     ui?: {
-        views?: boolean;
-        modals?: boolean;
-        notifications?: boolean;
-    };
+        views?: boolean | undefined;
+        modals?: boolean | undefined;
+        notifications?: boolean | undefined;
+    } | undefined;
 }>;
 export declare enum CapabilityLevel {
     MINIMAL = "minimal",// Basic read-only access

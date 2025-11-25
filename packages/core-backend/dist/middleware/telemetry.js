@@ -1,20 +1,13 @@
-"use strict";
 /**
  * Telemetry middleware for Express
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.telemetryMiddleware = telemetryMiddleware;
-exports.telemetryErrorHandler = telemetryErrorHandler;
-exports.traceDbQuery = traceDbQuery;
-exports.traceCacheOperation = traceCacheOperation;
-exports.traceAsync = traceAsync;
-const TelemetryService_1 = require("../services/TelemetryService");
+import { getTelemetry } from '../services/TelemetryService';
 /**
  * Telemetry middleware
  * Adds tracing, logging, and metrics to HTTP requests
  */
-function telemetryMiddleware() {
-    const telemetry = (0, TelemetryService_1.getTelemetry)();
+export function telemetryMiddleware() {
+    const telemetry = getTelemetry();
     return (req, res, next) => {
         // Use telemetry's built-in Express middleware
         const middleware = telemetry.expressMiddleware();
@@ -51,7 +44,7 @@ function telemetryMiddleware() {
 /**
  * Error handling middleware with telemetry
  */
-function telemetryErrorHandler() {
+export function telemetryErrorHandler() {
     return (err, req, res, next) => {
         // Log error
         if (req.logger) {
@@ -83,8 +76,8 @@ function telemetryErrorHandler() {
 /**
  * Database query tracing helper
  */
-function traceDbQuery(operation, table, queryFn) {
-    const telemetry = (0, TelemetryService_1.getTelemetry)();
+export function traceDbQuery(operation, table, queryFn) {
+    const telemetry = getTelemetry();
     const tracer = telemetry.getTracer('database');
     const metrics = telemetry.getMetrics();
     return tracer.startActiveSpan(`db.${operation}.${table}`, async (span) => {
@@ -117,8 +110,8 @@ function traceDbQuery(operation, table, queryFn) {
 /**
  * Cache operation tracing helper
  */
-function traceCacheOperation(operation, key, operationFn) {
-    const telemetry = (0, TelemetryService_1.getTelemetry)();
+export function traceCacheOperation(operation, key, operationFn) {
+    const telemetry = getTelemetry();
     const tracer = telemetry.getTracer('cache');
     const metrics = telemetry.getMetrics();
     return tracer.startActiveSpan(`cache.${operation}`, async (span) => {
@@ -154,8 +147,8 @@ function traceCacheOperation(operation, key, operationFn) {
 /**
  * Async operation tracing helper
  */
-async function traceAsync(name, fn, attributes) {
-    const telemetry = (0, TelemetryService_1.getTelemetry)();
+export async function traceAsync(name, fn, attributes) {
+    const telemetry = getTelemetry();
     const tracer = telemetry.getTracer('async');
     return tracer.startActiveSpan(name, { attributes }, async (span) => {
         try {

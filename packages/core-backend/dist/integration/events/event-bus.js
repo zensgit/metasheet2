@@ -1,14 +1,11 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.eventBus = exports.EventBus = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const metrics_1 = require("../metrics/metrics");
+import { EventEmitter } from 'eventemitter3';
+import { coreMetrics } from '../metrics/metrics';
 let _idSeq = 0;
-class EventBus {
-    emitter = new eventemitter3_1.EventEmitter();
+export class EventBus {
+    emitter = new EventEmitter();
     listeners = new Map();
     dispatch(type, payload) {
-        metrics_1.coreMetrics.inc('eventsEmitted');
+        coreMetrics.inc('eventsEmitted');
         this.emitter.emit(type, payload);
         // regex listeners
         for (const meta of this.listeners.values()) {
@@ -82,6 +79,5 @@ class EventBus {
         return this.subscribe(pattern, handler, plugin);
     }
 }
-exports.EventBus = EventBus;
-exports.eventBus = new EventBus();
+export const eventBus = new EventBus();
 //# sourceMappingURL=event-bus.js.map

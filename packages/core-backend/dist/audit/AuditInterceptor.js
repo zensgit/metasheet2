@@ -1,14 +1,8 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.AuditInterceptor = void 0;
-exports.enableAuditInterceptor = enableAuditInterceptor;
-exports.Audited = Audited;
-exports.Compliant = Compliant;
-const AuditService_1 = require("./AuditService");
+import { AuditService } from './AuditService';
 /**
  * Database query interceptor for automatic audit logging
  */
-class AuditInterceptor {
+export class AuditInterceptor {
     auditService;
     enabledTables;
     excludedOperations;
@@ -170,11 +164,10 @@ class AuditInterceptor {
         return changes;
     }
 }
-exports.AuditInterceptor = AuditInterceptor;
 /**
  * Monkey patch pg Pool to add audit interceptor
  */
-function enableAuditInterceptor(pool, auditService, config) {
+export function enableAuditInterceptor(pool, auditService, config) {
     const interceptor = new AuditInterceptor(auditService, config);
     const originalQuery = pool.query.bind(pool);
     pool.query = async function (text, params) {
@@ -187,11 +180,11 @@ function enableAuditInterceptor(pool, auditService, config) {
 /**
  * Decorator for methods that should trigger audit logging
  */
-function Audited(eventType, eventCategory = 'SYSTEM') {
+export function Audited(eventType, eventCategory = 'SYSTEM') {
     return function (target, propertyKey, descriptor) {
         const originalMethod = descriptor.value;
         descriptor.value = async function (...args) {
-            const auditService = this.auditService || new AuditService_1.AuditService();
+            const auditService = this.auditService || new AuditService();
             const startTime = Date.now();
             try {
                 const result = await originalMethod.apply(this, args);
@@ -229,11 +222,11 @@ function Audited(eventType, eventCategory = 'SYSTEM') {
 /**
  * Decorator for compliance-sensitive operations
  */
-function Compliant(regulation, requirement) {
+export function Compliant(regulation, requirement) {
     return function (target, propertyKey, descriptor) {
         const originalMethod = descriptor.value;
         descriptor.value = async function (...args) {
-            const auditService = this.auditService || new AuditService_1.AuditService();
+            const auditService = this.auditService || new AuditService();
             // Log compliance event before operation
             await auditService.logComplianceEvent(regulation, {
                 requirement,

@@ -1,12 +1,5 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.isWhitelisted = isWhitelisted;
-exports.jwtAuthMiddleware = jwtAuthMiddleware;
-const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const metrics_1 = require("../metrics/metrics");
+import jwt from 'jsonwebtoken';
+import { metrics } from '../metrics/metrics';
 const AUTH_WHITELIST = [
     '/health',
     '/metrics',
@@ -20,26 +13,26 @@ const AUTH_WHITELIST = [
     '/internal/metrics',
     '/api/cache-test'
 ];
-function isWhitelisted(path) {
+export function isWhitelisted(path) {
     return AUTH_WHITELIST.some(p => path.startsWith(p));
 }
-function jwtAuthMiddleware(req, res, next) {
+export function jwtAuthMiddleware(req, res, next) {
     try {
         const auth = req.headers['authorization'] || '';
         const token = auth.startsWith('Bearer ') ? auth.slice(7) : undefined;
         if (!token) {
-            metrics_1.metrics.jwtAuthFail.inc({ reason: 'missing_token' });
-            metrics_1.metrics.authFailures.inc();
+            metrics.jwtAuthFail.inc({ reason: 'missing_token' });
+            metrics.authFailures.inc();
             return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } });
         }
         const secret = process.env.JWT_SECRET || 'dev-secret';
-        const payload = jsonwebtoken_1.default.verify(token, secret);
+        const payload = jwt.verify(token, secret);
         req.user = payload;
         return next();
     }
     catch (err) {
-        metrics_1.metrics.jwtAuthFail.inc({ reason: 'invalid_token' });
-        metrics_1.metrics.authFailures.inc();
+        metrics.jwtAuthFail.inc({ reason: 'invalid_token' });
+        metrics.authFailures.inc();
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
     }
 }

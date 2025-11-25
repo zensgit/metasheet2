@@ -1,12 +1,9 @@
-"use strict";
 /**
  * RPC Manager Usage Examples
  * Issues #27 & #30: Demonstrates proper RPC usage patterns
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RPCExamples = void 0;
-const rpc_manager_1 = require("../messaging/rpc-manager");
-const rpc_error_handler_1 = require("../messaging/rpc-error-handler");
+import { RPCManager } from '../messaging/rpc-manager';
+import { RPCError, RPCErrorCode, RPCErrorHandler } from '../messaging/rpc-error-handler';
 // Mock implementations for demonstration
 const logger = {
     debug: (msg) => console.log(`[DEBUG] ${msg}`),
@@ -19,10 +16,10 @@ const metrics = {
     histogram: (name, value, labels) => console.log(`[METRIC] ${name}: ${value}`, labels),
     gauge: (name, value, labels) => console.log(`[METRIC] ${name}: ${value}`, labels)
 };
-class RPCExamples {
+export class RPCExamples {
     rpcManager;
     constructor() {
-        this.rpcManager = new rpc_manager_1.RPCManager(logger, metrics, {
+        this.rpcManager = new RPCManager(logger, metrics, {
             defaultTimeoutMs: 5000,
             maxRetries: 3,
             cleanupIntervalMs: 30000,
@@ -58,7 +55,7 @@ class RPCExamples {
             console.log('✅ User data received:', result);
         }
         catch (error) {
-            console.error('❌ RPC call failed:', rpc_error_handler_1.RPCErrorHandler.getErrorMessage(error));
+            console.error('❌ RPC call failed:', RPCErrorHandler.getErrorMessage(error));
         }
     }
     /**
@@ -72,7 +69,7 @@ class RPCExamples {
             console.log('✅ Export completed:', result);
         }
         catch (error) {
-            console.error('❌ Export failed:', rpc_error_handler_1.RPCErrorHandler.getErrorMessage(error));
+            console.error('❌ Export failed:', RPCErrorHandler.getErrorMessage(error));
         }
     }
     /**
@@ -85,7 +82,7 @@ class RPCExamples {
             console.log('✅ Eventually succeeded:', result);
         }
         catch (error) {
-            console.error('❌ Failed after retries:', rpc_error_handler_1.RPCErrorHandler.getErrorMessage(error));
+            console.error('❌ Failed after retries:', RPCErrorHandler.getErrorMessage(error));
         }
     }
     /**
@@ -105,7 +102,7 @@ class RPCExamples {
                 console.log(`✅ ${testCase.topic} succeeded:`, result);
             }
             catch (error) {
-                const rpcError = rpc_error_handler_1.RPCErrorHandler.wrapError(error, {
+                const rpcError = RPCErrorHandler.wrapError(error, {
                     topic: testCase.topic,
                     requestId: 'demo-' + Date.now()
                 });
@@ -113,7 +110,7 @@ class RPCExamples {
                 console.log(`   Code: ${rpcError.code}`);
                 console.log(`   Message: ${rpcError.message}`);
                 console.log(`   Retriable: ${rpcError.retriable}`);
-                console.log(`   User Message: ${rpc_error_handler_1.RPCErrorHandler.formatUserMessage(rpcError)}`);
+                console.log(`   User Message: ${RPCErrorHandler.formatUserMessage(rpcError)}`);
             }
         }
     }
@@ -155,7 +152,7 @@ class RPCExamples {
         const results = await Promise.allSettled(operations.map(op => this.rpcManager.request(op.topic, op.data).then(result => ({ id: op.id, success: true, result }), error => ({
             id: op.id,
             success: false,
-            error: rpc_error_handler_1.RPCErrorHandler.wrapError(error).toJSON()
+            error: RPCErrorHandler.wrapError(error).toJSON()
         }))));
         results.forEach((result, index) => {
             const op = operations[index];
@@ -226,23 +223,23 @@ class RPCExamples {
                     }
                     break;
                 case 'auth.validate':
-                    const authError = new rpc_error_handler_1.RPCError({
-                        code: rpc_error_handler_1.RPCErrorCode.UNAUTHORIZED,
+                    const authError = new RPCError({
+                        code: RPCErrorCode.UNAUTHORIZED,
                         message: 'Invalid token'
                     });
                     this.rpcManager.handleResponse(request.id, null, authError);
                     break;
                 case 'data.validate':
-                    const validationError = new rpc_error_handler_1.RPCError({
-                        code: rpc_error_handler_1.RPCErrorCode.VALIDATION_ERROR,
+                    const validationError = new RPCError({
+                        code: RPCErrorCode.VALIDATION_ERROR,
                         message: 'Invalid data format',
                         details: { field: 'name', message: 'Name is required' }
                     });
                     this.rpcManager.handleResponse(request.id, null, validationError);
                     break;
                 case 'service.unavailable':
-                    const unavailableError = new rpc_error_handler_1.RPCError({
-                        code: rpc_error_handler_1.RPCErrorCode.SERVICE_UNAVAILABLE,
+                    const unavailableError = new RPCError({
+                        code: RPCErrorCode.SERVICE_UNAVAILABLE,
                         message: 'Service is down for maintenance'
                     });
                     this.rpcManager.handleResponse(request.id, null, unavailableError);
@@ -256,8 +253,8 @@ class RPCExamples {
                     break;
                 case 'user.create':
                     if (request.payload.invalid) {
-                        const createError = new rpc_error_handler_1.RPCError({
-                            code: rpc_error_handler_1.RPCErrorCode.VALIDATION_ERROR,
+                        const createError = new RPCError({
+                            code: RPCErrorCode.VALIDATION_ERROR,
                             message: 'Invalid user data'
                         });
                         this.rpcManager.handleResponse(request.id, null, createError);
@@ -313,7 +310,6 @@ class RPCExamples {
         await this.rpcManager.shutdown();
     }
 }
-exports.RPCExamples = RPCExamples;
 // Example usage
 if (require.main === module) {
     const examples = new RPCExamples();

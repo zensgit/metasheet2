@@ -1,0 +1,20 @@
+{
+  "phase": "Phase 5 Production Baseline",
+  "start_time": "2025-11-24T18:07:28+08:00",
+  "metrics_url": "http://localhost:8900/metrics/prom",
+  "interval_seconds": 5,
+  "max_samples": 1,
+  "slo_targets": {
+    "http_success_rate": 0.98,
+    "p95_latency_seconds": 0.150,
+    "p99_latency_seconds": 2.0,
+    "raw_fallback_ratio": 0.10,
+    "effective_fallback_ratio": 0.05,
+    "error_rate": 0.01,
+    "cpu_percent": 30,
+    "rss_memory_mb": 500,
+    "cache_hit_rate": 0.80,
+    "plugin_reload_success_rate": 0.95,
+    "snapshot_success_rate": 0.99
+  }
+}

@@ -13,8 +13,8 @@ export declare class WorkflowDefinitionRepository extends BaseRepository<'workfl
         id: string;
         name: string;
         version: string;
-        type: "BPMN" | "DAG" | "STATE_MACHINE";
         status: "DRAFT" | "ACTIVE" | "DEPRECATED";
+        type: "BPMN" | "DAG" | "STATE_MACHINE";
         created_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
@@ -25,11 +25,11 @@ export declare class WorkflowDefinitionRepository extends BaseRepository<'workfl
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        definition: any;
         settings: any;
-        created_by: string;
+        created_by: string | null;
+        definition: any;
         variables_schema: any;
-    }>;
+    } | undefined>;
     /**
      * Get all versions of a workflow
      */
@@ -37,8 +37,8 @@ export declare class WorkflowDefinitionRepository extends BaseRepository<'workfl
         id: string;
         name: string;
         version: string;
-        type: "BPMN" | "DAG" | "STATE_MACHINE";
         status: "DRAFT" | "ACTIVE" | "DEPRECATED";
+        type: "BPMN" | "DAG" | "STATE_MACHINE";
         created_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
@@ -49,9 +49,9 @@ export declare class WorkflowDefinitionRepository extends BaseRepository<'workfl
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        definition: any;
         settings: any;
-        created_by: string;
+        created_by: string | null;
+        definition: any;
         variables_schema: any;
     }[]>;
 }
@@ -61,50 +61,50 @@ export declare class WorkflowInstanceRepository extends BaseRepository<'workflow
      * Find running instances
      */
     findRunning(): Promise<{
-        error: string;
+        error: string | null;
         id: string;
         status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "SUSPENDED";
-        completed_at: Date;
+        completed_at: Date | null;
         created_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
+        context: any;
         updated_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        definition_id: string;
-        parent_instance_id: string;
         variables: any;
-        context: any;
-        started_at: Date;
+        definition_id: string;
+        parent_instance_id: string | null;
+        started_at: Date | null;
     }[]>;
     /**
      * Update instance status with timestamp
      */
     updateStatus(id: string, status: WorkflowInstancesTable['status'], error?: string): Promise<{
-        error: string;
+        error: string | null;
         id: string;
         status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "SUSPENDED";
-        completed_at: Date;
+        completed_at: Date | null;
         created_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
+        context: any;
         updated_at: {
             readonly __select__: Date;
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        definition_id: string;
-        parent_instance_id: string;
         variables: any;
-        context: any;
-        started_at: Date;
-    }>;
+        definition_id: string;
+        parent_instance_id: string | null;
+        started_at: Date | null;
+    } | undefined>;
     /**
      * Get instances with incidents
      */
@@ -143,8 +143,8 @@ export declare class WorkflowTokenRepository extends BaseRepository<'workflow_to
         instance_id: string;
         node_id: string;
         token_type: "WAIT" | "EXECUTION" | "COMPENSATE";
-        parent_token_id: string;
-        consumed_at: Date;
+        parent_token_id: string | null;
+        consumed_at: Date | null;
     }[]>;
     /**
      * Consume a token
@@ -166,9 +166,9 @@ export declare class WorkflowTokenRepository extends BaseRepository<'workflow_to
         instance_id: string;
         node_id: string;
         token_type: "WAIT" | "EXECUTION" | "COMPENSATE";
-        parent_token_id: string;
-        consumed_at: Date;
-    }>;
+        parent_token_id: string | null;
+        consumed_at: Date | null;
+    } | undefined>;
     /**
      * Create child tokens for parallel execution
      */
@@ -189,8 +189,8 @@ export declare class WorkflowTokenRepository extends BaseRepository<'workflow_to
         instance_id: string;
         node_id: string;
         token_type: "WAIT" | "EXECUTION" | "COMPENSATE";
-        parent_token_id: string;
-        consumed_at: Date;
+        parent_token_id: string | null;
+        consumed_at: Date | null;
     }[]>;
 }
 export declare class WorkflowIncidentRepository extends BaseRepository<'workflow_incidents'> {
@@ -210,19 +210,19 @@ export declare class WorkflowIncidentRepository extends BaseRepository<'workflow
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        error_message: string;
+        error_message: string | null;
         severity: "CRITICAL" | "WARNING" | "ERROR";
+        resolved_at: Date | null;
+        resolved_by: string | null;
         instance_id: string;
-        token_id: string;
+        token_id: string | null;
         incident_type: "VALIDATION_ERROR" | "ERROR" | "TIMEOUT" | "COMPENSATION_FAILED" | "SYSTEM_ERROR";
-        node_id: string;
-        error_code: string;
-        stack_trace: string;
+        node_id: string | null;
+        error_code: string | null;
+        stack_trace: string | null;
         incident_data: any;
         resolution_status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "IGNORED";
-        resolved_by: string;
-        resolved_at: Date;
-        resolution_notes: string;
+        resolution_notes: string | null;
         retry_count: number;
         max_retries: number;
     }[]>;
@@ -251,19 +251,19 @@ export declare class WorkflowIncidentRepository extends BaseRepository<'workflow
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        error_message: string;
+        error_message: string | null;
         severity: "CRITICAL" | "WARNING" | "ERROR";
+        resolved_at: Date | null;
+        resolved_by: string | null;
         instance_id: string;
-        token_id: string;
+        token_id: string | null;
         incident_type: "VALIDATION_ERROR" | "ERROR" | "TIMEOUT" | "COMPENSATION_FAILED" | "SYSTEM_ERROR";
-        node_id: string;
-        error_code: string;
-        stack_trace: string;
+        node_id: string | null;
+        error_code: string | null;
+        stack_trace: string | null;
         incident_data: any;
         resolution_status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "IGNORED";
-        resolved_by: string;
-        resolved_at: Date;
-        resolution_notes: string;
+        resolution_notes: string | null;
         retry_count: number;
         max_retries: number;
     }>;
@@ -282,22 +282,22 @@ export declare class WorkflowIncidentRepository extends BaseRepository<'workflow
             readonly __insert__: string | Date;
             readonly __update__: string | Date;
         };
-        error_message: string;
+        error_message: string | null;
         severity: "CRITICAL" | "WARNING" | "ERROR";
+        resolved_at: Date | null;
+        resolved_by: string | null;
         instance_id: string;
-        token_id: string;
+        token_id: string | null;
         incident_type: "VALIDATION_ERROR" | "ERROR" | "TIMEOUT" | "COMPENSATION_FAILED" | "SYSTEM_ERROR";
-        node_id: string;
-        error_code: string;
-        stack_trace: string;
+        node_id: string | null;
+        error_code: string | null;
+        stack_trace: string | null;
         incident_data: any;
         resolution_status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "IGNORED";
-        resolved_by: string;
-        resolved_at: Date;
-        resolution_notes: string;
+        resolution_notes: string | null;
         retry_count: number;
         max_retries: number;
-    }>;
+    } | undefined>;
     /**
      * Get incident statistics
      */

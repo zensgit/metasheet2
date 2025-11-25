@@ -1,21 +1,16 @@
-"use strict";
 /**
  * 插件 RPC 机制使用示例
  * 展示如何在插件间使用 RPC 进行同步通信
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.UIClientPlugin = exports.CalculationPlugin = exports.DataServicePlugin = void 0;
-exports.demonstrateRpc = demonstrateRpc;
-exports.advancedExample = advancedExample;
-const plugin_rpc_1 = require("./plugin-rpc");
-const logger_1 = require("../utils/logger");
-const logger = (0, logger_1.createLogger)('rpc-example');
+import { RpcManager } from './plugin-rpc';
+import { createLogger } from './logger';
+const logger = createLogger('rpc-example');
 // ============= 插件A: 数据服务插件 =============
 class DataServicePlugin {
     pluginId = 'plugin-data-service';
     rpcServer;
     constructor() {
-        this.rpcServer = plugin_rpc_1.RpcManager.getInstance().createServer(this.pluginId);
+        this.rpcServer = RpcManager.getInstance().createServer(this.pluginId);
     }
     async initialize() {
         // 注册数据查询方法
@@ -136,16 +131,15 @@ class DataServicePlugin {
         return this.rpcServer.getMethods();
     }
     destroy() {
-        plugin_rpc_1.RpcManager.getInstance().destroyServer(this.pluginId);
+        RpcManager.getInstance().destroyServer(this.pluginId);
     }
 }
-exports.DataServicePlugin = DataServicePlugin;
 // ============= 插件B: 计算服务插件 =============
 class CalculationPlugin {
     pluginId = 'plugin-calculation';
     rpcServer;
     constructor() {
-        this.rpcServer = plugin_rpc_1.RpcManager.getInstance().createServer(this.pluginId);
+        this.rpcServer = RpcManager.getInstance().createServer(this.pluginId);
     }
     async initialize() {
         // 注册计算方法
@@ -232,16 +226,15 @@ class CalculationPlugin {
         return results;
     }
     destroy() {
-        plugin_rpc_1.RpcManager.getInstance().destroyServer(this.pluginId);
+        RpcManager.getInstance().destroyServer(this.pluginId);
     }
 }
-exports.CalculationPlugin = CalculationPlugin;
 // ============= 插件C: UI 客户端插件 =============
 class UIClientPlugin {
     pluginId = 'plugin-ui-client';
     rpcClient;
     constructor() {
-        this.rpcClient = plugin_rpc_1.RpcManager.getInstance().createClient(this.pluginId);
+        this.rpcClient = RpcManager.getInstance().createClient(this.pluginId);
     }
     async initialize() {
         logger.info(`${this.pluginId} initialized`);
@@ -324,10 +317,9 @@ class UIClientPlugin {
         }
     }
     destroy() {
-        plugin_rpc_1.RpcManager.getInstance().destroyClient(this.pluginId);
+        RpcManager.getInstance().destroyClient(this.pluginId);
     }
 }
-exports.UIClientPlugin = UIClientPlugin;
 // ============= 示例运行 =============
 async function demonstrateRpc() {
     console.log('=== RPC Mechanism Demonstration ===\n');
@@ -340,7 +332,7 @@ async function demonstrateRpc() {
     await uiClient.initialize();
     console.log('\n--- Plugins initialized ---');
     console.log('Available RPC methods:');
-    const allMethods = plugin_rpc_1.RpcManager.getInstance().listAvailableMethods();
+    const allMethods = RpcManager.getInstance().listAvailableMethods();
     allMethods.forEach(m => {
         console.log(`  - ${m.plugin}.${m.method}: ${m.description}`);
     });
@@ -366,7 +358,7 @@ async function demonstrateRpc() {
     console.log('\n--- Error Handling ---');
     try {
         // 调用不存在的方法
-        const client = plugin_rpc_1.RpcManager.getInstance().createClient('error-test');
+        const client = RpcManager.getInstance().createClient('error-test');
         await client.call('plugin-data-service', 'nonExistentMethod', {});
     }
     catch (error) {
@@ -375,7 +367,7 @@ async function demonstrateRpc() {
     // 5. 超时处理
     console.log('\n--- Timeout Handling ---');
     try {
-        const client = plugin_rpc_1.RpcManager.getInstance().createClient('timeout-test');
+        const client = RpcManager.getInstance().createClient('timeout-test');
         await client.call('plugin-data-service', 'queryData', { table: 'large_table' }, { timeout: 1 } // 1ms 超时
         );
     }
@@ -384,7 +376,7 @@ async function demonstrateRpc() {
     }
     // 6. 查看 RPC 指标
     console.log('\n--- RPC Metrics ---');
-    const metrics = plugin_rpc_1.RpcManager.getInstance().getMetrics();
+    const metrics = RpcManager.getInstance().getMetrics();
     console.log('System metrics:', metrics);
     // 获取单个服务器的指标
     const serverMetrics = dataService.rpcServer.getMetrics();
@@ -405,8 +397,8 @@ async function advancedExample() {
         rpcClient;
         rpcServer;
         constructor() {
-            this.rpcClient = plugin_rpc_1.RpcManager.getInstance().createClient(this.pluginId);
-            this.rpcServer = plugin_rpc_1.RpcManager.getInstance().createServer(this.pluginId);
+            this.rpcClient = RpcManager.getInstance().createClient(this.pluginId);
+            this.rpcServer = RpcManager.getInstance().createServer(this.pluginId);
         }
         async initialize() {
             // 注册工作流执行方法
@@ -469,8 +461,8 @@ async function advancedExample() {
             }
         }
         destroy() {
-            plugin_rpc_1.RpcManager.getInstance().destroyClient(this.pluginId);
-            plugin_rpc_1.RpcManager.getInstance().destroyServer(this.pluginId);
+            RpcManager.getInstance().destroyClient(this.pluginId);
+            RpcManager.getInstance().destroyServer(this.pluginId);
         }
     }
     // 初始化所有插件
@@ -481,7 +473,7 @@ async function advancedExample() {
     await calculator.initialize();
     await workflow.initialize();
     // 创建客户端调用工作流
-    const client = plugin_rpc_1.RpcManager.getInstance().createClient('workflow-client');
+    const client = RpcManager.getInstance().createClient('workflow-client');
     const workflowResult = await client.call('plugin-workflow', 'executeWorkflow', {
         workflowId: 'wf-001',
         data: { input: 'test' }
@@ -491,7 +483,7 @@ async function advancedExample() {
     dataService.destroy();
     calculator.destroy();
     workflow.destroy();
-    plugin_rpc_1.RpcManager.getInstance().destroyClient('workflow-client');
+    RpcManager.getInstance().destroyClient('workflow-client');
 }
 // 运行示例
 if (require.main === module) {
@@ -499,4 +491,5 @@ if (require.main === module) {
         .then(() => advancedExample())
         .catch(console.error);
 }
+export { DataServicePlugin, CalculationPlugin, UIClientPlugin, demonstrateRpc, advancedExample };
 //# sourceMappingURL=plugin-rpc.example.js.map

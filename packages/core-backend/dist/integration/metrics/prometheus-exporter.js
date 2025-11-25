@@ -1,17 +1,14 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.renderPrometheus = renderPrometheus;
-const metrics_1 = require("./metrics");
+import { coreMetrics } from './metrics';
 const CACHE_TTL_MS = 5000;
 let cache = null;
 function formatLine(name, help, type, value) {
     return `# HELP ${name} ${help}\n# TYPE ${name} ${type}\n${name} ${value}`;
 }
-function renderPrometheus() {
+export function renderPrometheus() {
     const now = Date.now();
     if (cache && now - cache.ts < CACHE_TTL_MS)
         return cache.text;
-    const snap = metrics_1.coreMetrics.get();
+    const snap = coreMetrics.get();
     const uptime = (Date.now() - snap.startedAt) / 1000;
     const mem = process.memoryUsage();
     const lines = [];

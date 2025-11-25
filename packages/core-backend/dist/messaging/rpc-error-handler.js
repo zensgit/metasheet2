@@ -1,11 +1,8 @@
-"use strict";
 /**
  * RPC Error Handler
  * Issue #30: Standardized error handling for RPC
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RPCErrorHandler = exports.RPCError = exports.RPCErrorCode = void 0;
-var RPCErrorCode;
+export var RPCErrorCode;
 (function (RPCErrorCode) {
     // Client errors
     RPCErrorCode["INVALID_REQUEST"] = "INVALID_REQUEST";
@@ -23,8 +20,8 @@ var RPCErrorCode;
     RPCErrorCode["NETWORK_ERROR"] = "NETWORK_ERROR";
     RPCErrorCode["CONNECTION_REFUSED"] = "CONNECTION_REFUSED";
     RPCErrorCode["CONNECTION_TIMEOUT"] = "CONNECTION_TIMEOUT";
-})(RPCErrorCode || (exports.RPCErrorCode = RPCErrorCode = {}));
-class RPCError extends Error {
+})(RPCErrorCode || (RPCErrorCode = {}));
+export class RPCError extends Error {
     code;
     details;
     retriable;
@@ -86,8 +83,7 @@ class RPCError extends Error {
         };
     }
 }
-exports.RPCError = RPCError;
-class RPCErrorHandler {
+export class RPCErrorHandler {
     /**
      * Wrap error in standard RPC error format
      */
@@ -254,5 +250,4 @@ class RPCErrorHandler {
         return 'An unexpected error occurred. Please try again.';
     }
 }
-exports.RPCErrorHandler = RPCErrorHandler;
 //# sourceMappingURL=rpc-error-handler.js.map

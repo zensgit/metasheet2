@@ -1,12 +1,10 @@
 #!/usr/bin/env tsx
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const pg_1 = require("../db/pg");
+import { pool } from '../db/pg';
 async function main() {
-    if (!pg_1.pool)
+    if (!pool)
         throw new Error('DATABASE_URL not configured');
     // Ensure admin role
-    await pg_1.pool.query(`INSERT INTO roles(id, name) VALUES ('admin','Administrator') ON CONFLICT (id) DO NOTHING`);
+    await pool.query(`INSERT INTO roles(id, name) VALUES ('admin','Administrator') ON CONFLICT (id) DO NOTHING`);
     // Seed common permissions (optional for non-admin users)
     const perms = [
         'roles:read', 'roles:write',
@@ -17,15 +15,15 @@ async function main() {
         'audit:read'
     ];
     for (const code of perms) {
-        await pg_1.pool.query(`INSERT INTO permissions(code) VALUES ($1) ON CONFLICT (code) DO NOTHING`, [code]);
+        await pool.query(`INSERT INTO permissions(code) VALUES ($1) ON CONFLICT (code) DO NOTHING`, [code]);
     }
     // Optionally grant all perms to admin role (not required for isAdmin bypass, but useful for explicit checks)
     for (const code of perms) {
-        await pg_1.pool.query(`INSERT INTO role_permissions(role_id, permission_code) VALUES ('admin',$1) ON CONFLICT DO NOTHING`, [code]);
+        await pool.query(`INSERT INTO role_permissions(role_id, permission_code) VALUES ('admin',$1) ON CONFLICT DO NOTHING`, [code]);
     }
     // Bind admin role to default user u1 (used by dev token script)
     const userId = process.env.SEED_USER_ID || 'u1';
-    await pg_1.pool.query(`INSERT INTO user_roles(user_id, role_id) VALUES ($1,'admin') ON CONFLICT DO NOTHING`, [userId]);
+    await pool.query(`INSERT INTO user_roles(user_id, role_id) VALUES ($1,'admin') ON CONFLICT DO NOTHING`, [userId]);
     console.log(`Seeded RBAC: role=admin, user=${userId}`);
 }
 main().catch(err => {

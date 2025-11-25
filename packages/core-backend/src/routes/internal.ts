@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { cacheRegistry } from '../../core/cache/CacheRegistry'
+import fallbackTestRouter from './fallback-test'
 
 /**
  * Internal API routes for debugging and monitoring
@@ -67,5 +68,8 @@ router.get('/cache', (req: Request, res: Response) => {
     }
   })
 })
+
+// Mount fallback test routes at /internal/test/*
+router.use('/test', fallbackTestRouter)
 
 export default router

@@ -1,19 +1,16 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.approvalHistoryRouter = approvalHistoryRouter;
-const express_1 = require("express");
-const pg_1 = require("../db/pg");
-function approvalHistoryRouter() {
-    const r = (0, express_1.Router)();
+import { Router } from 'express';
+import { pool } from '../db/pg';
+export function approvalHistoryRouter() {
+    const r = Router();
     r.get('/api/approvals/:id/history', async (req, res) => {
         const id = req.params.id;
-        if (pg_1.pool) {
+        if (pool) {
             const page = Math.max(parseInt(req.query.page || '1', 10), 1);
             const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '50', 10), 1), 200);
             const offset = (page - 1) * pageSize;
-            const countRes = await pg_1.pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id]);
+            const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id]);
             const total = countRes.rows[0]?.c || 0;
-            const { rows } = await pg_1.pool.query(`SELECT occurred_at, actor_id, action, comment, from_status, to_status, version
+            const { rows } = await pool.query(`SELECT occurred_at, actor_id, action, comment, from_status, to_status, version
          FROM approval_records
          WHERE instance_id = $1
          ORDER BY occurred_at DESC

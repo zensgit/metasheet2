@@ -25,7 +25,7 @@ export declare const cacheConfig: {
     redis: {
         host: string;
         port: number;
-        password: string;
+        password: string | undefined;
     };
 };
 //# sourceMappingURL=cache.d.ts.map

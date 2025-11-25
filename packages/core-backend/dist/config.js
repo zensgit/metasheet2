@@ -1,11 +1,7 @@
-"use strict";
 /**
  * 配置管理
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.getConfig = getConfig;
-exports.sanitizeConfig = sanitizeConfig;
-function getConfig() {
+export function getConfig() {
     return {
         db: {
             url: process.env.DATABASE_URL || '',
@@ -33,7 +29,7 @@ function getConfig() {
 /**
  * Sanitize config for external exposure (remove secrets)
  */
-function sanitizeConfig(cfg) {
+export function sanitizeConfig(cfg) {
     return {
         db: {
             poolMax: cfg.db.poolMax,

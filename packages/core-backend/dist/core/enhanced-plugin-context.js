@@ -1,28 +1,25 @@
-"use strict";
 /**
  * 增强版插件上下文
  * 集成所有新的服务和功能
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.createEnhancedPluginContext = createEnhancedPluginContext;
-const eventemitter3_1 = require("eventemitter3");
-const logger_1 = require("./logger");
-const audit_1 = require("../audit/audit");
-const metrics_1 = require("../metrics/metrics");
-const db_1 = require("../db/db");
+import { EventEmitter } from 'eventemitter3';
+import { Logger as LoggerImpl } from './logger';
+import { auditLog } from '../audit/audit';
+import { metrics } from '../metrics/metrics';
+import { db } from '../db/db';
 // Import service implementations
-const CacheService_1 = require("../services/CacheService");
-const QueueService_1 = require("../services/QueueService");
-const StorageService_1 = require("../services/StorageService");
-const SchedulerService_1 = require("../services/SchedulerService");
-const NotificationService_1 = require("../services/NotificationService");
-const WebSocketService_1 = require("../services/WebSocketService");
-const SecurityService_1 = require("../services/SecurityService");
-const ValidationService_1 = require("../services/ValidationService");
+import { CacheServiceImpl } from '../services/CacheService';
+import { QueueServiceImpl } from '../services/QueueService';
+import { StorageServiceImpl } from '../services/StorageService';
+import { SchedulerServiceImpl } from '../services/SchedulerService';
+import { NotificationServiceImpl } from '../services/NotificationService';
+import { WebSocketServiceImpl } from '../services/WebSocketService';
+import { SecurityServiceImpl } from '../services/SecurityService';
+import { ValidationServiceImpl } from '../services/ValidationService';
 /**
  * 增强版插件上下文创建器
  */
-function createEnhancedPluginContext(manifest, coreAPI, serviceInstances) {
+export function createEnhancedPluginContext(manifest, coreAPI, serviceInstances) {
     // 创建插件元信息
     const metadata = {
         name: manifest.name,
@@ -34,14 +31,14 @@ function createEnhancedPluginContext(manifest, coreAPI, serviceInstances) {
     };
     // 创建或使用现有服务实例
     const services = {
-        cache: serviceInstances?.cache || CacheService_1.CacheServiceImpl.createMemoryService(),
-        queue: serviceInstances?.queue || new QueueService_1.QueueServiceImpl(),
-        storage: serviceInstances?.storage || new StorageService_1.StorageServiceImpl(),
-        scheduler: serviceInstances?.scheduler || new SchedulerService_1.SchedulerServiceImpl(),
-        notification: serviceInstances?.notification || new NotificationService_1.NotificationServiceImpl(),
-        websocket: serviceInstances?.websocket || new WebSocketService_1.WebSocketServiceImpl(),
-        security: serviceInstances?.security || new SecurityService_1.SecurityServiceImpl(),
-        validation: serviceInstances?.validation || new ValidationService_1.ValidationServiceImpl()
+        cache: serviceInstances?.cache || CacheServiceImpl.createMemoryService(),
+        queue: serviceInstances?.queue || new QueueServiceImpl(),
+        storage: serviceInstances?.storage || new StorageServiceImpl(),
+        scheduler: serviceInstances?.scheduler || new SchedulerServiceImpl(),
+        notification: serviceInstances?.notification || new NotificationServiceImpl(),
+        websocket: serviceInstances?.websocket || new WebSocketServiceImpl(),
+        security: serviceInstances?.security || new SecurityServiceImpl(),
+        validation: serviceInstances?.validation || new ValidationServiceImpl()
     };
     // 创建沙箱化的API
     const sandboxedAPI = createEnhancedSandboxedAPI(coreAPI, manifest, services);
@@ -50,7 +47,7 @@ function createEnhancedPluginContext(manifest, coreAPI, serviceInstances) {
     // 创建插件通信
     const communication = createPluginCommunication(manifest.name);
     // 创建日志器
-    const logger = new logger_1.Logger(`Plugin:${manifest.name}`);
+    const logger = new LoggerImpl(`Plugin:${manifest.name}`);
     // 创建插件配置（从配置管理器加载）
     const config = loadPluginConfig(manifest.name);
     // 设置插件安全沙箱
@@ -80,7 +77,7 @@ function createEnhancedSandboxedAPI(api, manifest, services) {
         if (!hasPermission(cap)) {
             try {
                 ;
-                metrics_1.metrics.pluginPermissionDenied?.labels?.(manifest.name, cap)?.inc?.();
+                metrics.pluginPermissionDenied?.labels?.(manifest.name, cap)?.inc?.();
             }
             catch { }
             await auditAPICall(manifest.name, cap, args, 'denied');
@@ -258,10 +255,10 @@ function createEnhancedPluginStorage(pluginName) {
     const memory = new Map();
     return {
         async get(key) {
-            if (!db_1.db)
+            if (!db)
                 return memory.get(key);
             try {
-                const row = await db_1.db.selectFrom('plugin_kv')
+                const row = await db.selectFrom('plugin_kv')
                     .selectAll()
                     .where('plugin_id', '=', pluginName)
                     .where('key', '=', key)
@@ -274,12 +271,12 @@ function createEnhancedPluginStorage(pluginName) {
             }
         },
         async set(key, value) {
-            if (!db_1.db) {
+            if (!db) {
                 memory.set(key, value);
                 return;
             }
             try {
-                await db_1.db
+                await db
                     .insertInto('plugin_kv')
                     .values({
                     plugin_id: pluginName,
@@ -297,12 +294,12 @@ function createEnhancedPluginStorage(pluginName) {
             }
         },
         async delete(key) {
-            if (!db_1.db) {
+            if (!db) {
                 memory.delete(key);
                 return;
             }
             try {
-                await db_1.db.deleteFrom('plugin_kv')
+                await db.deleteFrom('plugin_kv')
                     .where('plugin_id', '=', pluginName)
                     .where('key', '=', key)
                     .execute();
@@ -313,10 +310,10 @@ function createEnhancedPluginStorage(pluginName) {
             }
         },
         async list() {
-            if (!db_1.db)
+            if (!db)
                 return Array.from(memory.keys());
             try {
-                const rows = await db_1.db.selectFrom('plugin_kv')
+                const rows = await db.selectFrom('plugin_kv')
                     .select(['key'])
                     .where('plugin_id', '=', pluginName)
                     .orderBy('key asc')
@@ -334,7 +331,7 @@ function createEnhancedPluginStorage(pluginName) {
  * 创建插件通信
  */
 function createPluginCommunication(pluginName) {
-    const eventBus = new eventemitter3_1.EventEmitter();
+    const eventBus = new EventEmitter();
     const apis = new Map();
     return {
         async call(plugin, method, ...args) {
@@ -390,7 +387,7 @@ function setupServiceEventForwarding(services, pluginName, logger) {
  */
 async function auditAPICall(plugin, cap, args, result) {
     try {
-        await (0, audit_1.auditLog)({
+        await auditLog({
             actorType: 'system',
             action: 'plugin.api',
             resourceType: 'plugin',

@@ -1,39 +1,34 @@
-"use strict";
 /**
  * 插件服务工厂
  * 负责创建和管理所有插件相关服务的实例
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.pluginServiceFactory = exports.PluginServiceFactory = void 0;
-exports.getPluginServices = getPluginServices;
-exports.configurePluginServices = configurePluginServices;
-const logger_1 = require("./logger");
+import { Logger } from './logger';
 // 导入服务实现
-const CacheService_1 = require("../services/CacheService");
-const QueueService_1 = require("../services/QueueService");
-const StorageService_1 = require("../services/StorageService");
-const SchedulerService_1 = require("../services/SchedulerService");
-const NotificationService_1 = require("../services/NotificationService");
+import { CacheServiceImpl } from '../services/CacheService';
+import { QueueServiceImpl } from '../services/QueueService';
+import { StorageServiceImpl } from '../services/StorageService';
+import { SchedulerServiceImpl } from '../services/SchedulerService';
+import { NotificationServiceImpl } from '../services/NotificationService';
 // 类型宽容：某些实现可能缺少类型声明，使用 any 断言避免编译阻塞
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
-const WebSocketService_1 = require("../services/WebSocketService");
+import { WebSocketServiceImpl } from '../services/WebSocketService';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
-const SecurityService_1 = require("../services/SecurityService");
+import { SecurityServiceImpl } from '../services/SecurityService';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
-const ValidationService_1 = require("../services/ValidationService");
+import { ValidationServiceImpl } from '../services/ValidationService';
 /**
  * 插件服务工厂
  */
-class PluginServiceFactory {
+export class PluginServiceFactory {
     services = null;
     options;
     logger;
     constructor(options = {}) {
         this.options = options;
-        this.logger = new logger_1.Logger('PluginServiceFactory');
+        this.logger = new Logger('PluginServiceFactory');
     }
     /**
      * 创建所有服务实例
@@ -77,15 +72,15 @@ class PluginServiceFactory {
                     // eslint-disable-next-line @typescript-eslint/no-var-requires
                     const Redis = require('ioredis');
                     const redis = new Redis(config.redis || {});
-                    return CacheService_1.CacheServiceImpl.createRedisService(redis);
+                    return CacheServiceImpl.createRedisService(redis);
                 }
                 catch (error) {
                     this.logger.warn('Redis not available, falling back to memory cache', error);
-                    return CacheService_1.CacheServiceImpl.createMemoryService();
+                    return CacheServiceImpl.createMemoryService();
                 }
             case 'memory':
             default:
-                return CacheService_1.CacheServiceImpl.createMemoryService();
+                return CacheServiceImpl.createMemoryService();
         }
     }
     /**
@@ -100,16 +95,16 @@ class PluginServiceFactory {
                     // 动态导入Bull队列（软依赖）
                     // eslint-disable-next-line @typescript-eslint/no-var-requires
                     require('bull');
-                    const queueService = new QueueService_1.QueueServiceImpl();
+                    const queueService = new QueueServiceImpl();
                     return queueService;
                 }
                 catch (error) {
                     this.logger.warn('Bull not available, falling back to memory queue', error);
-                    return new QueueService_1.QueueServiceImpl();
+                    return new QueueServiceImpl();
                 }
             case 'memory':
             default:
-                return new QueueService_1.QueueServiceImpl();
+                return new QueueServiceImpl();
         }
     }
     /**
@@ -117,7 +112,7 @@ class PluginServiceFactory {
      */
     async createStorageService() {
         const config = this.options.storage || {};
-        const service = new StorageService_1.StorageServiceImpl();
+        const service = new StorageServiceImpl();
         switch (config.provider) {
             case 's3':
                 try {
@@ -149,7 +144,7 @@ class PluginServiceFactory {
      */
     async createSchedulerService() {
         const config = this.options.scheduler || {};
-        const service = new SchedulerService_1.SchedulerServiceImpl();
+        const service = new SchedulerServiceImpl();
         // 可以在这里配置调度器的存储后端
         if (config.provider === 'database') {
             // 配置数据库存储
@@ -161,7 +156,7 @@ class PluginServiceFactory {
      */
     async createNotificationService() {
         const config = this.options.notification || {};
-        const service = new NotificationService_1.NotificationServiceImpl();
+        const service = new NotificationServiceImpl();
         // 注册额外的通知渠道
         if (config.channels) {
             for (const channel of config.channels) {
@@ -190,7 +185,7 @@ class PluginServiceFactory {
      */
     async createWebSocketService() {
         const config = this.options.websocket || {};
-        const service = new WebSocketService_1.WebSocketServiceImpl(config.io);
+        const service = new WebSocketServiceImpl(config.io);
         return service;
     }
     /**
@@ -198,7 +193,7 @@ class PluginServiceFactory {
      */
     async createSecurityService() {
         const config = this.options.security || {};
-        const service = new SecurityService_1.SecurityServiceImpl(config.encryptionKey);
+        const service = new SecurityServiceImpl(config.encryptionKey);
         return service;
     }
     /**
@@ -206,7 +201,7 @@ class PluginServiceFactory {
      */
     async createValidationService() {
         const config = this.options.validation || {};
-        const service = new ValidationService_1.ValidationServiceImpl();
+        const service = new ValidationServiceImpl();
         return service;
     }
     /**
@@ -336,14 +331,13 @@ class PluginServiceFactory {
         return health;
     }
 }
-exports.PluginServiceFactory = PluginServiceFactory;
 // 导出单例工厂实例
-exports.pluginServiceFactory = new PluginServiceFactory();
+export const pluginServiceFactory = new PluginServiceFactory();
 // 导出便捷方法
-async function getPluginServices() {
-    return exports.pluginServiceFactory.getServices();
+export async function getPluginServices() {
+    return pluginServiceFactory.getServices();
 }
-async function configurePluginServices(options) {
+export async function configurePluginServices(options) {
     const factory = new PluginServiceFactory(options);
     return factory.createServices();
 }

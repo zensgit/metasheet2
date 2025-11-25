@@ -1,21 +1,49 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.approvalsRouter = approvalsRouter;
-const express_1 = require("express");
-const metrics_1 = require("../metrics/metrics");
-const audit_1 = require("../audit/audit");
-const pg_1 = require("../db/pg");
+import { Router } from 'express';
+import { metrics } from '../metrics/metrics';
+import { auditLog } from '../audit/audit';
+import { pool, withTransaction } from '../db/pg';
+// Graceful degradation for missing approval tables (Phase B)
+let approvalDegraded = false;
+const allowDegradation = process.env.APPROVAL_OPTIONAL === '1';
+function isDatabaseSchemaError(error) {
+    // PostgreSQL error code 42P01: relation does not exist
+    if (error?.code === '42P01')
+        return true;
+    if (error?.message && typeof error.message === 'string') {
+        const msg = error.message.toLowerCase();
+        return (msg.includes('relation') || msg.includes('table')) && msg.includes('does not exist');
+    }
+    return false;
+}
 // 简化的内存存储用于演示乐观锁协议
 const instances = new Map();
 instances.set('demo-1', { id: 'demo-1', status: 'PENDING', version: 0 });
-function approvalsRouter() {
-    const r = (0, express_1.Router)();
+export function approvalsRouter() {
+    const r = Router();
     r.get('/api/approvals/:id', async (req, res) => {
-        if (pg_1.pool) {
-            const { rows } = await pg_1.pool.query('SELECT id, status, version FROM approval_instances WHERE id = $1', [req.params.id]);
-            if (!rows.length)
-                return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
-            return res.json({ ok: true, data: rows[0] });
+        if (pool) {
+            try {
+                const { rows } = await pool.query('SELECT id, status, version FROM approval_instances WHERE id = $1', [req.params.id]);
+                if (!rows.length)
+                    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
+                return res.json({ ok: true, data: rows[0] });
+            }
+            catch (error) {
+                if (isDatabaseSchemaError(error) && allowDegradation) {
+                    if (!approvalDegraded) {
+                        console.warn('⚠️  Approval service degraded - approval_instances table not found');
+                        console.warn('⚠️  Falling back to in-memory approval storage');
+                        console.warn('⚠️  Set APPROVAL_OPTIONAL=1 environment variable is active');
+                        approvalDegraded = true;
+                    }
+                    // Fallback to memory
+                    const inst = instances.get(req.params.id);
+                    if (!inst)
+                        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
+                    return res.json({ ok: true, data: inst });
+                }
+                throw error;
+            }
         }
         else {
             const inst = instances.get(req.params.id);
@@ -24,50 +52,101 @@ function approvalsRouter() {
             return res.json({ ok: true, data: inst });
         }
     });
+    function canTransition(from, action) {
+        const allowedFrom = {
+            approve: ['PENDING'],
+            reject: ['PENDING'],
+            return: ['APPROVED'],
+            revoke: ['APPROVED']
+        };
+        return allowedFrom[action].includes(from);
+    }
     async function transition(req, res, action, newStatus) {
         const reqVersion = Number(req.body?.version);
         if (!Number.isInteger(reqVersion)) {
             return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'version required' } });
         }
-        if (pg_1.pool) {
-            // 单条语句的原子更新 + 返回旧/新值
+        if (pool) {
+            // 使用事务：读取当前状态 -> 校验版本与状态机 -> 更新并记录
             try {
-                const { rows } = await pg_1.pool.query(`WITH cur AS (
-             SELECT id, status, version FROM approval_instances WHERE id = $1
-           ), upd AS (
-             UPDATE approval_instances a
-             SET status = $2, version = cur.version + 1
-             FROM cur
-             WHERE a.id = cur.id AND cur.version = $3
-             RETURNING a.id, a.version, $2::text AS to_status, cur.status AS from_status, cur.version AS prev_version
-           )
-           SELECT * FROM upd`, [req.params.id, newStatus, reqVersion]);
-                if (!rows.length) {
-                    // 区分不存在与版本冲突
-                    const v = await pg_1.pool.query('SELECT version FROM approval_instances WHERE id=$1', [req.params.id]);
-                    if (v.rows.length) {
-                        metrics_1.metrics.approvalActions.inc({ action, result: 'conflict' });
-                        metrics_1.metrics.approvalConflict.inc({ action });
-                        return res.status(409).json({ ok: false, error: { code: 'APPROVAL_VERSION_CONFLICT', message: 'Approval instance version mismatch', currentVersion: v.rows[0].version } });
+                const result = await withTransaction(async (client) => {
+                    const cur = await client.query('SELECT id, status, version FROM approval_instances WHERE id=$1', [req.params.id]);
+                    if (!cur.rows.length) {
+                        return { type: 'not_found' };
                     }
+                    const row = cur.rows[0];
+                    if (row.version !== reqVersion) {
+                        return { type: 'conflict', currentVersion: row.version };
+                    }
+                    if (!canTransition(row.status, action)) {
+                        return { type: 'invalid', from: row.status };
+                    }
+                    const newVersion = reqVersion + 1;
+                    await client.query('UPDATE approval_instances SET status=$2, version=$3 WHERE id=$1', [row.id, newStatus, newVersion]);
+                    const actorId = req.user?.id || '00000000-0000-0000-0000-000000000001';
+                    await client.query('INSERT INTO approval_records(instance_id, action, actor_id, comment, from_status, to_status, from_version, to_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [row.id, action, actorId, req.body?.comment || null, row.status, newStatus, reqVersion, newVersion]);
+                    return { type: 'ok', id: row.id, from: row.status, to: newStatus, prevVersion: reqVersion, version: newVersion };
+                });
+                if (result.type === 'not_found') {
                     return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
                 }
-                const row = rows[0];
-                await pg_1.pool.query('INSERT INTO approval_records(instance_id, action, actor_id, comment, from_status, to_status, version) VALUES ($1,$2,$3,$4,$5,$6,$7)', [row.id, action, req.user?.id || null, req.body?.comment || null, row.from_status, row.to_status, row.version]);
-                metrics_1.metrics.approvalActions.inc({ action, result: 'success' });
-                await (0, audit_1.auditLog)({
+                if (result.type === 'conflict') {
+                    metrics.approvalActions.inc({ action, result: 'conflict' });
+                    metrics.approvalConflict.inc({ action });
+                    return res.status(409).json({ ok: false, error: { code: 'APPROVAL_VERSION_CONFLICT', message: 'Approval instance version mismatch', currentVersion: result.currentVersion } });
+                }
+                if (result.type === 'invalid') {
+                    return res.status(422).json({ ok: false, error: { code: 'INVALID_STATE_TRANSITION', message: `Cannot ${action} from ${result.from}` } });
+                }
+                const ok = result;
+                metrics.approvalActions.inc({ action, result: 'success' });
+                await auditLog({
                     actorId: req.user?.id,
                     actorType: 'user',
                     action,
                     resourceType: 'approval',
-                    resourceId: row.id,
+                    resourceId: ok.id,
                     ip: req.ip,
                     userAgent: req.headers['user-agent'],
-                    meta: { from: row.from_status, to: row.to_status, prevVersion: row.prev_version, newVersion: row.version }
+                    meta: { from: ok.from, to: ok.to, prevVersion: ok.prevVersion, newVersion: ok.version }
                 });
-                return res.json({ ok: true, data: { id: row.id, status: row.to_status, version: row.version, prevVersion: row.prev_version } });
+                return res.json({ ok: true, data: { id: ok.id, status: ok.to, version: ok.version, prevVersion: ok.prevVersion } });
             }
             catch (e) {
+                if (isDatabaseSchemaError(e) && allowDegradation) {
+                    if (!approvalDegraded) {
+                        console.warn('⚠️  Approval service degraded - approval_instances table not found');
+                        console.warn('⚠️  Falling back to in-memory approval storage');
+                        console.warn('⚠️  Set APPROVAL_OPTIONAL=1 environment variable is active');
+                        approvalDegraded = true;
+                    }
+                    // Fallback to memory logic (same as else branch below)
+                    const inst = instances.get(req.params.id);
+                    if (!inst)
+                        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
+                    if (inst.version !== reqVersion) {
+                        metrics.approvalActions.inc({ action, result: 'conflict' });
+                        metrics.approvalConflict.inc({ action });
+                        return res.status(409).json({ ok: false, error: { code: 'APPROVAL_VERSION_CONFLICT', message: 'Approval instance version mismatch', currentVersion: inst.version } });
+                    }
+                    if (!canTransition(inst.status, action)) {
+                        return res.status(422).json({ ok: false, error: { code: 'INVALID_STATE_TRANSITION', message: `Cannot ${action} from ${inst.status}` } });
+                    }
+                    inst.status = newStatus;
+                    inst.version += 1;
+                    metrics.approvalActions.inc({ action, result: 'success' });
+                    await auditLog({
+                        actorId: req.user?.id,
+                        actorType: 'user',
+                        action,
+                        resourceType: 'approval',
+                        resourceId: inst.id,
+                        ip: req.ip,
+                        userAgent: req.headers['user-agent'],
+                        meta: { from: null, to: newStatus, version: inst.version }
+                    });
+                    return res.json({ ok: true, data: { id: inst.id, status: inst.status, version: inst.version } });
+                }
                 return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `${action} failed` } });
             }
         }
@@ -77,14 +156,17 @@ function approvalsRouter() {
             if (!inst)
                 return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Instance not found' } });
             if (inst.version !== reqVersion) {
-                metrics_1.metrics.approvalActions.inc({ action, result: 'conflict' });
-                metrics_1.metrics.approvalConflict.inc({ action });
+                metrics.approvalActions.inc({ action, result: 'conflict' });
+                metrics.approvalConflict.inc({ action });
                 return res.status(409).json({ ok: false, error: { code: 'APPROVAL_VERSION_CONFLICT', message: 'Approval instance version mismatch', currentVersion: inst.version } });
+            }
+            if (!canTransition(inst.status, action)) {
+                return res.status(422).json({ ok: false, error: { code: 'INVALID_STATE_TRANSITION', message: `Cannot ${action} from ${inst.status}` } });
             }
             inst.status = newStatus;
             inst.version += 1;
-            metrics_1.metrics.approvalActions.inc({ action, result: 'success' });
-            await (0, audit_1.auditLog)({
+            metrics.approvalActions.inc({ action, result: 'success' });
+            await auditLog({
                 actorId: req.user?.id,
                 actorType: 'user',
                 action,

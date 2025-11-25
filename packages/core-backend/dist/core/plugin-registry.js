@@ -1,26 +1,20 @@
-"use strict";
 /**
  * 插件注册中心
  * 提供插件的集中管理、生命周期控制、依赖管理等功能
  */
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PluginRegistry = void 0;
-const eventemitter3_1 = require("eventemitter3");
-const semver_1 = __importDefault(require("semver"));
-const plugin_1 = require("../types/plugin");
-const plugin_2 = require("../types/plugin");
-const plugin_loader_1 = require("./plugin-loader");
-const logger_1 = require("./logger");
+import { EventEmitter } from 'eventemitter3';
+import semver from 'semver';
+import { PluginCapability, PluginStatus } from '../types/plugin';
+import { CAPABILITY_PERMISSIONS } from '../types/plugin';
+import { PluginLoader } from './plugin-loader';
+import { Logger } from './logger';
 /**
  * 插件依赖解析器
  */
 class DependencyResolver {
     logger;
     constructor() {
-        this.logger = new logger_1.Logger('DependencyResolver');
+        this.logger = new Logger('DependencyResolver');
     }
     /**
      * 解析插件依赖关系
@@ -64,7 +58,7 @@ class DependencyResolver {
                 const depPlugin = pluginMap.get(depName);
                 if (depPlugin) {
                     const requiredVersion = plugin.dependencies?.[depName] || plugin.peerDependencies?.[depName];
-                    if (requiredVersion && !semver_1.default.satisfies(depPlugin.version, requiredVersion)) {
+                    if (requiredVersion && !semver.satisfies(depPlugin.version, requiredVersion)) {
                         conflicts.push(`Version conflict: ${pluginName} requires ${depName}@${requiredVersion}, ` +
                             `but found ${depPlugin.version}`);
                     }
@@ -132,7 +126,7 @@ class DependencyResolver {
 /**
  * 插件注册中心实现
  */
-class PluginRegistry extends eventemitter3_1.EventEmitter {
+export class PluginRegistry extends EventEmitter {
     registrations = new Map();
     loader;
     dependencyResolver;
@@ -140,27 +134,27 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
     capabilities = new Map();
     constructor(coreAPI) {
         super();
-        this.loader = new plugin_loader_1.PluginLoader(coreAPI);
+        this.loader = new PluginLoader(coreAPI);
         this.dependencyResolver = new DependencyResolver();
-        this.logger = new logger_1.Logger('PluginRegistry');
+        this.logger = new Logger('PluginRegistry');
         // 监听插件加载器事件
         this.setupLoaderListeners();
     }
     setupLoaderListeners() {
         this.loader.on('plugin:loaded', (pluginName) => {
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.ENABLED);
-            this.emit(plugin_1.PluginEvent.ENABLED, pluginName);
+            this.updatePluginStatus(pluginName, PluginStatus.ENABLED);
+            this.emit(PluginEvent.ENABLED, pluginName);
         });
         this.loader.on('plugin:activated', (pluginName) => {
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.ENABLED);
+            this.updatePluginStatus(pluginName, PluginStatus.ENABLED);
             const registration = this.registrations.get(pluginName);
             if (registration) {
                 registration.lastActivated = new Date();
             }
         });
         this.loader.on('plugin:error', ({ plugin, error }) => {
-            this.updatePluginStatus(plugin, plugin_1.PluginStatus.ERROR, error.message);
-            this.emit(plugin_1.PluginEvent.ERROR, { plugin, error });
+            this.updatePluginStatus(plugin, PluginStatus.ERROR, error.message);
+            this.emit(PluginEvent.ERROR, { plugin, error });
         });
     }
     /**
@@ -184,14 +178,14 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
                 manifest,
                 capabilities,
                 dependencies: this.extractDependencies(manifest),
-                status: plugin_1.PluginStatus.INSTALLED,
+                status: PluginStatus.INSTALLED,
                 installedAt: new Date()
             };
             // 保存注册信息
             this.registrations.set(manifest.name, registration);
             this.capabilities.set(manifest.name, capabilities);
             this.logger.info(`Plugin registered successfully: ${manifest.name}`);
-            this.emit(plugin_1.PluginEvent.INSTALLED, manifest.name);
+            this.emit(PluginEvent.INSTALLED, manifest.name);
             return registration;
         }
         catch (error) {
@@ -207,7 +201,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         if (!registration) {
             throw new Error(`Plugin ${pluginName} is not registered`);
         }
-        if (registration.status === plugin_1.PluginStatus.ENABLED) {
+        if (registration.status === PluginStatus.ENABLED) {
             this.logger.warn(`Plugin ${pluginName} is already enabled`);
             return;
         }
@@ -215,14 +209,14 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             // 检查依赖关系
             await this.checkDependencies(pluginName);
             // 更新状态
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.LOADING);
+            this.updatePluginStatus(pluginName, PluginStatus.LOADING);
             // 通过加载器启用插件（使用公开API，而非调用私有方法）
             // 此处简单复用 Loader 的单个加载流程
             await this.loader.loadPlugin(registration.manifest);
             this.logger.info(`Plugin enabled: ${pluginName}`);
         }
         catch (error) {
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.ERROR, error.message);
+            this.updatePluginStatus(pluginName, PluginStatus.ERROR, error.message);
             this.logger.error(`Failed to enable plugin ${pluginName}`, error);
             throw error;
         }
@@ -235,7 +229,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         if (!registration) {
             throw new Error(`Plugin ${pluginName} is not registered`);
         }
-        if (registration.status === plugin_1.PluginStatus.DISABLED) {
+        if (registration.status === PluginStatus.DISABLED) {
             this.logger.warn(`Plugin ${pluginName} is already disabled`);
             return;
         }
@@ -245,9 +239,9 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             // 通过加载器停用插件
             await this.loader.deactivatePlugin(pluginName);
             // 更新状态
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.DISABLED);
+            this.updatePluginStatus(pluginName, PluginStatus.DISABLED);
             this.logger.info(`Plugin disabled: ${pluginName}`);
-            this.emit(plugin_1.PluginEvent.DISABLED, pluginName);
+            this.emit(PluginEvent.DISABLED, pluginName);
         }
         catch (error) {
             this.logger.error(`Failed to disable plugin ${pluginName}`, error);
@@ -264,7 +258,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         }
         try {
             // 先禁用插件
-            if (registration.status === plugin_1.PluginStatus.ENABLED) {
+            if (registration.status === PluginStatus.ENABLED) {
                 await this.disablePlugin(pluginName);
             }
             // 通过加载器卸载插件
@@ -273,7 +267,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             this.registrations.delete(pluginName);
             this.capabilities.delete(pluginName);
             this.logger.info(`Plugin uninstalled: ${pluginName}`);
-            this.emit(plugin_1.PluginEvent.UNINSTALLED, pluginName);
+            this.emit(PluginEvent.UNINSTALLED, pluginName);
         }
         catch (error) {
             this.logger.error(`Failed to uninstall plugin ${pluginName}`, error);
@@ -289,9 +283,9 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             throw new Error(`Plugin ${pluginName} is not registered`);
         }
         try {
-            const wasEnabled = registration.status === plugin_1.PluginStatus.ENABLED;
+            const wasEnabled = registration.status === PluginStatus.ENABLED;
             // 更新状态
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.UPDATING);
+            this.updatePluginStatus(pluginName, PluginStatus.UPDATING);
             // 如果插件已启用，先禁用
             if (wasEnabled) {
                 await this.disablePlugin(pluginName);
@@ -299,7 +293,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             // 验证新清单
             this.validateManifest(newManifest);
             // 检查版本
-            if (!semver_1.default.gt(newManifest.version, registration.manifest.version)) {
+            if (!semver.gt(newManifest.version, registration.manifest.version)) {
                 throw new Error(`New version ${newManifest.version} is not greater than current version ${registration.manifest.version}`);
             }
             // 更新注册信息
@@ -311,12 +305,12 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
                 await this.enablePlugin(pluginName);
             }
             else {
-                this.updatePluginStatus(pluginName, plugin_1.PluginStatus.INSTALLED);
+                this.updatePluginStatus(pluginName, PluginStatus.INSTALLED);
             }
             this.logger.info(`Plugin updated: ${pluginName} to version ${newManifest.version}`);
         }
         catch (error) {
-            this.updatePluginStatus(pluginName, plugin_1.PluginStatus.ERROR, error.message);
+            this.updatePluginStatus(pluginName, PluginStatus.ERROR, error.message);
             this.logger.error(`Failed to update plugin ${pluginName}`, error);
             throw error;
         }
@@ -370,7 +364,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
     checkReverseDependencies(pluginName) {
         const dependents = [];
         for (const [name, registration] of this.registrations) {
-            if (name === pluginName || registration.status !== plugin_1.PluginStatus.ENABLED) {
+            if (name === pluginName || registration.status !== PluginStatus.ENABLED) {
                 continue;
             }
             const dependencies = [
@@ -392,7 +386,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         if (!manifest.name || !manifest.version) {
             throw new Error('Plugin manifest must include name and version');
         }
-        if (!semver_1.default.valid(manifest.version)) {
+        if (!semver.valid(manifest.version)) {
             throw new Error(`Invalid version format: ${manifest.version}`);
         }
         if (!manifest.engines?.metasheet) {
@@ -407,25 +401,25 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         if (manifest.contributes) {
             const { contributes } = manifest;
             if (contributes.views && contributes.views.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.VIEW_PROVIDER);
+                capabilities.push(PluginCapability.VIEW_PROVIDER);
             }
             if (contributes.fieldTypes && contributes.fieldTypes.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.FIELD_TYPE);
+                capabilities.push(PluginCapability.FIELD_TYPE);
             }
             if (contributes.formulas && contributes.formulas.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.FORMULA_FUNCTION);
+                capabilities.push(PluginCapability.FORMULA_FUNCTION);
             }
             if (contributes.triggers && contributes.triggers.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.TRIGGER_PROVIDER);
+                capabilities.push(PluginCapability.TRIGGER_PROVIDER);
             }
             if (contributes.actions && contributes.actions.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.ACTION_PROVIDER);
+                capabilities.push(PluginCapability.ACTION_PROVIDER);
             }
             if (contributes.commands && contributes.commands.length > 0) {
-                capabilities.push(plugin_1.PluginCapability.API_ENDPOINT);
+                capabilities.push(PluginCapability.API_ENDPOINT);
             }
             if (contributes.menus) {
-                capabilities.push(plugin_1.PluginCapability.MENU_ITEM);
+                capabilities.push(PluginCapability.MENU_ITEM);
             }
         }
         return capabilities;
@@ -456,7 +450,7 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         const requiredPermissions = new Set();
         // 根据能力计算所需权限
         for (const capability of capabilities) {
-            const permissions = plugin_2.CAPABILITY_PERMISSIONS[capability] || [];
+            const permissions = CAPABILITY_PERMISSIONS[capability] || [];
             permissions.forEach(p => requiredPermissions.add(p));
         }
         // 检查清单中的权限是否包含所需权限
@@ -495,19 +489,19 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
             capabilities: {}
         };
         // 初始化能力计数
-        for (const capability of Object.values(plugin_1.PluginCapability)) {
+        for (const capability of Object.values(PluginCapability)) {
             stats.capabilities[capability] = 0;
         }
         // 统计状态和能力
         for (const registration of this.registrations.values()) {
             switch (registration.status) {
-                case plugin_1.PluginStatus.ENABLED:
+                case PluginStatus.ENABLED:
                     stats.enabled++;
                     break;
-                case plugin_1.PluginStatus.DISABLED:
+                case PluginStatus.DISABLED:
                     stats.disabled++;
                     break;
-                case plugin_1.PluginStatus.ERROR:
+                case PluginStatus.ERROR:
                     stats.error++;
                     break;
             }
@@ -529,5 +523,4 @@ class PluginRegistry extends eventemitter3_1.EventEmitter {
         return graph;
     }
 }
-exports.PluginRegistry = PluginRegistry;
 //# sourceMappingURL=plugin-registry.js.map

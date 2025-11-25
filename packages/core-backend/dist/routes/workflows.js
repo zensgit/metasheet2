@@ -1,50 +1,48 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const db_1 = require("../db");
-const auth_1 = require("../middleware/auth");
-const zod_1 = require("zod");
-const router = (0, express_1.Router)();
+import { Router } from 'express';
+import { db } from '../db';
+import { authMiddleware } from '../middleware/auth';
+import { z } from 'zod';
+const router = Router();
 // Workflow schema validation
-const WorkflowNodeSchema = zod_1.z.object({
-    id: zod_1.z.string(),
-    type: zod_1.z.string(),
-    position: zod_1.z.object({
-        x: zod_1.z.number(),
-        y: zod_1.z.number()
+const WorkflowNodeSchema = z.object({
+    id: z.string(),
+    type: z.string(),
+    position: z.object({
+        x: z.number(),
+        y: z.number()
     }),
-    data: zod_1.z.record(zod_1.z.any())
+    data: z.record(z.any())
 });
-const WorkflowEdgeSchema = zod_1.z.object({
-    id: zod_1.z.string(),
-    source: zod_1.z.string(),
-    target: zod_1.z.string(),
-    sourceHandle: zod_1.z.string().optional(),
-    targetHandle: zod_1.z.string().optional(),
-    type: zod_1.z.string().optional(),
-    data: zod_1.z.record(zod_1.z.any()).optional()
+const WorkflowEdgeSchema = z.object({
+    id: z.string(),
+    source: z.string(),
+    target: z.string(),
+    sourceHandle: z.string().optional(),
+    targetHandle: z.string().optional(),
+    type: z.string().optional(),
+    data: z.record(z.any()).optional()
 });
-const WorkflowDefinitionSchema = zod_1.z.object({
-    name: zod_1.z.string(),
-    description: zod_1.z.string().optional(),
-    nodes: zod_1.z.array(WorkflowNodeSchema),
-    edges: zod_1.z.array(WorkflowEdgeSchema),
-    variables: zod_1.z.record(zod_1.z.any()).optional(),
-    settings: zod_1.z.object({
-        maxExecutionTime: zod_1.z.number().optional(),
-        retryPolicy: zod_1.z.object({
-            enabled: zod_1.z.boolean(),
-            maxRetries: zod_1.z.number(),
-            retryDelay: zod_1.z.number()
+const WorkflowDefinitionSchema = z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    nodes: z.array(WorkflowNodeSchema),
+    edges: z.array(WorkflowEdgeSchema),
+    variables: z.record(z.any()).optional(),
+    settings: z.object({
+        maxExecutionTime: z.number().optional(),
+        retryPolicy: z.object({
+            enabled: z.boolean(),
+            maxRetries: z.number(),
+            retryDelay: z.number()
         }).optional(),
-        errorHandling: zod_1.z.enum(['fail', 'continue', 'compensate']).optional()
+        errorHandling: z.enum(['fail', 'continue', 'compensate']).optional()
     }).optional()
 });
 // List all workflows
-router.get('/workflows', auth_1.authMiddleware, async (req, res) => {
+router.get('/workflows', authMiddleware, async (req, res) => {
     try {
         const { status, category, search, limit = 20, offset = 0 } = req.query;
-        let query = db_1.db
+        let query = db
             .selectFrom('workflow_definitions')
             .selectAll()
             .where('deleted_at', 'is', null)
@@ -65,9 +63,9 @@ router.get('/workflows', auth_1.authMiddleware, async (req, res) => {
             .limit(Number(limit))
             .offset(Number(offset))
             .execute();
-        const total = await db_1.db
+        const total = await db
             .selectFrom('workflow_definitions')
-            .select(db_1.db.fn.count('id').as('count'))
+            .select(db.fn.count('id').as('count'))
             .where('deleted_at', 'is', null)
             .executeTakeFirst();
         res.json({
@@ -83,9 +81,9 @@ router.get('/workflows', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Get single workflow
-router.get('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
+router.get('/workflows/:id', authMiddleware, async (req, res) => {
     try {
-        const workflow = await db_1.db
+        const workflow = await db
             .selectFrom('workflow_definitions')
             .selectAll()
             .where('id', '=', req.params.id)
@@ -95,13 +93,13 @@ router.get('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
             return res.status(404).json({ error: 'Workflow not found' });
         }
         // Get workflow statistics
-        const stats = await db_1.db
+        const stats = await db
             .selectFrom('workflow_instances')
             .select([
-            db_1.db.fn.count('id').as('total_instances'),
-            db_1.db.fn.countAll().filter((eb) => eb('status', '=', 'completed')).as('completed'),
-            db_1.db.fn.countAll().filter((eb) => eb('status', '=', 'failed')).as('failed'),
-            db_1.db.fn.countAll().filter((eb) => eb('status', '=', 'running')).as('running')
+            db.fn.count('id').as('total_instances'),
+            db.fn.countAll().filter((eb) => eb('status', '=', 'completed')).as('completed'),
+            db.fn.countAll().filter((eb) => eb('status', '=', 'failed')).as('failed'),
+            db.fn.countAll().filter((eb) => eb('status', '=', 'running')).as('running')
         ])
             .where('workflow_id', '=', req.params.id)
             .executeTakeFirst();
@@ -116,11 +114,11 @@ router.get('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Create new workflow
-router.post('/workflows', auth_1.authMiddleware, async (req, res) => {
+router.post('/workflows', authMiddleware, async (req, res) => {
     try {
         const validatedData = WorkflowDefinitionSchema.parse(req.body);
         const userId = req.user.id;
-        const workflow = await db_1.db
+        const workflow = await db
             .insertInto('workflow_definitions')
             .values({
             id: `wf_${Date.now()}`,
@@ -143,7 +141,7 @@ router.post('/workflows', auth_1.authMiddleware, async (req, res) => {
         res.status(201).json(workflow);
     }
     catch (error) {
-        if (error instanceof zod_1.z.ZodError) {
+        if (error instanceof z.ZodError) {
             return res.status(400).json({ error: 'Invalid workflow data', details: error.errors });
         }
         console.error('Error creating workflow:', error);
@@ -151,12 +149,12 @@ router.post('/workflows', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Update workflow
-router.put('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
+router.put('/workflows/:id', authMiddleware, async (req, res) => {
     try {
         const validatedData = WorkflowDefinitionSchema.partial().parse(req.body);
         const userId = req.user.id;
         // Check if workflow exists
-        const existing = await db_1.db
+        const existing = await db
             .selectFrom('workflow_definitions')
             .select(['id', 'version', 'status'])
             .where('id', '=', req.params.id)
@@ -168,13 +166,13 @@ router.put('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
         // Create new version if workflow is published
         if (existing.status === 'published') {
             // Archive current version
-            await db_1.db
+            await db
                 .updateTable('workflow_definitions')
                 .set({ status: 'archived' })
                 .where('id', '=', req.params.id)
                 .execute();
             // Create new version
-            const newWorkflow = await db_1.db
+            const newWorkflow = await db
                 .insertInto('workflow_definitions')
                 .values({
                 id: `wf_${Date.now()}`,
@@ -198,7 +196,7 @@ router.put('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
             return res.json(newWorkflow);
         }
         // Update existing draft
-        const updated = await db_1.db
+        const updated = await db
             .updateTable('workflow_definitions')
             .set({
             name: validatedData.name,
@@ -224,7 +222,7 @@ router.put('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
         res.json(updated);
     }
     catch (error) {
-        if (error instanceof zod_1.z.ZodError) {
+        if (error instanceof z.ZodError) {
             return res.status(400).json({ error: 'Invalid workflow data', details: error.errors });
         }
         console.error('Error updating workflow:', error);
@@ -232,10 +230,10 @@ router.put('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Publish workflow
-router.post('/workflows/:id/publish', auth_1.authMiddleware, async (req, res) => {
+router.post('/workflows/:id/publish', authMiddleware, async (req, res) => {
     try {
         const userId = req.user.id;
-        const workflow = await db_1.db
+        const workflow = await db
             .updateTable('workflow_definitions')
             .set({
             status: 'published',
@@ -258,10 +256,10 @@ router.post('/workflows/:id/publish', auth_1.authMiddleware, async (req, res) =>
     }
 });
 // Delete workflow (soft delete)
-router.delete('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
+router.delete('/workflows/:id', authMiddleware, async (req, res) => {
     try {
         const userId = req.user.id;
-        const deleted = await db_1.db
+        const deleted = await db
             .updateTable('workflow_definitions')
             .set({
             deleted_at: new Date(),
@@ -282,12 +280,12 @@ router.delete('/workflows/:id', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Execute workflow
-router.post('/workflows/:id/execute', auth_1.authMiddleware, async (req, res) => {
+router.post('/workflows/:id/execute', authMiddleware, async (req, res) => {
     try {
         const { variables = {}, context = {} } = req.body;
         const userId = req.user.id;
         // Get workflow definition
-        const workflow = await db_1.db
+        const workflow = await db
             .selectFrom('workflow_definitions')
             .selectAll()
             .where('id', '=', req.params.id)
@@ -298,7 +296,7 @@ router.post('/workflows/:id/execute', auth_1.authMiddleware, async (req, res) =>
             return res.status(404).json({ error: 'Published workflow not found' });
         }
         // Create workflow instance
-        const instance = await db_1.db
+        const instance = await db
             .insertInto('workflow_instances')
             .values({
             id: `wi_${Date.now()}`,
@@ -330,10 +328,10 @@ router.post('/workflows/:id/execute', auth_1.authMiddleware, async (req, res) =>
     }
 });
 // Get workflow instances
-router.get('/workflows/:id/instances', auth_1.authMiddleware, async (req, res) => {
+router.get('/workflows/:id/instances', authMiddleware, async (req, res) => {
     try {
         const { status, limit = 20, offset = 0 } = req.query;
-        let query = db_1.db
+        let query = db
             .selectFrom('workflow_instances')
             .selectAll()
             .where('workflow_id', '=', req.params.id)
@@ -353,9 +351,9 @@ router.get('/workflows/:id/instances', auth_1.authMiddleware, async (req, res) =
     }
 });
 // Get workflow instance details
-router.get('/instances/:id', auth_1.authMiddleware, async (req, res) => {
+router.get('/instances/:id', authMiddleware, async (req, res) => {
     try {
-        const instance = await db_1.db
+        const instance = await db
             .selectFrom('workflow_instances')
             .selectAll()
             .where('id', '=', req.params.id)
@@ -364,14 +362,14 @@ router.get('/instances/:id', auth_1.authMiddleware, async (req, res) => {
             return res.status(404).json({ error: 'Instance not found' });
         }
         // Get tokens for this instance
-        const tokens = await db_1.db
+        const tokens = await db
             .selectFrom('workflow_tokens')
             .selectAll()
             .where('instance_id', '=', req.params.id)
             .orderBy('created_at', 'desc')
             .execute();
         // Get incidents for this instance
-        const incidents = await db_1.db
+        const incidents = await db
             .selectFrom('workflow_incidents')
             .selectAll()
             .where('instance_id', '=', req.params.id)
@@ -389,15 +387,15 @@ router.get('/instances/:id', auth_1.authMiddleware, async (req, res) => {
     }
 });
 // Cancel workflow instance
-router.post('/instances/:id/cancel', auth_1.authMiddleware, async (req, res) => {
+router.post('/instances/:id/cancel', authMiddleware, async (req, res) => {
     try {
         const userId = req.user.id;
-        const instance = await db_1.db
+        const instance = await db
             .updateTable('workflow_instances')
             .set({
             status: 'cancelled',
             completed_at: new Date(),
-            context: db_1.db.raw(`context || '{"cancelled_by": "${userId}", "cancelled_at": "${new Date().toISOString()}"}'::jsonb`)
+            context: db.raw(`context || '{"cancelled_by": "${userId}", "cancelled_at": "${new Date().toISOString()}"}'::jsonb`)
         })
             .where('id', '=', req.params.id)
             .where('status', 'in', ['pending', 'running'])
@@ -407,7 +405,7 @@ router.post('/instances/:id/cancel', auth_1.authMiddleware, async (req, res) => 
             return res.status(404).json({ error: 'Active instance not found' });
         }
         // Cancel all active tokens
-        await db_1.db
+        await db
             .updateTable('workflow_tokens')
             .set({
             status: 'cancelled',
@@ -426,5 +424,5 @@ router.post('/instances/:id/cancel', auth_1.authMiddleware, async (req, res) => 
         res.status(500).json({ error: 'Failed to cancel instance' });
     }
 });
-exports.default = router;
+export default router;
 //# sourceMappingURL=workflows.js.map

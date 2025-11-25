@@ -1,26 +1,22 @@
-"use strict";
 /**
  * Migration: Create views and view_states tables
  * Timestamp: 2025-09-24 12:00:00
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.up = up;
-exports.down = down;
-const kysely_1 = require("kysely");
-async function up(db) {
+import { sql } from 'kysely';
+export async function up(db) {
     // Ensure pgcrypto extension for gen_random_uuid() (idempotent)
-    await (0, kysely_1.sql) `CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db);
+    await sql `CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db);
     // Create views table (idempotent)
     await db.schema
         .createTable('views')
         .ifNotExists()
-        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('table_id', 'uuid')
-        .addColumn('type', 'text', (col) => col.notNull().check((0, kysely_1.sql) `type IN ('grid','kanban','gantt','form','calendar')`))
+        .addColumn('type', 'text', (col) => col.notNull().check(sql `type IN ('grid','kanban','gantt','form','calendar')`))
         .addColumn('name', 'text', (col) => col.notNull())
-        .addColumn('config', 'jsonb', (col) => col.notNull().defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
-        .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
+        .addColumn('config', 'jsonb', (col) => col.notNull().defaultTo(sql `'{}'::jsonb`))
+        .addColumn('created_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `NOW()`))
+        .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `NOW()`))
         .execute();
     // Create indexes for views (idempotent)
     await db.schema
@@ -29,16 +25,16 @@ async function up(db) {
         .on('views')
         .column('type')
         .execute();
-    await (0, kysely_1.sql) `CREATE INDEX IF NOT EXISTS idx_views_config_gin ON views USING gin(config)`.execute(db);
+    await sql `CREATE INDEX IF NOT EXISTS idx_views_config_gin ON views USING gin(config)`.execute(db);
     // Create view_states table (idempotent)
     await db.schema
         .createTable('view_states')
         .ifNotExists()
-        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo((0, kysely_1.sql) `gen_random_uuid()`))
+        .addColumn('id', 'uuid', (col) => col.primaryKey().defaultTo(sql `gen_random_uuid()`))
         .addColumn('view_id', 'uuid', (col) => col.notNull().references('views.id').onDelete('cascade'))
         .addColumn('user_id', 'uuid', (col) => col.notNull())
-        .addColumn('state', 'jsonb', (col) => col.notNull().defaultTo((0, kysely_1.sql) `'{}'::jsonb`))
-        .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo((0, kysely_1.sql) `NOW()`))
+        .addColumn('state', 'jsonb', (col) => col.notNull().defaultTo(sql `'{}'::jsonb`))
+        .addColumn('updated_at', 'timestamptz', (col) => col.notNull().defaultTo(sql `NOW()`))
         .execute();
     // Create unique constraint for view_id + user_id (idempotent)
     await db.schema
@@ -56,7 +52,7 @@ async function up(db) {
         .columns(['view_id', 'user_id'])
         .execute();
     // Create GIN index for state column only if state column exists (may not exist if table was created by 043)
-    await (0, kysely_1.sql) `
+    await sql `
     DO $$ BEGIN
       IF EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -69,7 +65,7 @@ async function up(db) {
     END $$;
   `.execute(db);
     // Create trigger to auto-update updated_at timestamp
-    await (0, kysely_1.sql) `
+    await sql `
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -79,18 +75,18 @@ async function up(db) {
     $$ language 'plpgsql';
   `.execute(db);
     // Ensure triggers are recreated idempotently
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_views_updated_at ON views`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_view_states_updated_at ON view_states`.execute(db);
-    await (0, kysely_1.sql) `CREATE TRIGGER update_views_updated_at BEFORE UPDATE ON views
+    await sql `DROP TRIGGER IF EXISTS update_views_updated_at ON views`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_view_states_updated_at ON view_states`.execute(db);
+    await sql `CREATE TRIGGER update_views_updated_at BEFORE UPDATE ON views
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`.execute(db);
-    await (0, kysely_1.sql) `CREATE TRIGGER update_view_states_updated_at BEFORE UPDATE ON view_states
+    await sql `CREATE TRIGGER update_view_states_updated_at BEFORE UPDATE ON view_states
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();`.execute(db);
 }
-async function down(db) {
+export async function down(db) {
     // Drop triggers
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_view_states_updated_at ON view_states`.execute(db);
-    await (0, kysely_1.sql) `DROP TRIGGER IF EXISTS update_views_updated_at ON views`.execute(db);
-    await (0, kysely_1.sql) `DROP FUNCTION IF EXISTS update_updated_at_column()`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_view_states_updated_at ON view_states`.execute(db);
+    await sql `DROP TRIGGER IF EXISTS update_views_updated_at ON views`.execute(db);
+    await sql `DROP FUNCTION IF EXISTS update_updated_at_column()`.execute(db);
     // Drop tables (cascade will handle foreign keys and indexes)
     await db.schema.dropTable('view_states').ifExists().cascade().execute();
     await db.schema.dropTable('views').ifExists().cascade().execute();

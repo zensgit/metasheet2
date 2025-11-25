@@ -237,6 +237,21 @@ const cache_candidate_requests = new client.Counter({
   labelNames: ['route', 'method'] as const
 })
 
+// Fallback metrics (Phase 5)
+// Tracks degraded responses for SLO validation
+// Reasons: http_error, http_timeout, message_error, message_timeout, cache_miss, circuit_breaker
+const fallbackRawTotal = new client.Counter({
+  name: 'metasheet_fallback_total',
+  help: 'Total degraded fallback responses (raw count)',
+  labelNames: ['reason'] as const
+})
+
+const fallbackEffectiveTotal = new client.Counter({
+  name: 'metasheet_fallback_effective_total',
+  help: 'Effective degraded fallback responses (excludes benign causes like cache_miss when COUNT_CACHE_MISS_AS_FALLBACK=false)',
+  labelNames: ['reason'] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -274,6 +289,8 @@ registry.registerMetric(cache_errors_total)
 registry.registerMetric(cache_invalidate_total)
 registry.registerMetric(cache_enabled)
 registry.registerMetric(cache_candidate_requests)
+registry.registerMetric(fallbackRawTotal)
+registry.registerMetric(fallbackEffectiveTotal)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -338,5 +355,7 @@ export const metrics = {
   cache_errors_total,
   cache_invalidate_total,
   cache_enabled,
-  cache_candidate_requests
+  cache_candidate_requests,
+  fallbackRawTotal,
+  fallbackEffectiveTotal
 }

@@ -1,23 +1,20 @@
-"use strict";
 /**
  * Distributed Tracing System
  * OpenTelemetry-based tracing for distributed system observability
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DistributedTracing = void 0;
-const sdk_trace_node_1 = require("@opentelemetry/sdk-trace-node");
-const resources_1 = require("@opentelemetry/resources");
-const semantic_conventions_1 = require("@opentelemetry/semantic-conventions");
-const sdk_trace_base_1 = require("@opentelemetry/sdk-trace-base");
-const exporter_jaeger_1 = require("@opentelemetry/exporter-jaeger");
-const exporter_zipkin_1 = require("@opentelemetry/exporter-zipkin");
-const instrumentation_1 = require("@opentelemetry/instrumentation");
-const instrumentation_http_1 = require("@opentelemetry/instrumentation-http");
-const instrumentation_express_1 = require("@opentelemetry/instrumentation-express");
-const instrumentation_ioredis_1 = require("@opentelemetry/instrumentation-ioredis");
-const api_1 = require("@opentelemetry/api");
-const eventemitter3_1 = require("eventemitter3");
-class DistributedTracing extends eventemitter3_1.EventEmitter {
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { Resource } from '@opentelemetry/resources';
+import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
+import { BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
+import { ZipkinExporter } from '@opentelemetry/exporter-zipkin';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
+import { ExpressInstrumentation } from '@opentelemetry/instrumentation-express';
+import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis';
+import { trace, context, SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { EventEmitter } from 'eventemitter3';
+export class DistributedTracing extends EventEmitter {
     provider;
     tracer;
     config;
@@ -32,7 +29,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         super();
         this.config = config;
         this.provider = this.initializeProvider();
-        this.tracer = api_1.trace.getTracer(config.serviceName, config.serviceVersion);
+        this.tracer = trace.getTracer(config.serviceName, config.serviceVersion);
         this.setupInstrumentations();
         this.emit('tracing:initialized', config);
     }
@@ -40,12 +37,12 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Initialize the tracer provider
      */
     initializeProvider() {
-        const resource = resources_1.Resource.default().merge(new resources_1.Resource({
-            [semantic_conventions_1.SemanticResourceAttributes.SERVICE_NAME]: this.config.serviceName,
-            [semantic_conventions_1.SemanticResourceAttributes.SERVICE_VERSION]: this.config.serviceVersion,
-            [semantic_conventions_1.SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: this.config.environment
+        const resource = Resource.default().merge(new Resource({
+            [SemanticResourceAttributes.SERVICE_NAME]: this.config.serviceName,
+            [SemanticResourceAttributes.SERVICE_VERSION]: this.config.serviceVersion,
+            [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: this.config.environment
         }));
-        const provider = new sdk_trace_node_1.NodeTracerProvider({
+        const provider = new NodeTracerProvider({
             resource,
             forceFlushTimeoutMillis: 10000
         });
@@ -62,29 +59,29 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         const exporters = this.config.exporters || {};
         // Console exporter for development
         if (exporters.console) {
-            const consoleExporter = new sdk_trace_base_1.ConsoleSpanExporter();
-            provider.addSpanProcessor(new sdk_trace_base_1.SimpleSpanProcessor(consoleExporter));
+            const consoleExporter = new ConsoleSpanExporter();
+            provider.addSpanProcessor(new SimpleSpanProcessor(consoleExporter));
         }
         // Jaeger exporter
         if (exporters.jaeger) {
-            const jaegerExporter = new exporter_jaeger_1.JaegerExporter({
+            const jaegerExporter = new JaegerExporter({
                 endpoint: exporters.jaeger.endpoint,
                 username: exporters.jaeger.username,
                 password: exporters.jaeger.password
             });
-            provider.addSpanProcessor(new sdk_trace_base_1.BatchSpanProcessor(jaegerExporter));
+            provider.addSpanProcessor(new BatchSpanProcessor(jaegerExporter));
         }
         // Zipkin exporter
         if (exporters.zipkin) {
-            const zipkinExporter = new exporter_zipkin_1.ZipkinExporter({
+            const zipkinExporter = new ZipkinExporter({
                 url: exporters.zipkin.url,
                 serviceName: exporters.zipkin.serviceName || this.config.serviceName
             });
-            provider.addSpanProcessor(new sdk_trace_base_1.BatchSpanProcessor(zipkinExporter));
+            provider.addSpanProcessor(new BatchSpanProcessor(zipkinExporter));
         }
         // Custom exporter
         if (exporters.custom) {
-            provider.addSpanProcessor(new sdk_trace_base_1.BatchSpanProcessor(exporters.custom));
+            provider.addSpanProcessor(new BatchSpanProcessor(exporters.custom));
         }
     }
     /**
@@ -94,7 +91,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         const instrumentations = this.config.instrumentations || {};
         const instrumentationList = [];
         if (instrumentations.http !== false) {
-            instrumentationList.push(new instrumentation_http_1.HttpInstrumentation({
+            instrumentationList.push(new HttpInstrumentation({
                 requestHook: (span, request) => {
                     span.setAttributes({
                         'http.request.body.size': request.headers['content-length'] || 0
@@ -109,7 +106,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
             }));
         }
         if (instrumentations.express !== false) {
-            instrumentationList.push(new instrumentation_express_1.ExpressInstrumentation({
+            instrumentationList.push(new ExpressInstrumentation({
                 requestHook: (span, info) => {
                     span.setAttributes({
                         'express.route': info.route,
@@ -119,7 +116,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
             }));
         }
         if (instrumentations.redis !== false) {
-            instrumentationList.push(new instrumentation_ioredis_1.IORedisInstrumentation({
+            instrumentationList.push(new IORedisInstrumentation({
                 requestHook: (span, info) => {
                     span.setAttributes({
                         'redis.command': info.command.name,
@@ -128,7 +125,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 }
             }));
         }
-        (0, instrumentation_1.registerInstrumentations)({
+        registerInstrumentations({
             instrumentations: instrumentationList
         });
     }
@@ -137,13 +134,13 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      */
     startSpan(name, options) {
         const spanOptions = {
-            kind: options?.kind || api_1.SpanKind.INTERNAL,
+            kind: options?.kind || SpanKind.INTERNAL,
             attributes: options?.attributes
         };
         let span;
         if (options?.parent) {
             const parentContext = 'spanContext' in options.parent
-                ? api_1.trace.setSpan(api_1.context.active(), options.parent)
+                ? trace.setSpan(context.active(), options.parent)
                 : options.parent;
             span = this.tracer.startSpan(name, spanOptions, parentContext);
         }
@@ -173,7 +170,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         this.activeSpans.delete(spanId);
         this.spanMetrics.completed++;
         this.spanMetrics.active--;
-        if (status?.code === api_1.SpanStatusCode.ERROR) {
+        if (status?.code === SpanStatusCode.ERROR) {
             this.spanMetrics.errors++;
         }
         this.emit('span:ended', {
@@ -193,25 +190,25 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 if (result instanceof Promise) {
                     return result
                         .then((value) => {
-                        this.endSpan(span, { code: api_1.SpanStatusCode.OK });
+                        this.endSpan(span, { code: SpanStatusCode.OK });
                         return value;
                     })
                         .catch((error) => {
                         span.recordException(error);
                         this.endSpan(span, {
-                            code: api_1.SpanStatusCode.ERROR,
+                            code: SpanStatusCode.ERROR,
                             message: error.message
                         });
                         throw error;
                     });
                 }
-                this.endSpan(span, { code: api_1.SpanStatusCode.OK });
+                this.endSpan(span, { code: SpanStatusCode.OK });
                 return result;
             }
             catch (error) {
                 span.recordException(error);
                 this.endSpan(span, {
-                    code: api_1.SpanStatusCode.ERROR,
+                    code: SpanStatusCode.ERROR,
                     message: error.message
                 });
                 throw error;
@@ -226,13 +223,13 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
             const span = this.startSpan(name, options);
             try {
                 const result = await fn(...args);
-                this.endSpan(span, { code: api_1.SpanStatusCode.OK });
+                this.endSpan(span, { code: SpanStatusCode.OK });
                 return result;
             }
             catch (error) {
                 span.recordException(error);
                 this.endSpan(span, {
-                    code: api_1.SpanStatusCode.ERROR,
+                    code: SpanStatusCode.ERROR,
                     message: error.message
                 });
                 throw error;
@@ -244,7 +241,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      */
     async traceHttpRequest(method, url, handler, headers) {
         const span = this.startSpan(`HTTP ${method} ${url}`, {
-            kind: api_1.SpanKind.CLIENT,
+            kind: SpanKind.CLIENT,
             attributes: {
                 'http.method': method,
                 'http.url': url,
@@ -259,7 +256,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 'http.status_code': result.status || 200,
                 'http.response_time': duration
             });
-            this.endSpan(span, { code: api_1.SpanStatusCode.OK });
+            this.endSpan(span, { code: SpanStatusCode.OK });
             return result;
         }
         catch (error) {
@@ -268,7 +265,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 'http.error': error.message
             });
             this.endSpan(span, {
-                code: api_1.SpanStatusCode.ERROR,
+                code: SpanStatusCode.ERROR,
                 message: error.message
             });
             throw error;
@@ -279,7 +276,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      */
     async traceDbQuery(operation, query, handler, params) {
         const span = this.startSpan(`DB ${operation}`, {
-            kind: api_1.SpanKind.CLIENT,
+            kind: SpanKind.CLIENT,
             attributes: {
                 'db.operation': operation,
                 'db.statement': query,
@@ -294,7 +291,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 'db.rows_affected': result.rowCount || 0,
                 'db.duration': duration
             });
-            this.endSpan(span, { code: api_1.SpanStatusCode.OK });
+            this.endSpan(span, { code: SpanStatusCode.OK });
             return result;
         }
         catch (error) {
@@ -303,7 +300,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
                 'db.error': error.message
             });
             this.endSpan(span, {
-                code: api_1.SpanStatusCode.ERROR,
+                code: SpanStatusCode.ERROR,
                 message: error.message
             });
             throw error;
@@ -313,7 +310,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Add event to current span
      */
     addEvent(name, attributes, timestamp) {
-        const span = api_1.trace.getActiveSpan();
+        const span = trace.getActiveSpan();
         if (span) {
             span.addEvent(name, attributes, timestamp);
         }
@@ -322,7 +319,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Set attributes on current span
      */
     setAttributes(attributes) {
-        const span = api_1.trace.getActiveSpan();
+        const span = trace.getActiveSpan();
         if (span) {
             span.setAttributes(attributes);
         }
@@ -331,7 +328,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Set baggage
      */
     setBaggage(key, value) {
-        const baggage = api_1.context.active().getValue(Symbol.for('OpenTelemetry Baggage'));
+        const baggage = context.active().getValue(Symbol.for('OpenTelemetry Baggage'));
         if (baggage) {
             baggage.setEntry(key, { value });
         }
@@ -340,7 +337,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Get baggage
      */
     getBaggage(key) {
-        const baggage = api_1.context.active().getValue(Symbol.for('OpenTelemetry Baggage'));
+        const baggage = context.active().getValue(Symbol.for('OpenTelemetry Baggage'));
         if (baggage) {
             const entry = baggage.getEntry(key);
             return entry?.value;
@@ -368,7 +365,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Inject trace context into headers
      */
     injectTraceContext(headers) {
-        const span = api_1.trace.getActiveSpan();
+        const span = trace.getActiveSpan();
         if (!span)
             return headers;
         const spanContext = span.spanContext();
@@ -388,7 +385,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
      * Get active span
      */
     getActiveSpan() {
-        return api_1.trace.getActiveSpan();
+        return trace.getActiveSpan();
     }
     /**
      * Get span by ID
@@ -420,7 +417,7 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         // End all active spans
         for (const [spanId, span] of this.activeSpans) {
             this.endSpan(span, {
-                code: api_1.SpanStatusCode.ERROR,
+                code: SpanStatusCode.ERROR,
                 message: 'Shutdown forced'
             });
         }
@@ -429,6 +426,5 @@ class DistributedTracing extends eventemitter3_1.EventEmitter {
         this.emit('tracing:shutdown');
     }
 }
-exports.DistributedTracing = DistributedTracing;
-exports.default = DistributedTracing;
+export default DistributedTracing;
 //# sourceMappingURL=DistributedTracing.js.map

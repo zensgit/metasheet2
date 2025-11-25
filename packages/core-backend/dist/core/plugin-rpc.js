@@ -1,16 +1,13 @@
-"use strict";
 /**
  * 插件间 RPC (Remote Procedure Call) 机制
  * 任务ID: P1-021
  * 功能: 基于事件总线实现插件间的远程方法调用
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.RpcManager = exports.RpcClient = exports.RpcServer = exports.RpcErrorCode = void 0;
-const logger_1 = require("./logger");
+import { createLogger } from './logger';
 /**
  * RPC 错误代码
  */
-var RpcErrorCode;
+export var RpcErrorCode;
 (function (RpcErrorCode) {
     RpcErrorCode[RpcErrorCode["METHOD_NOT_FOUND"] = -32601] = "METHOD_NOT_FOUND";
     RpcErrorCode[RpcErrorCode["INVALID_PARAMS"] = -32602] = "INVALID_PARAMS";
@@ -19,11 +16,11 @@ var RpcErrorCode;
     RpcErrorCode[RpcErrorCode["PLUGIN_NOT_FOUND"] = -32001] = "PLUGIN_NOT_FOUND";
     RpcErrorCode[RpcErrorCode["UNAUTHORIZED"] = -32002] = "UNAUTHORIZED";
     RpcErrorCode[RpcErrorCode["RATE_LIMITED"] = -32003] = "RATE_LIMITED";
-})(RpcErrorCode || (exports.RpcErrorCode = RpcErrorCode = {}));
+})(RpcErrorCode || (RpcErrorCode = {}));
 /**
  * RPC 服务器 - 提供方法供其他插件调用
  */
-class RpcServer {
+export class RpcServer {
     pluginId;
     methods;
     eventBus;
@@ -38,7 +35,7 @@ class RpcServer {
         this.methods = new Map();
         this.stats = new Map();
         this.rateLimiters = new Map();
-        this.logger = (0, logger_1.createLogger)(`RpcServer:${pluginId}`);
+        this.logger = createLogger(`RpcServer:${pluginId}`);
         this.config = {
             enableLogging: true,
             enableMetrics: true,
@@ -251,11 +248,10 @@ class RpcServer {
         }
     }
 }
-exports.RpcServer = RpcServer;
 /**
  * RPC 客户端 - 调用其他插件提供的方法
  */
-class RpcClient {
+export class RpcClient {
     pluginId;
     eventBus;
     logger;
@@ -265,7 +261,7 @@ class RpcClient {
         this.pluginId = pluginId;
         this.eventBus = eventBus;
         this.pendingCalls = new Map();
-        this.logger = (0, logger_1.createLogger)(`RpcClient:${pluginId}`);
+        this.logger = createLogger(`RpcClient:${pluginId}`);
         this.config = {
             timeout: 30000,
             retries: 3,
@@ -379,11 +375,10 @@ class RpcClient {
         this.logger.info(`RPC Client destroyed for plugin: ${this.pluginId}`);
     }
 }
-exports.RpcClient = RpcClient;
 /**
  * RPC 管理器 - 简化 RPC 使用
  */
-class RpcManager {
+export class RpcManager {
     static instance;
     eventBus;
     servers;
@@ -393,7 +388,7 @@ class RpcManager {
         this.eventBus = eventBus;
         this.servers = new Map();
         this.clients = new Map();
-        this.logger = (0, logger_1.createLogger)('RpcManager');
+        this.logger = createLogger('RpcManager');
     }
     /**
      * 获取单例实例
@@ -453,7 +448,6 @@ class RpcManager {
         this.logger.info('RPC Manager destroyed');
     }
 }
-exports.RpcManager = RpcManager;
 // 导出默认管理器
-exports.default = RpcManager;
+export default RpcManager;
 //# sourceMappingURL=plugin-rpc.js.map

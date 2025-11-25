@@ -1,7 +1,6 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const express_1 = require("express");
-const CacheRegistry_1 = require("../../core/cache/CacheRegistry");
+import { Router } from 'express';
+import { cacheRegistry } from '../../core/cache/CacheRegistry';
+import fallbackTestRouter from './fallback-test';
 /**
  * Internal API routes for debugging and monitoring
  *
@@ -17,7 +16,7 @@ const CacheRegistry_1 = require("../../core/cache/CacheRegistry");
  * app.use('/internal', internalRouter)
  * ```
  */
-const router = (0, express_1.Router)();
+const router = Router();
 /**
  * GET /internal/cache - Cache status endpoint
  *
@@ -50,7 +49,7 @@ router.get('/cache', (req, res) => {
     if (process.env.NODE_ENV === 'production') {
         return res.status(404).json({ error: 'Not available in production' });
     }
-    const status = CacheRegistry_1.cacheRegistry.getStatus();
+    const status = cacheRegistry.getStatus();
     res.json({
         enabled: status.enabled,
         implName: status.implName,
@@ -65,5 +64,7 @@ router.get('/cache', (req, res) => {
         }
     });
 });
-exports.default = router;
+// Mount fallback test routes at /internal/test/*
+router.use('/test', fallbackTestRouter);
+export default router;
 //# sourceMappingURL=internal.js.map

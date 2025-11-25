@@ -4,5 +4,5 @@ export type Permission = {
     action: string;
 };
 export declare function hasPermission(user: any, perm: Permission): Promise<boolean>;
-export declare function rbacGuard(resource: string, action: string): (req: Request, res: Response, next: NextFunction) => Promise<Response<any, Record<string, any>>>;
+export declare function rbacGuard(resource: string, action: string): (req: Request, res: Response, next: NextFunction) => Promise<any>;
 //# sourceMappingURL=rbac.d.ts.map

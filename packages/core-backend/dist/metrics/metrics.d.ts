@@ -1,5 +1,6 @@
 import type { Application, Request, Response, NextFunction } from 'express';
 import client from 'prom-client';
+export declare const registry: client.Registry<"text/plain; version=0.0.4; charset=utf-8">;
 export declare function installMetrics(app: Application): void;
 export declare function requestMetricsMiddleware(req: Request, res: Response, next: NextFunction): void;
 export declare const metrics: {
@@ -11,21 +12,35 @@ export declare const metrics: {
     rbacPermCacheMisses: client.Counter<never>;
     rbacDenials: client.Counter<never>;
     authFailures: client.Counter<never>;
-    httpSummary: client.Summary<"status" | "route" | "method">;
-    httpRequestsTotal: client.Counter<"status" | "method">;
+    httpSummary: client.Summary<"route" | "method" | "status">;
+    httpRequestsTotal: client.Counter<"method" | "status">;
     eventsEmittedTotal: client.Counter<never>;
     messagesProcessedTotal: client.Counter<never>;
     messagesRetriedTotal: client.Counter<never>;
     messagesExpiredTotal: client.Counter<never>;
     permissionDeniedTotal: client.Counter<never>;
     rpcTimeoutsTotal: client.Counter<never>;
+    pluginReloadTotal: client.Counter<"result" | "plugin_name">;
+    pluginReloadDuration: client.Histogram<"plugin_name">;
+    snapshotCreateTotal: client.Counter<"result">;
+    snapshotRestoreTotal: client.Counter<"result">;
+    snapshotOperationDuration: client.Histogram<"operation">;
+    snapshotCleanupTotal: client.Counter<"result">;
+    snapshotTagsTotal: client.Counter<"tag">;
+    snapshotProtectionLevel: client.Gauge<"level">;
+    snapshotReleaseChannel: client.Gauge<"channel">;
+    protectionRuleEvaluationsTotal: client.Counter<"result" | "rule">;
+    protectionRuleBlocksTotal: client.Counter<"operation" | "rule">;
+    snapshotProtectedSkippedTotal: client.Counter<never>;
     cache_hits_total: client.Counter<"impl" | "key_pattern">;
     cache_miss_total: client.Counter<"impl" | "key_pattern">;
     cache_set_total: client.Counter<"impl" | "key_pattern">;
     cache_del_total: client.Counter<"impl" | "key_pattern">;
     cache_errors_total: client.Counter<"impl" | "error_type">;
-    cache_invalidate_total: client.Counter<"impl" | "tag">;
+    cache_invalidate_total: client.Counter<"tag" | "impl">;
     cache_enabled: client.Gauge<"impl">;
     cache_candidate_requests: client.Counter<"route" | "method">;
+    fallbackRawTotal: client.Counter<"reason">;
+    fallbackEffectiveTotal: client.Counter<"reason">;
 };
 //# sourceMappingURL=metrics.d.ts.map

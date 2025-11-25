@@ -1,12 +1,9 @@
-"use strict";
 /**
  * Workflow-specific Repository
  * Handles workflow definitions, instances, tokens, and incidents
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.workflowIncidentRepo = exports.workflowTokenRepo = exports.workflowInstanceRepo = exports.workflowDefinitionRepo = exports.WorkflowIncidentRepository = exports.WorkflowTokenRepository = exports.WorkflowInstanceRepository = exports.WorkflowDefinitionRepository = void 0;
-const BaseRepository_1 = require("./BaseRepository");
-class WorkflowDefinitionRepository extends BaseRepository_1.BaseRepository {
+import { BaseRepository } from './BaseRepository';
+export class WorkflowDefinitionRepository extends BaseRepository {
     constructor() {
         super('workflow_definitions');
     }
@@ -34,8 +31,7 @@ class WorkflowDefinitionRepository extends BaseRepository_1.BaseRepository {
             .execute();
     }
 }
-exports.WorkflowDefinitionRepository = WorkflowDefinitionRepository;
-class WorkflowInstanceRepository extends BaseRepository_1.BaseRepository {
+export class WorkflowInstanceRepository extends BaseRepository {
     constructor() {
         super('workflow_instances');
     }
@@ -88,8 +84,7 @@ class WorkflowInstanceRepository extends BaseRepository_1.BaseRepository {
             .execute();
     }
 }
-exports.WorkflowInstanceRepository = WorkflowInstanceRepository;
-class WorkflowTokenRepository extends BaseRepository_1.BaseRepository {
+export class WorkflowTokenRepository extends BaseRepository {
     constructor() {
         super('workflow_tokens');
     }
@@ -130,8 +125,7 @@ class WorkflowTokenRepository extends BaseRepository_1.BaseRepository {
         return await this.createMany(tokens);
     }
 }
-exports.WorkflowTokenRepository = WorkflowTokenRepository;
-class WorkflowIncidentRepository extends BaseRepository_1.BaseRepository {
+export class WorkflowIncidentRepository extends BaseRepository {
     constructor() {
         super('workflow_incidents');
     }
@@ -200,10 +194,9 @@ class WorkflowIncidentRepository extends BaseRepository_1.BaseRepository {
         return await query.execute();
     }
 }
-exports.WorkflowIncidentRepository = WorkflowIncidentRepository;
 // Export repository instances
-exports.workflowDefinitionRepo = new WorkflowDefinitionRepository();
-exports.workflowInstanceRepo = new WorkflowInstanceRepository();
-exports.workflowTokenRepo = new WorkflowTokenRepository();
-exports.workflowIncidentRepo = new WorkflowIncidentRepository();
+export const workflowDefinitionRepo = new WorkflowDefinitionRepository();
+export const workflowInstanceRepo = new WorkflowInstanceRepository();
+export const workflowTokenRepo = new WorkflowTokenRepository();
+export const workflowIncidentRepo = new WorkflowIncidentRepository();
 //# sourceMappingURL=WorkflowRepository.js.map

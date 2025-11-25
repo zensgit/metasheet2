@@ -1,26 +1,20 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.pool = void 0;
-exports.query = query;
-exports.withTransaction = withTransaction;
-exports.getPoolStats = getPoolStats;
-const pg_1 = require("pg");
+import { Pool } from 'pg';
 const connectionString = process.env.DATABASE_URL || '';
 const max = parseInt(process.env.PGPOOL_MAX || '10', 10);
 const idleTimeoutMillis = parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10);
 const connectionTimeoutMillis = parseInt(process.env.PG_CONN_TIMEOUT_MS || '5000', 10);
-exports.pool = connectionString
-    ? new pg_1.Pool({ connectionString, max, idleTimeoutMillis, connectionTimeoutMillis })
+export const pool = connectionString
+    ? new Pool({ connectionString, max, idleTimeoutMillis, connectionTimeoutMillis })
     : undefined;
-async function query(text, params) {
-    if (!exports.pool)
+export async function query(text, params) {
+    if (!pool)
         throw new Error('DATABASE_URL not configured');
-    return exports.pool.query(text, params);
+    return pool.query(text, params);
 }
-async function withTransaction(fn) {
-    if (!exports.pool)
+export async function withTransaction(fn) {
+    if (!pool)
         throw new Error('DATABASE_URL not configured');
-    const client = await exports.pool.connect();
+    const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const result = await fn(client);
@@ -35,10 +29,10 @@ async function withTransaction(fn) {
         client.release();
     }
 }
-function getPoolStats() {
-    if (!exports.pool)
+export function getPoolStats() {
+    if (!pool)
         return null;
     // @ts-ignore - pg types don't expose these counts in d.ts
-    return { total: exports.pool.totalCount || 0, idle: exports.pool.idleCount || 0, waiting: exports.pool.waitingCount || 0 };
+    return { total: pool.totalCount || 0, idle: pool.idleCount || 0, waiting: pool.waitingCount || 0 };
 }
 //# sourceMappingURL=pg.js.map

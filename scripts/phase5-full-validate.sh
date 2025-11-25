@@ -131,11 +131,15 @@ extract_metric() {
 }
 
 # Calculate cache hit rate
+# Note: Uses cache_miss_total (singular) which is the actual metric name
 calculate_cache_hit_rate() {
     local raw_file="$1"
 
-    local cache_hits=$(extract_metric "$raw_file" "cache_hits_total")
-    local cache_misses=$(extract_metric "$raw_file" "cache_misses_total")
+    # Sum all cache_hits_total entries (may have labels)
+    local cache_hits=$(grep "^cache_hits_total" "$raw_file" | grep -v "^#" | awk '{sum+=$2} END {print sum+0}')
+    # Sum all cache_miss_total entries (singular, not misses)
+    local cache_misses=$(grep "^cache_miss_total" "$raw_file" | grep -v "^#" | awk '{sum+=$2} END {print sum+0}')
+
     local total=$((cache_hits + cache_misses))
 
     if [ "$total" -gt 0 ]; then
@@ -289,9 +293,13 @@ validate_fallback_taxonomy() {
     fi
 }
 
-# Detect empty histogram samples and generate warnings
-detect_empty_histograms() {
+# Detect histogram sample issues and generate warnings
+# Checks for:
+# - Empty histograms (count = 0)
+# - Low sample counts (count < 5) - may cause unstable percentiles
+detect_histogram_warnings() {
     local percentiles_json="$1"
+    local raw_fallback="$2"
 
     local warnings="["
     local first=true
@@ -314,8 +322,40 @@ detect_empty_histograms() {
 EOF
 )
             first=false
+        elif [ "$count" -lt 5 ]; then
+            if [ "$first" = false ]; then
+                warnings+=","
+            fi
+
+            warnings+=$(cat <<EOF
+{
+  "metric": "$metric",
+  "issue": "low_sample_count",
+  "count": $count,
+  "message": "Histogram has only $count samples - percentiles may be unstable (recommend >= 5)"
+}
+EOF
+)
+            first=false
         fi
     done
+
+    # Add warning for zero fallback events (acceptable baseline)
+    if [ "$raw_fallback" -eq 0 ]; then
+        if [ "$first" = false ]; then
+            warnings+=","
+        fi
+
+        warnings+=$(cat <<EOF
+{
+  "metric": "metasheet_fallback_total",
+  "issue": "no_fallback_events",
+  "message": "No fallback events observed - acceptable baseline (ratio trivially 0)"
+}
+EOF
+)
+        first=false
+    fi
 
     warnings+="]"
 
@@ -425,8 +465,8 @@ main() {
     local memory_rss_bytes=$(extract_metric "$temp_raw" "process_resident_memory_bytes")
     local memory_rss_mb=$(echo "scale=2; $memory_rss_bytes / 1024 / 1024" | bc)
 
-    # Detect empty histograms and generate warnings
-    local warnings=$(detect_empty_histograms "$percentiles_json")
+    # Detect histogram warnings (empty + low sample counts + fallback baseline)
+    local warnings=$(detect_histogram_warnings "$percentiles_json" "$raw_fallback")
 
     # Generate assertions dynamically from thresholds.json
     log_info "Generating dynamic assertions from thresholds..."

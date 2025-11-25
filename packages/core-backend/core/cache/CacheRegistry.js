@@ -1,12 +1,11 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.cacheRegistry = exports.CacheRegistry = void 0;
-const NullCache_1 = require("./NullCache");
+import { NullCache } from '../../src/cache/implementations/null-cache';
+import { MemoryCache } from '../../src/cache/implementations/memory-cache';
+import { metrics } from '../../src/metrics/metrics';
 /**
  * Singleton managing active cache implementation
  *
  * CacheRegistry provides a central point for cache implementation management:
- * - Starts with NullCache (observability only)
+ * - Starts with NullCache (observability only) or MemoryCache (when FEATURE_CACHE=true)
  * - Supports runtime switching to other implementations (e.g., RedisCache)
  * - Tracks cache statistics for monitoring
  * - Provides status information for debugging
@@ -15,6 +14,10 @@ const NullCache_1 = require("./NullCache");
  * - Single instance throughout application lifecycle
  * - Global access via getInstance()
  * - Thread-safe (Node.js single-threaded)
+ *
+ * **Environment Configuration**:
+ * - FEATURE_CACHE=true: Use MemoryCache (real caching with metrics)
+ * - FEATURE_CACHE=false or unset: Use NullCache (observability only)
  *
  * **Hot-Swapping**:
  * Implementations can be registered at any time:
@@ -38,22 +41,22 @@ const NullCache_1 = require("./NullCache");
  * @example Status inspection
  * ```typescript
  * const status = cacheRegistry.getStatus()
- * console.log(status.implName) // "NullCache" or "RedisCache"
+ * console.log(status.implName) // "NullCache" or "MemoryCache"
  * console.log(status.stats.hits) // Total hits since startup
  * ```
  */
-class CacheRegistry {
+export class CacheRegistry {
     static instance;
     /**
      * Currently active cache implementation
      * @private
      */
-    current = new NullCache_1.NullCache();
+    current;
     /**
      * Name of current implementation
      * @private
      */
-    implName = 'NullCache';
+    implName;
     /**
      * Cache statistics
      * @private
@@ -70,10 +73,36 @@ class CacheRegistry {
     };
     /**
      * Private constructor (Singleton pattern)
+     * Initializes cache based on FEATURE_CACHE environment variable
      * @private
      */
     constructor() {
-        // Intentionally private
+        // Check environment for cache enablement
+        const featureCache = process.env.FEATURE_CACHE === 'true';
+        if (featureCache) {
+            this.current = new MemoryCache();
+            this.implName = 'MemoryCache';
+            console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)');
+            // Set cache_enabled gauge
+            try {
+                metrics.cache_enabled.set({ impl: 'memory' }, 1);
+            }
+            catch (e) {
+                // Ignore metric errors during initialization
+            }
+        }
+        else {
+            this.current = new NullCache();
+            this.implName = 'NullCache';
+            console.log('[CacheRegistry] Initialized with NullCache (FEATURE_CACHE not set)');
+            // Set cache_enabled gauge
+            try {
+                metrics.cache_enabled.set({ impl: 'null' }, 0);
+            }
+            catch (e) {
+                // Ignore metric errors during initialization
+            }
+        }
     }
     /**
      * Get or create singleton instance
@@ -117,6 +146,12 @@ class CacheRegistry {
         this.stats.misses = 0;
         this.stats.errors = 0;
         console.log(`[CacheRegistry] Switched to: ${name}`);
+        // Update cache_enabled gauge
+        try {
+            const implLabel = name.toLowerCase().includes('memory') ? 'memory' : name.toLowerCase();
+            metrics.cache_enabled.set({ impl: implLabel }, name === 'NullCache' ? 0 : 1);
+        }
+        catch { }
     }
     /**
      * Get current active cache implementation
@@ -183,7 +218,6 @@ class CacheRegistry {
         this.stats.errors++;
     }
 }
-exports.CacheRegistry = CacheRegistry;
 /**
  * Singleton instance for application-wide cache access
  *
@@ -216,5 +250,5 @@ exports.CacheRegistry = CacheRegistry;
  * }
  * ```
  */
-exports.cacheRegistry = CacheRegistry.getInstance();
+export const cacheRegistry = CacheRegistry.getInstance();
 //# sourceMappingURL=CacheRegistry.js.map
