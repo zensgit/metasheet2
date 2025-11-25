@@ -252,22 +252,29 @@ class MetaSheetServer {
 
     // 健康检查
     this.app.get('/health', (req, res) => {
-      const stats = getPoolStats()
-      // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
-      let pluginsSummary: any = undefined
+      const endTimer = (res as any).__metricsTimer?.({ route: '/health', method: 'GET' })
       try {
-        // 与 /api/plugins 的 summary 保持一致结构
-        pluginsSummary = (this.pluginLoader as any).getSummary?.()
-      } catch {}
-      res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        plugins: this.pluginLoader.getPlugins().size,
-        pluginsSummary: pluginsSummary || undefined,
-        dbPool: stats || undefined,
-        wsAdapter: this.wsAdapterType,
-        redis: this.wsRedis
-      })
+        const stats = getPoolStats()
+        // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
+        let pluginsSummary: any = undefined
+        try {
+          // 与 /api/plugins 的 summary 保持一致结构
+          pluginsSummary = (this.pluginLoader as any).getSummary?.()
+        } catch {}
+        res.json({
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+          plugins: this.pluginLoader.getPlugins().size,
+          pluginsSummary: pluginsSummary || undefined,
+          dbPool: stats || undefined,
+          wsAdapter: this.wsAdapterType,
+          redis: this.wsRedis
+        })
+        endTimer?.(200)
+      } catch (err) {
+        endTimer?.(500)
+        throw err
+      }
     })
 
     // 路由：审批（示例）
@@ -302,10 +309,18 @@ class MetaSheetServer {
 
     // V2 测试端点
     this.app.get('/api/v2/hello', (req, res) => {
-      res.json({ ok: true, message: 'Hello from MetaSheet V2!', version: '2.0.0-alpha.1' })
+      const endTimer = (res as any).__metricsTimer?.({ route: '/api/v2/hello', method: 'GET' })
+      try {
+        res.json({ ok: true, message: 'Hello from MetaSheet V2!', version: '2.0.0-alpha.1' })
+        endTimer?.(200)
+      } catch (err) {
+        endTimer?.(500)
+        throw err
+      }
     })
 
     this.app.get('/api/v2/rpc-test', async (req, res) => {
+      const endTimer = (res as any).__metricsTimer?.({ route: '/api/v2/rpc-test', method: 'GET' })
       try {
         // 测试 RPC 功能
         const testTopic = 'test.rpc'
@@ -319,26 +334,38 @@ class MetaSheetServer {
         // 发送 RPC 请求
         const result = await messageBus.request(testTopic, testPayload, 1000)
         res.json({ ok: true, rpcTest: 'passed', result })
+        endTimer?.(200)
       } catch (error: any) {
         res.json({ ok: true, rpcTest: 'skipped', reason: error.message })
+        endTimer?.(200)
       }
     })
 
     // 插件信息
     this.app.get('/api/plugins', (req, res) => {
+      const endTimer = (res as any).__metricsTimer?.({ route: '/api/plugins', method: 'GET' })
       try {
         const list = this.pluginLoader.getList?.() || []
         const summary = this.pluginLoader.getSummary?.() || {}
         res.json({ list, summary })
+        endTimer?.(200)
       } catch (e: any) {
         res.json({ list: [], summary: { error: e?.message || String(e) } })
+        endTimer?.(500)
       }
     })
 
     // Metrics (JSON minimal)
     this.app.get('/internal/metrics', async (_req, res) => {
-      const { coreMetrics } = await import('./integration/metrics/metrics')
-      res.json(coreMetrics.get())
+      const endTimer = (res as any).__metricsTimer?.({ route: '/internal/metrics', method: 'GET' })
+      try {
+        const { coreMetrics } = await import('./integration/metrics/metrics')
+        res.json(coreMetrics.get())
+        endTimer?.(200)
+      } catch (err) {
+        endTimer?.(500)
+        throw err
+      }
     })
 
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
