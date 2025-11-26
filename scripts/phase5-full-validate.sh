@@ -126,6 +126,9 @@ calculate_percentiles() {
     local TSX_CMD
     TSX_CMD=$(resolve_tsx_runner)
 
+    # Ensure thresholds path is available to the TS script regardless of cwd (use non-readonly env var)
+    export THRESHOLDS_PATH="$THRESHOLDS_FILE"
+
     if ! eval "$TSX_CMD \"$PERCENTILES_SCRIPT\" \"$metrics_url\" \"$output_file\"" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
         log_error "Failed to calculate percentiles"
         exit 1

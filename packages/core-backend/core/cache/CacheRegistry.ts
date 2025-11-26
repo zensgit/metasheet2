@@ -87,12 +87,28 @@ export class CacheRegistry {
     const featureCache = process.env.FEATURE_CACHE === 'true'
 
     if (featureCache) {
-      this.current = new MemoryCache()
-      this.implName = 'MemoryCache'
+      const impl = (process.env.CACHE_IMPL || 'memory').toLowerCase()
+      if (impl === 'redis') {
+        try {
+          // Lazy import Redis adapter if present
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { RedisCache } = require('../../src/cache/implementations/redis-cache')
+          this.current = new RedisCache(process.env.REDIS_URL)
+          this.implName = 'RedisCache'
+        } catch {
+          // Fallback to memory if redis adapter not available
+          this.current = new MemoryCache()
+          this.implName = 'MemoryCache'
+        }
+      } else {
+        this.current = new MemoryCache()
+        this.implName = 'MemoryCache'
+      }
       console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)')
       // Set cache_enabled gauge
       try {
-        metrics.cache_enabled.set({ impl: 'memory' }, 1)
+        const implLabel = this.implName.toLowerCase().includes('redis') ? 'redis' : 'memory'
+        metrics.cache_enabled.set({ impl: implLabel }, 1)
       } catch (e) {
         // Ignore metric errors during initialization
       }

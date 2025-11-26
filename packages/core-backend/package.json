@@ -15,6 +15,7 @@
     "seed:demo": "echo 'Seeding demo data...' && exit 0",
     "seed:rbac": "tsx scripts/seed-rbac.ts",
     "test": "vitest",
+    "test:phase5": "vitest --config vitest.phase5.config.ts run",
     "test:unit": "vitest run packages/core-backend/tests/unit --reporter=dot",
     "test:integration": "vitest run packages/core-backend/tests/integration --reporter=dot",
     "test:cache": "npm run build:cache && TEST_USE_DIST=true vitest --config vitest.cache.config.ts run --reporter=dot",

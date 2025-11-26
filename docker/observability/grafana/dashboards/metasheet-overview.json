@@ -1,562 +1,143 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": { "list": [] },
   "editable": true,
-  "fiscalYearStartMonth": 0,
+  "gnetId": null,
   "graphTooltip": 0,
   "id": null,
-  "links": [],
-  "liveNow": false,
+  "templating": { "list": [
+    { "type": "datasource", "name": "DS_PROM", "query": "prometheus" },
+    { "type": "custom", "name": "env", "query": "dev,staging,prod", "current": { "text": "dev", "value": "dev" } },
+    { "type": "query", "name": "job", "datasource": "${DS_PROM}", "refresh": 2, "query": "label_values(up, job)", "current": { "text": "default", "value": "default" } },
+    { "type": "interval", "name": "interval", "query": "5m,10m,30m,1h" }
+  ] },
   "panels": [
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Plugin Reload p95",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_events_emitted_total",
-          "instant": false,
-          "legendFormat": "Total Events",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_plugin_reload_duration_seconds_bucket{job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Events Emitted",
-      "type": "stat"
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 2}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Plugin Reload p99",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_plugin_reload_total",
-          "instant": false,
-          "legendFormat": "Reloads",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "histogram_quantile(0.99, sum(rate(metasheet_plugin_reload_duration_seconds_bucket{job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Plugin Reloads",
-      "type": "stat"
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 5}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 0
-      },
-      "id": 3,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Plugin Reload Samples (_count)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_snapshot_create_total",
-          "instant": false,
-          "legendFormat": "Snapshots",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "sum(increase(metasheet_plugin_reload_duration_seconds_count{job=\"$job\"}[$interval]))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Snapshots Created",
-      "type": "stat"
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 0
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Snapshot Create p95",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_permission_denied_total",
-          "instant": false,
-          "legendFormat": "Denials",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"create\",job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Permission Denied",
-      "type": "stat"
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 5}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 4
-      },
-      "id": 5,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Snapshot Create p99",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 6 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "rate(metasheet_events_emitted_total[1m])",
-          "instant": false,
-          "legendFormat": "Events/min",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "histogram_quantile(0.99, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"create\",job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Event Rate",
-      "type": "timeseries"
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 8}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 4
-      },
-      "id": 6,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Snapshot Create Samples (_count)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 6 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_plugin_reload_duration_seconds",
-          "instant": false,
-          "legendFormat": "Reload Duration",
-          "range": true,
-          "refId": "A"
-        }
+        { "expr": "sum(increase(metasheet_snapshot_operation_duration_seconds_count{operation=\"create\",job=\"$job\"}[$interval]))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Plugin Reload Duration",
-      "type": "timeseries"
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "PBFA97CFB590B2093"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 12
-      },
-      "id": 7,
-      "options": {
-        "displayMode": "gradient",
-        "minVizHeight": 10,
-        "minVizWidth": 0,
-        "namePlacement": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showUnfilled": true,
-        "sizing": "auto",
-        "valueMode": "color"
-      },
-      "pluginVersion": "10.2.2",
+      "type": "stat",
+      "title": "Snapshot Restore p95",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_db_pool_size",
-          "instant": false,
-          "legendFormat": "Pool Size",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "expr": "metasheet_db_pool_waiting",
-          "instant": false,
-          "legendFormat": "Waiting",
-          "range": true,
-          "refId": "B"
-        }
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"restore\",job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
       ],
-      "title": "Database Connection Pool",
-      "type": "bargauge"
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 5}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Snapshot Restore p99",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"restore\",job=\"$job\"}[$interval])) by (le))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 8}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Snapshot Restore Samples (_count)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "targets": [
+        { "expr": "sum(increase(metasheet_snapshot_operation_duration_seconds_count{operation=\"restore\",job=\"$job\"}[$interval]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Cache Hit Rate",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 18 },
+      "targets": [
+        { "expr": "sum(rate(cache_hits_total{job=\"$job\"}[$interval])) / (sum(rate(cache_hits_total{job=\"$job\"}[$interval])) + sum(rate(cache_miss_total{job=\"$job\"}[$interval])))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "percentage", "steps": [{"color":"red","value": 0.8},{"color":"green","value": 0.9}] } },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "HTTP Success Rate",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 18 },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total{status=~\"2..\",job=\"$job\"}[$interval])) / sum(rate(http_requests_total{job=\"$job\"}[$interval]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "percentage", "steps": [{"color":"red","value": 0.98},{"color":"green","value": 0.99}] } },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Fallback Effective Ratio",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 18 },
+      "targets": [
+        { "expr": "sum(increase(metasheet_fallback_effective_total{job=\"$job\"}[$interval])) / sum(increase(metasheet_fallback_total{job=\"$job\"}[$interval]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "percentage", "steps": [{"color":"green","value": 0.6},{"color":"red","value": 0.7}] } },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
     }
   ],
-  "refresh": "10s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": [
-    "metasheet",
-    "overview"
-  ],
-  "templating": {
-    "list": []
-  },
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
-  "timepicker": {},
+  "tags": ["metasheet", "phase5"],
+  "time": { "from": "now-1h", "to": "now" },
   "timezone": "",
-  "title": "MetaSheet Overview",
-  "uid": "metasheet-overview",
-  "version": 1,
-  "weekStart": ""
+  "title": "MetaSheet Phase 5 SLO",
+  "uid": "metasheet-phase5-slo",
+  "version": 1
 }

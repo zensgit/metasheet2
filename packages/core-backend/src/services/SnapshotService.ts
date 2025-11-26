@@ -70,6 +70,19 @@ export class SnapshotService {
    */
   async createSnapshot(options: SnapshotCreateOptions): Promise<Snapshot> {
     const startTime = Date.now()
+    // Prometheus timer helper; ensures duration is recorded even on failure
+    const stopTimer = (() => {
+      try {
+        const end = (label: 'create' | 'restore', startMs: number) => {
+          const duration = (Date.now() - startMs) / 1000
+          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch {}
+          return duration
+        }
+        return (label: 'create' | 'restore') => end(label, startTime)
+      } catch {
+        return (_label: 'create' | 'restore') => (Date.now() - startTime) / 1000
+      }
+    })()
 
     if (!db) {
       throw new Error('Database not available')
@@ -111,11 +124,8 @@ export class SnapshotService {
       const itemsCreated = await this.captureViewState(snapshot.id as string, options.viewId)
 
       // Record metrics
-      const duration = (Date.now() - startTime) / 1000
-      try {
-        metrics.snapshotCreateTotal.labels('success').inc()
-        metrics.snapshotOperationDuration.labels('create').observe(duration)
-      } catch {}
+      const duration = stopTimer('create')
+      try { metrics.snapshotCreateTotal.labels('success').inc() } catch {}
 
       // Audit log
       await auditLog({
@@ -137,9 +147,8 @@ export class SnapshotService {
       return snapshot as Snapshot
     } catch (error) {
       const err = error as Error
-      try {
-        metrics.snapshotCreateTotal.labels('failure').inc()
-      } catch {}
+      const duration = stopTimer('create')
+      try { metrics.snapshotCreateTotal.labels('failure').inc() } catch {}
 
       this.logger.error('Failed to create snapshot', err)
       throw err
@@ -237,6 +246,18 @@ export class SnapshotService {
     duration: number
   }> {
     const startTime = Date.now()
+    const stopTimer = (() => {
+      try {
+        const end = (label: 'create' | 'restore', startMs: number) => {
+          const duration = (Date.now() - startMs) / 1000
+          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch {}
+          return duration
+        }
+        return (label: 'create' | 'restore') => end(label, startTime)
+      } catch {
+        return (_label: 'create' | 'restore') => (Date.now() - startTime) / 1000
+      }
+    })()
 
     if (!db) {
       throw new Error('Database not available')
@@ -285,7 +306,7 @@ export class SnapshotService {
         }
       }
 
-      const duration = (Date.now() - startTime) / 1000
+      const duration = stopTimer('restore')
 
       // Log restore operation
       await db
@@ -302,10 +323,7 @@ export class SnapshotService {
         .execute()
 
       // Record metrics
-      try {
-        metrics.snapshotRestoreTotal.labels('success').inc()
-        metrics.snapshotOperationDuration.labels('restore').observe(duration)
-      } catch {}
+      try { metrics.snapshotRestoreTotal.labels('success').inc() } catch {}
 
       // Audit log
       await auditLog({
@@ -330,10 +348,8 @@ export class SnapshotService {
       }
     } catch (error) {
       const err = error as Error
-
-      try {
-        metrics.snapshotRestoreTotal.labels('failure').inc()
-      } catch {}
+      const duration = stopTimer('restore')
+      try { metrics.snapshotRestoreTotal.labels('failure').inc() } catch {}
 
       // Log failure
       if (db) {

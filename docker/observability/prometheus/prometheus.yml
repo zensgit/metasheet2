@@ -26,9 +26,10 @@ scrape_configs:
           app: 'prometheus'
           env: 'development'
 
-# Recording rules for common aggregations
+# Recording and alert rules (mounted into /etc/prometheus/rules by Docker Compose)
 rule_files:
-  # - "rules/*.yml"  # Uncomment when adding custom rules
+  - "/etc/prometheus/rules/phase5-recording-rules.yml"
+  - "/etc/prometheus/rules/phase5-alerts.yml"
 
 # Alerting configuration (optional)
 # alerting:
