@@ -64,4 +64,19 @@ jobs:
             exit 1
           fi
 
-      # Optional: Slack/Teams notification could be added here using a webhook secret
+      - name: Notify Slack on failure
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_USERNAME: Phase5Bot
+          SLACK_ICON_EMOJI: F6A8
+          SLACK_COLOR: '#FF0000'
+          SLACK_TITLE: 'Nightly Phase 5 validation failed'
+          SLACK_MESSAGE: |
+            Workflow: ${{ github.workflow }}
+            Run ID: ${{ github.run_id }}
+            Status: Failed
+            Repo: ${{ github.repository }}
+            Branch: ${{ github.ref }}
+            Actor: ${{ github.actor }}
