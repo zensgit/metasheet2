@@ -107,6 +107,15 @@ fetch_raw_metrics() {
     log_success "Raw metrics fetched ($(wc -l < "$temp_file") lines)"
 }
 
+# Resolve a TS runner (prefer pnpm workspace tsx, fallback to npx tsx)
+resolve_tsx_runner() {
+    if command -v pnpm >/dev/null 2>&1; then
+        echo "pnpm -F @metasheet/core-backend exec tsx"
+        return
+    fi
+    echo "npx tsx"
+}
+
 # Calculate percentiles using Node.js script
 calculate_percentiles() {
     local metrics_url="$1"
@@ -114,7 +123,10 @@ calculate_percentiles() {
 
     log_info "Calculating percentiles..."
 
-    if ! npx tsx "$PERCENTILES_SCRIPT" "$metrics_url" "$output_file" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
+    local TSX_CMD
+    TSX_CMD=$(resolve_tsx_runner)
+
+    if ! eval "$TSX_CMD \"$PERCENTILES_SCRIPT\" \"$metrics_url\" \"$output_file\"" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
         log_error "Failed to calculate percentiles"
         exit 1
     fi

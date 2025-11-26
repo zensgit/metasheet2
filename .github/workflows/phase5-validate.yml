@@ -1,58 +1,88 @@
-name: Phase 5 SLO Validation
+name: Phase 5 PR Validation
 
 on:
   pull_request:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      metrics_url:
-        description: Prometheus metrics URL
-        required: false
-        default: http://localhost:8900/metrics/prom
+    types: [opened, synchronize, reopened]
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    env:
+      METRICS_URL: ${{ secrets.METRICS_URL }}
+      METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Ensure metrics URL configured
+        id: config
+        shell: bash
+        run: |
+          if [ -z "${METRICS_URL}" ]; then
+            echo "METRICS_URL secret not set; skipping PR validation (non-blocking)." > unreachable.txt
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Using METRICS_URL=${METRICS_URL}"
+          fi
+
+      - name: Probe metrics endpoint
+        if: steps.config.outputs.skip != 'true'
+        id: probe
+        shell: bash
+        run: |
+          set -e
+          HDRS=()
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            HDRS=( -H "${METRICS_AUTH_HEADER}" )
+          fi
+          if ! curl -sS -I "${METRICS_URL}" "${HDRS[@]}" | head -n 1 | grep -q "200"; then
+            if ! curl -sS "${METRICS_URL}" "${HDRS[@]}" | head -n 1 >/dev/null; then
+              echo "Metrics endpoint unreachable: ${METRICS_URL}" > unreachable.txt
+              echo "skip=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Set up Node
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
-            node-version: '18'
+          node-version: '18'
 
       - name: Install deps
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         run: |
           npm ci || pnpm i || yarn install
 
       - name: Run Phase 5 validation
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        shell: bash
         env:
-          METRICS_URL: ${{ github.event.inputs.metrics_url || 'http://localhost:8900/metrics/prom' }}
+          METRICS_URL: ${{ env.METRICS_URL }}
+          METRICS_AUTH_HEADER: ${{ env.METRICS_AUTH_HEADER }}
         run: |
-          mkdir -p /tmp
-          if [ -f scripts/phase5-run-all.sh ]; then
-            bash scripts/phase5-run-all.sh "$METRICS_URL" || true
-          else
-            scripts/phase5-full-validate.sh "$METRICS_URL" /tmp/phase5.json
-            scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            export EXTRA_CURL_HEADER="${METRICS_AUTH_HEADER}"
           fi
-          cat /tmp/phase5.json || true
-
-      - name: Fail if overall_status != pass
-        run: |
-          status=$(jq -r '.summary.overall_status' /tmp/phase5.json)
-          echo "Overall status: $status"
-          if [ "$status" != "pass" ]; then
-            echo "Phase 5 validation failed"
-            exit 1
-          fi
+          bash scripts/phase5-full-validate.sh "${METRICS_URL}" /tmp/phase5.json
+          bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase5-validation
+          name: phase5-pr-validation
           path: |
             /tmp/phase5.json
             /tmp/phase5.md
+            unreachable.txt
+
+      - name: Gate PR on failure
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        shell: bash
+        run: |
+          STATUS=$(jq -r '.summary.overall_status' /tmp/phase5.json || echo 'fail')
+          echo "Overall status: ${STATUS}"
+          if [ "${STATUS}" != "pass" ]; then
+            echo "Phase 5 validation failed (overall_status=${STATUS})." >&2
+            exit 1
+          fi

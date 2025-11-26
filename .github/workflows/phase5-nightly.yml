@@ -2,81 +2,105 @@ name: Phase 5 Nightly Validation
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # UTC 02:00 (Beijing 10:00)
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       metrics_url:
-        description: Override metrics URL
+        description: 'Override metrics URL (e.g., https://env/metrics/prom)'
         required: false
 
 jobs:
-  nightly:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    env:
+      METRICS_URL: ${{ github.event.inputs.metrics_url || secrets.METRICS_URL }}
+      METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Ensure metrics URL configured
+        shell: bash
+        run: |
+          if [ -z "${METRICS_URL}" ]; then
+            echo "METRICS_URL not set via input or secret; skipping validation." > unreachable.txt
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Using METRICS_URL=${METRICS_URL}"
+          fi
+        id: config
+
+      - name: Probe metrics endpoint
+        if: steps.config.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -e
+          HDRS=()
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            HDRS=( -H "${METRICS_AUTH_HEADER}" )
+          fi
+          # Try a quick HEAD, fall back to GET
+          if ! curl -sS -I "${METRICS_URL}" "${HDRS[@]}" | head -n 1 | grep -q "200"; then
+            if ! curl -sS "${METRICS_URL}" "${HDRS[@]}" | head -n 1 >/dev/null; then
+              echo "Metrics endpoint unreachable: ${METRICS_URL}" > unreachable.txt
+              echo "skip=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+        id: probe
+
+      - name: Set up Node
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
       - name: Install deps
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
         run: |
           npm ci || pnpm i || yarn install
 
       - name: Run Phase 5 validation
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        shell: bash
         env:
-          METRICS_URL: ${{ github.event.inputs.metrics_url || secrets.METRICS_URL || 'http://localhost:8900/metrics/prom' }}
+          METRICS_URL: ${{ env.METRICS_URL }}
+          METRICS_AUTH_HEADER: ${{ env.METRICS_AUTH_HEADER }}
         run: |
-          mkdir -p /tmp
-          if [ -f scripts/phase5-run-all.sh ]; then
-            bash scripts/phase5-run-all.sh "$METRICS_URL" || true
-          else
-            scripts/phase5-full-validate.sh "$METRICS_URL" /tmp/phase5.json
-            scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
+          # Export auth header to scripts when supported
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            export EXTRA_CURL_HEADER="${METRICS_AUTH_HEADER}"
           fi
-          cat /tmp/phase5.json || true
+          bash scripts/phase5-full-validate.sh "${METRICS_URL}" /tmp/phase5.json
+          bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
 
-      - name: Summarize result
-        run: |
-          status=$(jq -r '.summary.overall_status' /tmp/phase5.json)
-          passed=$(jq -r '.summary.passed' /tmp/phase5.json)
-          failed=$(jq -r '.summary.failed' /tmp/phase5.json)
-          na=$(jq -r '.summary.na' /tmp/phase5.json)
-          echo "Status: $status | Passed: $passed | Failed: $failed | NA: $na" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload artifacts (keep 7 days)
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase5-validation-$(date +"%Y%m%d")
+          name: phase5-validation
           path: |
             /tmp/phase5.json
             /tmp/phase5.md
-          retention-days: 7
+            unreachable.txt
 
-      - name: Fail if overall_status != pass
+      - name: Fail on non-pass summary
+        if: steps.config.outputs.skip != 'true' && steps.probe.outputs.skip != 'true'
+        shell: bash
         run: |
-          status=$(jq -r '.summary.overall_status' /tmp/phase5.json)
-          if [ "$status" != "pass" ]; then
-            echo "Nightly Phase 5 validation failed"
+          STATUS=$(jq -r '.summary.overall_status' /tmp/phase5.json || echo 'fail')
+          echo "Overall status: ${STATUS}"
+          if [ "${STATUS}" != "pass" ]; then
+            echo "Phase 5 validation failed (overall_status=${STATUS})." >&2
             exit 1
           fi
 
-      - name: Notify Slack on failure
+      - name: Slack notify on failure
         if: failure()
         uses: rtCamp/action-slack-notify@v2
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_USERNAME: Phase5Bot
-          SLACK_ICON_EMOJI: F6A8
-          SLACK_COLOR: '#FF0000'
-          SLACK_TITLE: 'Nightly Phase 5 validation failed'
-          SLACK_MESSAGE: |
-            Workflow: ${{ github.workflow }}
-            Run ID: ${{ github.run_id }}
-            Status: Failed
-            Repo: ${{ github.repository }}
-            Branch: ${{ github.ref }}
-            Actor: ${{ github.actor }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL || 'alerts' }}
+          SLACK_USERNAME: 'Phase5 CI'
+          SLACK_ICON_EMOJI: ':rotating_light:'
+          SLACK_TITLE: 'Phase 5 Nightly Validation Failed'
+          SLACK_MESSAGE: 'Check artifacts phase5.json/md and metrics endpoint reachability.'

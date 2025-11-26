@@ -1,6 +1,6 @@
 {
   "name": "metasheet-v2",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Next-generation collaborative spreadsheet platform with microkernel architecture",
   "private": true,
   "type": "module",

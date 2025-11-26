@@ -17,7 +17,13 @@
   - `.github/workflows/phase5-nightly.yml` (scheduled)
 - Secrets required:
   - `METRICS_URL` (staging/prod Prometheus endpoint)
-  - `SLACK_WEBHOOK` (for nightly failure notifications)
+  - `METRICS_AUTH_HEADER` (optional auth header, e.g., `Authorization: Bearer <token>`)
+  - `SLACK_WEBHOOK_URL` (optional: nightly failure notifications)
+  - `SLACK_CHANNEL` (optional: e.g., `alerts`)
+
+### Manual Dispatch (Nightly)
+- Actions → Phase 5 Nightly Validation → Run workflow
+- Provide `metrics_url` input if not using the secret.
 
 ## Server Flags
 - Production safety:

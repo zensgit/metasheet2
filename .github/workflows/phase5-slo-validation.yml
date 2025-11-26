@@ -58,7 +58,8 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
         run: |
-          pnpm -F @metasheet/core-backend db:migrate || true
+          # Use the actual migrate script defined in core-backend/package.json
+          pnpm -F @metasheet/core-backend migrate || true
 
       - name: Start backend with Phase 5 configuration
         env:
@@ -71,7 +72,8 @@ jobs:
           COUNT_CACHE_MISS_AS_FALLBACK: 'false'
           ALLOW_UNSAFE_ADMIN: 'true'
         run: |
-          nohup pnpm -F @metasheet/core-backend dev:core >/tmp/server.log 2>&1 &
+          # Start the dev server (script name is `dev` in core-backend)
+          nohup pnpm -F @metasheet/core-backend dev >/tmp/server.log 2>&1 &
           echo $! > /tmp/server.pid
 
       - name: Wait for backend health
