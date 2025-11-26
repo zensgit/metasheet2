@@ -69,6 +69,27 @@ router.get('/cache', (req: Request, res: Response) => {
   })
 })
 
+/**
+ * GET /internal/config - Non-sensitive runtime config snapshot
+ *
+ * Returns selected environment flags without secrets.
+ * Hidden in production environments.
+ */
+router.get('/config', (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not available in production' })
+  }
+
+  const flags = {
+    FEATURE_CACHE: process.env.FEATURE_CACHE === 'true',
+    ENABLE_FALLBACK_TEST: process.env.ENABLE_FALLBACK_TEST === 'true',
+    ALLOW_UNSAFE_ADMIN: process.env.ALLOW_UNSAFE_ADMIN === 'true',
+    COUNT_CACHE_MISS_AS_FALLBACK: process.env.COUNT_CACHE_MISS_AS_FALLBACK === 'true',
+    METRICS_PATH: '/metrics/prom'
+  }
+  res.json({ env: flags })
+})
+
 // Mount fallback test routes at /internal/test/*
 router.use('/test', fallbackTestRouter)
 
