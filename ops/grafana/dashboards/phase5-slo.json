@@ -1,16 +1,43 @@
 {
-  "title": "Metasheet Phase 5 SLO",
+  "title": "Phase 5 SLO Dashboard",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
   "panels": [
-    {"type": "graph", "title": "HTTP Success Rate", "targets": [{"expr": "sum(rate(metasheet_http_requests_total{result=\\\"success\\\"}[5m])) / sum(rate(metasheet_http_requests_total[5m]))"}], "thresholds": [{"value": 0.98, "op": "lt"}]},
-    {"type": "graph", "title": "Cache Hit Rate", "targets": [{"expr": "sum(rate(cache_hits_total[10m])) / (sum(rate(cache_hits_total[10m])) + sum(rate(cache_miss_total[10m])))"}], "thresholds": [{"value": 0.8, "op": "lt"}]},
-    {"type": "graph", "title": "Fallback Effective Ratio", "targets": [{"expr": "sum(rate(metasheet_fallback_effective_total[10m])) / sum(rate(metasheet_fallback_total[10m]))"}], "thresholds": [{"value": 0.6, "op": "gt"}]},
-    {"type": "graph", "title": "Plugin Reload P95", "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m])))"}], "thresholds": [{"value": 2, "op": "gt"}]},
-    {"type": "graph", "title": "Plugin Reload P99", "targets": [{"expr": "histogram_quantile(0.99, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m])))"}], "thresholds": [{"value": 5, "op": "gt"}]},
-    {"type": "graph", "title": "Snapshot Create P95", "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\\\"create\\\"}[5m])))"}], "thresholds": [{"value": 5, "op": "gt"}]},
-    {"type": "graph", "title": "Snapshot Restore P95", "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\\\"restore\\\"}[5m])))"}], "thresholds": [{"value": 5, "op": "gt"}]},
-    {"type": "graph", "title": "Memory RSS (bytes)", "targets": [{"expr": "metasheet_memory_rss_bytes"}], "thresholds": [{"value": 500000000, "op": "gt"}]},
-    {"type": "graph", "title": "Plugin Reload Sample Count", "targets": [{"expr": "sum(rate(metasheet_plugin_reload_duration_seconds_count[5m]))"}]},
-    {"type": "graph", "title": "Snapshot Create Sample Count", "targets": [{"expr": "sum(rate(metasheet_snapshot_operation_duration_seconds_count{operation=\\\"create\\\"}[5m]))"}]},
-    {"type": "graph", "title": "Snapshot Restore Sample Count", "targets": [{"expr": "sum(rate(metasheet_snapshot_operation_duration_seconds_count{operation=\\\"restore\\\"}[5m]))"}]}
+    {
+      "type": "stat",
+      "title": "HTTP Success Rate (5m)",
+      "targets": [{"expr": "metasheet:http_success_rate:5m"}]
+    },
+    {
+      "type": "stat",
+      "title": "Cache Hit Rate (10m)",
+      "targets": [{"expr": "metasheet:cache_hit_rate:10m"}]
+    },
+    {
+      "type": "stat",
+      "title": "Fallback Effective Ratio (10m)",
+      "targets": [{"expr": "metasheet:fallback_effective_ratio:10m"}]
+    },
+    {
+      "type": "stat",
+      "title": "Plugin Reload p95 (5m)",
+      "targets": [{"expr": "metasheet:plugin_reload_p95:5m"}]
+    },
+    {
+      "type": "stat",
+      "title": "Plugin Reload p99 (5m)",
+      "targets": [{"expr": "metasheet:plugin_reload_p99:5m"}]
+    },
+    {
+      "type": "stat",
+      "title": "Snapshot Create p95 (5m)",
+      "targets": [{"expr": "label_replace(metasheet:snapshot_op_p95:5m, \"operation\", \"create\", \"operation\", \".*\")"}]
+    },
+    {
+      "type": "stat",
+      "title": "Snapshot Restore p95 (5m)",
+      "targets": [{"expr": "label_replace(metasheet:snapshot_op_p95:5m, \"operation\", \"restore\", \"operation\", \".*\")"}]
+    }
   ]
 }

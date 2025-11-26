@@ -57,3 +57,25 @@ jobs:
             exit 1
           fi
 
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set; skipping Slack notification"
+            exit 0
+          fi
+          summary=$(jq -r '.summary | "Total: \(.total_checks) | Passed: \(.passed) | Failed: \(.failed) | NA: \(.na) | Status: \(.overall_status)"' /tmp/phase5.json 2>/dev/null || echo "Phase 5 validation failed")
+          pr_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          payload=$(cat <<EOF
+          {
+            "text": "Phase 5 Nightly Validation FAILED",
+            "blocks": [
+              {"type":"section","text":{"type":"mrkdwn","text":"*Phase 5 Nightly Validation FAILED*\nRepo: ${{ github.repository }}\nRun: <$pr_url|View Run>"}},
+              {"type":"section","text":{"type":"mrkdwn","text":"$summary"}}
+            ]
+          }
+EOF
+          )
+          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
