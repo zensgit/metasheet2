@@ -237,6 +237,17 @@ class MetaSheetServer {
     installMetrics(this.app)
     this.app.use(requestMetricsMiddleware)
 
+    // Production safety guards
+    if (process.env.NODE_ENV === 'production') {
+      if (process.env.ALLOW_UNSAFE_ADMIN === 'true') {
+        this.logger.error('FATAL: ALLOW_UNSAFE_ADMIN=true in production')
+        process.exit(1)
+      }
+      if (process.env.ENABLE_FALLBACK_TEST === 'true') {
+        this.logger.warn('WARNING: ENABLE_FALLBACK_TEST should be false in production')
+      }
+    }
+
     // 请求日志
     this.app.use((req, res, next) => {
       this.logger.info(`${req.method} ${req.path}`)
@@ -298,10 +309,12 @@ class MetaSheetServer {
     // 路由：内部调试端点 (dev/staging only)
     this.app.use('/internal', internalRouter)
     // 路由：降级测试端点 (dev only)
+    // 使用静态导入，避免在某些运行环境中 transpile 为顶层 await 导致语法错误
+    // 动态导入（无需使用 await，避免编译为顶层 await）
     try {
       import('./routes/fallback-test')
         .then(m => {
-          this.app.use(m.default)
+          if (m?.default) this.app.use(m.default)
         })
         .catch(() => {})
     } catch {}

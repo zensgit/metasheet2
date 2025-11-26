@@ -1,0 +1,67 @@
+name: Phase 5 Nightly Validation
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # UTC 02:00 (Beijing 10:00)
+  workflow_dispatch:
+    inputs:
+      metrics_url:
+        description: Override metrics URL
+        required: false
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install deps
+        run: |
+          npm ci || pnpm i || yarn install
+
+      - name: Run Phase 5 validation
+        env:
+          METRICS_URL: ${{ github.event.inputs.metrics_url || secrets.METRICS_URL || 'http://localhost:8900/metrics/prom' }}
+        run: |
+          mkdir -p /tmp
+          if [ -f scripts/phase5-run-all.sh ]; then
+            bash scripts/phase5-run-all.sh "$METRICS_URL" || true
+          else
+            scripts/phase5-full-validate.sh "$METRICS_URL" /tmp/phase5.json
+            scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md
+          fi
+          cat /tmp/phase5.json || true
+
+      - name: Summarize result
+        run: |
+          status=$(jq -r '.summary.overall_status' /tmp/phase5.json)
+          passed=$(jq -r '.summary.passed' /tmp/phase5.json)
+          failed=$(jq -r '.summary.failed' /tmp/phase5.json)
+          na=$(jq -r '.summary.na' /tmp/phase5.json)
+          echo "Status: $status | Passed: $passed | Failed: $failed | NA: $na" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifacts (keep 7 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-validation-$(date +"%Y%m%d")
+          path: |
+            /tmp/phase5.json
+            /tmp/phase5.md
+          retention-days: 7
+
+      - name: Fail if overall_status != pass
+        run: |
+          status=$(jq -r '.summary.overall_status' /tmp/phase5.json)
+          if [ "$status" != "pass" ]; then
+            echo "Nightly Phase 5 validation failed"
+            exit 1
+          fi
+
+      # Optional: Slack/Teams notification could be added here using a webhook secret
