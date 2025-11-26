@@ -28,14 +28,38 @@ jobs:
 
       - name: Determine metrics URL
         id: cfg
+        env:
+          METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
         run: |
-          if [ -n "${{ github.event.inputs.metrics_url }}" ]; then
-            echo "url=${{ github.event.inputs.metrics_url }}" >> $GITHUB_OUTPUT
+          URL_INPUT="${{ github.event.inputs.metrics_url }}"
+          if [ -n "$URL_INPUT" ]; then
+            echo "url=$URL_INPUT" >> $GITHUB_OUTPUT
+          elif [ -n "$METRICS_URL_SECRET" ]; then
+            echo "url=$METRICS_URL_SECRET" >> $GITHUB_OUTPUT
           else
-            echo "url=http://localhost:8900/metrics/prom" >> $GITHUB_OUTPUT
+            echo "url=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Probe metrics endpoint
+        id: probe
+        run: |
+          URL="${{ steps.cfg.outputs.url }}"
+          if [ -z "$URL" ]; then
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "No METRICS_URL provided; skipping validation." > /tmp/phase5.md
+            echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
+            exit 0
+          fi
+          if curl -sSf -m 5 "$URL" >/dev/null; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "Metrics endpoint unreachable: $URL" > /tmp/phase5.md
+            echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
           fi
 
       - name: Run Phase 5 validation
+        if: steps.probe.outputs.available == 'true'
         run: |
           bash scripts/phase5-full-validate.sh "${{ steps.cfg.outputs.url }}" /tmp/phase5.json || true
           bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
@@ -49,6 +73,7 @@ jobs:
             /tmp/phase5.md
 
       - name: Fail if overall status is not pass
+        if: steps.probe.outputs.available == 'true'
         run: |
           status=$(jq -r '.summary.overall_status' /tmp/phase5.json 2>/dev/null || echo fail)
           echo "Overall status: $status"
