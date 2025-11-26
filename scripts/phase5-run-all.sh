@@ -53,6 +53,17 @@ main() {
     bash scripts/phase5-populate-cache.sh || warn "Cache populate script returned non-zero"
   fi
 
+  # HTTP warm-up to ensure http_success_rate has samples
+  # Need enough requests to get meaningful success rate (>50 samples recommended)
+  log "Warming up HTTP success metrics (50 iterations)..."
+  for i in $(seq 1 50); do
+    curl -sf "$API_BASE/api/v2/hello" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/api/plugins" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/internal/metrics" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/health" >/dev/null 2>&1 || true
+  done
+  log "HTTP warm-up complete (200 requests)"
+
   # Populate plugin reload metrics (SafetyGuard reload loop)
   if [[ -f scripts/phase5-populate-plugin-reload.sh ]]; then
     log "Executing plugin reload population..."

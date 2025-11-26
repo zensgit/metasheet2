@@ -32,14 +32,32 @@
 
 ## CI & Monitoring
 
-- CI validation: `.github/workflows/phase5-validate.yml` fails PRs when `overall_status != pass`.
+- CI nightly validation: `.github/workflows/phase5-nightly-validation.yml` runs on cron and dispatch; fails when `overall_status != pass`.
 - Prometheus alerts: `ops/prometheus/phase5-alerts.yml` covers HTTP success, cache hit rate, fallback ratio, plugin/snapshot latencies, memory.
 - Grafana dashboard: `ops/grafana/dashboards/phase5-slo.json` panels for all 11 checks.
+
+### CI Nightly Usage
+
+- Manual dispatch: override `metrics_url` if not using default.
+- Artifacts: `/tmp/phase5.json`, `/tmp/phase5.md` uploaded for trend tracking.
+- Ensure metrics endpoint accessible from GitHub runners (allowlist if needed).
 
 ## Production Hardening
 
 - Disable dev-only features in prod: `ENABLE_FALLBACK_TEST=false`, `ALLOW_UNSAFE_ADMIN=false`.
 - Keep cache enabled: `FEATURE_CACHE=true` (MemoryCache or Redis adapter).
+
+## Staging Ops
+
+- Flags: `FEATURE_CACHE=true ENABLE_FALLBACK_TEST=true COUNT_CACHE_MISS_AS_FALLBACK=false ALLOW_UNSAFE_ADMIN=true`
+- Metrics URL: set `METRICS_URL` secret for CI nightly validation.
+- Warm-up volumes:
+  - HTTP: 200 requests across 4 endpoints
+  - Plugin reloads: 12
+  - Snapshots: 3 creates + 3 restores (min), recommend 10 total
+  - Cache simulate: ≥5 keys (miss→set→hit cycles)
+  - Fallback triggers: mixed reasons; ensure effective excludes cache_miss
+- Artifacts: CI uploads `/tmp/phase5.json` and `/tmp/phase5.md` with 7-day retention.
 
 ## Notes
 

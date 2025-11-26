@@ -1,0 +1,204 @@
+name: Phase 5 SLO Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_full_validation:
+        description: 'Run full validation with all metrics population'
+        required: false
+        default: 'true'
+        type: boolean
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+    paths:
+      - 'packages/core-backend/src/metrics/**'
+      - 'packages/core-backend/src/cache/**'
+      - 'packages/core-backend/src/fallback/**'
+      - 'packages/core-backend/src/routes/fallback-test.ts'
+      - 'packages/core-backend/src/routes/cache-test.ts'
+      - 'scripts/phase5-*.sh'
+      - '.github/workflows/phase5-slo-validation.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: quay.io/enterprisedb/postgresql:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: metasheet
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable corepack / setup pnpm
+        run: |
+          corepack enable
+          pnpm -v || npm i -g pnpm@8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+        run: |
+          pnpm -F @metasheet/core-backend db:migrate || true
+
+      - name: Start backend with Phase 5 configuration
+        env:
+          HOST: 127.0.0.1
+          PORT: 8900
+          JWT_SECRET: 'dev-secret'
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          FEATURE_CACHE: 'true'
+          ENABLE_FALLBACK_TEST: 'true'
+          COUNT_CACHE_MISS_AS_FALLBACK: 'false'
+          ALLOW_UNSAFE_ADMIN: 'true'
+        run: |
+          nohup pnpm -F @metasheet/core-backend dev:core >/tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+
+      - name: Wait for backend health
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          for i in {1..60}; do
+            if curl -fsS "$API/health" >/dev/null 2>&1; then
+              echo "Backend is healthy"
+              exit 0
+            fi
+            echo "Waiting for backend... ($i/60)"
+            sleep 2
+          done
+          echo "::error::Backend failed to start"
+          tail -100 /tmp/server.log
+          exit 1
+
+      - name: Generate JWT token
+        run: |
+          TOKEN=$(bash scripts/phase5-dev-jwt.sh)
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Populate cache metrics
+        env:
+          API_BASE: http://127.0.0.1:8900
+        run: bash scripts/phase5-populate-cache.sh
+
+      - name: Populate HTTP success metrics
+        env:
+          API: http://127.0.0.1:8900
+        run: |
+          echo "Warming up HTTP endpoints..."
+          for i in $(seq 1 50); do
+            curl -sf "$API/health" >/dev/null 2>&1 || true
+            curl -sf "$API/api/v2/hello" >/dev/null 2>&1 || true
+            curl -sf "$API/api/plugins" >/dev/null 2>&1 || true
+            curl -sf "$API/internal/metrics" >/dev/null 2>&1 || true
+          done
+          echo "HTTP warm-up complete"
+
+      - name: Populate plugin reload metrics
+        env:
+          API_BASE: http://127.0.0.1:8900
+        run: |
+          # Use -unsafe route for simplicity in CI
+          for i in $(seq 1 10); do
+            curl -s -H "Authorization: Bearer $TOKEN" \
+              -X POST "$API_BASE/api/admin/plugins/example-plugin/reload-unsafe" >/dev/null 2>&1 || true
+            sleep 0.3
+          done
+          echo "Plugin reload population complete"
+
+      - name: Populate snapshot metrics
+        env:
+          API_BASE: http://127.0.0.1:8900
+        run: |
+          for i in $(seq 1 10); do
+            RESP=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -X POST "$API_BASE/api/snapshots" \
+              -d "{\"view_id\":\"ci-view-$i\",\"name\":\"ci-test-$i\",\"description\":\"CI test $i\"}")
+            SNAP_ID=$(echo "$RESP" | jq -r '.data.id // empty')
+            if [[ -n "$SNAP_ID" ]]; then
+              curl -s -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -X POST "$API_BASE/api/snapshots/$SNAP_ID/restore" \
+                -d '{}' >/dev/null 2>&1 || true
+            fi
+          done
+          echo "Snapshot population complete"
+
+      - name: Trigger fallback events
+        env:
+          SERVER_URL: http://127.0.0.1:8900
+        run: bash scripts/phase5-trigger-fallback.sh || true
+
+      - name: Run Phase 5 validation
+        env:
+          METRICS_URL: http://127.0.0.1:8900/metrics/prom
+        run: |
+          bash scripts/phase5-full-validate.sh "$METRICS_URL" /tmp/phase5.json
+
+      - name: Generate validation report
+        run: |
+          bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
+
+      - name: Check validation result
+        run: |
+          STATUS=$(jq -r '.summary.overall_status' /tmp/phase5.json)
+          PASSED=$(jq -r '.summary.passed' /tmp/phase5.json)
+          FAILED=$(jq -r '.summary.failed' /tmp/phase5.json)
+          NA=$(jq -r '.summary.na' /tmp/phase5.json)
+
+          echo "=== Phase 5 SLO Validation Result ==="
+          echo "Status: $STATUS"
+          echo "Passed: $PASSED"
+          echo "Failed: $FAILED"
+          echo "N/A: $NA"
+          echo ""
+
+          if [ "$STATUS" != "pass" ]; then
+            echo "::error::Phase 5 SLO validation failed"
+            jq '.assertions[] | select(.status != "pass")' /tmp/phase5.json
+            exit 1
+          fi
+
+          echo "::notice::Phase 5 SLO validation passed ($PASSED/11 checks)"
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-validation-results
+          path: |
+            /tmp/phase5.json
+            /tmp/phase5.md
+            /tmp/server.log
+          retention-days: 14
+
+      - name: Post validation summary
+        if: always()
+        run: |
+          if [ -f /tmp/phase5.json ]; then
+            echo "## Phase 5 SLO Validation Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Actual | Threshold | Status |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|--------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+            jq -r '.assertions[] | "| \(.metric) | \(.actual) | \(.threshold) \(.unit) | \(.status | ascii_upcase) |"' /tmp/phase5.json >> $GITHUB_STEP_SUMMARY
+          fi

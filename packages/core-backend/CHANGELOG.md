@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Phase 5: SLO Validation & Observability (2025-11-26)
+
+#### Observability Infrastructure
+- **Prometheus Metrics** - Comprehensive SLO metrics across 11 validation points
+  - `metasheet_plugin_reload_duration_seconds` - Plugin reload latency histogram
+  - `metasheet_snapshot_operation_duration_seconds` - Snapshot create/restore latency histogram
+  - `cache_hits_total` / `cache_miss_total` - Cache hit rate counters with `key_pattern` labels
+  - `metasheet_fallback_total` - Raw fallback event counter by reason
+  - `metasheet_fallback_effective_total` - Effective fallback counter (excludes cache_miss)
+  - `http_requests_total` - HTTP request counter with status labels
+  - `process_resident_memory_bytes` - Memory usage gauge
+
+- **Fallback Taxonomy** - Complete error categorization system
+  - `http_error`, `http_timeout`, `message_error`, `message_timeout`
+  - `cache_miss`, `circuit_breaker`, `upstream_error`, `unknown`
+  - Configurable via `COUNT_CACHE_MISS_AS_FALLBACK` environment variable
+
+#### Test Infrastructure
+- **Dev-only Routes** (guarded by `ENABLE_FALLBACK_TEST=true`)
+  - `POST /internal/test/fallback` - Fallback simulation endpoint
+  - `POST /api/cache-test/warm` - Cache warming endpoint
+  - `POST /api/cache-test/simulate` - Realistic cache pattern simulation
+
+- **Integration Tests** (`src/routes/__tests__/fallback-test.test.ts`)
+  - 8 test cases covering all fallback modes
+  - Route path regression test to prevent double-nesting
+
+#### Validation Scripts
+- `scripts/phase5-full-validate.sh` - Complete SLO validation with JSON output
+- `scripts/phase5-generate-report.sh` - Markdown report generation
+- `scripts/phase5-populate-cache.sh` - Cache metrics population
+- `scripts/phase5-populate-plugin-reload.sh` - Plugin reload histogram population
+- `scripts/phase5-trigger-fallback.sh` - Fallback event triggering
+- `scripts/phase5-run-all.sh` - One-shot orchestration script
+- `scripts/phase5-dev-jwt.sh` - JWT token generation for local testing
+
+#### CI/CD
+- **GitHub Actions Workflow** (`.github/workflows/phase5-slo-validation.yml`)
+  - Automated Phase 5 validation on PRs touching metrics/cache/fallback code
+  - PostgreSQL service container for integration testing
+  - Artifact upload for validation results
+  - Job summary with metric table
+
+#### Documentation
+- `claudedocs/PHASE5_COMPLETION_REPORT_FINAL.md` - Complete validation report
+  - Reproducible run settings with environment variables
+  - Traffic volume specifications for validation
+  - Production hardening checklist
+  - Prometheus alert rule recommendations
+
+### SLO Thresholds Validated
+| Metric | Threshold | Status |
+|--------|-----------|--------|
+| plugin_reload_latency_p95 | ≤ 2.0s | PASS |
+| plugin_reload_latency_p99 | ≤ 5.0s | PASS |
+| snapshot_restore_latency_p95 | ≤ 5.0s | PASS |
+| snapshot_restore_latency_p99 | ≤ 8.0s | PASS |
+| snapshot_create_latency_p95 | ≤ 5.0s | PASS |
+| snapshot_create_latency_p99 | ≤ 8.0s | PASS |
+| cache_hit_rate | ≥ 80% | PASS |
+| fallback_effective_ratio | ≤ 0.6 | PASS |
+| memory_rss | ≤ 500MB | PASS |
+| http_success_rate | ≥ 98% | PASS |
+| error_rate | ≤ 1% | PASS |
+
+### Key Fixes (2025-11-26)
+- **Route path fix**: `fallback-test.ts` route changed from `/internal/test/fallback` to `/fallback` to prevent double-nesting when mounted at `/internal/test`
+- **JWT secret alignment**: `phase5-dev-jwt.sh` uses `dev-secret` to match jwt-middleware.ts default
+- **macOS compatibility**: `head -n -1` replaced with `sed '$d'` in shell scripts
+- **SafetyGuard token parsing**: Added `.confirmation.token` path to jq extraction
+- **Fallback taxonomy**: Added `upstream_error` and `unknown` to `phase5-thresholds.json`
+- **HTTP metrics recording**: Added explicit metrics recording to direct route handlers
+
+### Environment Variables
+```bash
+# Required for Phase 5 validation
+FEATURE_CACHE=true
+ENABLE_FALLBACK_TEST=true        # Dev only - set to false in production
+COUNT_CACHE_MISS_AS_FALLBACK=false
+ALLOW_UNSAFE_ADMIN=true          # Dev only - set to false in production
+```
+
+---
+
 ### Added - Sprint 2: Snapshot Protection System (2025-11-19)
 
 #### Database Schema

@@ -1,0 +1,59 @@
+name: Phase 5 Nightly Validation
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      metrics_url:
+        description: 'Override metrics URL (default http://localhost:8900/metrics/prom)'
+        required: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Determine metrics URL
+        id: cfg
+        run: |
+          if [ -n "${{ github.event.inputs.metrics_url }}" ]; then
+            echo "url=${{ github.event.inputs.metrics_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "url=http://localhost:8900/metrics/prom" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Phase 5 validation
+        run: |
+          bash scripts/phase5-full-validate.sh "${{ steps.cfg.outputs.url }}" /tmp/phase5.json || true
+          bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-validation
+          path: |
+            /tmp/phase5.json
+            /tmp/phase5.md
+
+      - name: Fail if overall status is not pass
+        run: |
+          status=$(jq -r '.summary.overall_status' /tmp/phase5.json 2>/dev/null || echo fail)
+          echo "Overall status: $status"
+          if [ "$status" != "pass" ]; then
+            echo "Phase 5 validation failed"
+            exit 1
+          fi
+

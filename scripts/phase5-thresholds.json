@@ -125,7 +125,9 @@
         "message_timeout",
         "message_error",
         "cache_miss",
-        "circuit_breaker"
+        "circuit_breaker",
+        "upstream_error",
+        "unknown"
       ]
     },
     "effective_fallback_calculation": {

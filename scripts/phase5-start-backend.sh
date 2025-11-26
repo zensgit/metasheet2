@@ -9,12 +9,13 @@ set -euo pipefail
 export FEATURE_CACHE=${FEATURE_CACHE:-true}
 export ENABLE_FALLBACK_TEST=${ENABLE_FALLBACK_TEST:-true}
 export COUNT_CACHE_MISS_AS_FALLBACK=${COUNT_CACHE_MISS_AS_FALLBACK:-false}
+export ALLOW_UNSAFE_ADMIN=${ALLOW_UNSAFE_ADMIN:-true}
 
 echo "[Phase5] Starting @metasheet/core-backend with flags:"
 echo "  FEATURE_CACHE=$FEATURE_CACHE"
 echo "  ENABLE_FALLBACK_TEST=$ENABLE_FALLBACK_TEST"
 echo "  COUNT_CACHE_MISS_AS_FALLBACK=$COUNT_CACHE_MISS_AS_FALLBACK"
+echo "  ALLOW_UNSAFE_ADMIN=$ALLOW_UNSAFE_ADMIN"
 echo "  Metrics: http://localhost:8900/metrics/prom"
 
 exec pnpm --filter @metasheet/core-backend dev
-
