@@ -1,0 +1,17 @@
+groups:
+  - name: phase5_recording
+    rules:
+      - record: metasheet:http_success_rate:5m
+        expr: sum(rate(metasheet_http_requests_total{result="success"}[5m])) / sum(rate(metasheet_http_requests_total[5m]))
+      - record: metasheet:cache_hit_rate:10m
+        expr: sum(rate(cache_hits_total[10m])) / (sum(rate(cache_hits_total[10m])) + sum(rate(cache_miss_total[10m])))
+      - record: metasheet:fallback_effective_ratio:10m
+        expr: sum(rate(metasheet_fallback_effective_total[10m])) / sum(rate(metasheet_fallback_total[10m]))
+      - record: metasheet:plugin_reload_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m])))
+      - record: metasheet:plugin_reload_p99:5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m])))
+      - record: metasheet:snapshot_create_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation="create"}[5m])))
+      - record: metasheet:snapshot_restore_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation="restore"}[5m])))
