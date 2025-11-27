@@ -477,10 +477,12 @@ class MetaSheetServer {
   }
 }
 
-// 启动
-const server = new MetaSheetServer()
-server.start().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('Failed to start MetaSheet v2 core:', err)
-  process.exit(1)
-})
+// 启动 - 仅在直接运行时启动服务器，测试导入时不启动
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+  const server = new MetaSheetServer()
+  server.start().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('Failed to start MetaSheet v2 core:', err)
+    process.exit(1)
+  })
+}

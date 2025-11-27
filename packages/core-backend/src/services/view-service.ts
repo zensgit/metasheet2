@@ -1,12 +1,15 @@
 import { db } from '../db/db'
 import { metrics } from '../metrics/metrics'
+import { canReadTable, canWriteTable, type User } from '../rbac/table-perms'
+import { isFeatureEnabled } from '../config/flags'
 
 export type ViewRow = any
 
 export async function getViewById(viewId: string): Promise<ViewRow | null> {
   if (!db) return null
   try {
-    return await db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst()
+    const result = await db.selectFrom('views').selectAll().where('id', '=', viewId).executeTakeFirst()
+    return result ?? null
   } catch {
     return null
   }
@@ -101,4 +104,60 @@ export async function queryKanban(args: { view: ViewRow; page: number; pageSize:
     observe('kanban', '500', start)
     throw e
   }
+}
+
+// RBAC wrapper functions
+
+export async function queryGridWithRBAC(
+  user: User,
+  args: { view: ViewRow; page: number; pageSize: number; filters: any; sorting: any }
+) {
+  if (isFeatureEnabled('FEATURE_TABLE_RBAC_ENABLED')) {
+    const tableId = args.view?.table_id
+    if (tableId) {
+      const allowed = await canReadTable(user, tableId)
+      if (!allowed) {
+        throw new Error('Permission denied')
+      }
+    }
+  }
+  return queryGrid(args)
+}
+
+export async function queryKanbanWithRBAC(
+  user: User,
+  args: { view: ViewRow; page: number; pageSize: number; filters: any }
+) {
+  if (isFeatureEnabled('FEATURE_TABLE_RBAC_ENABLED')) {
+    const tableId = args.view?.table_id
+    if (tableId) {
+      const allowed = await canReadTable(user, tableId)
+      if (!allowed) {
+        throw new Error('Permission denied')
+      }
+    }
+  }
+  return queryKanban(args)
+}
+
+export async function updateViewConfigWithRBAC(
+  user: User,
+  viewId: string,
+  config: any
+) {
+  const view = await getViewById(viewId)
+  if (!view) {
+    throw new Error(`View ${viewId} not found`)
+  }
+
+  if (isFeatureEnabled('FEATURE_TABLE_RBAC_ENABLED')) {
+    const tableId = view?.table_id
+    if (tableId) {
+      const allowed = await canWriteTable(user, tableId)
+      if (!allowed) {
+        throw new Error('Permission denied')
+      }
+    }
+  }
+  return updateViewConfig(viewId, config)
 }
