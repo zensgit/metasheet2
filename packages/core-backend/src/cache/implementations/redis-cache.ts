@@ -1,4 +1,4 @@
-import type { Cache } from '../../types/cache'
+import type { Cache, Result } from '../../types/cache'
 import { metrics } from '../../metrics/metrics'
 
 function keyPrefix(key: string): string {
@@ -14,33 +14,37 @@ export class RedisCache implements Cache {
     this.url = url
   }
 
-  async get<T>(key: string): Promise<T | undefined> {
+  async get<T = any>(key: string): Promise<Result<T | null>> {
     const labels = { impl: 'redis', key_pattern: keyPrefix(key) }
     try {
       // Placeholder: no real Redis ops yet; behaves like miss
       metrics.cache_miss_total.inc(labels)
-      return undefined
-    } catch {
+      return { ok: true, value: null }
+    } catch (e) {
       metrics.cache_errors_total.inc(labels)
-      return undefined
+      return { ok: false, error: e instanceof Error ? e : new Error(String(e)) }
     }
   }
 
-  async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
+  async set(key: string, value: any, ttl?: number): Promise<Result<void>> {
     const labels = { impl: 'redis', key_pattern: keyPrefix(key) }
     try {
       metrics.cache_set_total.inc(labels)
-    } catch {
+      return { ok: true, value: undefined }
+    } catch (e) {
       metrics.cache_errors_total.inc(labels)
+      return { ok: false, error: e instanceof Error ? e : new Error(String(e)) }
     }
   }
 
-  async del(key: string): Promise<void> {
+  async del(key: string): Promise<Result<void>> {
     const labels = { impl: 'redis', key_pattern: keyPrefix(key) }
     try {
       metrics.cache_del_total.inc(labels)
-    } catch {
+      return { ok: true, value: undefined }
+    } catch (e) {
       metrics.cache_errors_total.inc(labels)
+      return { ok: false, error: e instanceof Error ? e : new Error(String(e)) }
     }
   }
 }
