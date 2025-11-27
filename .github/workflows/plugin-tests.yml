@@ -78,7 +78,7 @@ jobs:
           postgres-version: 14
       - name: Create test database
         run: |
-          psql -c 'CREATE DATABASE metasheet_test;' -U postgres -h localhost
+          createdb -U postgres metasheet_test || true
 
       - name: Run DB migrations
         env:

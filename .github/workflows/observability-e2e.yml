@@ -111,7 +111,7 @@ jobs:
         run: |
           set +e
           tries=0
-          until curl -fsS "$API/api/permissions?userId=u1" >/dev/null; do
+          until curl -fsS -H "Authorization: Bearer $TOKEN" "$API/api/permissions?userId=u1" >/dev/null; do
             tries=$((tries+1))
             if [ $tries -ge 5 ]; then echo "RBAC warmup failed after $tries attempts"; exit 1; fi
             sleep $((tries))
