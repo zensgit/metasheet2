@@ -1,19 +1,14 @@
 import { defineConfig } from 'vitest/config'
-import * as fs from 'fs/promises'
 import * as path from 'path'
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    // Fix vite SSR transformation issues
+    // Fix vite SSR transformation issues - use forks pool to avoid __vite_ssr_exportName__ errors
+    pool: 'forks',
     deps: {
-      optimizer: {
-        ssr: {
-          enabled: true,
-          include: ['test-db']
-        }
-      }
+      interopDefault: true
     },
     coverage: {
       provider: 'v8',
@@ -34,13 +29,6 @@ export default defineConfig({
     testTimeout: 30000, // Increased timeout for better stability
     hookTimeout: 15000,
     setupFiles: ['./tests/setup.ts'],
-    // Improve test isolation and stability
-    pool: 'threads',
-    poolOptions: {
-      threads: {
-        singleThread: true // Force single thread to avoid race conditions
-      }
-    },
     // Better error handling and debugging
     reporter: ['verbose'],
     maxConcurrency: 1, // Reduce concurrency for stability
