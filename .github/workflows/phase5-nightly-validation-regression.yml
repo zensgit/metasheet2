@@ -98,6 +98,39 @@ jobs:
             /tmp/phase5.md
             /tmp/regression.txt
 
+      - name: Stage nightly JSON for repository trend tracking
+        if: success() && steps.probe.outputs.available == 'true'
+        run: |
+          mkdir -p results/nightly
+          cp /tmp/phase5.json "results/nightly/phase5-$(date -u '+%Y%m%d').json"
+          echo "Staged results/nightly/phase5-$(date -u '+%Y%m%d').json"
+
+      - name: Generate weekly trend markdown
+        if: success() && steps.probe.outputs.available == 'true'
+        run: |
+          mkdir -p claudedocs
+          bash scripts/phase5-weekly-trend.sh results/nightly claudedocs/PHASE5_WEEKLY_TREND.md 7 || echo "weekly trend generation skipped"
+
+      - name: Generate SLO tightening suggestions
+        if: success() && steps.probe.outputs.available == 'true'
+        run: |
+          bash scripts/phase5-slo-tighten-suggestions.sh results/nightly claudedocs/PHASE5_SLO_SUGGESTIONS.json 30 || echo "tighten suggestions skipped"
+
+      - name: Create PR with nightly JSON (for trend, suggestions & baseline rotation)
+        if: success() && steps.probe.outputs.available == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "chore(phase5): nightly JSON, weekly trend & SLO suggestions $(date -u '+%Y-%m-%d')"
+          title: "Phase5 Nightly: JSON + Trend + SLO Suggestions $(date -u '+%Y-%m-%d')"
+          body: |
+            Automated nightly Phase 5 validation.
+            Includes:
+            - Nightly JSON (results/nightly)
+            - Weekly trend (last 7): claudedocs/PHASE5_WEEKLY_TREND.md
+            - SLO tightening suggestions (window 30d): claudedocs/PHASE5_SLO_SUGGESTIONS.json
+            Supports future baseline rotation after sustained PASS streak.
+          branch: chore/phase5-nightly-$(date -u '+%Y%m%d')
+
       - name: Fail if overall status is not pass
         if: steps.probe.outputs.available == 'true'
         run: |
@@ -124,23 +157,20 @@ jobs:
             echo "SLACK_WEBHOOK_URL not set; skipping Slack notification"
             exit 0
           fi
-          summary=$(jq -r '.summary | "Total: \(.total_checks) | Passed: \(.passed) | Failed: \(.failed) | NA: \(.na) | Status: \(.overall_status)"' /tmp/phase5.json 2>/dev/null || echo "Phase 5 validation failed")
-          regression=""
-          if [ -f /tmp/regression.txt ]; then
-            regression=$(sed -n '1,120p' /tmp/regression.txt | sed 's/"/\\"/g')
+          # Use helper script to build failure summary (suggestions/audit may be absent)
+          bash scripts/phase5-build-slack-summary.sh /tmp/phase5.json baseline/phase5-baseline.json claudedocs/PHASE5_SLO_SUGGESTIONS.json /tmp/cache_audit.txt > /tmp/slack_summary.txt || echo "summary build failed" > /tmp/slack_summary.txt
+          curl -s -X POST -H 'Content-type: application/json' --data "$(jq -Rs '{text:.}' /tmp/slack_summary.txt)" "$SLACK_WEBHOOK_URL" || true
+
+      - name: Notify Slack on success (summary & deltas)
+        if: success() && steps.probe.outputs.available == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          METRICS_URL: ${{ steps.cfg.outputs.url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set; skipping Slack success notification"; exit 0
           fi
-          pr_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          endpoint="$METRICS_URL"
-          payload=$(cat <<EOF
-          {
-            "text": "Phase 5 Nightly Validation FAILED",
-            "blocks": [
-              {"type":"section","text":{"type":"mrkdwn","text":"*Phase 5 Nightly Validation FAILED*\nRepo: ${{ github.repository }}\nRun: <$pr_url|View Run>"}},
-              {"type":"section","text":{"type":"mrkdwn","text":"$summary"}},
-              {"type":"section","text":{"type":"mrkdwn","text":"*Endpoint:* $endpoint"}},
-              {"type":"section","text":{"type":"mrkdwn","text":"*Regression:*\n$regression"}}
-            ]
-          }
-EOF
-          )
-          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
+          # Build cache audit first (non-fatal)
+          if [ -n "$METRICS_URL" ]; then bash scripts/phase5-cache-audit.sh "$METRICS_URL" 30 70 > /tmp/cache_audit.txt 2>&1 || echo "cache audit failed" > /tmp/cache_audit.txt; fi
+          bash scripts/phase5-build-slack-summary.sh /tmp/phase5.json baseline/phase5-baseline.json claudedocs/PHASE5_SLO_SUGGESTIONS.json /tmp/cache_audit.txt > /tmp/slack_summary.txt || echo "summary build failed" > /tmp/slack_summary.txt
+          curl -s -X POST -H 'Content-type: application/json' --data "$(jq -Rs '{text:.}' /tmp/slack_summary.txt)" "$SLACK_WEBHOOK_URL" || true
