@@ -125,6 +125,8 @@ jobs:
           kill $(cat server.pid) || true
 
       - name: Build web app
+        # Skip on Node 18 - @vitejs/plugin-vue@6.x requires Node 20+ (crypto.hash API)
+        if: matrix.node-version != '18.x'
         run: |
           pnpm --filter @metasheet/web build
 

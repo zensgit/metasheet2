@@ -10,6 +10,11 @@ const userPerms = new Map<string, Set<string>>()
 export function permissionsRouter(): Router {
   const r = Router()
 
+  // Health check endpoint (no auth required - whitelisted in jwt-middleware)
+  r.get('/api/permissions/health', (_req: Request, res: Response) => {
+    return res.json({ ok: true, source: 'synthetic', timestamp: new Date().toISOString() })
+  })
+
   r.get('/api/permissions', rbacGuard('permissions', 'read'), async (req: Request, res: Response) => {
     const userId = (req.query.userId as string) || (req as any).user?.id
     if (!userId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId required' } })
