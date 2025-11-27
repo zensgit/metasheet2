@@ -8,6 +8,7 @@ groups:
           severity: warning
         annotations:
           summary: HTTP success rate below 98%
+          runbook: SLO Phase5 → Check recent deploy, inspect error logs, confirm upstream health.
 
       - alert: CacheHitRateLow
         expr: (sum(rate(cache_hits_total[10m])) / (sum(rate(cache_hits_total[10m])) + sum(rate(cache_miss_total[10m])))) < 0.8
@@ -16,6 +17,7 @@ groups:
           severity: warning
         annotations:
           summary: Cache hit rate below 80%
+          runbook: Warm cache, verify FEATURE_CACHE enabled, inspect key churn.
 
       - alert: FallbackEffectiveHigh
         expr: (sum(rate(metasheet_fallback_effective_total[10m])) / sum(rate(metasheet_fallback_total[10m]))) > 0.6
@@ -24,6 +26,7 @@ groups:
           severity: warning
         annotations:
           summary: Fallback effective ratio above 0.6
+          runbook: Check underlying causes (http_error, upstream_error), validate cache misses excluded.
 
       - alert: PluginReloadLatencyP95High
         expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m]))) > 2
@@ -32,6 +35,7 @@ groups:
           severity: warning
         annotations:
           summary: Plugin reload p95 latency above 2s
+          runbook: Inspect plugin loader logs, recent plugin code changes.
 
       - alert: PluginReloadLatencyP99High
         expr: histogram_quantile(0.99, sum by (le) (rate(metasheet_plugin_reload_duration_seconds_bucket[5m]))) > 5
@@ -40,6 +44,7 @@ groups:
           severity: warning
         annotations:
           summary: Plugin reload p99 latency above 5s
+          runbook: Same as p95; consider profiling reload path.
 
       - alert: SnapshotCreateLatencyP95High
         expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation="create"}[5m]))) > 5
@@ -48,6 +53,7 @@ groups:
           severity: warning
         annotations:
           summary: Snapshot create p95 latency above 5s
+          runbook: Check storage backend, recent snapshot volume, IO saturation.
 
       - alert: SnapshotRestoreLatencyP95High
         expr: histogram_quantile(0.95, sum by (le) (rate(metasheet_snapshot_operation_duration_seconds_bucket{operation="restore"}[5m]))) > 5
@@ -56,6 +62,7 @@ groups:
           severity: warning
         annotations:
           summary: Snapshot restore p95 latency above 5s
+          runbook: Validate restore path, data size growth, concurrency.
 
       - alert: MemoryRssHigh
         expr: metasheet_memory_rss_bytes > 500 * 1024 * 1024
@@ -64,3 +71,4 @@ groups:
           severity: warning
         annotations:
           summary: Memory RSS above 500MB
+          runbook: Capture heap snapshot, inspect recent plugin/snapshot operations.

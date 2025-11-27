@@ -1,4 +1,4 @@
-name: Phase 5 Nightly Validation
+name: Phase 5 Nightly Validation (External Metrics)
 
 on:
   schedule:
@@ -6,101 +6,90 @@ on:
   workflow_dispatch:
     inputs:
       metrics_url:
-        description: 'Override metrics URL (default http://localhost:8900/metrics/prom)'
+        description: 'Override metrics URL'
         required: false
 
 jobs:
-  validate:
+  nightly:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Probe metrics URL
+        id: probe
+        env:
+          METRICS_URL: ${{ inputs.metrics_url || secrets.METRICS_URL }}
+          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
+        run: |
+          echo "metrics_url=${METRICS_URL}" >> $GITHUB_OUTPUT
+          if [ -z "${METRICS_URL}" ]; then
+            echo "No METRICS_URL configured; skipping." && exit 0
+          fi
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            curl -s -H "${METRICS_AUTH_HEADER}" "${METRICS_URL}" >/dev/null || exit 0
+          else
+            curl -s "${METRICS_URL}" >/dev/null || exit 0
+          fi
+
+      - name: Setup Node
+        if: steps.probe.outputs.metrics_url != ''
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '18.x'
 
-      - name: Install dependencies
+      - name: Enable corepack and install pnpm
+        if: steps.probe.outputs.metrics_url != ''
         run: |
           corepack enable
-          pnpm install --frozen-lockfile
+          corepack prepare pnpm@latest --activate
 
-      - name: Determine metrics URL
-        id: cfg
+      - name: Install dependencies
+        if: steps.probe.outputs.metrics_url != ''
+        run: pnpm install --frozen-lockfile
+
+      - name: Run validation against external metrics
+        if: steps.probe.outputs.metrics_url != ''
         env:
-          METRICS_URL_SECRET: ${{ secrets.METRICS_URL }}
+          METRICS_URL: ${{ steps.probe.outputs.metrics_url }}
+          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
         run: |
-          URL_INPUT="${{ github.event.inputs.metrics_url }}"
-          if [ -n "$URL_INPUT" ]; then
-            echo "url=$URL_INPUT" >> $GITHUB_OUTPUT
-          elif [ -n "$METRICS_URL_SECRET" ]; then
-            echo "url=$METRICS_URL_SECRET" >> $GITHUB_OUTPUT
-          else
-            echo "url=" >> $GITHUB_OUTPUT
+          chmod +x scripts/phase5-full-validate.sh || true
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            # pass through via curl in script if needed
+            export METRICS_AUTH_HEADER
           fi
-
-      - name: Probe metrics endpoint
-        id: probe
-        run: |
-          URL="${{ steps.cfg.outputs.url }}"
-          if [ -z "$URL" ]; then
-            echo "available=false" >> $GITHUB_OUTPUT
-            echo "No METRICS_URL provided; skipping validation." > /tmp/phase5.md
-            echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
-            exit 0
-          fi
-          if curl -sSf -m 5 "$URL" >/dev/null; then
-            echo "available=true" >> $GITHUB_OUTPUT
-          else
-            echo "available=false" >> $GITHUB_OUTPUT
-            echo "Metrics endpoint unreachable: $URL" > /tmp/phase5.md
-            echo '{"summary":{"overall_status":"na"}}' > /tmp/phase5.json
-          fi
-
-      - name: Run Phase 5 validation
-        if: steps.probe.outputs.available == 'true'
-        run: |
-          bash scripts/phase5-full-validate.sh "${{ steps.cfg.outputs.url }}" /tmp/phase5.json || true
-          bash scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
+          ./scripts/phase5-full-validate.sh -o /tmp/phase5.json "${METRICS_URL}" || true
+          ./scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
 
       - name: Upload artifacts
+        if: steps.probe.outputs.metrics_url != ''
         uses: actions/upload-artifact@v4
         with:
-          name: phase5-validation
+          name: phase5-nightly
           path: |
             /tmp/phase5.json
             /tmp/phase5.md
 
-      - name: Fail if overall status is not pass
-        if: steps.probe.outputs.available == 'true'
+      - name: Gate on PASS
+        if: steps.probe.outputs.metrics_url != ''
         run: |
-          status=$(jq -r '.summary.overall_status' /tmp/phase5.json 2>/dev/null || echo fail)
-          echo "Overall status: $status"
-          if [ "$status" != "pass" ]; then
-            echo "Phase 5 validation failed"
-            exit 1
+          if command -v jq >/dev/null 2>&1; then
+            STATUS=$(jq -r '.summary.overall_status // "unknown"' /tmp/phase5.json)
+          else
+            STATUS="unknown"
+          fi
+          echo "overall_status=${STATUS}"
+          if [ "${STATUS}" != "pass" ]; then
+            echo "Phase 5 validation failed" && exit 1
           fi
 
       - name: Notify Slack on failure
-        if: failure()
+        if: failure() && steps.probe.outputs.metrics_url != ''
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: '{"text":"Phase 5 Nightly Validation FAILED for ${{ github.ref }} (status: ${{ job.status }})"}'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "SLACK_WEBHOOK_URL not set; skipping Slack notification"
-            exit 0
-          fi
-          summary=$(jq -r '.summary | "Total: \(.total_checks) | Passed: \(.passed) | Failed: \(.failed) | NA: \(.na) | Status: \(.overall_status)"' /tmp/phase5.json 2>/dev/null || echo "Phase 5 validation failed")
-          pr_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          payload=$(cat <<EOF
-          {
-            "text": "Phase 5 Nightly Validation FAILED",
-            "blocks": [
-              {"type":"section","text":{"type":"mrkdwn","text":"*Phase 5 Nightly Validation FAILED*\nRepo: ${{ github.repository }}\nRun: <$pr_url|View Run>"}},
-              {"type":"section","text":{"type":"mrkdwn","text":"$summary"}}
-            ]
-          }
-EOF
-          )
-          curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

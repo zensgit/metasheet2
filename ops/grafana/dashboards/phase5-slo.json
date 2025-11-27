@@ -6,6 +6,12 @@
   "panels": [
     {
       "type": "stat",
+      "title": "Plugin Reload Samples (_count)",
+      "targets": [{"expr": "sum by (plugin_name) (metasheet_plugin_reload_duration_seconds_count)"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 5}]}}}
+    },
+    {
+      "type": "stat",
       "title": "HTTP Success Rate (5m)",
       "targets": [{"expr": "metasheet:http_success_rate:5m"}]
     },
@@ -38,6 +44,13 @@
       "type": "stat",
       "title": "Snapshot Restore p95 (5m)",
       "targets": [{"expr": "label_replace(metasheet:snapshot_op_p95:5m, \"operation\", \"restore\", \"operation\", \".*\")"}]
+    }
+    ,
+    {
+      "type": "stat",
+      "title": "Snapshot Samples (_count)",
+      "targets": [{"expr": "sum by (operation) (metasheet_snapshot_operation_duration_seconds_count)"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 5}]}}}
     }
   ]
 }

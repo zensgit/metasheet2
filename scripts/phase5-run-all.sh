@@ -80,6 +80,30 @@ main() {
     warn "scripts/phase5-trigger-fallback.sh not found; skipping"
   fi
 
+  # Populate snapshot create histogram explicitly
+  log "Populating snapshot create histogram..."
+  if [[ -z "${TOKEN:-}" ]]; then
+    if [[ -x scripts/phase5-dev-jwt.sh ]]; then
+      TOKEN="$(bash scripts/phase5-dev-jwt.sh || true)"
+    fi
+  fi
+  SNAP_CREATE_COUNT="${SNAP_CREATE_COUNT:-10}"
+  SNAP_SLEEP_SECS="${SNAP_SLEEP_SECS:-0.2}"
+  if [[ -n "${TOKEN:-}" ]]; then
+    log "snapshot-create attempts: ${SNAP_CREATE_COUNT}"
+    for i in $(seq 1 "${SNAP_CREATE_COUNT}"); do
+      curl -s -X POST "$API_BASE/api/snapshots" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d '{"view_id":"demo-view","name":"phase5-warmup-'"$i"'","description":"phase5-run-all warm-up","snapshot_type":"full","metadata":{"source":"phase5"},"expires_at":null}' >/dev/null || true
+      sleep "$SNAP_SLEEP_SECS"
+    done
+    log "snapshot-create metrics check (create count)"
+    curl -s "$METRICS_URL" | grep '^metasheet_snapshot_operation_duration_seconds_count' | grep 'operation="create"' || warn "snapshot-create count not found in metrics scrape"
+  else
+    warn "JWT token unavailable; skipping snapshot create warm-up"
+  fi
+
   # Optional: snapshot exercise if a helper is available
   if [[ -f scripts/rehearsal-snapshot.sh ]]; then
     log "Running snapshot rehearsal to ensure histogram samples..."
