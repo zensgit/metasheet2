@@ -212,8 +212,10 @@ jobs:
 
       - name: Assert RBAC metrics activity (relaxed)
         run: |
-          HITS=$(awk '/rbac_perm_cache_hits_total/{print $2}' /tmp/metrics.txt | head -1)
-          MISS=$(awk '/rbac_perm_cache_misses_total/{print $2}' /tmp/metrics.txt | head -1)
+          # Extract numeric values only (skip HELP/TYPE lines)
+          HITS=$(awk '/^rbac_perm_cache_hits_total [0-9]/{print $2}' /tmp/metrics.txt | head -1)
+          # Note: The metric name is rbac_perm_cache_miss_total (no 's'), not misses
+          MISS=$(awk '/^rbac_perm_cache_miss_total [0-9]/{print $2}' /tmp/metrics.txt | head -1)
 
           HITS=${HITS:-0}
           MISS=${MISS:-0}
