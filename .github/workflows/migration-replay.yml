@@ -50,8 +50,8 @@ jobs:
 
       - name: Create DB and extension
         run: |
-          createdb -U postgres metasheet || true
-          psql -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          createdb -h localhost -U postgres metasheet || true
+          psql -h localhost -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
         timeout-minutes: 2
 
       - name: Run migrations twice (replay)
