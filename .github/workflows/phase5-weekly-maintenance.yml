@@ -1,0 +1,55 @@
+name: Phase 5 Weekly Maintenance
+
+on:
+  schedule:
+    - cron: '15 3 * * 1' # Mondays 03:15 UTC
+  workflow_dispatch: {}
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Retention cleanup (45d)
+        run: |
+          bash scripts/phase5-retention-cleanup.sh results/nightly 45 || true
+
+      - name: Generate weekly trend (7d)
+        run: |
+          mkdir -p claudedocs
+          bash scripts/phase5-weekly-trend.sh results/nightly claudedocs/PHASE5_WEEKLY_TREND.md 7 || true
+
+      - name: Generate SLO tighten suggestions (30d)
+        run: |
+          bash scripts/phase5-slo-tighten-suggestions.sh results/nightly claudedocs/PHASE5_SLO_SUGGESTIONS.json 30 || true
+
+      - name: Threshold patch (dry-run)
+        run: |
+          bash scripts/phase5-slo-threshold-pr.sh claudedocs/PHASE5_SLO_SUGGESTIONS.json scripts/phase5-thresholds.json /tmp/threshold.patch || true
+          echo '--- patch start'; cat /tmp/threshold.patch || echo 'no patch'; echo '--- patch end'
+
+      - name: Create PR (if suggestions exist)
+        if: success()
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "chore(phase5): weekly maintenance artifacts"
+          title: "Phase5 Weekly Maintenance"
+          body: |
+            Weekly maintenance:
+            - Retention cleanup (45d)
+            - Weekly trend markdown
+            - SLO tightening suggestions (30d)
+            - Threshold patch (dry-run shown in logs)
+          branch: chore/phase5-weekly-maint-$(date -u '+%Y%m%d')
+
+      - name: Slack notify (optional)
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            MSG="Phase5 Weekly Maintenance complete: trend + suggestions generated." 
+            curl -s -X POST -H 'Content-type: application/json' --data "{\"text\":\"$MSG\"}" "$SLACK_WEBHOOK_URL" || true
+          fi

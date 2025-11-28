@@ -237,6 +237,27 @@ const cache_candidate_requests = new client.Counter({
   labelNames: ['route', 'method'] as const
 })
 
+// Redis metrics (Phase 5 extension)
+// Redis histogram; ensure creation even if Redis client not used yet
+const redisOperationDuration = new client.Histogram({
+  name: 'redis_operation_duration_seconds',
+  help: 'Redis cache operation duration in seconds',
+  labelNames: ['op'] as const,
+  buckets: [0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]
+})
+
+const redisRecoveryAttemptsTotal = new client.Counter({
+  name: 'redis_recovery_attempts_total',
+  help: 'Redis recovery attempts after failure',
+  labelNames: ['result'] as const
+})
+
+const redisLastFailureTimestamp = new client.Gauge({
+  name: 'redis_last_failure_timestamp',
+  help: 'Unix timestamp of last Redis failure',
+  labelNames: [] as const
+})
+
 // Fallback metrics (Phase 5)
 // Tracks degraded responses for SLO validation
 // Reasons: http_error, http_timeout, message_error, message_timeout, cache_miss, circuit_breaker
@@ -291,6 +312,9 @@ registry.registerMetric(cache_enabled)
 registry.registerMetric(cache_candidate_requests)
 registry.registerMetric(fallbackRawTotal)
 registry.registerMetric(fallbackEffectiveTotal)
+registry.registerMetric(redisOperationDuration)
+registry.registerMetric(redisRecoveryAttemptsTotal)
+registry.registerMetric(redisLastFailureTimestamp)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -357,5 +381,8 @@ export const metrics = {
   cache_enabled,
   cache_candidate_requests,
   fallbackRawTotal,
-  fallbackEffectiveTotal
+  fallbackEffectiveTotal,
+  redisOperationDuration,
+  redisRecoveryAttemptsTotal,
+  redisLastFailureTimestamp
 }

@@ -53,6 +53,17 @@ main() {
     bash scripts/phase5-populate-cache.sh || warn "Cache populate script returned non-zero"
   fi
 
+  # HTTP warm-up to ensure http_success_rate has samples
+  # Need enough requests to get meaningful success rate (>50 samples recommended)
+  log "Warming up HTTP success metrics (50 iterations)..."
+  for i in $(seq 1 50); do
+    curl -sf "$API_BASE/api/v2/hello" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/api/plugins" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/internal/metrics" >/dev/null 2>&1 || true
+    curl -sf "$API_BASE/health" >/dev/null 2>&1 || true
+  done
+  log "HTTP warm-up complete (200 requests)"
+
   # Populate plugin reload metrics (SafetyGuard reload loop)
   if [[ -f scripts/phase5-populate-plugin-reload.sh ]]; then
     log "Executing plugin reload population..."
@@ -69,10 +80,67 @@ main() {
     warn "scripts/phase5-trigger-fallback.sh not found; skipping"
   fi
 
+  # Redis operation sampling (populate redis_operation_duration_seconds) if Redis cache impl active
+  if [[ "${CACHE_IMPL:-memory}" == "redis" ]]; then
+    log "Sampling Redis operations to populate latency histogram..."
+    local redis_samples="${REDIS_SAMPLES:-200}"
+    for i in $(seq 1 "$redis_samples"); do
+      # Use cache test endpoints if present; fall back to generic set/get keys
+      curl -sf "$API_BASE/internal/cache/set?key=phase5:key:$i&value=$RANDOM" >/dev/null 2>&1 || true
+      curl -sf "$API_BASE/internal/cache/get?key=phase5:key:$i" >/dev/null 2>&1 || true
+    done
+    log "Redis sampling complete ($redis_samples get/set pairs)."
+  fi
+
+  # Populate snapshot create histogram explicitly
+  log "Populating snapshot create histogram..."
+  if [[ -z "${TOKEN:-}" ]]; then
+    if [[ -x scripts/phase5-dev-jwt.sh ]]; then
+      TOKEN="$(bash scripts/phase5-dev-jwt.sh || true)"
+    fi
+  fi
+  SNAP_CREATE_COUNT="${SNAP_CREATE_COUNT:-10}"
+  SNAP_SLEEP_SECS="${SNAP_SLEEP_SECS:-0.2}"
+  if [[ -n "${TOKEN:-}" ]]; then
+    log "snapshot-create attempts: ${SNAP_CREATE_COUNT}"
+    for i in $(seq 1 "${SNAP_CREATE_COUNT}"); do
+      curl -s -X POST "$API_BASE/api/snapshots" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d '{"view_id":"demo-view","name":"phase5-warmup-'"$i"'","description":"phase5-run-all warm-up","snapshot_type":"full","metadata":{"source":"phase5"},"expires_at":null}' >/dev/null || true
+      sleep "$SNAP_SLEEP_SECS"
+    done
+    log "snapshot-create metrics check (create count)"
+    curl -s "$METRICS_URL" | grep '^metasheet_snapshot_operation_duration_seconds_count' | grep 'operation="create"' || warn "snapshot-create count not found in metrics scrape"
+  else
+    warn "JWT token unavailable; skipping snapshot create warm-up"
+  fi
+
   # Optional: snapshot exercise if a helper is available
   if [[ -f scripts/rehearsal-snapshot.sh ]]; then
     log "Running snapshot rehearsal to ensure histogram samples..."
     bash scripts/rehearsal-snapshot.sh || warn "Snapshot rehearsal returned non-zero"
+  fi
+
+  # Explicit snapshot restore sampling to stabilize restore percentiles (needs TOKEN)
+  if [[ -n "${TOKEN:-}" ]]; then
+    SNAP_RESTORE_COUNT="${SNAP_RESTORE_COUNT:-10}"
+    log "Sampling snapshot restore ($SNAP_RESTORE_COUNT attempts)..."
+    # Create one base snapshot to restore repeatedly
+    BASE_SNAP_ID=""
+    resp=$(curl -s -X POST "$API_BASE/api/snapshots" -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"view_id":"demo-view","name":"phase5-restore-base","description":"base for restore sampling","snapshot_type":"full"}') || true
+    BASE_SNAP_ID=$(echo "$resp" | jq -r '.id // empty')
+    if [[ -n "$BASE_SNAP_ID" && "$BASE_SNAP_ID" != "null" ]]; then
+      for i in $(seq 1 "$SNAP_RESTORE_COUNT"); do
+        curl -s -X POST "$API_BASE/api/snapshots/$BASE_SNAP_ID/restore" -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"mode":"full"}' >/dev/null || true
+        sleep "${SNAP_SLEEP_SECS:-0.2}"
+      done
+      log "Snapshot restore sampling complete (restore count target: $SNAP_RESTORE_COUNT)"
+    else
+      warn "Failed to obtain base snapshot ID for restore sampling"
+    fi
+  else
+    warn "TOKEN empty; skipping snapshot restore sampling"
   fi
 
   # Validate and generate report

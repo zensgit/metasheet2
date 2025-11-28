@@ -107,6 +107,15 @@ fetch_raw_metrics() {
     log_success "Raw metrics fetched ($(wc -l < "$temp_file") lines)"
 }
 
+# Resolve a TS runner (prefer pnpm workspace tsx, fallback to npx tsx)
+resolve_tsx_runner() {
+    if command -v pnpm >/dev/null 2>&1; then
+        echo "pnpm -F @metasheet/core-backend exec tsx"
+        return
+    fi
+    echo "npx tsx"
+}
+
 # Calculate percentiles using Node.js script
 calculate_percentiles() {
     local metrics_url="$1"
@@ -114,7 +123,13 @@ calculate_percentiles() {
 
     log_info "Calculating percentiles..."
 
-    if ! npx tsx "$PERCENTILES_SCRIPT" "$metrics_url" "$output_file" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
+    local TSX_CMD
+    TSX_CMD=$(resolve_tsx_runner)
+
+    # Ensure thresholds path is available to the TS script regardless of cwd (use non-readonly env var)
+    export THRESHOLDS_PATH="$THRESHOLDS_FILE"
+
+    if ! eval "$TSX_CMD \"$PERCENTILES_SCRIPT\" \"$metrics_url\" \"$output_file\"" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
         log_error "Failed to calculate percentiles"
         exit 1
     fi
@@ -313,9 +328,11 @@ detect_histogram_warnings() {
                 warnings+=","
             fi
 
+            # Escape metric name safely for JSON (handles embedded quotes/braces)
+            local esc_metric=$(printf '%s' "$metric" | jq -R '@json')
             warnings+=$(cat <<EOF
 {
-  "metric": "$metric",
+  "metric": $esc_metric,
   "issue": "no_samples",
   "message": "Histogram has 0 samples - cannot validate latency SLO reliably"
 }
@@ -327,9 +344,10 @@ EOF
                 warnings+=","
             fi
 
+            local esc_metric=$(printf '%s' "$metric" | jq -R '@json')
             warnings+=$(cat <<EOF
 {
-  "metric": "$metric",
+  "metric": $esc_metric,
   "issue": "low_sample_count",
   "count": $count,
   "message": "Histogram has only $count samples - percentiles may be unstable (recommend >= 5)"
@@ -439,6 +457,19 @@ main() {
     # Extract cache hit rate
     local cache_hit_rate=$(calculate_cache_hit_rate "$temp_raw")
     log_info "Cache hit rate: ${cache_hit_rate}%"
+
+    # Redis recent failures (15m): derive from last_failure_timestamp if present
+    local redis_recent_failures=0
+    local last_fail_ts=$(grep '^redis_last_failure_timestamp ' "$temp_raw" | awk '{print $2}' | head -1 || true)
+    if [ -n "$last_fail_ts" ]; then
+        # consider a failure "recent" if within last 900s (15m)
+        local now_ts=$(date +%s)
+        # last_fail_ts may be float; cast to int seconds
+        local last_int=${last_fail_ts%.*}
+        if [ $(( now_ts - last_int )) -le 900 ]; then
+            redis_recent_failures=1
+        fi
+    fi
 
     # Extract and validate fallback data
     local fallback_taxonomy_valid=$(validate_fallback_taxonomy "$temp_raw")
@@ -571,6 +602,7 @@ main() {
     "http_success_rate": $http_success_rate,
     "error_rate": $error_rate,
     "memory_rss_mb": $memory_rss_mb,
+    "redis_recent_failures": $redis_recent_failures,
     "fallback_by_reason": $fallback_by_reason
   },
   "validation": {

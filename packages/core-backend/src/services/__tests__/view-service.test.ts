@@ -183,12 +183,12 @@ describe('ViewService - Phase 1 Core', () => {
 // Phase 2: RBAC Integration Tests
 // ============================================================================
 
-vi.mock('../rbac/table-perms', () => ({
+vi.mock('../../rbac/table-perms', () => ({
   canReadTable: vi.fn(),
   canWriteTable: vi.fn()
 }))
 
-vi.mock('../config/flags', () => ({
+vi.mock('../../config/flags', () => ({
   isFeatureEnabled: vi.fn()
 }))
 

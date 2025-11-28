@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/license-Private-red.svg)](LICENSE)
 [![Phase 4](https://img.shields.io/badge/Phase%204-Complete-brightgreen)](https://github.com/zensgit/metasheet2/releases/tag/v2.4.0)
 [![Phase 5](https://img.shields.io/badge/Phase%205-Complete-brightgreen)](https://github.com/zensgit/metasheet2/issues/1)
+![Phase 5 Nightly](https://github.com/zensgit/metasheet2/actions/workflows/phase5-nightly.yml/badge.svg)
 
 ## 🎯 Overview
 

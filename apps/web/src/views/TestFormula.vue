@@ -41,12 +41,19 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { formulaEngine } from '../utils/formulaEngine'
+import { formulaEngine, type CellValue } from '../utils/formulaEngine'
 
 const testFormula = ref('')
-const testResult = ref('')
+const testResult = ref<CellValue>('')
 
-const testCases = ref([
+interface TestCase {
+  category: string
+  formula: string
+  result: CellValue
+  status: string
+}
+
+const testCases = ref<TestCase[]>([
   // 数学函数
   { category: '数学', formula: '=SUM(1,2,3,4,5)', result: '', status: '' },
   { category: '数学', formula: '=AVERAGE(10,20,30)', result: '', status: '' },

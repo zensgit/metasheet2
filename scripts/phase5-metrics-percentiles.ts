@@ -240,7 +240,9 @@ function calculatePercentiles(histogram: Histogram): PercentileResult {
  * Filter histograms by metric names
  */
 function filterHistograms(histograms: Histogram[], targetMetrics: string[]): Histogram[] {
-  return histograms.filter(h => targetMetrics.includes(h.metric));
+  // Some exporters or wrappers may tweak metric naming; be tolerant by prefix match.
+  const targets = new Set(targetMetrics);
+  return histograms.filter(h => targets.has(h.metric) || targetMetrics.some(t => h.metric.startsWith(t)));
 }
 
 /**
@@ -267,7 +269,7 @@ async function main() {
     console.error(`[INFO] Found ${allHistograms.length} histogram metrics`);
 
     // Load target metrics dynamically from thresholds.json
-    const thresholdsPath = process.env.THRESHOLDS_FILE ||
+    const thresholdsPath = process.env.THRESHOLDS_FILE || process.env.THRESHOLDS_PATH ||
       path.join(process.cwd(), 'scripts', 'phase5-thresholds.json');
 
     console.error(`[INFO] Loading thresholds from ${thresholdsPath}...`);

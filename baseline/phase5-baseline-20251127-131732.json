@@ -1,0 +1,144 @@
+{
+  "timestamp": "2025-11-27T05:10:15Z",
+  "metrics_url": "http://127.0.0.1:8901/metrics/prom",
+  "configuration": {
+    "count_cache_miss_as_fallback": false,
+    "thresholds_file": "/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json"
+  },
+  "percentiles": {
+  "metasheet_plugin_reload_duration_seconds{plugin_name=\"example-plugin\"}": {
+    "p50": 0.05,
+    "p95": 0.095,
+    "p99": 0.09900000000000002,
+    "count": 11,
+    "sum": 0.007385706999999999,
+    "mean": 0.000671427909090909
+  },
+  "metasheet_snapshot_operation_duration_seconds{operation=\"create\"}": {
+    "p50": 0.05,
+    "p95": 0.09500000000000001,
+    "p99": 0.09899999999999999,
+    "count": 19,
+    "sum": 0.13600000000000004,
+    "mean": 0.007157894736842107
+  },
+  "metasheet_snapshot_operation_duration_seconds{operation=\"restore\"}": {
+    "p50": 0.05,
+    "p95": 0.095,
+    "p99": 0.099,
+    "count": 10,
+    "sum": 0.038000000000000006,
+    "mean": 0.0038000000000000004
+  }
+},
+  "counters": {
+    "cache_hit_rate": 96.94,
+    "raw_fallback": 1,
+    "effective_fallback": 0,
+    "fallback_effective_ratio": 0,
+    "http_success_rate": 100.00,
+    "error_rate": 0,
+    "memory_rss_mb": 75.57,
+    "fallback_by_reason": {"http_timeout":1,"http_error":1,"message_timeout":0,"message_error":0,"cache_miss":1,"circuit_breaker":0,"upstream_error":1,"unknown":0}
+  },
+  "validation": {
+    "fallback_taxonomy_valid": true
+  },
+  "warnings": [],
+  "assertions": [{
+  "metric": "plugin_reload_latency_p95",
+  "actual": 0.095,
+  "threshold": 2.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "plugin_reload_latency_p99",
+  "actual": 0.09900000000000002,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "snapshot_restore_latency_p95",
+  "actual": 0.095,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "snapshot_restore_latency_p99",
+  "actual": 0.099,
+  "threshold": 8.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "snapshot_create_latency_p95",
+  "actual": 0.09500000000000001,
+  "threshold": 5.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "snapshot_create_latency_p99",
+  "actual": 0.09899999999999999,
+  "threshold": 8.0,
+  "unit": "seconds",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "cache_hit_rate",
+  "actual": 96.94,
+  "threshold": 80.0,
+  "unit": "percent",
+  "type": "lower_bound",
+  "comparison": "≥",
+  "status": "pass"
+},{
+  "metric": "fallback_effective_ratio",
+  "actual": 0,
+  "threshold": 0.6,
+  "unit": "ratio",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "memory_rss",
+  "actual": 75.57,
+  "threshold": 500.0,
+  "unit": "megabytes",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+},{
+  "metric": "http_success_rate",
+  "actual": 100.00,
+  "threshold": 98.0,
+  "unit": "percent",
+  "type": "lower_bound",
+  "comparison": "≥",
+  "status": "pass"
+},{
+  "metric": "error_rate",
+  "actual": 0,
+  "threshold": 1.0,
+  "unit": "percent",
+  "type": "upper_bound",
+  "comparison": "≤",
+  "status": "pass"
+}],
+  "summary": {
+    "total_checks": 11,
+    "passed": 11,
+    "failed": 0,
+    "na": 0,
+    "overall_status": "pass"
+  }
+}

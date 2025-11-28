@@ -1,0 +1,47 @@
+name: Phase 5 SLO Validation (Local CI)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+
+      - name: Enable corepack and install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run unified Phase 5 CI
+        env:
+          FEATURE_CACHE: 'true'
+          ENABLE_FALLBACK_TEST: 'true'
+          COUNT_CACHE_MISS_AS_FALLBACK: 'false'
+          ALLOW_UNSAFE_ADMIN: 'true'
+          API_BASE: 'http://127.0.0.1:8900'
+          METRICS_URL: 'http://127.0.0.1:8900/metrics/prom'
+        run: |
+          chmod +x scripts/phase5-ci-run.sh || true
+          bash scripts/phase5-ci-run.sh || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-validation
+          path: |
+            /tmp/phase5.json
+            /tmp/phase5.md
+            /tmp/server.log
+

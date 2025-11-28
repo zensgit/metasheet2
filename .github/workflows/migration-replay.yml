@@ -27,7 +27,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 8
+          version: 10
           run_install: false
 
       - name: Install dependencies
@@ -49,15 +49,14 @@ jobs:
           exit 1
 
       - name: Create DB and extension
-        env:
-          PGPASSWORD: postgres
         run: |
-          createdb -h 127.0.0.1 -U postgres metasheet || true
-          psql -h 127.0.0.1 -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          createdb metasheet || true
+          psql -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+        timeout-minutes: 2
 
       - name: Run migrations twice (replay)
         env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          DATABASE_URL: postgresql://127.0.0.1/metasheet
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # TODO: Fix migration to be fully idempotent or split into separate migrations
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
@@ -71,7 +70,7 @@ jobs:
           pnpm -F @metasheet/core-backend db:migrate
       - name: List migrations
         env:
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet
+          DATABASE_URL: postgresql://127.0.0.1/metasheet
         run: pnpm -F @metasheet/core-backend db:list
 
       - name: Upload install logs on failure

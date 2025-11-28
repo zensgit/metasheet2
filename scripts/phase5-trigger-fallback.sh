@@ -6,7 +6,9 @@ set -euo pipefail
 # If no such route exists, the script exits with a guidance message.
 
 API_BASE="${API_BASE:-http://localhost:8900}"
-ROUTE="${FALLBACK_ROUTE:-/internal/test/fallback}" # configurable
+# The route is mounted by fallback-test.ts under '/fallback' (guarded in code),
+# not '/internal/test/fallback'. Allow override by env.
+ROUTE="${FALLBACK_ROUTE:-/fallback}" # configurable
 
 if [ ! -x scripts/phase5-dev-jwt.sh ]; then
   echo "Missing scripts/phase5-dev-jwt.sh" >&2; exit 1

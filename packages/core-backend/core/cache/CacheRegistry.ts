@@ -87,12 +87,35 @@ export class CacheRegistry {
     const featureCache = process.env.FEATURE_CACHE === 'true'
 
     if (featureCache) {
-      this.current = new MemoryCache()
-      this.implName = 'MemoryCache'
-      console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)')
+      const impl = (process.env.CACHE_IMPL || 'memory').toLowerCase()
+      if (impl === 'redis') {
+        // Direct import (project ships redis adapter); fall back gracefully
+        try {
+          const { RedisCache } = require('../../src/cache/implementations/redis-cache')
+          this.current = new RedisCache(process.env.REDIS_URL)
+          this.implName = 'RedisCache'
+          try {
+            const redacted = (process.env.REDIS_URL || '').replace(/:\/\/[A-Za-z0-9_-]+:(.*?)@/, '://***:***@')
+            console.log('[CacheRegistry] Initialized with RedisCache url=' + redacted)
+          } catch {
+            console.log('[CacheRegistry] Initialized with RedisCache')
+          }
+        } catch (e) {
+          this.current = new MemoryCache()
+          this.implName = 'MemoryCache'
+          console.warn('[CacheRegistry] Redis init failed; falling back to MemoryCache:', e?.message || e)
+        }
+      } else {
+        this.current = new MemoryCache()
+        this.implName = 'MemoryCache'
+      }
+      if (this.implName === 'MemoryCache') {
+        console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)')
+      }
       // Set cache_enabled gauge
       try {
-        metrics.cache_enabled.set({ impl: 'memory' }, 1)
+        const implLabel = this.implName.toLowerCase().includes('redis') ? 'redis' : 'memory'
+        metrics.cache_enabled.set({ impl: implLabel }, 1)
       } catch (e) {
         // Ignore metric errors during initialization
       }

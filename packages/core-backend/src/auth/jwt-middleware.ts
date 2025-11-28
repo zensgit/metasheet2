@@ -13,7 +13,8 @@ const AUTH_WHITELIST = [
   '/api/v2/hello',
   '/api/v2/rpc-test',
   '/internal/metrics',
-  '/api/cache-test'
+  '/api/cache-test',
+  '/api/permissions/health'
 ]
 
 export function isWhitelisted(path: string): boolean {

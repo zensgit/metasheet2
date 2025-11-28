@@ -1,0 +1,92 @@
+name: Phase 5 Ops Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Set true to lint/bundle only (no deploy)'
+        required: false
+        default: 'true'
+      deploy_prometheus:
+        description: 'Deploy Prometheus rules (true/false)'
+        required: false
+        default: 'true'
+      deploy_grafana:
+        description: 'Deploy Grafana dashboard (true/false)'
+        required: false
+        default: 'true'
+      prometheus_url:
+        description: 'Prometheus base URL for reload (e.g. https://prom:9090)'
+        required: false
+      prometheus_host:
+        description: 'SSH host for rules copy (user@host)'
+        required: false
+      prometheus_rules_dir:
+        description: 'Target rules dir on host (e.g. /etc/prometheus/rules)'
+        required: false
+      grafana_url:
+        description: 'Grafana base URL (e.g. https://grafana.example.com)'
+        required: false
+      grafana_folder_id:
+        description: 'Grafana folder ID (numeric)'
+        required: false
+
+jobs:
+  deploy:
+    # Restrict execution to main branch even for manual dispatch
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+      PROMETHEUS_URL: ${{ github.event.inputs.prometheus_url }}
+      PROMETHEUS_HOST: ${{ github.event.inputs.prometheus_host }}
+      PROMETHEUS_RULES_DIR: ${{ github.event.inputs.prometheus_rules_dir }}
+      GRAFANA_URL: ${{ github.event.inputs.grafana_url }}
+      GRAFANA_FOLDER_ID: ${{ github.event.inputs.grafana_folder_id }}
+      GRAFANA_API_TOKEN: ${{ secrets.GRAFANA_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show inputs
+        run: |
+          echo "dry_run=${DRY_RUN}"; echo "deploy_prometheus=${{ github.event.inputs.deploy_prometheus }}"; echo "deploy_grafana=${{ github.event.inputs.deploy_grafana }}"
+      - name: Safety combination check
+        shell: bash
+        run: |
+          if [ "${DRY_RUN}" = "true" ] && { [ "${{ github.event.inputs.deploy_prometheus }}" = "true" ] || [ "${{ github.event.inputs.deploy_grafana }}" = "true" ]; }; then
+            echo "[ops-deploy][error] dry_run=true with deploy_prometheus/deploy_grafana=true. Refusing to proceed." >&2
+            exit 1
+          fi
+
+      - name: Lint & Deploy Prometheus Rules
+        if: github.event.inputs.deploy_prometheus == 'true'
+        shell: bash
+        run: |
+          bash scripts/phase5-deploy-prometheus-rules.sh || exit 1
+
+      - name: Lint & Deploy Grafana Dashboard
+        if: github.event.inputs.deploy_grafana == 'true'
+        shell: bash
+        run: |
+          bash scripts/phase5-deploy-grafana-dashboard.sh || exit 1
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-ops-deploy
+          path: |
+            artifacts/phase5-prometheus-bundle
+            artifacts/grafana
+
+      - name: Slack notify on failure
+        if: failure()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL || 'alerts' }}
+          SLACK_USERNAME: 'Phase5 Ops'
+          SLACK_ICON_EMOJI: ':gear:'
+          SLACK_TITLE: 'Phase 5 Ops Deployment Failed'
+          SLACK_MESSAGE: 'Check lint/deploy steps and artifacts for details.'

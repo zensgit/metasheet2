@@ -208,7 +208,7 @@ function initSpreadsheet() {
   if (!spreadsheetEl.value) return
 
   const options = {
-    mode: 'edit',
+    mode: 'edit' as const,
     showToolbar: true,
     showGrid: true,
     showContextmenu: true,

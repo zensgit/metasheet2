@@ -69,7 +69,10 @@ async function main() {
   console.log('Migrations complete')
 }
 
-main().catch(err => {
-  console.error(err)
-  process.exit(1)
-})
+// Only run when executed directly, not when imported in tests
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+  main().catch(err => {
+    console.error(err)
+    process.exit(1)
+  })
+}

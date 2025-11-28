@@ -1,0 +1,22 @@
+name: Phase 5 Production Flags Guard
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Scan for unsafe production flags
+        run: |
+          # Fail if default env config enables unsafe flags for production build scripts
+          bad=0
+          grep -R "ENABLE_FALLBACK_TEST=true" -n packages/core-backend/src || true
+          if grep -R "ENABLE_FALLBACK_TEST=true" packages/core-backend/src >/dev/null 2>&1; then echo "Found ENABLE_FALLBACK_TEST=true in source"; bad=1; fi
+          if grep -R "ALLOW_UNSAFE_ADMIN=true" packages/core-backend/src >/dev/null 2>&1; then echo "Found ALLOW_UNSAFE_ADMIN=true in source"; bad=1; fi
+          if grep -R "DISABLE_EVENT_BUS=true" packages/core-backend/src >/dev/null 2>&1; then echo "Found DISABLE_EVENT_BUS=true hard-coded"; bad=1; fi
+          if (( bad > 0 )); then echo "Unsafe production flags detected"; exit 1; else echo "Production flags guard passed"; fi

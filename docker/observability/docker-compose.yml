@@ -14,9 +14,11 @@ services:
     image: prom/prometheus:v2.48.0
     container_name: metasheet-prometheus
     ports:
-      - "9090:9090"
+      - "${PROM_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../ops/prometheus/phase5-recording-rules.yml:/etc/prometheus/rules/phase5-recording-rules.yml:ro
+      - ../../ops/prometheus/phase5-alerts.yml:/etc/prometheus/rules/phase5-alerts.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -39,7 +41,7 @@ services:
     image: grafana/grafana:10.2.2
     container_name: metasheet-grafana
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

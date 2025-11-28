@@ -1,6 +1,6 @@
 #!/bin/bash
 # Generate a development JWT token for local RBAC-protected endpoint testing.
-# Uses JWT_SECRET (default dev-secret). Payload kept minimal.
+# Uses JWT_SECRET (default dev-secret to match jwt-middleware.ts default). Payload kept minimal.
 set -euo pipefail
 SECRET=${JWT_SECRET:-dev-secret}
 SUB=${1:-phase5-user}

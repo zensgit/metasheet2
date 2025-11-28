@@ -10,8 +10,9 @@ router.use((req, res, next) => {
   next()
 })
 
-// POST /internal/test/fallback { mode }
-router.post('/internal/test/fallback', (req, res) => {
+// POST /fallback { mode }
+// Mounted at /internal/test, so full path is /internal/test/fallback
+router.post('/fallback', (req, res) => {
   const mode = (req.body?.mode as string) || 'unknown'
   switch (mode) {
     case 'http_error':

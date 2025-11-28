@@ -1,0 +1,95 @@
+name: Phase 5 Nightly Validation (External Metrics)
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      metrics_url:
+        description: 'Override metrics URL'
+        required: false
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Probe metrics URL
+        id: probe
+        env:
+          METRICS_URL: ${{ inputs.metrics_url || secrets.METRICS_URL }}
+          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
+        run: |
+          echo "metrics_url=${METRICS_URL}" >> $GITHUB_OUTPUT
+          if [ -z "${METRICS_URL}" ]; then
+            echo "No METRICS_URL configured; skipping." && exit 0
+          fi
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            curl -s -H "${METRICS_AUTH_HEADER}" "${METRICS_URL}" >/dev/null || exit 0
+          else
+            curl -s "${METRICS_URL}" >/dev/null || exit 0
+          fi
+
+      - name: Setup Node
+        if: steps.probe.outputs.metrics_url != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+
+      - name: Enable corepack and install pnpm
+        if: steps.probe.outputs.metrics_url != ''
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
+        if: steps.probe.outputs.metrics_url != ''
+        run: pnpm install --frozen-lockfile
+
+      - name: Run validation against external metrics
+        if: steps.probe.outputs.metrics_url != ''
+        env:
+          METRICS_URL: ${{ steps.probe.outputs.metrics_url }}
+          METRICS_AUTH_HEADER: ${{ secrets.METRICS_AUTH_HEADER }}
+        run: |
+          chmod +x scripts/phase5-full-validate.sh || true
+          if [ -n "${METRICS_AUTH_HEADER}" ]; then
+            # pass through via curl in script if needed
+            export METRICS_AUTH_HEADER
+          fi
+          ./scripts/phase5-full-validate.sh -o /tmp/phase5.json "${METRICS_URL}" || true
+          ./scripts/phase5-generate-report.sh /tmp/phase5.json /tmp/phase5.md || true
+
+      - name: Upload artifacts
+        if: steps.probe.outputs.metrics_url != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-nightly
+          path: |
+            /tmp/phase5.json
+            /tmp/phase5.md
+
+      - name: Gate on PASS
+        if: steps.probe.outputs.metrics_url != ''
+        run: |
+          if command -v jq >/dev/null 2>&1; then
+            STATUS=$(jq -r '.summary.overall_status // "unknown"' /tmp/phase5.json)
+          else
+            STATUS="unknown"
+          fi
+          echo "overall_status=${STATUS}"
+          if [ "${STATUS}" != "pass" ]; then
+            echo "Phase 5 validation failed" && exit 1
+          fi
+
+      - name: Notify Slack on failure
+        if: failure() && steps.probe.outputs.metrics_url != ''
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: '{"text":"Phase 5 Nightly Validation FAILED for ${{ github.ref }} (status: ${{ job.status }})"}'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
