@@ -322,6 +322,15 @@ class MetaSheetServer {
     // 路由：缓存测试端点 (dev only)
     this.app.use('/api/cache-test', cacheTestRouter)
 
+    // 路由：模拟错误 (用于观测 HTTP 成功率下降 & Burn Rate 测试，仅在非生产且允许不安全 admin 时暴露)
+    if (process.env.ALLOW_UNSAFE_ADMIN === 'true') {
+      this.app.get('/api/sim-error', (req, res) => {
+        const endTimer = (res as any).__metricsTimer?.({ route: '/api/sim-error', method: 'GET' })
+        endTimer?.(500)
+        res.status(500).json({ ok: false, error: { code: 'SIMULATED_ERROR', message: 'Simulated failure' } })
+      })
+    }
+
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
       pluginLoader: this.pluginLoader,
@@ -432,10 +441,19 @@ class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
-    // 初始化EventBusService
-    this.logger.info('Initializing EventBusService...')
-    const coreAPI = this.createCoreAPI()
-    await initializeEventBusService(coreAPI)
+    // 初始化EventBusService (允许降级跳过以保证度量端可用)
+    if (process.env.DISABLE_EVENT_BUS === 'true') {
+      this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS=true)')
+    } else {
+      this.logger.info('Initializing EventBusService...')
+      const coreAPI = this.createCoreAPI()
+      try {
+        await initializeEventBusService(coreAPI)
+      } catch (e) {
+        // 降级容错：记录错误但继续启动，使 Redis / metrics 在缺表或总线故障时仍可观测
+        this.logger.error('EventBusService initialization failed; continuing in degraded mode', e as Error)
+      }
+    }
 
     // 加载插件并启动 HTTP 服务
     if (process.env.SKIP_PLUGINS === 'true') {

@@ -19,6 +19,51 @@ import fallbackTestRouter from './fallback-test'
  */
 const router = Router()
 
+// Simple in-memory rate limiter for internal routes (opt-in)
+type Counter = { count: number; resetAt: number }
+const rlStore = new Map<string, Counter>()
+const RL_WINDOW_MS = parseInt(process.env.INTERNAL_RATE_LIMIT_WINDOW_MS || '60000', 10)
+const RL_MAX = parseInt(process.env.INTERNAL_RATE_LIMIT_MAX || '120', 10)
+
+function internalRateLimit(req: Request, res: Response): boolean {
+  // Disabled by default if max <= 0
+  if (RL_MAX <= 0) return true
+  const token = (req.header('x-internal-token') as string) || ''
+  const key = token || req.ip || 'anon'
+  const now = Date.now()
+  const cur = rlStore.get(key)
+  if (!cur || now >= cur.resetAt) {
+    rlStore.set(key, { count: 1, resetAt: now + RL_WINDOW_MS })
+    return true
+  }
+  if (cur.count >= RL_MAX) {
+    const retrySec = Math.max(1, Math.ceil((cur.resetAt - now) / 1000))
+    res.setHeader('Retry-After', String(retrySec))
+    res.status(429).json({ error: 'Too Many Requests' })
+    return false
+  }
+  cur.count += 1
+  return true
+}
+
+function requireInternalAuth(req: Request, res: Response): boolean {
+  // Hide entirely in production
+  if (process.env.NODE_ENV === 'production') {
+    res.status(404).json({ error: 'Not available in production' })
+    return false
+  }
+  // Optional header/token guard
+  const required = process.env.INTERNAL_API_TOKEN
+  if (required) {
+    const token = req.header('x-internal-token') || req.query.token
+    if (!token || token !== required) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return false
+    }
+  }
+  return true
+}
+
 /**
  * GET /internal/cache - Cache status endpoint
  *
@@ -47,10 +92,8 @@ const router = Router()
  * ```
  */
 router.get('/cache', (req: Request, res: Response) => {
-  // Only available in non-production
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Not available in production' })
-  }
+  if (!requireInternalAuth(req, res)) return
+  if (!internalRateLimit(req, res)) return
 
   const status = cacheRegistry.getStatus()
 
@@ -76,9 +119,8 @@ router.get('/cache', (req: Request, res: Response) => {
  * Hidden in production environments.
  */
 router.get('/config', (req: Request, res: Response) => {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Not available in production' })
-  }
+  if (!requireInternalAuth(req, res)) return
+  if (!internalRateLimit(req, res)) return
 
   const flags = {
     FEATURE_CACHE: process.env.FEATURE_CACHE === 'true',
@@ -91,6 +133,10 @@ router.get('/config', (req: Request, res: Response) => {
 })
 
 // Mount fallback test routes at /internal/test/*
-router.use('/test', fallbackTestRouter)
+router.use(
+  '/test',
+  (req, res, next) => { if (!requireInternalAuth(req, res)) return; if (!internalRateLimit(req, res)) return; next() },
+  fallbackTestRouter
+)
 
 export default router

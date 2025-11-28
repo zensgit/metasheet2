@@ -8,6 +8,10 @@ groups:
         expr: sum(rate(cache_hits_total[10m])) / (sum(rate(cache_hits_total[10m])) + sum(rate(cache_miss_total[10m])))
       - record: metasheet:fallback_effective_ratio:10m
         expr: sum(rate(metasheet_fallback_effective_total[10m])) / sum(rate(metasheet_fallback_total[10m]))
+      - record: metasheet:fallback_reason_rate:5m
+        expr: sum by (reason) (rate(metasheet_fallback_total[5m]))
+      - record: metasheet:redis_fail_rate:5m
+        expr: sum(rate(redis_recovery_attempts_total{result="error"}[5m]))
       - record: metasheet:plugin_reload_p95:5m
         expr: histogram_quantile(0.95, sum(rate(metasheet_plugin_reload_duration_seconds_bucket[5m])) by (le))
       - record: metasheet:plugin_reload_p99:5m
@@ -16,3 +20,19 @@ groups:
         expr: histogram_quantile(0.95, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket[5m])) by (operation, le))
       - record: metasheet:snapshot_op_p99:5m
         expr: histogram_quantile(0.99, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket[5m])) by (operation, le))
+      - record: metasheet:redis_get_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="get"}[5m])))
+      - record: metasheet:redis_get_p99:5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="get"}[5m])))
+      - record: metasheet:redis_set_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="set"}[5m])))
+      - record: metasheet:redis_set_p99:5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="set"}[5m])))
+      - record: metasheet:redis_get_p95:30m
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="get"}[30m])))
+      - record: metasheet:redis_get_p99:30m
+        expr: histogram_quantile(0.99, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="get"}[30m])))
+      - record: metasheet:redis_set_p95:30m
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="set"}[30m])))
+      - record: metasheet:redis_set_p99:30m
+        expr: histogram_quantile(0.99, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="set"}[30m])))

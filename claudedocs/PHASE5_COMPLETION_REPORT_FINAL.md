@@ -63,6 +63,17 @@ Export these before running the orchestrator to control load volume.
 - Artifacts: `/tmp/phase5.json`, `/tmp/phase5.md` uploaded for trend tracking.
 - Ensure metrics endpoint accessible from GitHub runners (allowlist if needed).
 
+### Weekly Trend
+
+- Nightly workflow 会将每天的 JSON 保存到 `results/nightly/phase5-YYYYMMDD.json` 并自动生成 `claudedocs/PHASE5_WEEKLY_TREND.md`。
+- 查看近 7 天 SLO 趋势（含 Redis 指标）: 见 `claudedocs/PHASE5_WEEKLY_TREND.md`。
+- 收紧建议文件：`claudedocs/PHASE5_SLO_SUGGESTIONS.json`（基于最近 30 天中位数 p95，对比现有阈值 <90% 时提出新阈值建议）。
+
+### Internal Routes Security
+
+- `/internal/*` 仅在非生产环境开放，且可通过设置 `INTERNAL_API_TOKEN` 要求请求头 `x-internal-token` 或 `?token=...`。
+- 生产环境强制返回 404；不要暴露到公共网络。
+
 ## Production Hardening
 
 - Disable dev-only features in prod: `ENABLE_FALLBACK_TEST=false`, `ALLOW_UNSAFE_ADMIN=false`.
@@ -523,5 +534,440 @@ Source: /tmp/phase5.md\n
 ---
 
 **Generated at**: 2025-11-26 06:53:40 UTC
+
+\n---\n
+\n## Run Artifact (2025-11-27 22:11:46)\n
+Source: /tmp/phase5.md\n
+# Phase 5 SLO Validation Report
+
+**Status**: ❌ **FAIL**
+**Timestamp**: 
+**Metrics Source**: ``
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Checks |  |
+| Passed | ✅  |
+| Failed | ❌  |
+| N/A | ⚪  |
+| Overall Status | ❌ FAIL |
+
+---
+
+## SLO Assertions
+
+| Metric | Actual | Threshold | Comparison | Status |
+|--------|--------|-----------|------------|--------|
+
+---
+
+## Detailed Metrics
+
+### Percentile Latencies
+
+**Plugin Reload Duration** (example-plugin):
+- P50: s
+- P95: s
+- P99: s
+- Sample Count: 
+
+**Snapshot Restore Duration**:
+- P50: s
+- P95: s
+- P99: s
+- Sample Count: 
+
+**Snapshot Create Duration**:
+- P50: s
+- P95: s
+- P99: s
+- Sample Count: 
+
+### Counter Metrics
+
+- **Cache Hit Rate**: %
+- **HTTP Success Rate**: %
+- **Error Rate**: %
+- **Raw Fallback Count**: 
+- **Effective Fallback Count**: 
+- **Fallback Effective Ratio**: 
+- **Memory RSS**: MB
+
+### Fallback Metrics
+
+**Summary**:
+- Raw Total: 
+- Effective Total: 
+- Ratio (effective/raw): 
+
+**Breakdown by Reason** (raw counts):
+
+| Reason | Count | Counts as Effective |
+|--------|-------|---------------------|
+
+---
+
+## Validation Status
+
+- **Fallback Taxonomy**: ⚠️ Invalid reasons found
+
+---
+
+## Configuration
+
+- **COUNT_CACHE_MISS_AS_FALLBACK**: 
+- **Thresholds File**: ``
+
+---
+
+**Generated at**: 2025-11-27 14:11:46 UTC
+
+\n---\n
+\n## Run Artifact (2025-11-27 22:13:01)\n
+Source: /tmp/phase5.md\n
+# Phase 5 SLO Validation Report
+
+**Status**: ✅ **PASS**
+**Timestamp**: 2025-11-27T14:12:59Z
+**Metrics Source**: `http://localhost:8900/metrics/prom`
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Checks | 11 |
+| Passed | ✅ 11 |
+| Failed | ❌ 0 |
+| N/A | ⚪ 0 |
+| Overall Status | ✅ PASS |
+
+---
+
+## SLO Assertions
+
+| Metric | Actual | Threshold | Comparison | Status |
+|--------|--------|-----------|------------|--------|
+| plugin_reload_latency_p95 | 0.095s | 2.0s | ≤ | ✅ pass |
+| plugin_reload_latency_p99 | 0.099s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p95 | 0.09499999999999999s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p99 | 0.09899999999999999s | 8.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p95 | 0.095s | 5.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p99 | 0.09900000000000002s | 8.0s | ≤ | ✅ pass |
+| cache_hit_rate | 99.27% | 80.0% | ≥ | ✅ pass |
+| fallback_effective_ratio | 0 | 0.6 | ≤ | ✅ pass |
+| memory_rss | 50.35MB | 500.0MB | ≤ | ✅ pass |
+| http_success_rate | 100.00% | 98.0% | ≥ | ✅ pass |
+| error_rate | 0% | 1.0% | ≤ | ✅ pass |
+
+---
+
+## Detailed Metrics
+
+### Percentile Latencies
+
+**Plugin Reload Duration** (example-plugin):
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.099s
+- Sample Count: 67
+
+**Snapshot Restore Duration**:
+- P50: 0.05s
+- P95: 0.09499999999999999s
+- P99: 0.09899999999999999s
+- Sample Count: 3
+
+**Snapshot Create Duration**:
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.09900000000000002s
+- Sample Count: 44
+
+### Counter Metrics
+
+- **Cache Hit Rate**: 99.27%
+- **HTTP Success Rate**: 100.00%
+- **Error Rate**: 0%
+- **Raw Fallback Count**: 6
+- **Effective Fallback Count**: 0
+- **Fallback Effective Ratio**: 0
+- **Memory RSS**: 50.35MB
+
+### Fallback Metrics
+
+**Summary**:
+- Raw Total: 6
+- Effective Total: 0
+- Ratio (effective/raw): 0
+
+**Breakdown by Reason** (raw counts):
+
+| Reason | Count | Counts as Effective |
+|--------|-------|---------------------|
+| cache_miss | 6 | No (excluded) |
+| circuit_breaker | 0 | Yes |
+| http_error | 6 | Yes |
+| http_timeout | 5 | Yes |
+| message_error | 0 | Yes |
+| message_timeout | 0 | Yes |
+| unknown | 0 | Yes |
+| upstream_error | 5 | Yes |
+
+---
+
+## Validation Status
+
+- **Fallback Taxonomy**: ✅ Valid
+
+
+### Warnings
+
+| Metric | Issue | Message |
+|--------|-------|---------|
+| "metasheet_snapshot_operation_duration_seconds{operation=\"restore\"}" | low_sample_count | Histogram has only 3 samples - percentiles may be unstable (recommend >= 5) |
+
+---
+
+## Configuration
+
+- **COUNT_CACHE_MISS_AS_FALLBACK**: false
+- **Thresholds File**: `/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json`
+
+---
+
+**Generated at**: 2025-11-27 14:13:01 UTC
+
+\n---\n
+\n## Run Artifact (2025-11-27 22:19:30)\n
+Source: /tmp/phase5.md\n
+# Phase 5 SLO Validation Report
+
+**Status**: ✅ **PASS**
+**Timestamp**: 2025-11-27T14:19:28Z
+**Metrics Source**: `http://localhost:8900/metrics/prom`
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Checks | 11 |
+| Passed | ✅ 11 |
+| Failed | ❌ 0 |
+| N/A | ⚪ 0 |
+| Overall Status | ✅ PASS |
+
+---
+
+## SLO Assertions
+
+| Metric | Actual | Threshold | Comparison | Status |
+|--------|--------|-----------|------------|--------|
+| plugin_reload_latency_p95 | 0.095s | 2.0s | ≤ | ✅ pass |
+| plugin_reload_latency_p99 | 0.09900000000000002s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p95 | 0.09499999999999999s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p99 | 0.09899999999999999s | 8.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p95 | 0.095s | 5.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p99 | 0.099s | 8.0s | ≤ | ✅ pass |
+| cache_hit_rate | 99.11% | 80.0% | ≥ | ✅ pass |
+| fallback_effective_ratio | 0 | 0.6 | ≤ | ✅ pass |
+| memory_rss | 78.18MB | 500.0MB | ≤ | ✅ pass |
+| http_success_rate | 100.00% | 98.0% | ≥ | ✅ pass |
+| error_rate | 0% | 1.0% | ≤ | ✅ pass |
+
+---
+
+## Detailed Metrics
+
+### Percentile Latencies
+
+**Plugin Reload Duration** (example-plugin):
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.09900000000000002s
+- Sample Count: 88
+
+**Snapshot Restore Duration**:
+- P50: 0.05s
+- P95: 0.09499999999999999s
+- P99: 0.09899999999999999s
+- Sample Count: 3
+
+**Snapshot Create Duration**:
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.099s
+- Sample Count: 54
+
+### Counter Metrics
+
+- **Cache Hit Rate**: 99.11%
+- **HTTP Success Rate**: 100.00%
+- **Error Rate**: 0%
+- **Raw Fallback Count**: 7
+- **Effective Fallback Count**: 0
+- **Fallback Effective Ratio**: 0
+- **Memory RSS**: 78.18MB
+
+### Fallback Metrics
+
+**Summary**:
+- Raw Total: 7
+- Effective Total: 0
+- Ratio (effective/raw): 0
+
+**Breakdown by Reason** (raw counts):
+
+| Reason | Count | Counts as Effective |
+|--------|-------|---------------------|
+| cache_miss | 7 | No (excluded) |
+| circuit_breaker | 0 | Yes |
+| http_error | 7 | Yes |
+| http_timeout | 6 | Yes |
+| message_error | 0 | Yes |
+| message_timeout | 0 | Yes |
+| unknown | 0 | Yes |
+| upstream_error | 6 | Yes |
+
+---
+
+## Validation Status
+
+- **Fallback Taxonomy**: ✅ Valid
+
+
+### Warnings
+
+| Metric | Issue | Message |
+|--------|-------|---------|
+| "metasheet_snapshot_operation_duration_seconds{operation=\"restore\"}" | low_sample_count | Histogram has only 3 samples - percentiles may be unstable (recommend >= 5) |
+
+---
+
+## Configuration
+
+- **COUNT_CACHE_MISS_AS_FALLBACK**: false
+- **Thresholds File**: `/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json`
+
+---
+
+**Generated at**: 2025-11-27 14:19:30 UTC
+
+\n---\n
+\n## Run Artifact (2025-11-28 21:50:24)\n
+Source: /tmp/phase5.md\n
+# Phase 5 SLO Validation Report
+
+**Status**: ✅ **PASS**
+**Timestamp**: 2025-11-28T13:50:24Z
+**Metrics Source**: `http://127.0.0.1:8901/metrics/prom`
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Checks | 11 |
+| Passed | ✅ 11 |
+| Failed | ❌ 0 |
+| N/A | ⚪ 0 |
+| Overall Status | ✅ PASS |
+
+---
+
+## SLO Assertions
+
+| Metric | Actual | Threshold | Comparison | Status |
+|--------|--------|-----------|------------|--------|
+| plugin_reload_latency_p95 | 0.095s | 2.0s | ≤ | ✅ pass |
+| plugin_reload_latency_p99 | 0.09900000000000002s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p95 | 0.095s | 5.0s | ≤ | ✅ pass |
+| snapshot_restore_latency_p99 | 0.099s | 8.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p95 | 0.095s | 5.0s | ≤ | ✅ pass |
+| snapshot_create_latency_p99 | 0.099s | 8.0s | ≤ | ✅ pass |
+| cache_hit_rate | 95.42% | 80.0% | ≥ | ✅ pass |
+| fallback_effective_ratio | 0 | 0.6 | ≤ | ✅ pass |
+| memory_rss | 68.37MB | 500.0MB | ≤ | ✅ pass |
+| http_success_rate | 100.00% | 98.0% | ≥ | ✅ pass |
+| error_rate | 0% | 1.0% | ≤ | ✅ pass |
+
+---
+
+## Detailed Metrics
+
+### Percentile Latencies
+
+**Plugin Reload Duration** (example-plugin):
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.09900000000000002s
+- Sample Count: 44
+
+**Snapshot Restore Duration**:
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.099s
+- Sample Count: 10
+
+**Snapshot Create Duration**:
+- P50: 0.05s
+- P95: 0.095s
+- P99: 0.099s
+- Sample Count: 40
+
+### Counter Metrics
+
+- **Cache Hit Rate**: 95.42%
+- **HTTP Success Rate**: 100.00%
+- **Error Rate**: 0%
+- **Raw Fallback Count**: 4
+- **Effective Fallback Count**: 0
+- **Fallback Effective Ratio**: 0
+- **Memory RSS**: 68.37MB
+
+### Fallback Metrics
+
+**Summary**:
+- Raw Total: 4
+- Effective Total: 0
+- Ratio (effective/raw): 0
+
+**Breakdown by Reason** (raw counts):
+
+| Reason | Count | Counts as Effective |
+|--------|-------|---------------------|
+| cache_miss | 4 | No (excluded) |
+| circuit_breaker | 0 | Yes |
+| http_error | 4 | Yes |
+| http_timeout | 4 | Yes |
+| message_error | 0 | Yes |
+| message_timeout | 0 | Yes |
+| unknown | 0 | Yes |
+| upstream_error | 4 | Yes |
+
+---
+
+## Validation Status
+
+- **Fallback Taxonomy**: ✅ Valid
+
+---
+
+## Configuration
+
+- **COUNT_CACHE_MISS_AS_FALLBACK**: false
+- **Thresholds File**: `/Users/huazhou/Insync/hua.chau@outlook.com/OneDrive/应用/GitHub/smartsheet/metasheet-v2/scripts/phase5-thresholds.json`
+
+---
+
+**Generated at**: 2025-11-28 13:50:24 UTC
 
 \n---\n

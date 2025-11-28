@@ -72,3 +72,43 @@ groups:
         annotations:
           summary: Memory RSS above 500MB
           runbook: Capture heap snapshot, inspect recent plugin/snapshot operations.
+      - alert: RedisGetLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="get"}[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis GET p95 latency above 50ms
+          runbook: Check Redis connectivity, network latency, slow commands.
+      - alert: RedisSetLatencyP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(redis_operation_duration_seconds_bucket{op="set"}[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis SET p95 latency above 50ms
+          runbook: Investigate write path, persistence, AOF/RDB performance.
+      - alert: RedisGetLatencyP95HighLong
+        expr: metasheet:redis_get_p95:30m > 0.04
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis GET 30m p95 latency above 40ms
+          runbook: Sustained latency; inspect slowlog, network, CPU, eviction policy.
+      - alert: RedisSetLatencyP95HighLong
+        expr: metasheet:redis_set_p95:30m > 0.04
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis SET 30m p95 latency above 40ms
+          runbook: Sustained write latency; review persistence config, disk IO.
+      - alert: RedisFailuresRecent
+        expr: metasheet:redis_fail_rate:5m > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis recovery errors in last 5m
+          runbook: Review redis_recovery_attempts_total{result="error"}, connectivity, failover; consider fallback to memory.

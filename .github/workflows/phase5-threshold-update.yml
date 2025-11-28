@@ -1,0 +1,76 @@
+name: Phase 5 Threshold Update
+
+on:
+  schedule:
+    - cron: '0 4 * * 1' # Mondays at 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply changes (default dry-run)'
+        required: false
+        type: boolean
+
+jobs:
+  update-thresholds:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Ensure suggestions exist
+        id: sugg
+        run: |
+          if [ ! -f claudedocs/PHASE5_SLO_SUGGESTIONS.json ]; then
+            echo "missing=true" >> $GITHUB_OUTPUT
+            echo "Suggestions file not found; generating from nightly (best effort)" | tee /tmp/update-thresholds.txt
+            mkdir -p claudedocs
+            bash scripts/phase5-slo-tighten-suggestions.sh results/nightly claudedocs/PHASE5_SLO_SUGGESTIONS.json 30 || true
+          else
+            echo "missing=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Dry-run threshold update
+        if: ${{ github.event.inputs.apply != true }}
+        run: |
+          bash scripts/phase5-update-thresholds.sh claudedocs/PHASE5_SLO_SUGGESTIONS.json scripts/phase5-thresholds.json > /tmp/update-thresholds.txt || true
+
+      - name: Upload dry-run diff
+        if: ${{ github.event.inputs.apply != true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-threshold-update-diff
+          path: /tmp/update-thresholds.txt
+
+      - name: Apply threshold update (requires approval)
+        if: ${{ github.event.inputs.apply == true }}
+        run: |
+          bash scripts/phase5-update-thresholds.sh claudedocs/PHASE5_SLO_SUGGESTIONS.json scripts/phase5-thresholds.json --apply --backup > /tmp/update-thresholds.txt || true
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add scripts/phase5-thresholds.json scripts/phase5-thresholds.json.bak || true
+          git commit -m "chore(phase5): apply threshold updates from suggestions" || true
+
+      - name: Create PR for applied changes
+        if: ${{ github.event.inputs.apply == true }}
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "chore(phase5): apply threshold updates"
+          title: "Phase 5 Threshold Updates"
+          body: |
+            Automated updates to Phase 5 thresholds based on SLO suggestions.
+            See artifact /tmp/update-thresholds.txt for proposed changes.
+          branch: chore/phase5-threshold-update-$(date -u '+%Y%m%d')
+

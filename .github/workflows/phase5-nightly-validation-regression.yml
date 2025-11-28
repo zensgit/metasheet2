@@ -131,6 +131,15 @@ jobs:
             Supports future baseline rotation after sustained PASS streak.
           branch: chore/phase5-nightly-$(date -u '+%Y%m%d')
 
+      - name: Auto-rotate baseline (if streak met)
+        if: success() && steps.probe.outputs.available == 'true'
+        run: |
+          bash scripts/phase5-baseline-auto-rotate.sh results/nightly baseline/phase5-baseline.json 14 || true
+          # If CACHE_IMPL=redis and redis baseline link exists, ensure redis-specific baseline persisted
+          if [ "${CACHE_IMPL:-memory}" = "redis" ] && [ -f baseline/phase5-baseline-redis.json ]; then
+            echo "Redis baseline link present: baseline/phase5-baseline-redis.json"
+          fi
+
       - name: Fail if overall status is not pass
         if: steps.probe.outputs.available == 'true'
         run: |

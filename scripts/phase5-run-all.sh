@@ -80,6 +80,18 @@ main() {
     warn "scripts/phase5-trigger-fallback.sh not found; skipping"
   fi
 
+  # Redis operation sampling (populate redis_operation_duration_seconds) if Redis cache impl active
+  if [[ "${CACHE_IMPL:-memory}" == "redis" ]]; then
+    log "Sampling Redis operations to populate latency histogram..."
+    local redis_samples="${REDIS_SAMPLES:-200}"
+    for i in $(seq 1 "$redis_samples"); do
+      # Use cache test endpoints if present; fall back to generic set/get keys
+      curl -sf "$API_BASE/internal/cache/set?key=phase5:key:$i&value=$RANDOM" >/dev/null 2>&1 || true
+      curl -sf "$API_BASE/internal/cache/get?key=phase5:key:$i" >/dev/null 2>&1 || true
+    done
+    log "Redis sampling complete ($redis_samples get/set pairs)."
+  fi
+
   # Populate snapshot create histogram explicitly
   log "Populating snapshot create histogram..."
   if [[ -z "${TOKEN:-}" ]]; then
@@ -108,6 +120,27 @@ main() {
   if [[ -f scripts/rehearsal-snapshot.sh ]]; then
     log "Running snapshot rehearsal to ensure histogram samples..."
     bash scripts/rehearsal-snapshot.sh || warn "Snapshot rehearsal returned non-zero"
+  fi
+
+  # Explicit snapshot restore sampling to stabilize restore percentiles (needs TOKEN)
+  if [[ -n "${TOKEN:-}" ]]; then
+    SNAP_RESTORE_COUNT="${SNAP_RESTORE_COUNT:-10}"
+    log "Sampling snapshot restore ($SNAP_RESTORE_COUNT attempts)..."
+    # Create one base snapshot to restore repeatedly
+    BASE_SNAP_ID=""
+    resp=$(curl -s -X POST "$API_BASE/api/snapshots" -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"view_id":"demo-view","name":"phase5-restore-base","description":"base for restore sampling","snapshot_type":"full"}') || true
+    BASE_SNAP_ID=$(echo "$resp" | jq -r '.id // empty')
+    if [[ -n "$BASE_SNAP_ID" && "$BASE_SNAP_ID" != "null" ]]; then
+      for i in $(seq 1 "$SNAP_RESTORE_COUNT"); do
+        curl -s -X POST "$API_BASE/api/snapshots/$BASE_SNAP_ID/restore" -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"mode":"full"}' >/dev/null || true
+        sleep "${SNAP_SLEEP_SECS:-0.2}"
+      done
+      log "Snapshot restore sampling complete (restore count target: $SNAP_RESTORE_COUNT)"
+    else
+      warn "Failed to obtain base snapshot ID for restore sampling"
+    fi
+  else
+    warn "TOKEN empty; skipping snapshot restore sampling"
   fi
 
   # Validate and generate report

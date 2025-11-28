@@ -89,22 +89,29 @@ export class CacheRegistry {
     if (featureCache) {
       const impl = (process.env.CACHE_IMPL || 'memory').toLowerCase()
       if (impl === 'redis') {
+        // Direct import (project ships redis adapter); fall back gracefully
         try {
-          // Lazy import Redis adapter if present
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
           const { RedisCache } = require('../../src/cache/implementations/redis-cache')
           this.current = new RedisCache(process.env.REDIS_URL)
           this.implName = 'RedisCache'
-        } catch {
-          // Fallback to memory if redis adapter not available
+          try {
+            const redacted = (process.env.REDIS_URL || '').replace(/:\/\/[A-Za-z0-9_-]+:(.*?)@/, '://***:***@')
+            console.log('[CacheRegistry] Initialized with RedisCache url=' + redacted)
+          } catch {
+            console.log('[CacheRegistry] Initialized with RedisCache')
+          }
+        } catch (e) {
           this.current = new MemoryCache()
           this.implName = 'MemoryCache'
+          console.warn('[CacheRegistry] Redis init failed; falling back to MemoryCache:', e?.message || e)
         }
       } else {
         this.current = new MemoryCache()
         this.implName = 'MemoryCache'
       }
-      console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)')
+      if (this.implName === 'MemoryCache') {
+        console.log('[CacheRegistry] Initialized with MemoryCache (FEATURE_CACHE=true)')
+      }
       // Set cache_enabled gauge
       try {
         const implLabel = this.implName.toLowerCase().includes('redis') ? 'redis' : 'memory'

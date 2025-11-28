@@ -1,5 +1,20 @@
 {
   "annotations": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "${DS_PROM}",
+        "enable": true,
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "name": "Prom Alerts",
+        "target": {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "time_series"
+        }
+      }
+    ]
+  },
   "editable": true,
   "gnetId": null,
   "graphTooltip": 0,
@@ -11,6 +26,54 @@
     { "type": "interval", "name": "interval", "query": "5m,10m,30m,1h" }
   ] },
   "panels": [
+    {
+      "type": "table",
+      "title": "SLO Status Overview",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(http_requests_total{status=~\"2..\",job=\"$job\"}[5m])) / sum(rate(http_requests_total{job=\"$job\"}[5m]))", "refId": "A" },
+        { "expr": "sum(rate(cache_hits_total{job=\"$job\"}[5m])) / (sum(rate(cache_hits_total{job=\"$job\"}[5m])) + sum(rate(cache_miss_total{job=\"$job\"}[5m])))", "refId": "B" },
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"create\",job=\"$job\"}[5m])) by (le))", "refId": "C" },
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_snapshot_operation_duration_seconds_bucket{operation=\"restore\",job=\"$job\"}[5m])) by (le))", "refId": "D" },
+        { "expr": "histogram_quantile(0.95, sum(rate(metasheet_plugin_reload_duration_seconds_bucket{job=\"$job\"}[5m])) by (le))", "refId": "E" },
+        { "expr": "metasheet:redis_get_p95:5m", "refId": "F" },
+        { "expr": "metasheet:redis_set_p95:5m", "refId": "G" },
+        { "expr": "sum(increase(metasheet_fallback_effective_total{job=\"$job\"}[5m])) / sum(increase(metasheet_fallback_total{job=\"$job\"}[5m]))", "refId": "H" },
+        { "expr": "time() - redis_last_failure_timestamp", "refId": "I" },
+        { "expr": "sum(increase(metasheet_plugin_reload_duration_seconds_count{job=\"$job\"}[5m]))", "refId": "J" },
+        { "expr": "sum(increase(metasheet_snapshot_operation_duration_seconds_count{operation=\"restore\",job=\"$job\"}[5m]))", "refId": "K" }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": {}, "indexByName": {}, "renameByName": {
+          "A": "HTTP Success 5m", "B": "Cache Hit 5m", "C": "Snap Create p95 5m",
+          "D": "Snap Restore p95 5m", "E": "Plugin Reload p95 5m", "F": "Redis GET p95 5m",
+          "G": "Redis SET p95 5m", "H": "Fallback Effective 5m", "I": "Redis Last Failure Age s",
+          "J": "Plugin Samples 5m", "K": "Restore Samples 5m" } } }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Burn Rate (HTTP 5m/1h)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        { "expr": "(1 - metasheet:http_success_rate:5m) / (1 - 0.99)", "refId": "A", "datasource": "${DS_PROM}" },
+        { "expr": "(1 - sum(rate(http_requests_total{status=~\"2..\"}[1h])) / sum(rate(http_requests_total[1h]))) / (1 - 0.99)", "refId": "B", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "mode": "percentage", "steps": [ {"color":"green","value": null},{"color":"red","value": 1.0} ] } } }
+    },
+    {
+      "type": "stat",
+      "title": "Error Budget Remaining (HTTP)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        { "expr": "(sum(rate(http_requests_total{status=~\"2..\"}[5m])) / sum(rate(http_requests_total[5m])) - 0.99) / (1 - 0.99)", "refId": "A", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "mode": "percentage", "steps": [ {"color":"red","value": 0.2},{"color":"green","value": 0.5} ] } } }
+    },
     {
       "type": "stat",
       "title": "Plugin Reload p95",
@@ -130,6 +193,49 @@
       ],
       "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "percentage", "steps": [{"color":"green","value": 0.6},{"color":"red","value": 0.7}] } },
       "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Redis GET p95 (5m)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 24 },
+      "targets": [ { "expr": "metasheet:redis_get_p95:5m", "datasource": "${DS_PROM}" } ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 0.05}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Redis SET p95 (5m)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 24 },
+      "targets": [ { "expr": "metasheet:redis_set_p95:5m", "datasource": "${DS_PROM}" } ],
+      "options": { "reduceOptions": { "calcs": ["last"] }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value": null},{"color":"red","value": 0.05}] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Redis Last Failure Age (s)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 24 },
+      "targets": [ { "expr": "time() - redis_last_failure_timestamp", "datasource": "${DS_PROM}" } ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis GET/SET p95 Trend",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 30 },
+      "targets": [
+        { "expr": "metasheet:redis_get_p95:5m", "datasource": "${DS_PROM}" },
+        { "expr": "metasheet:redis_set_p95:5m", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "legend": { "displayMode": "table" } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Fallback Reasons (rate)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 42 },
+      "targets": [ { "expr": "metasheet:fallback_reason_rate:5m", "datasource": "${DS_PROM}" } ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ],
   "schemaVersion": 38,

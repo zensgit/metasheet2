@@ -1,0 +1,62 @@
+name: Phase 5 Baseline Rotation
+
+on:
+  schedule:
+    - cron: '15 3 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install deps
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Count consecutive PASS days
+        id: pass
+        run: |
+          DAYS=14
+          DIR=results/nightly
+          count=0
+          if [ -d "$DIR" ]; then
+            for f in $(ls -1t $DIR/phase5-*.json 2>/dev/null); do
+              status=$(jq -r '.summary.overall_status' "$f" 2>/dev/null || echo na)
+              if [ "$status" = "pass" ]; then
+                count=$((count+1))
+              else
+                break
+              fi
+            done
+          fi
+          echo "count=$count" >> $GITHUB_OUTPUT
+          echo "Consecutive PASS=$count"
+          if [ $count -lt $DAYS ]; then
+            echo "Not enough consecutive PASS days (need $DAYS)"; exit 0
+          fi
+
+      - name: Prepare new baseline
+        if: steps.pass.outputs.count != '0' && steps.pass.outputs.count >= '14'
+        run: |
+          latest=$(ls -1t results/nightly/phase5-*.json | head -n1)
+          cp "$latest" baseline/phase5-baseline-$(date -u '+%Y%m%d-%H%M%S').json
+          ln -sf $(basename baseline/phase5-baseline-*.json | tail -n1) baseline/phase5-baseline.json
+
+      - name: Create PR
+        if: steps.pass.outputs.count != '0' && steps.pass.outputs.count >= '14'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "chore(phase5): rotate baseline after 14 PASS days"
+          title: "Phase5: Baseline rotation (14-day PASS streak)"
+          body: "Automated baseline rotation based on 14 consecutive PASS nightly validations."
+          branch: chore/phase5-baseline-rotation
+

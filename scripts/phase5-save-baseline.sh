@@ -10,6 +10,7 @@ set -euo pipefail
 
 CUR_JSON="${1:-/tmp/phase5.json}"
 BASE_DIR="${2:-baseline}"
+IMPL="${CACHE_IMPL:-memory}"
 
 if [[ ! -f "$CUR_JSON" ]]; then
   echo "[baseline] Current JSON not found: $CUR_JSON" >&2
@@ -20,8 +21,15 @@ mkdir -p "$BASE_DIR"
 STAMP="$(date '+%Y%m%d-%H%M%S')"
 DEST="$BASE_DIR/phase5-baseline-$STAMP.json"
 cp -f "$CUR_JSON" "$DEST"
+# Generic symlink (latest baseline for the current impl)
 ln -sfn "$(basename "$DEST")" "$BASE_DIR/phase5-baseline.json"
+
+# Per-implementation symlink / copy to enable dual baseline regression selection
+IMPL_LINK="$BASE_DIR/phase5-baseline-$IMPL.json"
+ln -sfn "$(basename "$DEST")" "$IMPL_LINK"
+
+echo "[baseline] Implementation: $IMPL"
+echo "[baseline] Per-impl symlink updated: $IMPL_LINK -> $(basename "$DEST")"
 
 echo "[baseline] Saved baseline: $DEST"
 echo "[baseline] Symlink updated: $BASE_DIR/phase5-baseline.json -> $(basename "$DEST")"
-
