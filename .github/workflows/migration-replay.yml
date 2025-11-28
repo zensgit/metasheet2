@@ -49,6 +49,8 @@ jobs:
           exit 1
 
       - name: Create DB and extension
+        env:
+          PGPASSWORD: postgres
         run: |
           createdb -h localhost -U postgres metasheet || true
           psql -h localhost -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
@@ -56,7 +58,7 @@ jobs:
 
       - name: Run migrations twice (replay)
         env:
-          DATABASE_URL: postgresql://postgres@localhost/metasheet
+          DATABASE_URL: postgresql://postgres:postgres@localhost/metasheet
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # TODO: Fix migration to be fully idempotent or split into separate migrations
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
@@ -70,7 +72,7 @@ jobs:
           pnpm -F @metasheet/core-backend db:migrate
       - name: List migrations
         env:
-          DATABASE_URL: postgresql://postgres@localhost/metasheet
+          DATABASE_URL: postgresql://postgres:postgres@localhost/metasheet
         run: pnpm -F @metasheet/core-backend db:list
 
       - name: Upload install logs on failure
