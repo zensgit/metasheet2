@@ -43,20 +43,20 @@ jobs:
       - name: Wait for Postgres readiness
         run: |
           for i in {1..60}; do
-            pg_isready -h /tmp -p 5432 && exit 0 || sleep 1
+            pg_isready -h 127.0.0.1 -p 5432 && exit 0 || sleep 1
           done
           echo "Postgres not ready in time" >&2
           exit 1
 
       - name: Create DB and extension
         run: |
-          createdb -U postgres metasheet || true
-          psql -U postgres -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          createdb metasheet || true
+          psql -d metasheet -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
         timeout-minutes: 2
 
       - name: Run migrations twice (replay)
         env:
-          DATABASE_URL: postgresql://postgres@/metasheet?host=/tmp
+          DATABASE_URL: postgresql://127.0.0.1/metasheet
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # TODO: Fix migration to be fully idempotent or split into separate migrations
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
@@ -70,7 +70,7 @@ jobs:
           pnpm -F @metasheet/core-backend db:migrate
       - name: List migrations
         env:
-          DATABASE_URL: postgresql://postgres@/metasheet?host=/tmp
+          DATABASE_URL: postgresql://127.0.0.1/metasheet
         run: pnpm -F @metasheet/core-backend db:list
 
       - name: Upload install logs on failure
