@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Protected Admin Routes
  *
@@ -170,11 +169,7 @@ router.post(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('Plugin reload failed', {
-        context: 'AdminRoutes',
-        pluginId: id,
-        error: err.message
-      });
+      logger.error(`Plugin reload failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message,
@@ -219,10 +214,7 @@ router.post(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('All plugins reload failed', {
-        context: 'AdminRoutes',
-        error: err.message
-      });
+      logger.error(`All plugins reload failed: ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message
@@ -346,11 +338,7 @@ router.delete(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('Plugin unload failed', {
-        context: 'AdminRoutes',
-        pluginId: id,
-        error: err.message
-      });
+      logger.error(`Plugin unload failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message,
@@ -415,11 +403,7 @@ router.post(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('Snapshot restore failed', {
-        context: 'AdminRoutes',
-        snapshotId: id,
-        error: err.message
-      });
+      logger.error(`Snapshot restore failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message,
@@ -474,11 +458,7 @@ router.delete(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('Snapshot deletion failed', {
-        context: 'AdminRoutes',
-        snapshotId: id,
-        error: err.message
-      });
+      logger.error(`Snapshot deletion failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message,
@@ -536,10 +516,7 @@ router.post(
       });
     } catch (error) {
       const err = error as Error;
-      logger.error('Snapshot cleanup failed', {
-        context: 'AdminRoutes',
-        error: err.message
-      });
+      logger.error(`Snapshot cleanup failed: ${err.message}`, err);
       res.status(500).json({
         success: false,
         error: err.message

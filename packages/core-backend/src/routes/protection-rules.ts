@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Protection Rules Admin API Routes
  * Sprint 2: Snapshot Protection System
