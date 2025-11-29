@@ -1,5 +1,5 @@
-// Minimal build artifact for tests
-if (typeof module !== 'undefined' && module.exports) module.exports = {
+// Kanban View Plugin
+const KanbanPlugin = {
   activate: async (context) => {
     if (context && context.api && context.api.http && typeof context.api.http.addRoute === 'function') {
       // Boards list route
@@ -30,3 +30,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = {
     }
   }
 }
+
+// Support both CommonJS and ESM
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = KanbanPlugin
+}
+export default KanbanPlugin

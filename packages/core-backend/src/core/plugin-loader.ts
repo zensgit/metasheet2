@@ -273,9 +273,13 @@ export class PluginLoader extends EventEmitter {
     // 创建插件实例
     let plugin: PluginLifecycle
     if (typeof PluginClass === 'function') {
+      // ES class or constructor function
       plugin = new PluginClass()
+    } else if (typeof PluginClass.onLoad === 'function' || typeof PluginClass.activate === 'function') {
+      // Object with lifecycle methods (CommonJS module.exports = { activate: ... })
+      plugin = PluginClass as any
     } else if (typeof pluginModule.onLoad === 'function' || typeof pluginModule.activate === 'function') {
-      // 直接使用导出的生命周期对象
+      // Direct exports (named exports)
       plugin = pluginModule as any
     } else {
       plugin = PluginClass as any
@@ -369,7 +373,15 @@ export class PluginLoader extends EventEmitter {
       const instance = this.plugins.get(name)
       if (instance && instance.status === 'loaded') {
         try {
-          await instance.plugin.activate(instance.context)
+          // Check if activate method exists
+          if (typeof instance.plugin.activate === 'function') {
+            await instance.plugin.activate(instance.context)
+          } else if (typeof (instance.plugin as any).onLoad === 'function') {
+            // Plugin uses onLoad pattern (already called during load), mark as active
+            this.logger.debug(`Plugin ${name} uses onLoad pattern, skipping activate`)
+          } else {
+            this.logger.warn(`Plugin ${name} has no activate or onLoad method`)
+          }
           instance.status = 'active'
           this.logger.info(`Plugin ${name} activated`)
           this.emit('plugin:activated', name)
