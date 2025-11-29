@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Router, Request, Response } from 'express';
 import { AuditService } from '../audit/AuditService';
 import { AuditRepository } from '../audit/AuditRepository';
