@@ -20,7 +20,15 @@ export class EventBus {
     // regex listeners
     for (const meta of this.listeners.values()) {
       if (meta.pattern instanceof RegExp && meta.pattern.test(type)) {
-        try { meta.handler(payload) } catch { /* swallow */ }
+        try {
+          meta.handler(payload)
+        } catch (err) {
+          console.error('[event-bus][regex-handler-error]', {
+            pattern: meta.pattern.toString(),
+            plugin: meta.plugin,
+            error: err instanceof Error ? err.message : String(err)
+          })
+        }
       }
     }
   }

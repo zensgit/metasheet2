@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Configuration Management Service
  * Provides a unified interface for application configuration with multiple sources

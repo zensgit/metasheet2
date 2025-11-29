@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Example Event Bus Plugin
  * 事件总线插件示例

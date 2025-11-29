@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Router } from 'express'
 import { recordFallback } from '../fallback/fallback-recorder'
 

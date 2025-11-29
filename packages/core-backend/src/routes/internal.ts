@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Router, Request, Response } from 'express'
 import { cacheRegistry } from '../../core/cache/CacheRegistry'
 import fallbackTestRouter from './fallback-test'

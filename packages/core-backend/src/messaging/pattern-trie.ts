@@ -80,12 +80,18 @@ export class PatternTrie {
       return
     }
 
+    // Count wildcards to determine pattern type
+    const wildcardCount = (pattern.match(/\*/g) || []).length
+
     // Handle different wildcard types
-    if (pattern.endsWith('.*')) {
+    if (wildcardCount === 1 && pattern.endsWith('.*')) {
+      // Simple prefix pattern: user.*
       this.addPrefixPattern(pattern, subscription)
-    } else if (pattern.startsWith('*.')) {
+    } else if (wildcardCount === 1 && pattern.startsWith('*.')) {
+      // Simple suffix pattern: *.login
       this.addSuffixPattern(pattern, subscription)
-    } else if (pattern.includes('*')) {
+    } else {
+      // Complex pattern with multiple wildcards or embedded wildcards: *.*.event, user.*.action
       this.addComplexWildcardPattern(pattern, subscription)
     }
 
@@ -111,9 +117,15 @@ export class PatternTrie {
           found = true
         }
       }
+    } else if (pattern.endsWith('.*')) {
+      // Remove prefix pattern from trie
+      found = this.removePrefixPattern(pattern, subscriptionId)
+    } else if (pattern.startsWith('*.')) {
+      // Remove suffix pattern from wildcardPatterns
+      found = this.removeSuffixPattern(subscriptionId)
     } else {
-      // Remove from trie structure
-      found = this.removeFromTrie(this.root, pattern, 0, subscriptionId)
+      // Remove complex wildcard pattern
+      found = this.removeComplexPattern(subscriptionId)
     }
 
     if (found) {
@@ -159,8 +171,13 @@ export class PatternTrie {
       subs.forEach(sub => all.add(sub))
     }
 
-    // Add trie patterns
+    // Add trie patterns (prefix patterns)
     this.collectSubscriptions(this.root, all)
+
+    // Add suffix and complex wildcard patterns
+    for (const subs of this.wildcardPatterns.values()) {
+      subs.forEach(sub => all.add(sub))
+    }
 
     return Array.from(all)
   }
@@ -381,6 +398,53 @@ export class PatternTrie {
       node.subscriptions.delete(toRemove)
       if (node.subscriptions.size === 0) {
         node.isWildcard = false
+      }
+      return true
+    }
+    return false
+  }
+
+  private removePrefixPattern(pattern: string, subscriptionId: string): boolean {
+    // pattern: "user.*" -> prefix: "user"
+    const prefix = pattern.slice(0, -2) // Remove ".*"
+    let node = this.root
+
+    // Navigate to the prefix node
+    for (const char of prefix) {
+      if (!node.children.has(char)) {
+        return false
+      }
+      node = node.children.get(char)!
+    }
+
+    // Remove subscription from this node
+    return this.removeWildcardSubscription(node, subscriptionId)
+  }
+
+  private removeSuffixPattern(subscriptionId: string): boolean {
+    const suffixSubs = this.wildcardPatterns.get('suffix')
+    if (!suffixSubs) return false
+
+    const toRemove = Array.from(suffixSubs).find(s => s.id === subscriptionId)
+    if (toRemove) {
+      suffixSubs.delete(toRemove)
+      if (suffixSubs.size === 0) {
+        this.wildcardPatterns.delete('suffix')
+      }
+      return true
+    }
+    return false
+  }
+
+  private removeComplexPattern(subscriptionId: string): boolean {
+    const complexSubs = this.wildcardPatterns.get('complex')
+    if (!complexSubs) return false
+
+    const toRemove = Array.from(complexSubs).find(s => s.id === subscriptionId)
+    if (toRemove) {
+      complexSubs.delete(toRemove)
+      if (complexSubs.size === 0) {
+        this.wildcardPatterns.delete('complex')
       }
       return true
     }

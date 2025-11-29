@@ -4,7 +4,16 @@
  */
 
 import { EventEmitter } from 'eventemitter3'
-import { VM } from 'vm2'
+// vm2 types - library may not be installed or have type declarations
+// @ts-ignore - Optional dependency
+import type { VM as VMType } from 'vm2'
+let VM: any
+try {
+  VM = require('vm2').VM
+} catch {
+  // vm2 not available - will use fallback
+  VM = null
+}
 import * as path from 'path'
 import * as fs from 'fs'
 import { Logger } from './logger'
@@ -78,7 +87,7 @@ export interface PluginMetrics {
 }
 
 export class PluginContext extends EventEmitter {
-  private vm?: VM
+  private vm?: any  // VM type from vm2
   private logger: Logger
   private capabilities: PluginCapabilities
   private metrics: PluginMetrics = {
@@ -221,7 +230,7 @@ export class PluginContext extends EventEmitter {
           const isRead = /^\s*(SELECT|WITH)/i.test(sql)
           const isWrite = /^\s*(INSERT|UPDATE|DELETE)/i.test(sql)
 
-          if (isRead) {
+          if (isRead && database) {
             const allowed = tables.every(table =>
               database.read?.includes(table)
             )
@@ -230,7 +239,7 @@ export class PluginContext extends EventEmitter {
             }
           }
 
-          if (isWrite) {
+          if (isWrite && database) {
             const allowed = tables.every(table =>
               database.write?.includes(table)
             )
@@ -282,8 +291,8 @@ export class PluginContext extends EventEmitter {
         }
 
         try {
-          const result = await this.coreAPI.http.request({
-            url,
+          // Use native fetch for HTTP requests - HttpAPI is for route registration
+          const result = await fetch(url, {
             ...options,
             headers: {
               ...options?.headers,

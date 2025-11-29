@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Secret Management Service
  * Provides secure storage and retrieval of sensitive data

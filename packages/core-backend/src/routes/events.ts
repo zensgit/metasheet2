@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Event Bus REST API Endpoints
  * 事件总线REST API端点

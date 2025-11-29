@@ -21,20 +21,23 @@ export interface MockDB extends DB {
 
 // Mock query builder
 export function createMockQueryBuilder() {
-  const builder = {
-    selectAll: vi.fn().mockReturnThis(),
-    select: vi.fn().mockReturnThis(),
-    where: vi.fn().mockReturnThis(),
-    orderBy: vi.fn().mockReturnThis(),
-    limit: vi.fn().mockReturnThis(),
-    values: vi.fn().mockReturnThis(),
-    set: vi.fn().mockReturnThis(),
-    returningAll: vi.fn().mockReturnThis(),
-    returning: vi.fn().mockReturnThis(),
+  const builder: any = {
     execute: vi.fn(),
     executeTakeFirst: vi.fn(),
     executeTakeFirstOrThrow: vi.fn()
   }
+
+  builder.selectAll = vi.fn().mockReturnValue(builder)
+  builder.select = vi.fn().mockReturnValue(builder)
+  builder.where = vi.fn().mockImplementation(() => builder)
+  builder.orderBy = vi.fn().mockReturnValue(builder)
+  builder.limit = vi.fn().mockReturnValue(builder)
+  builder.values = vi.fn().mockReturnValue(builder)
+  builder.set = vi.fn().mockReturnValue(builder)
+  builder.returningAll = vi.fn().mockReturnValue(builder)
+  builder.returning = vi.fn().mockReturnValue(builder)
+
+  // console.log('Created mock query builder', Object.keys(builder))
   return builder
 }
 
@@ -42,18 +45,24 @@ export function createMockQueryBuilder() {
 export function createMockDb(): MockDB {
   const queryBuilder = createMockQueryBuilder()
 
-  return {
+  const mockDb = {
     selectFrom: vi.fn().mockReturnValue(queryBuilder),
     insertInto: vi.fn().mockReturnValue(queryBuilder),
     updateTable: vi.fn().mockReturnValue(queryBuilder),
     deleteFrom: vi.fn().mockReturnValue(queryBuilder),
-    transaction: vi.fn().mockReturnValue({
-      execute: vi.fn()
-    }),
+    transaction: vi.fn(),
     fn: {
       max: vi.fn().mockReturnValue({ as: vi.fn() })
     }
-  } as MockDB
+  } as unknown as MockDB
+
+  mockDb.transaction.mockReturnValue({
+    execute: vi.fn().mockImplementation(async (callback: (trx: any) => Promise<any>) => {
+      return callback(mockDb)
+    })
+  })
+
+  return mockDb
 }
 
 // Test data generators

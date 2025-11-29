@@ -6,6 +6,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Request, Response } from 'express'
 
+// Helper to extract route handler
+function findRouteHandler(router: any, method: string, path: string) {
+  return router.stack.find((layer: any) => 
+    layer.route?.path === path && layer.route.methods[method.toLowerCase()]
+  )?.route?.stack[0]?.handle
+}
+
 // Mock dependencies
 vi.mock('../../db/db', () => ({
   db: {
@@ -27,15 +34,22 @@ vi.mock('../../services/view-service', () => ({
   getViewById: vi.fn(),
   updateViewConfigWithRBAC: vi.fn(),
   queryGridWithRBAC: vi.fn(),
-  queryKanbanWithRBAC: vi.fn()
+  queryKanbanWithRBAC: vi.fn(),
+  queryGrid: vi.fn(),
+  queryKanban: vi.fn()
 }))
 
 vi.mock('../../core/logger', () => ({
   Logger: vi.fn().mockImplementation(() => ({
-    error: vi.fn(),
-    warn: vi.fn(),
+    error: vi.fn((msg, err) => console.error('MOCK LOGGER ERROR:', msg, err)),
+    warn: vi.fn((msg) => console.warn('MOCK LOGGER WARN:', msg)),
     info: vi.fn()
   }))
+}))
+
+vi.mock('../../rbac/table-perms', () => ({
+  canReadTable: vi.fn().mockResolvedValue(true),
+  canWriteTable: vi.fn().mockResolvedValue(true)
 }))
 
 describe('Views Routes - Phase 3 RBAC Integration', () => {
@@ -87,21 +101,39 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
         columns: ['a', 'b']
       }
 
-      vi.mocked(viewService.getViewConfig).mockResolvedValue(mockConfig)
+      // Mock DB response for getViewById
+      const mockViewRow = {
+        id: 'v1',
+        table_id: 't1',
+        name: 'Test View',
+        type: 'grid',
+        config: { columns: ['a', 'b'] },
+        created_at: new Date(),
+        updated_at: new Date()
+      }
+      
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(mockViewRow)
+          })
+        })
+      } as any)
 
       // Simulate route handler execution
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/config' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/config')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
       }
 
-      expect(viewService.getViewConfig).toHaveBeenCalledWith('v1')
       expect(mockResponse.json).toHaveBeenCalledWith({
         success: true,
-        data: mockConfig
+        data: expect.objectContaining({
+          id: 'v1',
+          name: 'Test View'
+        })
       })
     })
 
@@ -109,11 +141,17 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
       const { default: viewsRouter } = await import('../views')
       const viewService = await import('../../services/view-service')
 
-      vi.mocked(viewService.getViewConfig).mockResolvedValue(null)
+      // Mock DB response for getViewById returning null
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(null)
+          })
+        })
+      } as any)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/config' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/config')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
@@ -134,9 +172,7 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
       const mockUpdated = { id: 'v1', name: 'Updated View' }
       vi.mocked(viewService.updateViewConfigWithRBAC).mockResolvedValue(mockUpdated)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/config' && layer.route.methods.put
-      )?.route?.stack[0].handle
+      const handler = findRouteHandler(viewsRouter, 'put', '/:viewId/config')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
@@ -163,9 +199,7 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
         new Error('Permission denied: User user123 cannot write to table t1')
       )
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/config' && layer.route.methods.put
-      )?.route?.stack[0].handle
+      const handler = findRouteHandler(viewsRouter, 'put', '/:viewId/config')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
@@ -189,22 +223,34 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
         meta: { total: 2, page: 1, pageSize: 50, hasMore: false }
       }
 
-      vi.mocked(viewService.getViewById).mockResolvedValue(mockView)
-      vi.mocked(viewService.queryGridWithRBAC).mockResolvedValue(mockData)
+      // Mock DB response for getViewById
+      const mockViewRow = {
+        id: 'v1',
+        table_id: 't1',
+        type: 'grid',
+        config: {}
+      }
+      
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(mockViewRow)
+          })
+        })
+      } as any)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/data' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      vi.mocked(viewService.queryGrid).mockResolvedValue(mockData)
+
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/data')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
       }
 
-      expect(viewService.getViewById).toHaveBeenCalledWith('v1')
-      expect(viewService.queryGridWithRBAC).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'user123' }),
+      expect(viewService.queryGrid).toHaveBeenCalledWith(
         expect.objectContaining({
-          view: mockView,
+          view: mockViewRow,
           page: 1,
           pageSize: 50
         })
@@ -226,19 +272,25 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
         meta: { total: 0, page: 1, pageSize: 50, hasMore: false }
       }
 
-      vi.mocked(viewService.getViewById).mockResolvedValue(kanbanView)
-      vi.mocked(viewService.queryKanbanWithRBAC).mockResolvedValue(mockData)
+      // Mock DB response for getViewById
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(kanbanView)
+          })
+        })
+      } as any)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/data' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      vi.mocked(viewService.queryKanban).mockResolvedValue(mockData)
+
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/data')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
       }
 
-      expect(viewService.queryKanbanWithRBAC).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'user123' }),
+      expect(viewService.queryKanban).toHaveBeenCalledWith(
         expect.objectContaining({
           view: kanbanView,
           page: 1,
@@ -250,15 +302,22 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
     it('should return 403 when RBAC check fails', async () => {
       const { default: viewsRouter } = await import('../views')
       const viewService = await import('../../services/view-service')
+      const { canReadTable } = await import('../../rbac/table-perms')
 
-      vi.mocked(viewService.getViewById).mockResolvedValue(mockView)
-      vi.mocked(viewService.queryGridWithRBAC).mockRejectedValue(
-        new Error('Permission denied: User user123 cannot read table t1')
-      )
+      // Mock DB response for getViewById
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(mockView)
+          })
+        })
+      } as any)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/data' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      // Mock permission failure
+      vi.mocked(canReadTable).mockResolvedValue(false)
+
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/data')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())
@@ -267,7 +326,7 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
       expect(responseStatus).toBe(403)
       expect(responseJson).toMatchObject({
         success: false,
-        error: expect.stringContaining('Permission denied')
+        error: expect.stringContaining('Forbidden')
       })
     })
 
@@ -275,11 +334,17 @@ describe('Views Routes - Phase 3 RBAC Integration', () => {
       const { default: viewsRouter } = await import('../views')
       const viewService = await import('../../services/view-service')
 
-      vi.mocked(viewService.getViewById).mockResolvedValue(null)
+      // Mock DB response for getViewById returning null
+      const { db } = await import('../../db/db')
+      vi.mocked(db.selectFrom).mockReturnValue({
+        selectAll: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            executeTakeFirst: vi.fn().mockResolvedValue(null)
+          })
+        })
+      } as any)
 
-      const handler = (viewsRouter as any).stack.find(
-        (layer: any) => layer.route?.path === '/:viewId/data' && layer.route.methods.get
-      )?.route?.stack[0].handle
+      const handler = findRouteHandler(viewsRouter, 'get', '/:viewId/data')
 
       if (handler) {
         await handler(mockRequest, mockResponse, vi.fn())

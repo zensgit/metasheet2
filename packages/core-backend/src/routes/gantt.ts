@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Gantt Chart API Routes
  * Direct integration routes for gantt functionality

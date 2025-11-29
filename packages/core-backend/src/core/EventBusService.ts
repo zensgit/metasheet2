@@ -134,7 +134,7 @@ export class EventBusService extends EventEmitter {
       }
 
       // If degradation not allowed or different error, re-throw
-      this.logger.error('Failed to initialize EventBus service:', error)
+      this.logger.error('Failed to initialize EventBus service:', error instanceof Error ? error : undefined)
       throw error
     }
   }
@@ -157,9 +157,9 @@ export class EventBusService extends EventEmitter {
   }
 
   /**
-   * Emit an event
+   * Publish an event (async version with persistence and validation)
    */
-  async emit(
+  async publish(
     eventName: string,
     payload: any,
     options?: {
@@ -346,7 +346,7 @@ export class EventBusService extends EventEmitter {
         created_at: new Date(),
         updated_at: new Date()
       })
-      .onConflict((oc) => oc
+      .onConflict((oc: any) => oc
         .column('event_name')
         .doUpdateSet({
           payload_schema: options?.payload_schema ? JSON.stringify(options.payload_schema) : null,
@@ -447,7 +447,7 @@ export class EventBusService extends EventEmitter {
         created_at: new Date(),
         updated_at: new Date()
       })
-      .onConflict((oc) => oc
+      .onConflict((oc: any) => oc
         .column('plugin_id')
         .doUpdateSet({
           ...permissions,
@@ -519,7 +519,7 @@ export class EventBusService extends EventEmitter {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
-        this.logger.error(`Failed to process event for subscription ${subscription.id}:`, error)
+        this.logger.error(`Failed to process event for subscription ${subscription.id}:`, error instanceof Error ? error : undefined)
 
         // Log failed delivery
         await this.logDelivery(event.event_id, subscription.id, false, Date.now() - startTime, errorMessage)
@@ -561,7 +561,7 @@ export class EventBusService extends EventEmitter {
 
       await handler(event, context)
     } catch (error) {
-      this.logger.error(`Local event handler error:`, error)
+      this.logger.error(`Local event handler error:`, error instanceof Error ? error : undefined)
     }
   }
 
@@ -694,7 +694,7 @@ export class EventBusService extends EventEmitter {
         payload: transformed
       }
     } catch (error) {
-      this.logger.error('Event transformation failed:', error)
+      this.logger.error('Event transformation failed:', error instanceof Error ? error : undefined)
       return event
     }
   }
@@ -779,7 +779,7 @@ export class EventBusService extends EventEmitter {
         first_failed_at: new Date(),
         last_failed_at: new Date()
       })
-      .onConflict((oc) => oc
+      .onConflict((oc: any) => oc
         .columns(['event_id', 'subscription_id'])
         .doUpdateSet({
           failure_count: db.raw('failure_count + 1'),
@@ -1052,7 +1052,7 @@ export class EventBusService extends EventEmitter {
           await this.processEvent(event)
         }
       } catch (error) {
-        this.logger.error('Event processor error:', error)
+        this.logger.error('Event processor error:', error instanceof Error ? error : undefined)
       } finally {
         this.isProcessing = false
       }
@@ -1067,7 +1067,7 @@ export class EventBusService extends EventEmitter {
       try {
         await this.cleanupOldEvents()
       } catch (error) {
-        this.logger.error('Cleanup processor error:', error)
+        this.logger.error('Cleanup processor error:', error instanceof Error ? error : undefined)
       }
     }, 3600000) // Run every hour
   }
@@ -1080,7 +1080,7 @@ export class EventBusService extends EventEmitter {
       try {
         await this.updateMetrics()
       } catch (error) {
-        this.logger.error('Metrics processor error:', error)
+        this.logger.error('Metrics processor error:', error instanceof Error ? error : undefined)
       }
     }, 60000) // Run every minute
   }

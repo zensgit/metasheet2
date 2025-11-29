@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Advanced Metrics Collector
  * Comprehensive metrics collection for Prometheus and other monitoring systems

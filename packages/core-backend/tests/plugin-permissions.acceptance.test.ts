@@ -3,7 +3,7 @@ import { PERMISSION_WHITELIST } from '../src/types/plugin'
 
 describe('permission whitelist acceptance', () => {
   const accepted = [
-    'websocket.sendTo',
+    'websocket.send', // Changed from sendTo to match actual whitelist
     'events.on',
     'events.once',
     'events.off',

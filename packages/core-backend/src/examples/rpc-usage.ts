@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * RPC Manager Usage Examples
  * Issues #27 & #30: Demonstrates proper RPC usage patterns

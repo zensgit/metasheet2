@@ -26,9 +26,16 @@ describe('PluginLoader success path', () => {
     // Stub scanning + manifests: one valid manifest
     vi.spyOn<any, any>(loader as any, 'scanPluginDirectories').mockResolvedValue(['/tmp/ok'])
     const manifest: PluginManifest = {
-      name: '@test/ok',
+      manifestVersion: '2.0.0',
+      name: 'test-plugin-ok',
       version: '1.0.0',
-      engines: { metasheet: '>=1.0.0' },
+      displayName: 'Test Plugin',
+      description: 'A test plugin',
+      author: 'Test Author',
+      main: 'dist/index.js',
+      capabilities: {},
+      permissions: {},
+      engine: { metasheet: '>=1.0.0' },
       path: '/tmp/ok'
     } as any
     vi.spyOn<any, any>(loader as any, 'loadManifests').mockResolvedValue([manifest])
@@ -49,8 +56,8 @@ describe('PluginLoader success path', () => {
     const failed = loader.getFailedPlugins()
     expect(failed.size).toBe(0)
     const plugins = loader.getPlugins()
-    expect(plugins.has('@test/ok')).toBe(true)
-    expect(plugins.get('@test/ok')?.status).toBe('active')
+    expect(plugins.has('test-plugin-ok')).toBe(true)
+    expect(plugins.get('test-plugin-ok')?.status).toBe('active')
   })
 })
 

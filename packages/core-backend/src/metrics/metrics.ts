@@ -273,6 +273,20 @@ const fallbackEffectiveTotal = new client.Counter({
   labelNames: ['reason'] as const
 })
 
+// RBAC table permission check metrics
+const rbacPermissionChecksTotal = new client.Counter({
+  name: 'rbac_permission_checks_total',
+  help: 'Total RBAC permission checks by operation and result',
+  labelNames: ['operation', 'result'] as const
+})
+
+const rbacCheckLatencySeconds = new client.Histogram({
+  name: 'rbac_check_latency_seconds',
+  help: 'RBAC permission check latency in seconds',
+  labelNames: ['operation'] as const,
+  buckets: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -315,6 +329,8 @@ registry.registerMetric(fallbackEffectiveTotal)
 registry.registerMetric(redisOperationDuration)
 registry.registerMetric(redisRecoveryAttemptsTotal)
 registry.registerMetric(redisLastFailureTimestamp)
+registry.registerMetric(rbacPermissionChecksTotal)
+registry.registerMetric(rbacCheckLatencySeconds)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -384,5 +400,7 @@ export const metrics = {
   fallbackEffectiveTotal,
   redisOperationDuration,
   redisRecoveryAttemptsTotal,
-  redisLastFailureTimestamp
+  redisLastFailureTimestamp,
+  rbacPermissionChecksTotal,
+  rbacCheckLatencySeconds
 }

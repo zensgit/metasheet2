@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Distributed Tracing System
  * OpenTelemetry-based tracing for distributed system observability

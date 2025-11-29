@@ -3,16 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-// To avoid Vite SSR helper issues in Vitest, allow tests to import from built dist
-// when TEST_USE_DIST=true (set by npm script). Falls back to source imports otherwise.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { NullCache } = (process.env.TEST_USE_DIST === 'true'
-  // dist path after `npm run build`
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ? require('../../../dist-cache/src/cache/implementations/null-cache.js')
-  // source path for local IDE runs
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  : require('../implementations/null-cache'))
+import { NullCache } from '../implementations/null-cache'
 
 describe('NullCache', () => {
   it('should always return cache miss on get', async () => {

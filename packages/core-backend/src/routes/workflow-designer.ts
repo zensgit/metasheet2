@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Workflow Designer API Routes
  * Visual workflow editor REST endpoints

@@ -19,6 +19,7 @@ import { ManifestValidator } from './PluginManifestValidator'
 
 export class PluginLoader extends EventEmitter {
   private plugins = new Map<string, PluginInstance>()
+  private failedPlugins = new Set<string>()
   private loadOrder: string[] = []
   private coreAPI: CoreAPI
   private logger: Logger
@@ -56,7 +57,13 @@ export class PluginLoader extends EventEmitter {
       this.logger.info(`Loaded ${manifests.length} plugin manifests`)
 
       // 3. 验证插件
-      const validManifests = manifests.filter(m => this.validateManifest(m))
+      const validManifests = manifests.filter(m => {
+        const valid = this.validateManifest(m)
+        if (!valid) {
+          this.failedPlugins.add(m.name)
+        }
+        return valid
+      })
       this.logger.info(`${validManifests.length} plugins passed validation`)
 
       // 4. 解析依赖关系并排序
@@ -69,6 +76,7 @@ export class PluginLoader extends EventEmitter {
         } catch (e: any) {
           const msg = (e && e.message) ? e.message : String(e)
           summaryErrors.push({ plugin: manifest.name, message: msg })
+          this.failedPlugins.add(manifest.name)
           // continue
         }
       }
@@ -243,64 +251,57 @@ export class PluginLoader extends EventEmitter {
   private async loadPlugin(manifest: PluginManifest): Promise<void> {
     this.logger.info(`Loading plugin: ${manifest.name}`)
 
-    try {
-      // 检查权限
-      this.checkPermissions(manifest)
+    // 检查权限
+    this.checkPermissions(manifest)
 
-      // 创建插件上下文
-      const context = createPluginContext(manifest, this.coreAPI)
+    // 创建插件上下文
+    const context = createPluginContext(manifest, this.coreAPI)
 
-      // 解析插件入口：支持纯 JS 源码 main，或 main.backend，或 dist/index.js
-      let pluginPath: string
-      if (typeof (manifest as any).main === 'string') {
-        pluginPath = path.join((manifest as any).path || manifest.name, (manifest as any).main)
-      } else if ((manifest as any).main?.backend) {
-        pluginPath = path.join((manifest as any).path || manifest.name, (manifest as any).main.backend)
-      } else {
-        pluginPath = path.join((manifest as any).path || manifest.name, 'dist', 'index.js')
-      }
-
-      const pluginModule = await import(pluginPath)
-      const PluginClass = pluginModule.default || pluginModule
-
-      // 创建插件实例
-      let plugin: PluginLifecycle
-      if (typeof PluginClass === 'function') {
-        plugin = new PluginClass()
-      } else if (typeof pluginModule.onLoad === 'function' || typeof pluginModule.activate === 'function') {
-        // 直接使用导出的生命周期对象
-        plugin = pluginModule as any
-      } else {
-        plugin = PluginClass as any
-      }
-
-      // 创建插件实例记录
-      const instance: PluginInstance = {
-        manifest,
-        plugin,
-        context,
-        status: 'loaded'
-      }
-
-      // 执行安装钩子
-      if (plugin.install) {
-        await plugin.install(context)
-      } else if ((plugin as any).onLoad) {
-        await (plugin as any).onLoad(context)
-      }
-
-      // 注册插件
-      this.plugins.set(manifest.name, instance)
-      this.loadOrder.push(manifest.name)
-
-      this.logger.info(`Plugin ${manifest.name} loaded successfully`)
-      this.emit('plugin:loaded', manifest.name)
-    } catch (error) {
-      this.logger.error(`Failed to load plugin ${manifest.name}`, error as Error)
-      this.emit('plugin:error', { plugin: manifest.name, error })
-      // Continue loading other plugins instead of failing completely
-      this.logger.warn(`Skipping plugin ${manifest.name} and continuing...`)
+    // 解析插件入口：支持纯 JS 源码 main，或 main.backend，或 dist/index.js
+    let pluginPath: string
+    if (typeof (manifest as any).main === 'string') {
+      pluginPath = path.join((manifest as any).path || manifest.name, (manifest as any).main)
+    } else if ((manifest as any).main?.backend) {
+      pluginPath = path.join((manifest as any).path || manifest.name, (manifest as any).main.backend)
+    } else {
+      pluginPath = path.join((manifest as any).path || manifest.name, 'dist', 'index.js')
     }
+
+    const pluginModule = await import(pluginPath)
+    const PluginClass = pluginModule.default || pluginModule
+
+    // 创建插件实例
+    let plugin: PluginLifecycle
+    if (typeof PluginClass === 'function') {
+      plugin = new PluginClass()
+    } else if (typeof pluginModule.onLoad === 'function' || typeof pluginModule.activate === 'function') {
+      // 直接使用导出的生命周期对象
+      plugin = pluginModule as any
+    } else {
+      plugin = PluginClass as any
+    }
+
+    // 创建插件实例记录
+    const instance: PluginInstance = {
+      manifest,
+      plugin,
+      context,
+      status: 'loaded'
+    }
+
+    // 执行安装钩子
+    if (plugin.install) {
+      await plugin.install(context)
+    } else if ((plugin as any).onLoad) {
+      await (plugin as any).onLoad(context)
+    }
+
+    // 注册插件
+    this.plugins.set(manifest.name, instance)
+    this.loadOrder.push(manifest.name)
+
+    this.logger.info(`Plugin ${manifest.name} loaded successfully`)
+    this.emit('plugin:loaded', manifest.name)
   }
 
   /**
@@ -316,8 +317,17 @@ export class PluginLoader extends EventEmitter {
     // Support both old array format and new V2 object format
     if (Array.isArray(perms)) {
       // Old format: string[]
+      const validPermissions = [
+        'http.addRoute', 'websocket.broadcast', 'database.query',
+        'events.on', 'events.emit', 'storage.upload', 'storage.download',
+        'storage.delete', 'queue.push', 'queue.process',
+        'messaging.publish', 'messaging.subscribe', 'messaging.request'
+      ]
       for (const permission of perms) {
         this.logger.debug(`Checking permission: ${permission}`)
+        if (!validPermissions.includes(permission)) {
+          throw new Error(`Permission not allowed: ${permission}`)
+        }
       }
     } else {
       // New V2 format: object with database/http/filesystem
@@ -427,6 +437,41 @@ export class PluginLoader extends EventEmitter {
 
     this.logger.info(`Plugin ${name} unloaded`)
     this.emit('plugin:unloaded', name)
+  }
+
+  /**
+   * 卸载所有插件
+   * Called during graceful shutdown
+   */
+  async unloadAll(): Promise<void> {
+    this.logger.info('Unloading all plugins...')
+
+    // Unload in reverse order of loading
+    const pluginNames = [...this.loadOrder].reverse()
+    const errors: Array<{ name: string; error: Error }> = []
+
+    for (const name of pluginNames) {
+      try {
+        await this.unloadPlugin(name)
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err))
+        errors.push({ name, error })
+        this.logger.warn(`Failed to unload plugin ${name}: ${error.message}`)
+      }
+    }
+
+    if (errors.length > 0) {
+      this.logger.warn(`${errors.length} plugins failed to unload cleanly`)
+    } else {
+      this.logger.info('All plugins unloaded successfully')
+    }
+  }
+
+  /**
+   * 获取加载失败的插件
+   */
+  getFailedPlugins(): Set<string> {
+    return new Set(this.failedPlugins)
   }
 
   /**

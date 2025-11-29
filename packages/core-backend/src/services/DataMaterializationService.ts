@@ -819,15 +819,69 @@ export class DataMaterializationService extends EventEmitter {
     keyField: string,
     keyValue: any
   ): Promise<boolean> {
-    // Implementation depends on target table structure
-    return false
+    if (!db) {
+      console.error('[DataMaterialization] Database not available')
+      return false
+    }
+
+    try {
+      // Query the materialized table for the key
+      const result = await db
+        .selectFrom('external_tables' as any)
+        .select('id')
+        .where('table_id', '=', tableId)
+        .executeTakeFirst()
+
+      if (!result) {
+        return false
+      }
+
+      // Check if record with key exists in the target table
+      const tableName = `materialized_${tableId.replace(/-/g, '_')}`
+      const exists = await db
+        .selectFrom(tableName as any)
+        .select('id')
+        .where(keyField, '=', keyValue)
+        .limit(1)
+        .executeTakeFirst()
+
+      return !!exists
+    } catch (error) {
+      console.error(`[DataMaterialization] Error checking record existence: ${error}`)
+      return false
+    }
   }
 
   private async insertRecord(
     tableId: string,
     record: Record<string, any>
   ): Promise<void> {
-    // Implementation depends on target table structure
+    if (!db) {
+      console.error('[DataMaterialization] Database not available')
+      return
+    }
+
+    try {
+      const tableName = `materialized_${tableId.replace(/-/g, '_')}`
+
+      // Add metadata fields
+      const recordWithMeta = {
+        ...record,
+        _created_at: new Date(),
+        _updated_at: new Date(),
+        _sync_version: 1
+      }
+
+      await db
+        .insertInto(tableName as any)
+        .values(recordWithMeta)
+        .execute()
+
+      console.log(`[DataMaterialization] Inserted record into ${tableName}`)
+    } catch (error) {
+      console.error(`[DataMaterialization] Error inserting record: ${error}`)
+      throw error
+    }
   }
 
   private async updateRecord(
@@ -836,7 +890,35 @@ export class DataMaterializationService extends EventEmitter {
     keyValue: any,
     record: Record<string, any>
   ): Promise<void> {
-    // Implementation depends on target table structure
+    if (!db) {
+      console.error('[DataMaterialization] Database not available')
+      return
+    }
+
+    try {
+      const tableName = `materialized_${tableId.replace(/-/g, '_')}`
+
+      // Add metadata fields
+      const recordWithMeta = {
+        ...record,
+        _updated_at: new Date()
+      }
+
+      // Increment sync version
+      await db
+        .updateTable(tableName as any)
+        .set({
+          ...recordWithMeta,
+          _sync_version: db.fn('COALESCE', ['_sync_version', 0]).add(1)
+        } as any)
+        .where(keyField, '=', keyValue)
+        .execute()
+
+      console.log(`[DataMaterialization] Updated record in ${tableName} where ${keyField}=${keyValue}`)
+    } catch (error) {
+      console.error(`[DataMaterialization] Error updating record: ${error}`)
+      throw error
+    }
   }
 
   private async deleteRecord(
@@ -844,15 +926,48 @@ export class DataMaterializationService extends EventEmitter {
     keyField: string,
     keyValue: any
   ): Promise<void> {
-    // Implementation depends on target table structure
+    if (!db) {
+      console.error('[DataMaterialization] Database not available')
+      return
+    }
+
+    try {
+      const tableName = `materialized_${tableId.replace(/-/g, '_')}`
+
+      await db
+        .deleteFrom(tableName as any)
+        .where(keyField, '=', keyValue)
+        .execute()
+
+      console.log(`[DataMaterialization] Deleted record from ${tableName} where ${keyField}=${keyValue}`)
+    } catch (error) {
+      console.error(`[DataMaterialization] Error deleting record: ${error}`)
+      throw error
+    }
   }
 
   private async getTargetKeys(
     tableId: string,
     keyField: string
   ): Promise<any[]> {
-    // Implementation depends on target table structure
-    return []
+    if (!db) {
+      console.error('[DataMaterialization] Database not available')
+      return []
+    }
+
+    try {
+      const tableName = `materialized_${tableId.replace(/-/g, '_')}`
+
+      const result = await db
+        .selectFrom(tableName as any)
+        .select(keyField)
+        .execute()
+
+      return result.map((row: any) => row[keyField])
+    } catch (error) {
+      console.error(`[DataMaterialization] Error getting target keys: ${error}`)
+      return []
+    }
   }
 
   private castValue(value: any, type: string): any {
@@ -870,9 +985,104 @@ export class DataMaterializationService extends EventEmitter {
     record: Record<string, any>,
     formula: string
   ): Promise<any> {
-    // Simple formula evaluation
-    // In production, use a proper formula engine
-    return eval(formula)
+    // Safe formula evaluation - NO eval() to prevent code injection
+    // Supports: field references, basic math, string concatenation
+    try {
+      // Sanitize formula - only allow safe characters
+      const sanitized = formula.trim()
+
+      // Check for dangerous patterns
+      const dangerousPatterns = [
+        /\beval\b/i,
+        /\bFunction\b/i,
+        /\brequire\b/i,
+        /\bimport\b/i,
+        /\bprocess\b/i,
+        /\bglobal\b/i,
+        /\b__proto__\b/i,
+        /\bconstructor\b/i,
+        /\bprototype\b/i,
+        /[`${}]/,  // Template literals
+      ]
+
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(sanitized)) {
+          throw new Error(`Unsafe formula pattern detected: ${pattern}`)
+        }
+      }
+
+      // Simple field reference: {{fieldName}}
+      const fieldRefPattern = /\{\{(\w+)\}\}/g
+      let result = sanitized.replace(fieldRefPattern, (_, field) => {
+        const value = record[field]
+        return value !== undefined ? String(value) : ''
+      })
+
+      // Simple arithmetic expressions (only numbers and basic operators)
+      const arithmeticPattern = /^[\d\s+\-*/().]+$/
+      if (arithmeticPattern.test(result)) {
+        // Safe evaluation of pure arithmetic
+        const safeArithmetic = (expr: string): number => {
+          // Parse and evaluate simple arithmetic using a safe approach
+          const tokens = expr.match(/[\d.]+|[+\-*/()]/g) || []
+          let pos = 0
+
+          const parseNumber = (): number => {
+            const num = parseFloat(tokens[pos] || '0')
+            pos++
+            return num
+          }
+
+          const parseFactor = (): number => {
+            if (tokens[pos] === '(') {
+              pos++ // skip (
+              const result = parseExpression()
+              pos++ // skip )
+              return result
+            }
+            return parseNumber()
+          }
+
+          const parseTerm = (): number => {
+            let result = parseFactor()
+            while (tokens[pos] === '*' || tokens[pos] === '/') {
+              const op = tokens[pos]
+              pos++
+              const right = parseFactor()
+              result = op === '*' ? result * right : result / right
+            }
+            return result
+          }
+
+          const parseExpression = (): number => {
+            let result = parseTerm()
+            while (tokens[pos] === '+' || tokens[pos] === '-') {
+              const op = tokens[pos]
+              pos++
+              const right = parseTerm()
+              result = op === '+' ? result + right : result - right
+            }
+            return result
+          }
+
+          return parseExpression()
+        }
+
+        return safeArithmetic(result)
+      }
+
+      // String concatenation: "text" + fieldValue
+      const concatPattern = /^["'][^"']*["'](\s*\+\s*(["'][^"']*["']|\w+))*$/
+      if (concatPattern.test(result)) {
+        return result.replace(/["']/g, '').split(/\s*\+\s*/).join('')
+      }
+
+      // Return as-is if it's just a value
+      return result
+    } catch (error) {
+      console.error('[DataMaterialization] Formula evaluation error:', error)
+      return null
+    }
   }
 
   private async lookupValue(

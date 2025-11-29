@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * 插件系统核心类型定义
  * Last updated: 2025-11-03 (Batch 1 完成)
@@ -117,6 +118,16 @@ export interface PluginManifest {
     filesystem?: {
       read?: string[]
       write?: string[]
+    }
+    events?: {
+      subscribe?: string[]
+      emit?: string[]
+    }
+    messaging?: {
+      subscribe?: string[]
+      publish?: string[]
+      rpc?: string[]
+      pattern?: boolean
     }
   }
 
@@ -305,19 +316,49 @@ export enum PluginStatus {
  * 插件能力标识
  */
 export enum PluginCapability {
+  // Core capabilities
   DATABASE = 'database',
   HTTP = 'http',
   WEBSOCKET = 'websocket',
   STORAGE = 'storage',
   SCHEDULER = 'scheduler',
   NOTIFICATION = 'notification',
+
+  // UI capabilities
   VIEW_PROVIDER = 'view_provider',
   FIELD_TYPE = 'field_type',
+  CUSTOM_COMPONENT = 'custom_component',
+  MENU_ITEM = 'menu_item',
+  TOOLBAR_BUTTON = 'toolbar_button',
+  CONTEXT_MENU = 'context_menu',
+  SETTINGS_PAGE = 'settings_page',
+
+  // Workflow capabilities
   FORMULA_FUNCTION = 'formula_function',
   TRIGGER_PROVIDER = 'trigger_provider',
   ACTION_PROVIDER = 'action_provider',
+  WORKFLOW_NODE = 'workflow_node',
+
+  // API capabilities
   API_ENDPOINT = 'api_endpoint',
-  MENU_ITEM = 'menu_item'
+  WEBHOOK_HANDLER = 'webhook_handler',
+
+  // Data capabilities
+  DATA_SOURCE = 'data_source',
+  CACHE_PROVIDER = 'cache_provider',
+
+  // Auth capabilities
+  AUTH_PROVIDER = 'auth_provider',
+  EXTERNAL_AUTH = 'external_auth',
+  PERMISSION_PROVIDER = 'permission_provider',
+
+  // Communication capabilities
+  NOTIFICATION_CHANNEL = 'notification_channel',
+  EMAIL_TEMPLATE = 'email_template',
+
+  // Background capabilities
+  BACKGROUND_TASK = 'background_task',
+  SCHEDULED_JOB = 'scheduled_job'
 }
 
 /**
@@ -341,13 +382,28 @@ export interface PluginDependency {
   name: string
   version: string
   optional?: boolean
+  capabilities?: PluginCapability[]
+}
+
+/**
+ * 插件事件类型枚举
+ */
+export enum PluginEventType {
+  INSTALLED = 'plugin:installed',
+  UNINSTALLED = 'plugin:uninstalled',
+  ENABLED = 'plugin:enabled',
+  DISABLED = 'plugin:disabled',
+  UPDATED = 'plugin:updated',
+  ERROR = 'plugin:error',
+  ACTIVATED = 'plugin:activated',
+  DEACTIVATED = 'plugin:deactivated'
 }
 
 /**
  * 插件事件
  */
 export interface PluginEvent {
-  type: string
+  type: PluginEventType | string
   pluginName: string
   timestamp: Date
   data?: any

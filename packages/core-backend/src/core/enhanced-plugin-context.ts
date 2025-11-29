@@ -83,6 +83,7 @@ export function createEnhancedPluginContext(
   return {
     metadata,
     api: sandboxedAPI,
+    core: sandboxedAPI, // Backward compatibility alias
     storage,
     config,
     communication,
@@ -99,7 +100,9 @@ function createEnhancedSandboxedAPI(
   manifest: PluginManifest,
   services: PluginServices
 ): CoreAPI {
-  const permissions = new Set(manifest.permissions || [])
+  // Handle both old array format and new V2 object format
+  const perms = manifest.permissions
+  const permissions = new Set(Array.isArray(perms) ? perms : [])
 
   // 权限检查辅助函数
   const hasPermission = (perm: string) =>
@@ -186,9 +189,9 @@ function createEnhancedSandboxedAPI(
       // SQL威胁扫描
       const threatScan = await services.security.scanForThreats(manifest.name, sql)
       if (!threatScan.safe) {
-        const criticalThreats = threatScan.threats.filter(t => t.severity === 'critical')
+        const criticalThreats = threatScan.threats.filter((t: any) => t.severity === 'critical')
         if (criticalThreats.length > 0) {
-          throw new Error(`SQL security threats detected: ${criticalThreats.map(t => t.description).join(', ')}`)
+          throw new Error(`SQL security threats detected: ${criticalThreats.map((t: any) => t.description).join(', ')}`)
         }
       }
 
@@ -292,10 +295,8 @@ function createEnhancedSandboxedAPI(
     cache: cache as any,
     queue: queue as any,
     websocket: websocket as any,
-    notification: notification as any,
-    // pass-through view service API from core API
-    views: (api as any).views
-  }
+    notification: notification as any
+  } as CoreAPI
 }
 
 /**
@@ -336,7 +337,7 @@ function createEnhancedPluginStorage(pluginName: string): PluginStorage {
             key,
             value
           })
-          .onConflict(oc => oc.columns(['plugin_id','key']).doUpdateSet({
+          .onConflict((oc: any) => oc.columns(['plugin_id','key']).doUpdateSet({
             value
           }))
           .execute()
@@ -372,7 +373,7 @@ function createEnhancedPluginStorage(pluginName: string): PluginStorage {
           .where('plugin_id', '=', pluginName)
           .orderBy('key asc')
           .execute()
-        return rows.map(r => r.key as string)
+        return rows.map((r: any) => r.key as string)
       } catch (error) {
         // 回退到内存存储
         return Array.from(memory.keys())
