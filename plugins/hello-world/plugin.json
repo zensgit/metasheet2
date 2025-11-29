@@ -9,6 +9,15 @@
   "main": "dist/index.js",
   "capabilities": {},
   "permissions": {
-    "http": { "internal": true }
+    "http": { "internal": true },
+    "events": {
+      "subscribe": ["*"],
+      "emit": ["*"]
+    },
+    "messaging": {
+      "subscribe": ["*"],
+      "publish": ["*"],
+      "rpc": ["*"]
+    }
   }
 }

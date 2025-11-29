@@ -29,7 +29,11 @@
     "http": {
       "internal": false
     },
-    "filesystem": {}
+    "filesystem": {},
+    "events": {
+      "subscribe": ["*"],
+      "emit": ["*"]
+    }
   },
   "license": "MIT"
 }
