@@ -198,7 +198,9 @@ export class PluginCapabilityManager extends EventEmitter {
     result.requiredPermissions = Array.from(new Set(requiredPermissions))
 
     // 检查权限是否在插件清单中声明
-    const declaredPermissions = new Set(manifest.permissions || [])
+    // Handle both old array format and new V2 object format
+    const perms = manifest.permissions
+    const declaredPermissions = new Set(Array.isArray(perms) ? perms : [])
     const missingPermissions = requiredPermissions.filter(perm =>
       !declaredPermissions.has(perm) && !declaredPermissions.has('*')
     )
@@ -409,7 +411,7 @@ export class PluginCapabilityManager extends EventEmitter {
     manifest: PluginManifest,
     capability: PluginCapability
   ): { valid: boolean; errors: string[]; warnings: string[] } {
-    const result = { valid: true, errors: [], warnings: [] }
+    const result: { valid: boolean; errors: string[]; warnings: string[] } = { valid: true, errors: [], warnings: [] }
 
     switch (capability) {
       case PluginCapability.VIEW_PROVIDER:

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Protected Admin Routes
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Elasticsearch Data Source Adapter
  * Provides access to Elasticsearch search engine

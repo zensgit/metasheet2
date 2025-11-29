@@ -10,7 +10,7 @@ import { createMockDb, createMockQueryBuilder } from '../utils/test-db'
 import { BASIC_SPREADSHEET, BASIC_SHEET, TEST_CELLS, TEST_IDS, API_FIXTURES } from '../utils/test-fixtures'
 
 // Mock database BEFORE importing routes
-let mockDb: ReturnType<typeof createMockDb>
+let mockDb: any
 vi.mock('../../src/db/db', () => ({
   get db() { return mockDb }
 }))
@@ -152,13 +152,15 @@ describe('Spreadsheet API Endpoints', () => {
     })
 
     test('should handle database unavailable', async () => {
-      vi.doMock('../../src/db/db', () => ({ db: undefined }))
+      const originalMockDb = mockDb
+      mockDb = undefined
 
       const response = await request(app)
         .get('/api/spreadsheets')
         .expect(503)
 
       expect(response).toHaveErrorResponse('DB_UNAVAILABLE')
+      mockDb = originalMockDb
     })
 
     test('should handle database errors', async () => {
@@ -276,7 +278,13 @@ describe('Spreadsheet API Endpoints', () => {
 
       expect(response).toHaveSuccessResponse()
       expect(response.body.data.id).toBe(TEST_IDS.SPREADSHEET_1)
-      expect(response.body.data.sheets).toEqual([BASIC_SHEET])
+      expect(response.body.data.sheets).toEqual([
+        {
+          ...BASIC_SHEET,
+          created_at: BASIC_SHEET.created_at,
+          updated_at: BASIC_SHEET.updated_at
+        }
+      ])
     })
 
     test('should return 404 for non-existent spreadsheet', async () => {
@@ -466,8 +474,29 @@ describe('Spreadsheet API Endpoints', () => {
           const trx = {
             selectFrom: vi.fn().mockReturnValue({
               selectAll: vi.fn().mockReturnValue({
-                where: vi.fn().mockReturnValue({
-                  executeTakeFirst: vi.fn().mockResolvedValue(existingCell)
+                where: vi.fn().mockImplementation(() => {
+                  // Return an object that supports chained where calls
+                  const chainableWhere: any = {
+                    where: vi.fn().mockImplementation(() => chainableWhere),
+                    executeTakeFirst: vi.fn().mockResolvedValue(existingCell),
+                    execute: vi.fn().mockResolvedValue([])
+                  }
+                  return chainableWhere
+                }),
+                execute: vi.fn().mockResolvedValue([]) // For triggerRecalculation
+              }),
+              select: vi.fn().mockReturnValue({
+                where: vi.fn().mockImplementation(() => {
+                  const chainableWhere: any = {
+                    where: vi.fn().mockImplementation(() => chainableWhere),
+                    orderBy: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockReturnValue({
+                        executeTakeFirst: vi.fn().mockResolvedValue({ version_number: 1 })
+                      })
+                    }),
+                    executeTakeFirst: vi.fn().mockResolvedValue({ id: 'ref-cell-id' })
+                  }
+                  return chainableWhere
                 })
               })
             }),
@@ -476,13 +505,17 @@ describe('Spreadsheet API Endpoints', () => {
                 where: vi.fn().mockReturnValue({
                   returningAll: vi.fn().mockReturnValue({
                     executeTakeFirstOrThrow: vi.fn().mockResolvedValue(updatedCell)
-                  })
+                  }),
+                  execute: vi.fn().mockResolvedValue({}) // For handleFormula update
                 })
               })
             }),
             insertInto: vi.fn().mockReturnValue({
               values: vi.fn().mockReturnValue({
-                execute: vi.fn().mockResolvedValue({})
+                execute: vi.fn().mockResolvedValue({}),
+                returningAll: vi.fn().mockReturnValue({
+                  executeTakeFirstOrThrow: vi.fn().mockResolvedValue(updatedCell)
+                })
               })
             })
           }
@@ -509,8 +542,13 @@ describe('Spreadsheet API Endpoints', () => {
           const trx = {
             selectFrom: vi.fn().mockReturnValue({
               selectAll: vi.fn().mockReturnValue({
-                where: vi.fn().mockReturnValue({
-                  executeTakeFirst: vi.fn().mockResolvedValue(null) // No existing cell
+                where: vi.fn().mockImplementation(() => {
+                  // Return an object that supports chained where calls
+                  const chainableWhere: any = {
+                    where: vi.fn().mockImplementation(() => chainableWhere),
+                    executeTakeFirst: vi.fn().mockResolvedValue(null) // No existing cell
+                  }
+                  return chainableWhere
                 })
               })
             }),
@@ -518,6 +556,15 @@ describe('Spreadsheet API Endpoints', () => {
               values: vi.fn().mockReturnValue({
                 returningAll: vi.fn().mockReturnValue({
                   executeTakeFirstOrThrow: vi.fn().mockResolvedValue(newCell)
+                }),
+                execute: vi.fn().mockResolvedValue({}) // For handleFormula if needed
+              })
+            }),
+            // Add updateTable just in case logic changes or handleFormula is called
+            updateTable: vi.fn().mockReturnValue({
+              set: vi.fn().mockReturnValue({
+                where: vi.fn().mockReturnValue({
+                  execute: vi.fn().mockResolvedValue({})
                 })
               })
             })
@@ -621,7 +668,8 @@ describe('Spreadsheet API Endpoints', () => {
 
   describe('Error Handling', () => {
     test('should handle database unavailable globally', async () => {
-      vi.doMock('../../src/db/db', () => ({ db: undefined }))
+      const originalMockDb = mockDb
+      mockDb = undefined
 
       const endpoints = [
         () => request(app).get('/api/spreadsheets'),
@@ -638,6 +686,8 @@ describe('Spreadsheet API Endpoints', () => {
         const response = await endpoint().expect(503)
         expect(response).toHaveErrorResponse('DB_UNAVAILABLE')
       }
+      // Restore mockDb
+      mockDb = originalMockDb
     })
 
     test('should handle unexpected errors', async () => {
@@ -669,8 +719,13 @@ describe('Spreadsheet API Endpoints', () => {
           const trx = {
             selectFrom: vi.fn().mockReturnValue({
               selectAll: vi.fn().mockReturnValue({
-                where: vi.fn().mockReturnValue({
-                  executeTakeFirst: vi.fn().mockResolvedValue(null)
+                where: vi.fn().mockImplementation(() => {
+                  // Return an object that supports chained where calls
+                  const chainableWhere: any = {
+                    where: vi.fn().mockImplementation(() => chainableWhere),
+                    executeTakeFirst: vi.fn().mockResolvedValue(null)
+                  }
+                  return chainableWhere
                 })
               })
             }),
@@ -678,6 +733,14 @@ describe('Spreadsheet API Endpoints', () => {
               values: vi.fn().mockReturnValue({
                 returningAll: vi.fn().mockReturnValue({
                   executeTakeFirstOrThrow: vi.fn().mockResolvedValue(TEST_CELLS.TEXT_CELL)
+                }),
+                execute: vi.fn().mockResolvedValue({})
+              })
+            }),
+            updateTable: vi.fn().mockReturnValue({
+              set: vi.fn().mockReturnValue({
+                where: vi.fn().mockReturnValue({
+                  execute: vi.fn().mockResolvedValue({})
                 })
               })
             })

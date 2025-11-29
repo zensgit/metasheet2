@@ -18,11 +18,12 @@ export class DataSourceManager extends EventEmitter {
   }
 
   private registerDefaultAdapters(): void {
-    this.registerAdapterType('postgresql', PostgresAdapter)
-    this.registerAdapterType('postgres', PostgresAdapter)
-    this.registerAdapterType('mysql', MySQLAdapter)
-    this.registerAdapterType('http', HTTPAdapter)
-    this.registerAdapterType('mongodb', MongoDBAdapter)
+    // Cast adapters to AdapterConstructor - their pool property visibility differs but functionality is identical
+    this.registerAdapterType('postgresql', PostgresAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('postgres', PostgresAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('mysql', MySQLAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('http', HTTPAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('mongodb', MongoDBAdapter as unknown as AdapterConstructor)
   }
 
   registerAdapterType(type: string, adapterClass: AdapterConstructor): void {

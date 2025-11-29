@@ -10,30 +10,14 @@ export default defineConfig({
     deps: {
       interopDefault: true
     },
-    // TODO: Fix these tests - temporarily excluded to unblock CI
-    // Tracked in: https://github.com/zensgit/metasheet2/issues/TBD
+    // Excluded tests - All unit tests enabled as of Session 9
+    // Integration tests require database/external services and custom PluginLoader API not yet implemented
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
-      // Integration tests requiring running server
+      // Integration tests require pluginDirs option in PluginLoader constructor (not implemented)
+      // and require running database/external services
       'tests/integration/**',
-      // Unit tests with mock issues
-      'tests/unit/**',
-      // Plugin loader tests
-      'tests/plugin-loader*.test.ts',
-      'tests/plugin-permissions*.test.ts',
-      'tests/permission*.test.ts',
-      // Src tests with mock/dependency issues
-      'src/__tests__/**',
-      'src/cache/__tests__/**',
-      'src/core/__tests__/**',
-      'src/guards/__tests__/**',
-      'src/metrics/__tests__/**',
-      'src/rbac/__tests__/**',
-      'src/routes/__tests__/**',
-      'src/tests/**',
-      // Root-level __tests__ dirs
-      'core/__tests__/**',
     ],
     coverage: {
       provider: 'v8',

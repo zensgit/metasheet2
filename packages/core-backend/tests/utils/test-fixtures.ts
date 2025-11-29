@@ -38,8 +38,8 @@ export const BASIC_SPREADSHEET = {
     version: 1
   },
   created_by: TEST_IDS.USER_1,
-  created_at: new Date('2024-01-01T00:00:00Z'),
-  updated_at: new Date('2024-01-01T00:00:00Z'),
+  created_at: '2024-01-01T00:00:00.000Z',
+  updated_at: '2024-01-01T00:00:00.000Z',
   deleted_at: null
 }
 
@@ -64,8 +64,8 @@ export const BASIC_SHEET = {
     showHeaders: true,
     showGridlines: true
   },
-  created_at: new Date('2024-01-01T00:00:00Z'),
-  updated_at: new Date('2024-01-01T00:00:00Z')
+  created_at: '2024-01-01T00:00:00.000Z',
+  updated_at: '2024-01-01T00:00:00.000Z'
 }
 
 // Cell fixtures with different data types
@@ -90,7 +90,7 @@ export const TEST_CELLS = {
     locked: false,
     comment: null,
     updated_by: TEST_IDS.USER_1,
-    updated_at: new Date('2024-01-01T00:00:00Z')
+    updated_at: '2024-01-01T00:00:00.000Z'
   },
 
   NUMBER_CELL: {
@@ -112,7 +112,7 @@ export const TEST_CELLS = {
     locked: false,
     comment: null,
     updated_by: TEST_IDS.USER_1,
-    updated_at: new Date('2024-01-01T00:00:00Z')
+    updated_at: '2024-01-01T00:00:00.000Z'
   },
 
   FORMULA_CELL: {

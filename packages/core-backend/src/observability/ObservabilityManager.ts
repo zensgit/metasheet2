@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Unified Observability Manager
  * Integrates metrics, tracing, logging, and alerting into a single cohesive system

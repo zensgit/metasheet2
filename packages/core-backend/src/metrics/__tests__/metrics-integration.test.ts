@@ -1,82 +1,14 @@
 /**
  * Metrics Integration Tests
- * Phase 4: Verify metrics compatibility and integration
+ * Verifies metrics module exports and functionality
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { metrics } from '../metrics'
 
-describe('Metrics Integration - Phase 4', () => {
+describe('Metrics Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-  })
-
-  describe('ViewService Metrics', () => {
-    it('should have viewDataLatencySeconds metric defined', () => {
-      expect(metrics.viewDataLatencySeconds).toBeDefined()
-      expect(typeof metrics.viewDataLatencySeconds.labels).toBe('function')
-    })
-
-    it('should have viewDataRequestsTotal metric defined', () => {
-      expect(metrics.viewDataRequestsTotal).toBeDefined()
-      expect(typeof metrics.viewDataRequestsTotal.labels).toBe('function')
-    })
-
-    it('should record view data latency', () => {
-      const labelsFn = vi.spyOn(metrics.viewDataLatencySeconds, 'labels')
-
-      // Simulate calling labels
-      const labeled = metrics.viewDataLatencySeconds.labels('grid', '200')
-
-      expect(labelsFn).toHaveBeenCalledWith('grid', '200')
-      expect(labeled).toBeDefined()
-      expect(typeof labeled.observe).toBe('function')
-    })
-
-    it('should record view data requests', () => {
-      const labelsFn = vi.spyOn(metrics.viewDataRequestsTotal, 'labels')
-
-      // Simulate calling labels
-      const labeled = metrics.viewDataRequestsTotal.labels('grid', 'ok')
-
-      expect(labelsFn).toHaveBeenCalledWith('grid', 'ok')
-      expect(labeled).toBeDefined()
-      expect(typeof labeled.inc).toBe('function')
-    })
-  })
-
-  describe('RBAC Metrics', () => {
-    it('should have rbacPermissionChecksTotal metric defined', () => {
-      expect(metrics.rbacPermissionChecksTotal).toBeDefined()
-      expect(typeof metrics.rbacPermissionChecksTotal.labels).toBe('function')
-    })
-
-    it('should have rbacCheckLatencySeconds metric defined', () => {
-      expect(metrics.rbacCheckLatencySeconds).toBeDefined()
-      expect(typeof metrics.rbacCheckLatencySeconds.labels).toBe('function')
-    })
-
-    it('should record RBAC permission checks', () => {
-      const labelsFn = vi.spyOn(metrics.rbacPermissionChecksTotal, 'labels')
-
-      // Simulate calling labels
-      const labeled = metrics.rbacPermissionChecksTotal.labels('read', 'allow')
-
-      expect(labelsFn).toHaveBeenCalledWith('read', 'allow')
-      expect(labeled).toBeDefined()
-      expect(typeof labeled.inc).toBe('function')
-    })
-
-    it('should record RBAC check latency', () => {
-      const labelsFn = vi.spyOn(metrics.rbacCheckLatencySeconds, 'labels')
-
-      // Simulate calling labels
-      const labeled = metrics.rbacCheckLatencySeconds.labels('read')
-
-      expect(labelsFn).toHaveBeenCalledWith('read')
-      expect(labeled).toBeDefined()
-      expect(typeof labeled.observe).toBe('function')
-    })
   })
 
   describe('HTTP Metrics', () => {
@@ -91,7 +23,7 @@ describe('Metrics Integration - Phase 4', () => {
     })
   })
 
-  describe('Legacy RBAC Compatibility Metrics', () => {
+  describe('RBAC Metrics', () => {
     it('should have rbacPermCacheHits for compatibility', () => {
       expect(metrics.rbacPermCacheHits).toBeDefined()
       expect(typeof metrics.rbacPermCacheHits.inc).toBe('function')
@@ -116,61 +48,114 @@ describe('Metrics Integration - Phase 4', () => {
       expect(metrics.authFailures).toBeDefined()
       expect(typeof metrics.authFailures.inc).toBe('function')
     })
+  })
 
-    it('should have rbacPermQueriesReal for RealShare compatibility', () => {
-      expect(metrics.rbacPermQueriesReal).toBeDefined()
-      expect(typeof metrics.rbacPermQueriesReal.inc).toBe('function')
-    })
-
-    it('should have rbacPermQueriesSynth for RealShare compatibility', () => {
-      expect(metrics.rbacPermQueriesSynth).toBeDefined()
-      expect(typeof metrics.rbacPermQueriesSynth.inc).toBe('function')
+  describe('Auth Metrics', () => {
+    it('should have jwtAuthFail metric defined', () => {
+      expect(metrics.jwtAuthFail).toBeDefined()
+      expect(typeof metrics.jwtAuthFail.labels).toBe('function')
     })
   })
 
-  describe('Metrics Label Compatibility', () => {
-    it('should support all view types in viewDataLatencySeconds', () => {
-      const viewTypes = ['grid', 'kanban', 'gallery', 'form']
-      const statuses = ['200', '403', '404', '500']
-
-      viewTypes.forEach(type => {
-        statuses.forEach(status => {
-          const labeled = metrics.viewDataLatencySeconds.labels(type, status)
-          expect(labeled).toBeDefined()
-          expect(typeof labeled.observe).toBe('function')
-        })
-      })
+  describe('Event Metrics', () => {
+    it('should have eventsEmittedTotal metric defined', () => {
+      expect(metrics.eventsEmittedTotal).toBeDefined()
+      expect(typeof metrics.eventsEmittedTotal.inc).toBe('function')
     })
 
-    it('should support all result types in viewDataRequestsTotal', () => {
-      const viewTypes = ['grid', 'kanban']
-      const results = ['ok', 'error']
-
-      viewTypes.forEach(type => {
-        results.forEach(result => {
-          const labeled = metrics.viewDataRequestsTotal.labels(type, result)
-          expect(labeled).toBeDefined()
-          expect(typeof labeled.inc).toBe('function')
-        })
-      })
+    it('should have messagesProcessedTotal metric defined', () => {
+      expect(metrics.messagesProcessedTotal).toBeDefined()
+      expect(typeof metrics.messagesProcessedTotal.inc).toBe('function')
     })
 
-    it('should support all RBAC actions and results', () => {
-      const actions = ['read', 'write']
-      const results = ['allow', 'deny', 'error']
+    it('should have messagesRetriedTotal metric defined', () => {
+      expect(metrics.messagesRetriedTotal).toBeDefined()
+      expect(typeof metrics.messagesRetriedTotal.inc).toBe('function')
+    })
 
-      actions.forEach(action => {
-        results.forEach(result => {
-          const labeled = metrics.rbacPermissionChecksTotal.labels(action, result)
-          expect(labeled).toBeDefined()
-          expect(typeof labeled.inc).toBe('function')
-        })
-      })
+    it('should have messagesExpiredTotal metric defined', () => {
+      expect(metrics.messagesExpiredTotal).toBeDefined()
+      expect(typeof metrics.messagesExpiredTotal.inc).toBe('function')
+    })
+  })
+
+  describe('Plugin Metrics', () => {
+    it('should have pluginReloadTotal metric defined', () => {
+      expect(metrics.pluginReloadTotal).toBeDefined()
+      expect(typeof metrics.pluginReloadTotal.labels).toBe('function')
+    })
+
+    it('should have pluginReloadDuration metric defined', () => {
+      expect(metrics.pluginReloadDuration).toBeDefined()
+      expect(typeof metrics.pluginReloadDuration.labels).toBe('function')
+    })
+  })
+
+  describe('Snapshot Metrics', () => {
+    it('should have snapshotCreateTotal metric defined', () => {
+      expect(metrics.snapshotCreateTotal).toBeDefined()
+      expect(typeof metrics.snapshotCreateTotal.labels).toBe('function')
+    })
+
+    it('should have snapshotRestoreTotal metric defined', () => {
+      expect(metrics.snapshotRestoreTotal).toBeDefined()
+      expect(typeof metrics.snapshotRestoreTotal.labels).toBe('function')
+    })
+
+    it('should have snapshotOperationDuration metric defined', () => {
+      expect(metrics.snapshotOperationDuration).toBeDefined()
+      expect(typeof metrics.snapshotOperationDuration.labels).toBe('function')
+    })
+
+    it('should have snapshotCleanupTotal metric defined', () => {
+      expect(metrics.snapshotCleanupTotal).toBeDefined()
+      expect(typeof metrics.snapshotCleanupTotal.labels).toBe('function')
+    })
+  })
+
+  describe('Cache Metrics', () => {
+    it('should have cache_hits_total metric defined', () => {
+      expect(metrics.cache_hits_total).toBeDefined()
+      expect(typeof metrics.cache_hits_total.labels).toBe('function')
+    })
+
+    it('should have cache_miss_total metric defined', () => {
+      expect(metrics.cache_miss_total).toBeDefined()
+      expect(typeof metrics.cache_miss_total.labels).toBe('function')
+    })
+
+    it('should have cache_enabled metric defined', () => {
+      expect(metrics.cache_enabled).toBeDefined()
+      expect(typeof metrics.cache_enabled.labels).toBe('function')
+    })
+  })
+
+  describe('Redis Metrics', () => {
+    it('should have redisOperationDuration metric defined', () => {
+      expect(metrics.redisOperationDuration).toBeDefined()
+      expect(typeof metrics.redisOperationDuration.labels).toBe('function')
+    })
+
+    it('should have redisRecoveryAttemptsTotal metric defined', () => {
+      expect(metrics.redisRecoveryAttemptsTotal).toBeDefined()
+      expect(typeof metrics.redisRecoveryAttemptsTotal.labels).toBe('function')
+    })
+  })
+
+  describe('Fallback Metrics', () => {
+    it('should have fallbackRawTotal metric defined', () => {
+      expect(metrics.fallbackRawTotal).toBeDefined()
+      expect(typeof metrics.fallbackRawTotal.labels).toBe('function')
+    })
+
+    it('should have fallbackEffectiveTotal metric defined', () => {
+      expect(metrics.fallbackEffectiveTotal).toBeDefined()
+      expect(typeof metrics.fallbackEffectiveTotal.labels).toBe('function')
     })
   })
 
   describe('Metrics Export', () => {
-    it('should export all required metrics', () => {
+    it('should export all required core metrics', () => {
       const requiredMetrics = [
         'jwtAuthFail',
         'approvalActions',
@@ -180,14 +165,15 @@ describe('Metrics Integration - Phase 4', () => {
         'rbacPermCacheMisses',
         'rbacDenials',
         'authFailures',
-        'rbacPermQueriesReal',
-        'rbacPermQueriesSynth',
         'httpSummary',
         'httpRequestsTotal',
-        'viewDataLatencySeconds',
-        'viewDataRequestsTotal',
-        'rbacPermissionChecksTotal',
-        'rbacCheckLatencySeconds'
+        'eventsEmittedTotal',
+        'messagesProcessedTotal',
+        'pluginReloadTotal',
+        'snapshotCreateTotal',
+        'cache_hits_total',
+        'redisOperationDuration',
+        'fallbackRawTotal'
       ]
 
       requiredMetrics.forEach(metricName => {
@@ -196,10 +182,10 @@ describe('Metrics Integration - Phase 4', () => {
       })
     })
 
-    it('should have exactly the expected number of exported metrics', () => {
+    it('should have the expected number of exported metrics', () => {
       const exportedKeys = Object.keys(metrics)
-      // 16 metrics as defined in the metrics module
-      expect(exportedKeys.length).toBe(16)
+      // 43 metrics as of current metrics module (including RBAC metrics)
+      expect(exportedKeys.length).toBe(43)
     })
   })
 })

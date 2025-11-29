@@ -21,71 +21,71 @@ describe('SafetyGuard', () => {
   });
 
   describe('Risk Assessment', () => {
-    it('should classify DROP_TABLE as CRITICAL', () => {
+    it('should classify DROP_TABLE as CRITICAL', async () => {
       const context: OperationContext = {
         operation: OperationType.DROP_TABLE,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.assessment.riskLevel).toBe(RiskLevel.CRITICAL);
       expect(result.assessment.requiresDoubleConfirm).toBe(true);
     });
 
-    it('should classify DELETE_DATA as HIGH', () => {
+    it('should classify DELETE_DATA as HIGH', async () => {
       const context: OperationContext = {
         operation: OperationType.DELETE_DATA,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.assessment.riskLevel).toBe(RiskLevel.HIGH);
       expect(result.assessment.requiresConfirmation).toBe(true);
     });
 
-    it('should classify RESET_METRICS as LOW', () => {
+    it('should classify RESET_METRICS as LOW', async () => {
       const context: OperationContext = {
         operation: OperationType.RESET_METRICS,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.assessment.riskLevel).toBe(RiskLevel.LOW);
       expect(result.assessment.requiresConfirmation).toBe(false);
     });
   });
 
   describe('Confirmation Flow', () => {
-    it('should block HIGH risk operations without token', () => {
+    it('should block HIGH risk operations without token', async () => {
       const context: OperationContext = {
         operation: OperationType.DELETE_DATA,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.allowed).toBe(false);
       expect(result.confirmationToken).toBeDefined();
       expect(result.tokenExpiry).toBeDefined();
     });
 
-    it('should allow LOW risk operations immediately', () => {
+    it('should allow LOW risk operations immediately', async () => {
       const context: OperationContext = {
         operation: OperationType.RESET_METRICS,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.allowed).toBe(true);
     });
 
-    it('should allow operation with valid token after acknowledgment', () => {
+    it('should allow operation with valid token after acknowledgment', async () => {
       const context: OperationContext = {
         operation: OperationType.DELETE_DATA,
         initiator: 'test@example.com'
       };
 
       // First check - gets token
-      const firstResult = guard.checkOperation(context);
+      const firstResult = await guard.checkOperation(context);
       expect(firstResult.allowed).toBe(false);
       const token = firstResult.confirmationToken!;
 
@@ -101,17 +101,17 @@ describe('SafetyGuard', () => {
         ...context,
         confirmationToken: token
       };
-      const secondResult = guard.checkOperation(secondContext);
+      const secondResult = await guard.checkOperation(secondContext);
       expect(secondResult.allowed).toBe(true);
     });
 
-    it('should require double-confirm for CRITICAL operations', () => {
+    it('should require double-confirm for CRITICAL operations', async () => {
       const context: OperationContext = {
         operation: OperationType.DROP_TABLE,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.allowed).toBe(false);
       expect(result.assessment.requiresDoubleConfirm).toBe(true);
 
@@ -134,13 +134,13 @@ describe('SafetyGuard', () => {
       expect(passVerification.valid).toBe(true);
     });
 
-    it('should reject wrong typed confirmation', () => {
+    it('should reject wrong typed confirmation', async () => {
       const context: OperationContext = {
         operation: OperationType.DROP_TABLE,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       const token = result.confirmationToken!;
 
       const verification = guard.verifyConfirmation({
@@ -167,7 +167,7 @@ describe('SafetyGuard', () => {
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       const token = result.confirmationToken!;
 
       // Wait for token to expire
@@ -190,7 +190,7 @@ describe('SafetyGuard', () => {
       expect(verification.reason).toContain('Invalid');
     });
 
-    it('should track pending confirmations', () => {
+    it('should track pending confirmations', async () => {
       const context: OperationContext = {
         operation: OperationType.DELETE_DATA,
         initiator: 'test@example.com'
@@ -198,16 +198,16 @@ describe('SafetyGuard', () => {
 
       expect(guard.getPendingCount()).toBe(0);
 
-      guard.checkOperation(context);
+      await guard.checkOperation(context);
       expect(guard.getPendingCount()).toBe(1);
 
-      guard.checkOperation({ ...context, initiator: 'other@example.com' });
+      await guard.checkOperation({ ...context, initiator: 'other@example.com' });
       expect(guard.getPendingCount()).toBe(2);
     });
   });
 
   describe('Configuration', () => {
-    it('should allow all operations when disabled', () => {
+    it('should allow all operations when disabled', async () => {
       guard.updateConfig({ enabled: false });
 
       const context: OperationContext = {
@@ -215,11 +215,11 @@ describe('SafetyGuard', () => {
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.allowed).toBe(true);
     });
 
-    it('should block operations in blockedOperations list', () => {
+    it('should block operations in blockedOperations list', async () => {
       guard.updateConfig({
         blockedOperations: [OperationType.SHUTDOWN_SERVICE]
       });
@@ -229,7 +229,7 @@ describe('SafetyGuard', () => {
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.allowed).toBe(false);
       expect(result.blockedReason).toContain('blocked by security policy');
       expect(result.confirmationToken).toBeUndefined();
@@ -237,37 +237,37 @@ describe('SafetyGuard', () => {
   });
 
   describe('Risk Description and Safeguards', () => {
-    it('should provide risk description', () => {
+    it('should provide risk description', async () => {
       const context: OperationContext = {
         operation: OperationType.DROP_TABLE,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.assessment.riskDescription).toContain(
         'permanently delete the table'
       );
     });
 
-    it('should provide safeguards', () => {
+    it('should provide safeguards', async () => {
       const context: OperationContext = {
         operation: OperationType.DELETE_DATA,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(context);
+      const result = await guard.checkOperation(context);
       expect(result.assessment.safeguards).toContain(
         'Create a snapshot before proceeding'
       );
     });
 
-    it('should estimate impact correctly', () => {
+    it('should estimate impact correctly', async () => {
       const systemWideOp: OperationContext = {
         operation: OperationType.SHUTDOWN_SERVICE,
         initiator: 'test@example.com'
       };
 
-      const result = guard.checkOperation(systemWideOp);
+      const result = await guard.checkOperation(systemWideOp);
       expect(result.assessment.impact.scope).toBe('system-wide');
       expect(result.assessment.impact.reversible).toBe(true);
 
@@ -276,7 +276,7 @@ describe('SafetyGuard', () => {
         initiator: 'test@example.com'
       };
 
-      const result2 = guard.checkOperation(irreversibleOp);
+      const result2 = await guard.checkOperation(irreversibleOp);
       expect(result2.assessment.impact.reversible).toBe(false);
     });
   });

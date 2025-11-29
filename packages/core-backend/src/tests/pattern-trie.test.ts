@@ -1,9 +1,10 @@
 /**
  * Pattern Trie Tests
  * Issue #28: Comprehensive tests for Trie-based pattern matching optimization
+ * Migrated from Jest to Vitest
  */
 
-import { describe, it, expect, beforeEach } from '@jest/globals'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { PatternTrie, Subscription } from '../messaging/pattern-trie'
 
 describe('PatternTrie', () => {
@@ -16,28 +17,28 @@ describe('PatternTrie', () => {
       {
         id: 'sub-1',
         pattern: 'user.login',
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now(),
         metadata: { test: 'exact' }
       },
       {
         id: 'sub-2',
         pattern: 'user.*',
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now(),
         metadata: { test: 'prefix' }
       },
       {
         id: 'sub-3',
         pattern: '*.login',
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now(),
         metadata: { test: 'suffix' }
       },
       {
         id: 'sub-4',
         pattern: 'system.*.event',
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now(),
         metadata: { test: 'complex' }
       }
@@ -181,7 +182,7 @@ describe('PatternTrie', () => {
       const complexSub = {
         id: 'complex-1',
         pattern: '*.*.event',
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now()
       }
 
@@ -234,7 +235,7 @@ describe('PatternTrie', () => {
         trie.addPattern(`pattern.${i}.*`, {
           id: `sub-${i}`,
           pattern: `pattern.${i}.*`,
-          callback: jest.fn(),
+          callback: vi.fn(),
           createdAt: Date.now()
         })
       }
@@ -254,7 +255,7 @@ describe('PatternTrie', () => {
         trie.addPattern(`category.${i % 10}.*`, {
           id: `sub-${i}`,
           pattern: `category.${i % 10}.*`,
-          callback: jest.fn(),
+          callback: vi.fn(),
           createdAt: Date.now()
         })
       }
@@ -276,7 +277,7 @@ describe('PatternTrie', () => {
       trie.addPattern(deepPattern, {
         id: 'deep-sub',
         pattern: deepPattern,
-        callback: jest.fn(),
+        callback: vi.fn(),
         createdAt: Date.now()
       })
 

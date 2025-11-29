@@ -21,8 +21,10 @@ export function validateManifest(manifest: PluginManifest, caps?: CapabilityRegi
   if (manifest.version && !semver.valid(manifest.version)) {
     issues.push({ level: 'error', message: `Invalid version: ${manifest.version}` })
   }
-  if (caps && manifest.capabilities) {
-    for (const c of manifest.capabilities) {
+  // Check capabilities if present (optional extension field not in base manifest type)
+  const manifestWithCaps = manifest as PluginManifest & { capabilities?: string[] }
+  if (caps && manifestWithCaps.capabilities) {
+    for (const c of manifestWithCaps.capabilities) {
       if (!caps.has(c)) issues.push({ level: 'warning', message: `Capability not in matrix: ${c}` })
     }
   }

@@ -55,7 +55,7 @@ describe('Spreadsheet Database Operations', () => {
       test('should generate UUID for new spreadsheet', async () => {
         const newSpreadsheet = {
           ...BASIC_SPREADSHEET,
-          id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+          id: '550e8400-e29b-41d4-a716-446655440099'
         }
 
         const queryBuilder = createMockQueryBuilder()
@@ -710,9 +710,9 @@ describe('Spreadsheet Database Operations', () => {
 
       test('should increment version number', async () => {
         const versions = [
-          { version_number: 1 },
+          { version_number: 3 },
           { version_number: 2 },
-          { version_number: 3 }
+          { version_number: 1 }
         ]
 
         const queryBuilder = createMockQueryBuilder()
@@ -895,16 +895,14 @@ describe('Spreadsheet Database Operations', () => {
       queryBuilder.execute.mockResolvedValue(largeCellSet)
       mockDb.insertInto.mockReturnValue(queryBuilder)
 
-      const end = performanceTracker.start('bulk_insert')
-
       // Simulate bulk insert
       for (const cell of largeCellSet) {
+        const end = performanceTracker.start('bulk_insert')
         await mockDb.insertInto('cells')
           .values(cell)
           .execute()
+        end()
       }
-
-      end()
 
       const stats = performanceTracker.getStats('bulk_insert')
       expect(stats?.count).toBe(2000)

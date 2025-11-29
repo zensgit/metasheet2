@@ -11,7 +11,7 @@ import {
   PluginRegistration,
   PluginCapability,
   PluginStatus,
-  PluginEvent,
+  PluginEventType,
   PluginDependency,
   CoreAPI
 } from '../types/plugin'
@@ -187,7 +187,7 @@ export class PluginRegistry extends EventEmitter {
   private setupLoaderListeners(): void {
     this.loader.on('plugin:loaded', (pluginName: string) => {
       this.updatePluginStatus(pluginName, PluginStatus.ENABLED)
-      this.emit(PluginEvent.ENABLED, pluginName)
+      this.emit(PluginEventType.ENABLED, pluginName)
     })
 
     this.loader.on('plugin:activated', (pluginName: string) => {
@@ -200,7 +200,7 @@ export class PluginRegistry extends EventEmitter {
 
     this.loader.on('plugin:error', ({ plugin, error }: { plugin: string; error: any }) => {
       this.updatePluginStatus(plugin, PluginStatus.ERROR, (error as Error).message)
-      this.emit(PluginEvent.ERROR, { plugin, error })
+      this.emit(PluginEventType.ERROR, { plugin, error })
     })
   }
 
@@ -239,7 +239,7 @@ export class PluginRegistry extends EventEmitter {
       this.capabilities.set(manifest.name, capabilities)
 
       this.logger.info(`Plugin registered successfully: ${manifest.name}`)
-      this.emit(PluginEvent.INSTALLED, manifest.name)
+      this.emit(PluginEventType.INSTALLED, manifest.name)
 
       return registration
     } catch (error) {
@@ -306,7 +306,7 @@ export class PluginRegistry extends EventEmitter {
       this.updatePluginStatus(pluginName, PluginStatus.DISABLED)
 
       this.logger.info(`Plugin disabled: ${pluginName}`)
-      this.emit(PluginEvent.DISABLED, pluginName)
+      this.emit(PluginEventType.DISABLED, pluginName)
     } catch (error) {
       this.logger.error(`Failed to disable plugin ${pluginName}`, error as Error)
       throw error
@@ -336,7 +336,7 @@ export class PluginRegistry extends EventEmitter {
       this.capabilities.delete(pluginName)
 
       this.logger.info(`Plugin uninstalled: ${pluginName}`)
-      this.emit(PluginEvent.UNINSTALLED, pluginName)
+      this.emit(PluginEventType.UNINSTALLED, pluginName)
     } catch (error) {
       this.logger.error(`Failed to uninstall plugin ${pluginName}`, error as Error)
       throw error
@@ -419,7 +419,7 @@ export class PluginRegistry extends EventEmitter {
    */
   getPluginsByCapability(capability: PluginCapability): PluginRegistration[] {
     return Array.from(this.registrations.values()).filter(p =>
-      p.capabilities.includes(capability)
+      p.capabilities?.includes(capability)
     )
   }
 
@@ -575,7 +575,9 @@ export class PluginRegistry extends EventEmitter {
     }
 
     // 检查清单中的权限是否包含所需权限
-    const manifestPermissions = new Set(manifest.permissions || [])
+    // Handle both old array format and new V2 object format
+    const perms = manifest.permissions
+    const manifestPermissions = new Set(Array.isArray(perms) ? perms : [])
 
     for (const required of requiredPermissions) {
       if (!manifestPermissions.has(required) && !manifestPermissions.has('*')) {
@@ -640,7 +642,7 @@ export class PluginRegistry extends EventEmitter {
       }
 
       // 统计能力
-      for (const capability of registration.capabilities) {
+      for (const capability of registration.capabilities || []) {
         stats.capabilities[capability]++
       }
     }
@@ -655,7 +657,7 @@ export class PluginRegistry extends EventEmitter {
     const graph: Record<string, string[]> = {}
 
     for (const [name, registration] of this.registrations) {
-      graph[name] = registration.dependencies.map(dep => dep.name)
+      graph[name] = (registration.dependencies || []).map(dep => dep.name)
     }
 
     return graph

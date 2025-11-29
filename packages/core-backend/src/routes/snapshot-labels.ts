@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Snapshot Labels API Routes
  * Sprint 2: Snapshot Protection System

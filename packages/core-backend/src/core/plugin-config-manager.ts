@@ -229,7 +229,7 @@ class DatabaseConfigStorage implements ConfigStorage {
           last_modified: config.lastModified,
           modified_by: config.modifiedBy
         })
-        .onConflict(oc => oc.column('plugin_name').doUpdateSet({
+        .onConflict((oc: any) => oc.column('plugin_name').doUpdateSet({
           config: config.config,
           schema: config.schema,
           version: config.version,
@@ -550,10 +550,10 @@ export class PluginConfigManager extends EventEmitter {
     if (this.validationService) {
       // 使用验证服务
       const zodSchema = this.convertToZodSchema(schema)
-      const result = this.validationService.validateSync(config, zodSchema)
+      const isValid = await this.validationService.validate(zodSchema, config)
 
-      if (!result.success) {
-        throw new Error(`Config validation failed: ${result.errors?.map(e => e.message).join(', ')}`)
+      if (!isValid) {
+        throw new Error(`Config validation failed for plugin: ${pluginName}`)
       }
     } else {
       // 简单的模式验证

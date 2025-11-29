@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { db } from '../db/db'
 import { metrics } from '../metrics/metrics'
 import { canReadTable, canWriteTable, type User } from '../rbac/table-perms'

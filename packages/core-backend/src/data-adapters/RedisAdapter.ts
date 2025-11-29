@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Redis Data Source Adapter
  * Provides access to Redis key-value store

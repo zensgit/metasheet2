@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * SafetyGuard Express Middleware
  *

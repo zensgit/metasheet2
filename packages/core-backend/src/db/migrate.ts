@@ -69,6 +69,14 @@ async function main() {
   console.log('Migrations complete')
 }
 
+export async function listMigrations(): Promise<string[]> {
+  const dir = path.join(__dirname, '..', '..', 'migrations')
+  if (!fs.existsSync(dir)) {
+    return []
+  }
+  return fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort()
+}
+
 // Only run when executed directly, not when imported in tests
 if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
   main().catch(err => {

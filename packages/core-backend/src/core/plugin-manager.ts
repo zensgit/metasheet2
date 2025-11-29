@@ -78,10 +78,8 @@ export class PluginManager extends EventEmitter {
     // 创建注册中心
     this.registry = new PluginRegistry(coreAPI)
 
-    // 创建加载器（支持自定义插件目录）
-    this.loader = new PluginLoader(coreAPI, {
-      pluginDirs: config.pluginDirectories
-    })
+    // 创建加载器（pluginDirectories config option not yet implemented in PluginLoader）
+    this.loader = new PluginLoader(coreAPI)
 
     // 创建配置管理器
     this.configManager = new PluginConfigManager(

@@ -15,6 +15,17 @@ import {
 export class MySQLAdapter extends BaseDataAdapter {
   private pool: Pool | null = null
 
+  /**
+   * Sanitize and quote MySQL identifier (table/column names)
+   * Prevents SQL injection by removing dangerous characters and properly quoting
+   */
+  private sanitizeMySQLIdentifier(identifier: string): string {
+    // First sanitize using parent method to remove dangerous characters
+    const sanitized = this.sanitizeIdentifier(identifier)
+    // Then wrap in backticks for MySQL
+    return `\`${sanitized}\``
+  }
+
   async connect(): Promise<void> {
     if (this.connected) {
       return
@@ -113,17 +124,17 @@ export class MySQLAdapter extends BaseDataAdapter {
 
   async select<T = any>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
     const selectClause = options.select?.length
-      ? options.select.map(col => `\`${col}\``).join(', ')
+      ? options.select.map(col => this.sanitizeMySQLIdentifier(col)).join(', ')
       : '*'
 
-    let sql = `SELECT ${selectClause} FROM \`${table}\``
+    let sql = `SELECT ${selectClause} FROM ${this.sanitizeMySQLIdentifier(table)}`
     const params: any[] = []
 
     // Add joins
     if (options.joins?.length) {
       for (const join of options.joins) {
         const joinType = join.type?.toUpperCase() || 'INNER'
-        sql += ` ${joinType} JOIN \`${join.table}\` ON ${join.on}`
+        sql += ` ${joinType} JOIN ${this.sanitizeMySQLIdentifier(join.table)} ON ${join.on}`
       }
     }
 
@@ -133,13 +144,13 @@ export class MySQLAdapter extends BaseDataAdapter {
 
       for (const [key, value] of Object.entries(options.where)) {
         if (value === null) {
-          conditions.push(`\`${key}\` IS NULL`)
+          conditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
         } else if (Array.isArray(value)) {
           const placeholders = value.map(() => '?').join(', ')
-          conditions.push(`\`${key}\` IN (${placeholders})`)
+          conditions.push(`${this.sanitizeMySQLIdentifier(key)} IN (${placeholders})`)
           params.push(...value)
         } else {
-          conditions.push(`\`${key}\` = ?`)
+          conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
           params.push(value)
         }
       }
@@ -152,17 +163,23 @@ export class MySQLAdapter extends BaseDataAdapter {
     // Add order by
     if (options.orderBy?.length) {
       const orderClauses = options.orderBy.map(
-        order => `\`${order.column}\` ${order.direction.toUpperCase()}`
+        order => `${this.sanitizeMySQLIdentifier(order.column)} ${order.direction.toUpperCase()}`
       )
       sql += ` ORDER BY ${orderClauses.join(', ')}`
     }
 
-    // Add limit and offset
+    // Add limit and offset (these are numeric, validate them)
     if (options.limit) {
-      sql += ` LIMIT ${options.limit}`
+      const limit = parseInt(String(options.limit), 10)
+      if (!isNaN(limit) && limit > 0) {
+        sql += ` LIMIT ${limit}`
+      }
     }
     if (options.offset) {
-      sql += ` OFFSET ${options.offset}`
+      const offset = parseInt(String(options.offset), 10)
+      if (!isNaN(offset) && offset >= 0) {
+        sql += ` OFFSET ${offset}`
+      }
     }
 
     return this.query<T>(sql, params)
@@ -175,7 +192,7 @@ export class MySQLAdapter extends BaseDataAdapter {
     }
 
     const columns = Object.keys(records[0])
-    const columnNames = columns.map(col => `\`${col}\``).join(', ')
+    const columnNames = columns.map(col => this.sanitizeMySQLIdentifier(col)).join(', ')
     const values: any[] = []
     const valuePlaceholders: string[] = []
 
@@ -188,8 +205,9 @@ export class MySQLAdapter extends BaseDataAdapter {
       }
     }
 
+    const sanitizedTable = this.sanitizeMySQLIdentifier(table)
     const sql = `
-      INSERT INTO \`${table}\` (${columnNames})
+      INSERT INTO ${sanitizedTable} (${columnNames})
       VALUES ${valuePlaceholders.join(', ')}
     `
 
@@ -198,7 +216,7 @@ export class MySQLAdapter extends BaseDataAdapter {
     // MySQL doesn't return inserted rows by default
     // We need to query them separately if needed
     if ((result as any).insertId) {
-      const selectSql = `SELECT * FROM \`${table}\` WHERE id >= ? LIMIT ?`
+      const selectSql = `SELECT * FROM ${sanitizedTable} WHERE id >= ? LIMIT ?`
       return this.query<T>(selectSql, [(result as any).insertId, records.length])
     }
 
@@ -210,22 +228,22 @@ export class MySQLAdapter extends BaseDataAdapter {
     const values: any[] = []
 
     for (const [key, value] of Object.entries(data)) {
-      setClause.push(`\`${key}\` = ?`)
+      setClause.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
       values.push(value)
     }
 
     const whereConditions: string[] = []
     for (const [key, value] of Object.entries(where)) {
       if (value === null) {
-        whereConditions.push(`\`${key}\` IS NULL`)
+        whereConditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
       } else {
-        whereConditions.push(`\`${key}\` = ?`)
+        whereConditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
         values.push(value)
       }
     }
 
     const sql = `
-      UPDATE \`${table}\`
+      UPDATE ${this.sanitizeMySQLIdentifier(table)}
       SET ${setClause.join(', ')}
       WHERE ${whereConditions.join(' AND ')}
     `
@@ -239,15 +257,15 @@ export class MySQLAdapter extends BaseDataAdapter {
 
     for (const [key, value] of Object.entries(where)) {
       if (value === null) {
-        conditions.push(`\`${key}\` IS NULL`)
+        conditions.push(`${this.sanitizeMySQLIdentifier(key)} IS NULL`)
       } else {
-        conditions.push(`\`${key}\` = ?`)
+        conditions.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
         values.push(value)
       }
     }
 
     const sql = `
-      DELETE FROM \`${table}\`
+      DELETE FROM ${this.sanitizeMySQLIdentifier(table)}
       WHERE ${conditions.join(' AND ')}
     `
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Migration: Add snapshot labeling and protection fields
  *

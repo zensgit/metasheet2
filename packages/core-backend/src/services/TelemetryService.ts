@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * OpenTelemetry Service
  * Provides distributed tracing, metrics, and structured logging

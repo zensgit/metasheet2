@@ -6,6 +6,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { canReadTable, canWriteTable, type User } from '../table-perms'
 import * as metricsModule from '../../metrics/metrics'
 
+// Mock the RBAC service
+vi.mock('../service', () => ({
+  isAdmin: vi.fn().mockResolvedValue(false),
+  userHasPermission: vi.fn().mockResolvedValue(false),
+  listUserPermissions: vi.fn().mockResolvedValue([])
+}))
+
 // Mock metrics
 vi.mock('../../metrics/metrics', () => ({
   metrics: {

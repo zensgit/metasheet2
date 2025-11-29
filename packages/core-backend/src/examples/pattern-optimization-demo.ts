@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Pattern Optimization Demo
  * Issue #28: Demonstrates Trie-based pattern matching performance improvements

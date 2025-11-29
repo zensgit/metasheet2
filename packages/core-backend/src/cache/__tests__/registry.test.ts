@@ -3,19 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-// Conditional imports to prefer built JS during CI/test runs to avoid SSR helper issues
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { CacheRegistry } = (process.env.TEST_USE_DIST === 'true'
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ? require('../../../dist-cache/src/cache/registry.js')
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  : require('../registry'))
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { NullCache } = (process.env.TEST_USE_DIST === 'true'
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ? require('../../../dist-cache/src/cache/implementations/null-cache.js')
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  : require('../implementations/null-cache'))
+import { CacheRegistry } from '../registry'
+import { NullCache } from '../implementations/null-cache'
 
 describe('CacheRegistry', () => {
   let registry: CacheRegistry

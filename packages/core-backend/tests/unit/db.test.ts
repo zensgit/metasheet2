@@ -28,7 +28,10 @@ describe('Database Configuration', () => {
 
   describe('isDatabaseConfigured', () => {
     it('should return false when DATABASE_URL is not set', () => {
+      const originalUrl = process.env.DATABASE_URL
+      delete process.env.DATABASE_URL
       expect(isDatabaseConfigured()).toBe(false)
+      process.env.DATABASE_URL = originalUrl
     })
   })
 })

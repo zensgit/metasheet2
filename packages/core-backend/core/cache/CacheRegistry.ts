@@ -103,7 +103,7 @@ export class CacheRegistry {
         } catch (e) {
           this.current = new MemoryCache()
           this.implName = 'MemoryCache'
-          console.warn('[CacheRegistry] Redis init failed; falling back to MemoryCache:', e?.message || e)
+          console.warn('[CacheRegistry] Redis init failed; falling back to MemoryCache:', (e as Error)?.message || e)
         }
       } else {
         this.current = new MemoryCache()

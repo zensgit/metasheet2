@@ -11,7 +11,7 @@ import type {
   PluginDependency,
   DatabaseAPI
 } from '../types/plugin'
-import { PluginStatus, PluginEvent, PluginCapability } from '../types/plugin'
+import { PluginStatus, PluginEventType, PluginCapability } from '../types/plugin'
 import { PluginCapabilityManager } from './PluginCapabilities'
 import { Logger } from '../core/logger'
 
@@ -133,7 +133,7 @@ export class PluginRegistry extends EventEmitter {
       // 重新构建依赖图
       this.rebuildDependencyGraph()
 
-      const eventType = isUpdate ? PluginEvent.INSTALLED : PluginEvent.INSTALLED
+      const eventType = isUpdate ? PluginEventType.INSTALLED : PluginEventType.INSTALLED
       this.emit(eventType, registration)
 
       this.logger.info(`${isUpdate ? 'Updated' : 'Registered'} plugin: ${pluginName}`)
@@ -147,7 +147,7 @@ export class PluginRegistry extends EventEmitter {
         const errorRegistration = this.plugins.get(pluginName)!
         errorRegistration.status = PluginStatus.ERROR
         errorRegistration.error = (error as Error).message
-        this.emit(PluginEvent.ERROR, errorRegistration)
+        this.emit(PluginEventType.ERROR, errorRegistration)
       }
 
       throw error
@@ -187,7 +187,7 @@ export class PluginRegistry extends EventEmitter {
       // 重新构建依赖图
       this.rebuildDependencyGraph()
 
-      this.emit(PluginEvent.UNINSTALLED, registration)
+      this.emit(PluginEventType.UNINSTALLED, registration)
       this.logger.info(`Unregistered plugin: ${pluginName}`)
 
     } catch (error) {
@@ -225,14 +225,14 @@ export class PluginRegistry extends EventEmitter {
         await this.updatePluginStatus(pluginName, PluginStatus.ENABLED)
       }
 
-      this.emit(PluginEvent.ENABLED, registration)
+      this.emit(PluginEventType.ENABLED, registration)
       this.logger.info(`Enabled plugin: ${pluginName}`)
 
     } catch (error) {
       registration.status = PluginStatus.ERROR
       registration.error = (error as Error).message
 
-      this.emit(PluginEvent.ERROR, registration)
+      this.emit(PluginEventType.ERROR, registration)
       this.logger.error(`Failed to enable plugin ${pluginName}`, error as Error)
       throw error
     }
@@ -269,14 +269,14 @@ export class PluginRegistry extends EventEmitter {
         await this.updatePluginStatus(pluginName, PluginStatus.DISABLED)
       }
 
-      this.emit(PluginEvent.DISABLED, registration)
+      this.emit(PluginEventType.DISABLED, registration)
       this.logger.info(`Disabled plugin: ${pluginName}`)
 
     } catch (error) {
       registration.status = PluginStatus.ERROR
       registration.error = (error as Error).message
 
-      this.emit(PluginEvent.ERROR, registration)
+      this.emit(PluginEventType.ERROR, registration)
       this.logger.error(`Failed to disable plugin ${pluginName}`, error as Error)
       throw error
     }
@@ -318,7 +318,7 @@ export class PluginRegistry extends EventEmitter {
     }
 
     if (options.capability) {
-      results = results.filter(p => p.capabilities.includes(options.capability!))
+      results = results.filter(p => p.capabilities?.includes(options.capability!))
     }
 
     if (options.author) {
@@ -384,7 +384,7 @@ export class PluginRegistry extends EventEmitter {
       }
 
       // 能力匹配
-      const capabilityMatch = plugin.capabilities.some(cap =>
+      const capabilityMatch = (plugin.capabilities || []).some((cap: string) =>
         cap.toLowerCase().includes(lowerKeyword)
       )
       if (capabilityMatch) {
@@ -444,7 +444,7 @@ export class PluginRegistry extends EventEmitter {
     const plugin = this.plugins.get(pluginName)
     if (!plugin) return []
 
-    return plugin.dependencies
+    return (plugin.dependencies || [])
       .map(dep => this.plugins.get(dep.name))
       .filter(Boolean) as PluginRegistration[]
   }
@@ -481,7 +481,7 @@ export class PluginRegistry extends EventEmitter {
         Array.from(this.pluginsByCapability.entries()).map(([cap, plugins]) => [cap, plugins.size])
       ),
       authors: this.pluginsByAuthor.size,
-      dependencies: plugins.reduce((sum, p) => sum + p.dependencies.length, 0)
+      dependencies: plugins.reduce((sum, p) => sum + (p.dependencies?.length || 0), 0)
     }
   }
 
@@ -552,8 +552,8 @@ export class PluginRegistry extends EventEmitter {
 
       // 检查能力依赖
       if (dep.capabilities) {
-        const missingCapabilities = dep.capabilities.filter(cap =>
-          !depPlugin.capabilities.includes(cap)
+        const missingCapabilities = dep.capabilities.filter((cap: PluginCapability) =>
+          !depPlugin.capabilities?.includes(cap)
         )
         if (missingCapabilities.length > 0) {
           conflicts.push(`${dep.name}: missing capabilities ${missingCapabilities.join(', ')}`)
@@ -580,7 +580,7 @@ export class PluginRegistry extends EventEmitter {
 
     const missing: string[] = []
 
-    for (const dep of plugin.dependencies) {
+    for (const dep of plugin.dependencies || []) {
       if (dep.optional) continue
 
       const depPlugin = this.plugins.get(dep.name)
@@ -625,7 +625,7 @@ export class PluginRegistry extends EventEmitter {
     const dependents: string[] = []
 
     for (const [name, registration] of this.plugins.entries()) {
-      const hasDependency = registration.dependencies.some(dep => dep.name === pluginName)
+      const hasDependency = (registration.dependencies || []).some(dep => dep.name === pluginName)
       if (hasDependency) {
         dependents.push(name)
       }
@@ -649,7 +649,7 @@ export class PluginRegistry extends EventEmitter {
    */
   private updateIndexes(pluginName: string, registration: PluginRegistration): void {
     // 按能力索引
-    for (const capability of registration.capabilities) {
+    for (const capability of registration.capabilities || []) {
       if (!this.pluginsByCapability.has(capability)) {
         this.pluginsByCapability.set(capability, new Set())
       }
@@ -671,7 +671,7 @@ export class PluginRegistry extends EventEmitter {
    */
   private removeFromIndexes(pluginName: string, registration: PluginRegistration): void {
     // 从能力索引中移除
-    for (const capability of registration.capabilities) {
+    for (const capability of registration.capabilities || []) {
       const pluginSet = this.pluginsByCapability.get(capability)
       if (pluginSet) {
         pluginSet.delete(pluginName)
@@ -705,7 +705,7 @@ export class PluginRegistry extends EventEmitter {
     for (const [name, plugin] of this.plugins.entries()) {
       nodes.push({ id: name, plugin })
 
-      for (const dep of plugin.dependencies) {
+      for (const dep of plugin.dependencies || []) {
         if (this.plugins.has(dep.name)) {
           edges.push({
             from: name,
@@ -725,7 +725,7 @@ export class PluginRegistry extends EventEmitter {
   /**
    * 检测循环依赖
    */
-  private detectCycles(nodes: string[], edges: Array<{ from: string; to: string }>): string[][] {
+  private detectCycles(nodes: string[], edges: Array<{ from: string; to: string; type?: string }>): string[][] {
     const cycles: string[][] = []
     const visited = new Set<string>()
     const visiting = new Set<string>()
@@ -868,5 +868,3 @@ export class PluginRegistry extends EventEmitter {
     }
   }
 }
-
-export { PluginQuery, PluginSearchResult, DependencyGraph }

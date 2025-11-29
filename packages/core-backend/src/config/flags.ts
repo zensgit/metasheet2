@@ -24,6 +24,11 @@ export const FEATURE_FLAGS = {
   // PR #155 Frontend Features
   FEATURE_VIEW_MANAGER_V2: process.env.FEATURE_VIEW_MANAGER_V2 === 'true',
   FEATURE_FORM_GALLERY_VIEWS: process.env.FEATURE_FORM_GALLERY_VIEWS === 'true',
+
+  // Database Flags
+  useKyselyDB: process.env.USE_KYSELY === 'true' || process.env.NODE_ENV === 'test',
+  kanbanDB: process.env.KANBAN_DB === 'true' || process.env.NODE_ENV === 'test',
+  workflowEnabled: process.env.WORKFLOW_ENABLED === 'true',
 } as const;
 
 /**
@@ -33,6 +38,10 @@ export const FEATURE_FLAGS = {
  */
 export function isFeatureEnabled(flag: keyof typeof FEATURE_FLAGS): boolean {
   return FEATURE_FLAGS[flag] === true;
+}
+
+export function getFeatureFlags() {
+  return FEATURE_FLAGS
 }
 
 /**

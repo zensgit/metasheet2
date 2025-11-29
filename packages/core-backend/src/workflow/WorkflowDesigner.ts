@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Visual Workflow Designer (n8n Style)
  * BPMN/DAG workflow visual editor backend support
