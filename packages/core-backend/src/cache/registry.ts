@@ -52,7 +52,7 @@ export class CacheRegistry implements Cache {
   /**
    * Get value by key with metrics
    */
-  async get<T = any>(key: string): Promise<Result<T | null>> {
+  async get<T = unknown>(key: string): Promise<Result<T | null>> {
     const start = Date.now()
     const result = await this.activeCache.get<T>(key)
 
@@ -78,7 +78,7 @@ export class CacheRegistry implements Cache {
   /**
    * Set value with metrics
    */
-  async set(key: string, value: any, ttl?: number): Promise<Result<void>> {
+  async set(key: string, value: unknown, ttl?: number): Promise<Result<void>> {
     const start = Date.now()
     const result = await this.activeCache.set(key, value, ttl)
 

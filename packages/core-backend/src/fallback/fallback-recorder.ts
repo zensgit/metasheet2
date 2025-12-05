@@ -13,7 +13,7 @@ export type FallbackReason =
 export function recordFallback(reason: FallbackReason, effective = true) {
   try {
     metrics.fallbackRawTotal.inc({ reason })
-  } catch {}
+  } catch { /* metrics unavailable */ }
   try {
     const countCacheMissAsFallback = process.env.COUNT_CACHE_MISS_AS_FALLBACK === 'true'
     const isCacheMiss = reason === 'cache_miss'
@@ -21,5 +21,5 @@ export function recordFallback(reason: FallbackReason, effective = true) {
     if (shouldCountEffective) {
       metrics.fallbackEffectiveTotal.inc({ reason })
     }
-  } catch {}
+  } catch { /* metrics unavailable */ }
 }

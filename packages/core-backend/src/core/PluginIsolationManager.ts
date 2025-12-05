@@ -8,7 +8,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { EventEmitter } from 'eventemitter3'
 import { Logger } from './logger'
-import { PluginContext, PluginCapabilities } from './PluginContext'
+import type { PluginCapabilities } from './PluginContext'
 import { metrics } from '../metrics/metrics'
 
 export interface IsolationConfig {
@@ -20,11 +20,31 @@ export interface IsolationConfig {
   enableFileSystemIsolation: boolean
 }
 
+export interface WorkerMessageData {
+  level?: string
+  args?: unknown[]
+  code?: string
+  context?: Record<string, unknown>
+  [key: string]: unknown
+}
+
 export interface WorkerMessage {
-  type: 'execute' | 'result' | 'error' | 'metrics' | 'log'
+  type: 'execute' | 'result' | 'error' | 'metrics' | 'log' | 'ping' | 'pong'
   id: string
-  data?: any
+  data?: WorkerMessageData
   error?: string
+  metrics?: {
+    executionTime?: number
+    memoryUsed?: number
+    timestamp?: number
+  }
+}
+
+export interface PluginWorkerRequest {
+  resolve: (value: unknown) => void
+  reject: (reason: unknown) => void
+  startTime: number
+  timeoutId?: NodeJS.Timeout
 }
 
 export interface PluginWorker {
@@ -32,13 +52,54 @@ export interface PluginWorker {
   worker: Worker
   pluginId: string
   capabilities: PluginCapabilities
-  activeRequests: Map<string, { resolve: Function; reject: Function; startTime: number }>
+  activeRequests: Map<string, PluginWorkerRequest>
   metrics: {
     totalExecutions: number
     totalErrors: number
     averageExecutionTime: number
     memoryUsage: number
     cpuUsage: number
+  }
+}
+
+export interface WorkerMetrics {
+  pluginId: string
+  totalExecutions: number
+  totalErrors: number
+  averageExecutionTime: number
+  memoryUsage: number
+  cpuUsage: number
+  activeRequests: number
+}
+
+export interface WorkerMetricsWithId extends WorkerMetrics {
+  workerId: string
+}
+
+export interface AllWorkerMetrics {
+  totalWorkers: number
+  poolSize: number
+  maxWorkers: number
+  workers: WorkerMetricsWithId[]
+}
+
+export interface ExecutionOptions {
+  timeout?: number
+}
+
+// Type guard for metrics object with optional methods
+interface MetricsWithOptionalMethods {
+  pluginWorkersActive?: {
+    set?: (value: number) => void
+  }
+  pluginExecutionTimeouts?: {
+    inc?: (labels: { plugin: string }) => void
+  }
+  pluginErrors?: {
+    inc?: (labels: { plugin: string; type: string }) => void
+  }
+  pluginWorkerCrashes?: {
+    inc?: (labels: { plugin: string }) => void
   }
 }
 
@@ -292,7 +353,8 @@ process.on('unhandledRejection', (reason) => {
 
     this.workers.set(workerId, pluginWorker)
 
-    ;(metrics as any).pluginWorkersActive?.set?.(this.workers.size)
+    const metricsObj = metrics as MetricsWithOptionalMethods
+    metricsObj.pluginWorkersActive?.set?.(this.workers.size)
 
     this.logger.info(`Created isolated context for plugin ${pluginId} (worker: ${workerId})`)
 
@@ -305,9 +367,9 @@ process.on('unhandledRejection', (reason) => {
   async execute(
     workerId: string,
     code: string,
-    context?: any,
-    options?: { timeout?: number }
-  ): Promise<any> {
+    context?: Record<string, unknown>,
+    options?: ExecutionOptions
+  ): Promise<unknown> {
     const pluginWorker = this.workers.get(workerId)
     if (!pluginWorker) {
       throw new Error(`Worker ${workerId} not found`)
@@ -318,21 +380,27 @@ process.on('unhandledRejection', (reason) => {
 
     return new Promise((resolve, reject) => {
       // Store request promise
-      pluginWorker.activeRequests.set(requestId, {
+      const request: PluginWorkerRequest = {
         resolve,
         reject,
         startTime: Date.now()
-      })
+      }
+
+      pluginWorker.activeRequests.set(requestId, request)
 
       // Set timeout
       const timeoutId = setTimeout(() => {
-        const request = pluginWorker.activeRequests.get(requestId)
-        if (request) {
+        const req = pluginWorker.activeRequests.get(requestId)
+        if (req) {
           pluginWorker.activeRequests.delete(requestId)
-          request.reject(new Error('Execution timeout'))
-          ;(metrics as any).pluginExecutionTimeouts?.inc?.({ plugin: pluginWorker.pluginId })
+          req.reject(new Error('Execution timeout'))
+          const metricsObj = metrics as MetricsWithOptionalMethods
+          metricsObj.pluginExecutionTimeouts?.inc?.({ plugin: pluginWorker.pluginId })
         }
       }, timeout)
+
+      // Update request with timeout ID for cleanup
+      request.timeoutId = timeoutId
 
       // Send execution request
       pluginWorker.worker.postMessage({
@@ -340,10 +408,6 @@ process.on('unhandledRejection', (reason) => {
         id: requestId,
         data: { code, context }
       })
-
-      // Update request with timeout ID for cleanup
-      const request = pluginWorker.activeRequests.get(requestId)!
-      ;(request as any).timeoutId = timeoutId
     })
   }
 
@@ -353,12 +417,12 @@ process.on('unhandledRejection', (reason) => {
   private handleWorkerMessage(pluginWorker: PluginWorker, message: WorkerMessage): void {
     switch (message.type) {
       case 'result':
-      case 'error':
+      case 'error': {
         const request = pluginWorker.activeRequests.get(message.id)
         if (request) {
           // Clear timeout
-          if ((request as any).timeoutId) {
-            clearTimeout((request as any).timeoutId)
+          if (request.timeoutId) {
+            clearTimeout(request.timeoutId)
           }
 
           // Update metrics
@@ -367,7 +431,8 @@ process.on('unhandledRejection', (reason) => {
 
           if (message.type === 'error') {
             pluginWorker.metrics.totalErrors++
-            ;(metrics as any).pluginErrors?.inc?.({ plugin: pluginWorker.pluginId, type: 'execution' })
+            const metricsObj = metrics as MetricsWithOptionalMethods
+            metricsObj.pluginErrors?.inc?.({ plugin: pluginWorker.pluginId, type: 'execution' })
           }
 
           pluginWorker.metrics.averageExecutionTime =
@@ -376,8 +441,8 @@ process.on('unhandledRejection', (reason) => {
             pluginWorker.metrics.totalExecutions
 
           // Update memory metrics if provided
-          if ((message as any)?.metrics?.memoryUsed) {
-            pluginWorker.metrics.memoryUsage = (message as any).metrics.memoryUsed
+          if (message.metrics?.memoryUsed !== undefined) {
+            pluginWorker.metrics.memoryUsage = message.metrics.memoryUsed
           }
 
           // Resolve or reject promise
@@ -390,13 +455,15 @@ process.on('unhandledRejection', (reason) => {
           }
         }
         break
-
+      }
       case 'log':
-        this.emit('plugin:log', {
-          pluginId: pluginWorker.pluginId,
-          level: message.data.level,
-          args: message.data.args
-        })
+        if (message.data) {
+          this.emit('plugin:log', {
+            pluginId: pluginWorker.pluginId,
+            level: message.data.level,
+            args: message.data.args
+          })
+        }
         break
 
       case 'metrics':
@@ -413,7 +480,7 @@ process.on('unhandledRejection', (reason) => {
    */
   private handleWorkerError(pluginWorker: PluginWorker, error: Error): void {
     // Reject all pending requests
-    for (const [requestId, request] of pluginWorker.activeRequests) {
+    for (const [_requestId, request] of pluginWorker.activeRequests) {
       request.reject(error)
     }
     pluginWorker.activeRequests.clear()
@@ -424,7 +491,8 @@ process.on('unhandledRejection', (reason) => {
       error: error.message
     })
 
-    ;(metrics as any).pluginWorkerCrashes?.inc?.({ plugin: pluginWorker.pluginId })
+    const metricsObj = metrics as MetricsWithOptionalMethods
+    metricsObj.pluginWorkerCrashes?.inc?.({ plugin: pluginWorker.pluginId })
   }
 
   /**
@@ -435,11 +503,12 @@ process.on('unhandledRejection', (reason) => {
     this.workers.delete(pluginWorker.id)
 
     // Reject any pending requests
-    for (const [requestId, request] of pluginWorker.activeRequests) {
+    for (const [_requestId, request] of pluginWorker.activeRequests) {
       request.reject(new Error('Worker exited'))
     }
 
-    ;(metrics as any).pluginWorkersActive?.set?.(this.workers.size)
+    const metricsObj = metrics as MetricsWithOptionalMethods
+    metricsObj.pluginWorkersActive?.set?.(this.workers.size)
 
     // Try to refill worker pool
     this.createWorker()
@@ -450,7 +519,7 @@ process.on('unhandledRejection', (reason) => {
   /**
    * Get worker metrics
    */
-  getWorkerMetrics(workerId: string): any {
+  getWorkerMetrics(workerId: string): WorkerMetrics | null {
     const pluginWorker = this.workers.get(workerId)
     if (!pluginWorker) {
       return null
@@ -466,11 +535,11 @@ process.on('unhandledRejection', (reason) => {
   /**
    * Get all worker metrics
    */
-  getAllMetrics(): any {
-    const metrics: any[] = []
+  getAllMetrics(): AllWorkerMetrics {
+    const workerMetrics: WorkerMetricsWithId[] = []
 
     for (const [workerId, pluginWorker] of this.workers) {
-      metrics.push({
+      workerMetrics.push({
         workerId,
         pluginId: pluginWorker.pluginId,
         ...pluginWorker.metrics,
@@ -482,7 +551,7 @@ process.on('unhandledRejection', (reason) => {
       totalWorkers: this.workers.size,
       poolSize: this.workerPool.length,
       maxWorkers: this.config.maxWorkers,
-      workers: metrics
+      workers: workerMetrics
     }
   }
 
@@ -496,7 +565,7 @@ process.on('unhandledRejection', (reason) => {
     }
 
     // Reject pending requests
-    for (const [requestId, request] of pluginWorker.activeRequests) {
+    for (const [_requestId, request] of pluginWorker.activeRequests) {
       request.reject(new Error('Worker terminated'))
     }
 
@@ -506,7 +575,8 @@ process.on('unhandledRejection', (reason) => {
     // Remove from active workers
     this.workers.delete(workerId)
 
-    ;(metrics as any).pluginWorkersActive?.set?.(this.workers.size)
+    const metricsObj = metrics as MetricsWithOptionalMethods
+    metricsObj.pluginWorkersActive?.set?.(this.workers.size)
 
     this.logger.info(`Terminated worker ${workerId} for plugin ${pluginWorker.pluginId}`)
   }
@@ -532,7 +602,8 @@ process.on('unhandledRejection', (reason) => {
     this.workers.clear()
     this.workerPool = []
 
-    ;(metrics as any).pluginWorkersActive?.set?.(0)
+    const metricsObj = metrics as MetricsWithOptionalMethods
+    metricsObj.pluginWorkersActive?.set?.(0)
 
     this.logger.info('All workers terminated')
   }
@@ -543,13 +614,13 @@ process.on('unhandledRejection', (reason) => {
   async healthCheck(): Promise<{ healthy: number; unhealthy: number }> {
     const results = { healthy: 0, unhealthy: 0 }
 
-    for (const [workerId, pluginWorker] of this.workers) {
+    for (const [_workerId, pluginWorker] of this.workers) {
       try {
         const pingId = crypto.randomUUID()
-        const pingPromise: Promise<any> = new Promise((resolve: any, reject: any) => {
+        const pingPromise: Promise<boolean> = new Promise((resolve, reject) => {
           const timeout = setTimeout(() => reject(new Error('Ping timeout')), 1000)
 
-          const handler = (message: any) => {
+          const handler = (message: WorkerMessage) => {
             if (message.type === 'pong' && message.id === pingId) {
               clearTimeout(timeout)
               pluginWorker.worker.off('message', handler)

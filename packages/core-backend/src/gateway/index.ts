@@ -1,10 +1,10 @@
-// @ts-nocheck
 export * from './APIGateway'
 export * from './RateLimiter'
 export * from './CircuitBreaker'
 
-import { Application } from 'express'
-import { APIGateway, APIEndpoint, GatewayConfig } from './APIGateway'
+import type { Application } from 'express'
+import type { APIEndpoint, GatewayConfig } from './APIGateway';
+import { APIGateway } from './APIGateway'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('Gateway')
@@ -210,9 +210,10 @@ export const rateLimiters = {
 export type {
   APIEndpoint,
   GatewayConfig,
-  RateLimitConfig,
-  CircuitBreakerConfig,
-  CircuitState,
   ValidationSchema,
   CacheConfig
 } from './APIGateway'
+
+export type { RateLimitConfig } from './RateLimiter'
+export { CircuitState } from './CircuitBreaker'
+export type { CircuitBreakerConfig } from './CircuitBreaker'

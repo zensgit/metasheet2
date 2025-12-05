@@ -1,38 +1,47 @@
-import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg'
+import type { Pool as PgPool, QueryResult, QueryResultRow } from 'pg'
+import { poolManager } from '../integration/db/connection-pool'
 
-const connectionString = process.env.DATABASE_URL || ''
+/**
+ * Get the internal pg Pool instance
+ */
+export const pool: PgPool | null = poolManager.get().getInternalPool()
 
-const max = parseInt(process.env.PGPOOL_MAX || '10', 10)
-const idleTimeoutMillis = parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10)
-const connectionTimeoutMillis = parseInt(process.env.PG_CONN_TIMEOUT_MS || '5000', 10)
-
-export const pool = connectionString
-  ? new Pool({ connectionString, max, idleTimeoutMillis, connectionTimeoutMillis })
-  : undefined
-
-export async function query<T extends QueryResultRow = any>(text: string, params?: any[]): Promise<QueryResult<T>> {
-  if (!pool) throw new Error('DATABASE_URL not configured')
-  return pool.query<T>(text, params)
+/**
+ * Execute a parameterized SQL query
+ */
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  params?: unknown[]
+): Promise<QueryResult<T>> {
+  return poolManager.get().query<T>(sql, params)
 }
 
-export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  if (!pool) throw new Error('DATABASE_URL not configured')
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    const result = await fn(client)
-    await client.query('COMMIT')
-    return result
-  } catch (e) {
-    await client.query('ROLLBACK')
-    throw e
-  } finally {
-    client.release()
+/**
+ * Execute a query in a transaction
+ */
+export async function transaction<T>(
+  handler: (client: { query: (sql: string, params?: unknown[]) => Promise<QueryResult> }) => Promise<T>
+): Promise<T> {
+  return poolManager.get().transaction(handler)
+}
+
+/**
+ * Get pool statistics
+ */
+export function getPoolStats(): {
+  total: number
+  idle: number
+  waiting: number
+} {
+  const p = pool
+  if (!p) {
+    return { total: 0, idle: 0, waiting: 0 }
+  }
+  return {
+    total: p.totalCount,
+    idle: p.idleCount,
+    waiting: p.waitingCount
   }
 }
 
-export function getPoolStats(): { total: number; idle: number; waiting: number } | null {
-  if (!pool) return null
-  // @ts-ignore - pg types don't expose these counts in d.ts
-  return { total: (pool as any).totalCount || 0, idle: (pool as any).idleCount || 0, waiting: (pool as any).waitingCount || 0 }
-}
+export type { PgPool as Pool }

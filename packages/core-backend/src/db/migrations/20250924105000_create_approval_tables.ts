@@ -1,7 +1,8 @@
 /** Duplicate shim migration for CI ordering: creates approval tables if missing */
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
 
   // Create tables if not exist
@@ -58,7 +59,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`.execute(db)
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   await db.schema.dropTable('approval_records').ifExists().cascade().execute()
   await db.schema.dropTable('approval_instances').ifExists().cascade().execute()
 }

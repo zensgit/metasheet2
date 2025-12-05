@@ -1,11 +1,172 @@
-// @ts-nocheck
 /**
  * Elasticsearch Data Source Adapter
  * Provides access to Elasticsearch search engine
+ *
+ * Note: This adapter intentionally does NOT extend BaseDataAdapter because:
+ * - Elasticsearch is a document-based search engine, not a relational database
+ * - Many BaseDataAdapter methods (SQL-style insert/update/delete) don't map directly
+ * - Elasticsearch has unique capabilities (full-text search, aggregations, DSL queries)
+ *   that require specialized methods not defined in BaseDataAdapter
+ *
+ * Instead, this adapter extends EventEmitter for consistency with connection lifecycle
+ * events while providing Elasticsearch-specific methods for document operations.
  */
 
-import { DataSourceAdapter, QueryParams, QueryResult, SchemaInfo } from './BaseAdapter'
-import { Client } from '@elastic/elasticsearch'
+import { EventEmitter } from 'eventemitter3'
+
+// Elasticsearch-specific query and result interfaces
+interface QueryParams {
+  table?: string;
+  where?: Record<string, unknown>;
+  limit?: number;
+  offset?: number;
+  orderBy?: Array<{ column: string; direction: string }>;
+  groupBy?: string | string[];
+  select?: string[]
+}
+interface QueryResult { [key: string]: unknown }
+interface SchemaInfo {
+  tables: TableInfo[];
+  views?: ViewInfo[];
+  routines?: unknown[]
+}
+class DataSourceAdapter extends EventEmitter {}
+
+// Elasticsearch type definitions
+interface ElasticsearchClientConfig {
+  node: string | string[]
+  auth?: {
+    username: string
+    password: string
+    apiKey?: string
+  }
+  cloud?: {
+    id: string
+  }
+  maxRetries?: number
+  requestTimeout?: number
+  sniffOnStart?: boolean
+  ssl?: {
+    rejectUnauthorized?: boolean
+    ca?: string
+  }
+}
+
+interface ElasticsearchHit {
+  _id: string
+  _index: string
+  _score: number
+  _source: Record<string, unknown>
+}
+
+interface ElasticsearchSearchResponse {
+  hits?: {
+    hits?: ElasticsearchHit[]
+  }
+  aggregations?: Record<string, unknown>
+  statusCode?: number
+}
+
+interface ElasticsearchBucket {
+  key: string | number
+  doc_count: number
+  [key: string]: unknown
+}
+
+interface ElasticsearchAggregationValue {
+  value?: unknown
+  buckets?: ElasticsearchBucket[]
+}
+
+interface ElasticsearchIndexMapping {
+  mappings: {
+    properties: Record<string, ElasticsearchFieldConfig>
+  }
+}
+
+interface ElasticsearchFieldConfig {
+  type: string
+  index?: boolean
+}
+
+interface ElasticsearchSQLResponse {
+  columns?: Array<{ name: string }>
+  rows?: unknown[][]
+}
+
+interface TableInfo {
+  name: string
+  columns: ColumnInfo[]
+  primaryKey: string
+  indexes: string[]
+  foreignKeys: unknown[]
+}
+
+interface ColumnInfo {
+  name: string
+  type: string
+  nullable: boolean
+  indexed: boolean
+  analyzed: boolean
+}
+
+interface ViewInfo {
+  name: string
+  definition: string
+  columns: unknown[]
+}
+
+interface ElasticsearchQuery {
+  search?: unknown
+  index?: unknown
+  update?: unknown
+  delete?: unknown
+  bulk?: unknown
+  sql?: string
+}
+
+interface ElasticsearchBoolQuery {
+  must?: unknown[]
+  must_not?: unknown[]
+  should?: unknown[]
+  filter?: unknown[]
+}
+
+interface ElasticsearchSearchBody {
+  size?: number
+  from?: number
+  query?: unknown
+  sort?: Array<Record<string, string>>
+  aggs?: Record<string, unknown>
+  highlight?: {
+    fields: Record<string, Record<string, never>>
+  }
+}
+
+interface WhereOperators {
+  $gt?: unknown
+  $gte?: unknown
+  $lt?: unknown
+  $lte?: unknown
+  $ne?: unknown
+  $in?: unknown[]
+  $nin?: unknown[]
+  $regex?: string
+  $text?: string
+  $exists?: boolean
+}
+
+// Dynamic elasticsearch import
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ElasticsearchClient = any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let Client: (new (config: ElasticsearchClientConfig) => ElasticsearchClient) | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  Client = require('@elastic/elasticsearch').Client
+} catch {
+  // @elastic/elasticsearch not installed
+}
 
 export interface ElasticsearchConfig {
   node: string | string[]
@@ -25,7 +186,7 @@ export interface ElasticsearchConfig {
 }
 
 export class ElasticsearchAdapter extends DataSourceAdapter {
-  private client: Client | null = null
+  private client: ElasticsearchClient | null = null
   private config: ElasticsearchConfig
 
   constructor(config: ElasticsearchConfig) {
@@ -34,8 +195,12 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
   }
 
   async connect(): Promise<void> {
+    if (!Client) {
+      throw new Error('Elasticsearch module not installed. Please install: npm install @elastic/elasticsearch')
+    }
+
     try {
-      const clientConfig: any = {
+      const clientConfig: ElasticsearchClientConfig = {
         node: this.config.node,
         maxRetries: this.config.maxRetries || 3,
         requestTimeout: this.config.requestTimeout || 30000,
@@ -47,7 +212,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
       }
 
       if (this.config.apiKey) {
-        clientConfig.auth = { apiKey: this.config.apiKey }
+        clientConfig.auth = { apiKey: this.config.apiKey } as ElasticsearchClientConfig['auth']
       }
 
       if (this.config.cloudId) {
@@ -88,7 +253,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
       const from = params.offset || 0
 
       // Build Elasticsearch query
-      const body: any = {
+      const body: ElasticsearchSearchBody = {
         size,
         from
       }
@@ -100,9 +265,9 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
 
       // Add sorting
       if (params.orderBy) {
-        body.sort = Array.isArray(params.orderBy)
-          ? params.orderBy.map(field => ({ [field]: 'asc' }))
-          : [{ [params.orderBy]: 'asc' }]
+        body.sort = params.orderBy.map(field => ({
+          [field.column]: field.direction?.toLowerCase() || 'asc'
+        }))
       }
 
       // Add aggregations if specified
@@ -114,7 +279,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
       const response = await this.client.search({
         index,
         body
-      })
+      }) as ElasticsearchSearchResponse
 
       // Process results
       const results: QueryResult[] = []
@@ -143,14 +308,14 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     }
   }
 
-  async execute(command: string, args?: any[]): Promise<any> {
+  async execute(command: string, _args?: unknown[]): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
 
     try {
       // Parse DSL query
-      const query = typeof command === 'string' ? JSON.parse(command) : command
+      const query: ElasticsearchQuery = typeof command === 'string' ? JSON.parse(command) : command
 
       // Execute based on operation type
       if (query.search) {
@@ -191,14 +356,14 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
 
     try {
       // Get all indices
-      const indices = await this.client.indices.getMapping()
-      const tables: SchemaInfo['tables'] = []
+      const indices = await this.client.indices.getMapping() as Record<string, ElasticsearchIndexMapping>
+      const tables: TableInfo[] = []
 
       for (const [indexName, indexData] of Object.entries(indices)) {
-        const mappings = (indexData as any).mappings
+        const mappings = indexData.mappings
         const properties = mappings.properties || {}
 
-        const columns = Object.entries(properties).map(([field, config]: [string, any]) => ({
+        const columns = Object.entries(properties).map(([field, config]): ColumnInfo => ({
           name: field,
           type: this.mapElasticsearchType(config.type),
           nullable: true,
@@ -211,15 +376,15 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
           columns,
           primaryKey: '_id',
           indexes: Object.keys(properties).filter(field =>
-            (properties[field] as any).index !== false
+            properties[field].index !== false
           ),
           foreignKeys: []
         })
       }
 
       // Get aliases as views
-      const aliases = await this.client.indices.getAlias()
-      const views = Object.keys(aliases).map(alias => ({
+      const aliases = await this.client.indices.getAlias() as Record<string, unknown>
+      const views: ViewInfo[] = Object.keys(aliases).map(alias => ({
         name: alias,
         definition: `Alias for indices`,
         columns: []
@@ -242,7 +407,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     }
 
     try {
-      const response = await this.client!.ping()
+      const response = await this.client!.ping() as ElasticsearchSearchResponse
       return response.statusCode === 200
     } catch {
       return false
@@ -252,44 +417,45 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
   /**
    * Build Elasticsearch query from where clause
    */
-  private buildElasticsearchQuery(where: Record<string, any>): any {
-    const must: any[] = []
-    const mustNot: any[] = []
-    const should: any[] = []
-    const filter: any[] = []
+  private buildElasticsearchQuery(where: Record<string, unknown>): Record<string, unknown> {
+    const must: unknown[] = []
+    const mustNot: unknown[] = []
+    const should: unknown[] = []
+    const filter: unknown[] = []
 
     for (const [field, value] of Object.entries(where)) {
       if (typeof value === 'object' && value !== null) {
+        const operators = value as WhereOperators
         // Handle operators
-        if ('$gt' in value) {
-          filter.push({ range: { [field]: { gt: value.$gt } } })
+        if ('$gt' in operators) {
+          filter.push({ range: { [field]: { gt: operators.$gt } } })
         }
-        if ('$gte' in value) {
-          filter.push({ range: { [field]: { gte: value.$gte } } })
+        if ('$gte' in operators) {
+          filter.push({ range: { [field]: { gte: operators.$gte } } })
         }
-        if ('$lt' in value) {
-          filter.push({ range: { [field]: { lt: value.$lt } } })
+        if ('$lt' in operators) {
+          filter.push({ range: { [field]: { lt: operators.$lt } } })
         }
-        if ('$lte' in value) {
-          filter.push({ range: { [field]: { lte: value.$lte } } })
+        if ('$lte' in operators) {
+          filter.push({ range: { [field]: { lte: operators.$lte } } })
         }
-        if ('$ne' in value) {
-          mustNot.push({ term: { [field]: value.$ne } })
+        if ('$ne' in operators) {
+          mustNot.push({ term: { [field]: operators.$ne } })
         }
-        if ('$in' in value) {
-          should.push({ terms: { [field]: value.$in } })
+        if ('$in' in operators) {
+          should.push({ terms: { [field]: operators.$in } })
         }
-        if ('$nin' in value) {
-          mustNot.push({ terms: { [field]: value.$nin } })
+        if ('$nin' in operators) {
+          mustNot.push({ terms: { [field]: operators.$nin } })
         }
-        if ('$regex' in value) {
-          must.push({ regexp: { [field]: value.$regex } })
+        if ('$regex' in operators) {
+          must.push({ regexp: { [field]: operators.$regex } })
         }
-        if ('$text' in value) {
-          must.push({ match: { [field]: value.$text } })
+        if ('$text' in operators) {
+          must.push({ match: { [field]: operators.$text } })
         }
-        if ('$exists' in value) {
-          if (value.$exists) {
+        if ('$exists' in operators) {
+          if (operators.$exists) {
             filter.push({ exists: { field } })
           } else {
             mustNot.push({ exists: { field } })
@@ -302,7 +468,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     }
 
     // Build bool query
-    const bool: any = {}
+    const bool: ElasticsearchBoolQuery = {}
     if (must.length > 0) bool.must = must
     if (mustNot.length > 0) bool.must_not = mustNot
     if (should.length > 0) bool.should = should
@@ -314,8 +480,8 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
   /**
    * Build aggregations
    */
-  private buildAggregations(groupBy: string | string[], select?: string[]): any {
-    const aggs: any = {}
+  private buildAggregations(groupBy: string | string[], select?: string[]): Record<string, unknown> {
+    const aggs: Record<string, unknown> = {}
 
     const fields = Array.isArray(groupBy) ? groupBy : [groupBy]
     let currentAgg = aggs
@@ -333,8 +499,8 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
       }
 
       if (i < fields.length - 1) {
-        currentAgg[aggName].aggs = {}
-        currentAgg = currentAgg[aggName].aggs
+        (currentAgg[aggName] as Record<string, unknown>).aggs = {}
+        currentAgg = (currentAgg[aggName] as Record<string, unknown>).aggs as Record<string, unknown>
       }
     }
 
@@ -376,14 +542,15 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
   /**
    * Process aggregation results
    */
-  private processAggregations(aggregations: any): QueryResult[] {
+  private processAggregations(aggregations: Record<string, unknown>): QueryResult[] {
     const results: QueryResult[] = []
 
-    const processAgg = (agg: any, parentKey?: string) => {
+    const processAgg = (agg: Record<string, unknown>, parentKey?: string): void => {
       for (const [key, value] of Object.entries(agg)) {
-        if ((value as any).buckets) {
+        const aggValue = value as ElasticsearchAggregationValue
+        if (aggValue.buckets) {
           // Terms aggregation
-          for (const bucket of (value as any).buckets) {
+          for (const bucket of aggValue.buckets) {
             const result: QueryResult = {}
             if (parentKey) result[parentKey] = bucket.key
             result[key] = bucket.key
@@ -393,9 +560,10 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
             const nestedResults: QueryResult = {}
             for (const [nestedKey, nestedValue] of Object.entries(bucket)) {
               if (nestedKey !== 'key' && nestedKey !== 'doc_count') {
-                if ((nestedValue as any).value !== undefined) {
-                  nestedResults[nestedKey] = (nestedValue as any).value
-                } else if ((nestedValue as any).buckets) {
+                const nestedAggValue = nestedValue as ElasticsearchAggregationValue
+                if (nestedAggValue.value !== undefined) {
+                  nestedResults[nestedKey] = nestedAggValue.value
+                } else if (nestedAggValue.buckets) {
                   // Recursive processing
                   processAgg({ [nestedKey]: nestedValue }, key)
                 }
@@ -404,9 +572,9 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
 
             results.push({ ...result, ...nestedResults })
           }
-        } else if ((value as any).value !== undefined) {
+        } else if (aggValue.value !== undefined) {
           // Metric aggregation
-          results.push({ [key]: (value as any).value })
+          results.push({ [key]: aggValue.value })
         }
       }
     }
@@ -418,7 +586,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
   /**
    * Execute SQL query using Elasticsearch SQL
    */
-  private async executeSQLQuery(sql: string): Promise<any> {
+  private async executeSQLQuery(sql: string): Promise<QueryResult[]> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -427,15 +595,15 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
       body: {
         query: sql
       }
-    })
+    }) as ElasticsearchSQLResponse
 
     // Convert SQL response to standard format
     const columns = response.columns || []
     const rows = response.rows || []
 
-    return rows.map((row: any[]) => {
+    return rows.map((row: unknown[]): QueryResult => {
       const result: QueryResult = {}
-      columns.forEach((col: any, index: number) => {
+      columns.forEach((col, index: number) => {
         result[col.name] = row[index]
       })
       return result
@@ -478,7 +646,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
    * Elasticsearch-specific methods
    */
 
-  async createIndex(name: string, settings?: any, mappings?: any): Promise<any> {
+  async createIndex(name: string, settings?: unknown, mappings?: unknown): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -492,7 +660,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     })
   }
 
-  async deleteIndex(name: string): Promise<any> {
+  async deleteIndex(name: string): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -502,7 +670,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     })
   }
 
-  async indexDocument(index: string, document: any, id?: string): Promise<any> {
+  async indexDocument(index: string, document: Record<string, unknown>, id?: string): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -514,7 +682,7 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
     })
   }
 
-  async bulkIndex(operations: any[]): Promise<any> {
+  async bulkIndex(operations: unknown[]): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -526,9 +694,9 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
 
   async searchWithHighlight(
     index: string,
-    query: any,
+    query: unknown,
     fields: string[]
-  ): Promise<any> {
+  ): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }
@@ -541,13 +709,13 @@ export class ElasticsearchAdapter extends DataSourceAdapter {
           fields: fields.reduce((acc, field) => {
             acc[field] = {}
             return acc
-          }, {} as any)
+          }, {} as Record<string, Record<string, never>>)
         }
       }
     })
   }
 
-  async aggregate(index: string, aggregations: any): Promise<any> {
+  async aggregate(index: string, aggregations: unknown): Promise<unknown> {
     if (!this.client) {
       throw new Error('Elasticsearch client not connected')
     }

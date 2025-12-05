@@ -30,26 +30,12 @@ export function initializeCache(): CacheRegistry {
       break
 
     case 'redis':
-      // Redis缓存需要额外配置
-      try {
-        // 动态导入Redis缓存
-        const { RedisCache } = require('./cache/implementations/redis-cache')
-        const redisCache = new RedisCache({
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379'),
-          password: process.env.REDIS_PASSWORD,
-        })
-        globalCache = new CacheRegistry(redisCache)
-        globalCache.register('redis', redisCache)
-        globalCache.register('memory', new MemoryCache())
-        globalCache.register('null', new NullCache())
-        logger.info('Redis cache initialized')
-      } catch (error) {
-        logger.warn(`Failed to initialize Redis cache, falling back to memory cache: ${error instanceof Error ? error.message : String(error)}`)
-        globalCache = new CacheRegistry(new MemoryCache())
-        globalCache.register('memory', new MemoryCache())
-        globalCache.register('null', new NullCache())
-      }
+      // Redis缓存需要额外配置 - 使用同步初始化回退到memory
+      // 注意: Redis初始化需要使用 initializeCacheAsync() 以支持异步加载
+      logger.warn('Redis cache requires async initialization. Use initializeCacheAsync() or falling back to memory cache.')
+      globalCache = new CacheRegistry(new MemoryCache())
+      globalCache.register('memory', new MemoryCache())
+      globalCache.register('null', new NullCache())
       break
 
     case 'null':
@@ -61,6 +47,42 @@ export function initializeCache(): CacheRegistry {
   }
 
   return globalCache
+}
+
+/**
+ * 异步初始化缓存 - 支持Redis等需要动态加载的实现
+ */
+export async function initializeCacheAsync(): Promise<CacheRegistry> {
+  if (globalCache) {
+    return globalCache
+  }
+
+  const cacheType = process.env.CACHE_TYPE || 'memory'
+  logger.info(`Async initializing ${cacheType} cache`)
+
+  if (cacheType === 'redis') {
+    try {
+      const { RedisCache } = await import('./cache/implementations/redis-cache')
+      const host = process.env.REDIS_HOST || 'localhost'
+      const port = process.env.REDIS_PORT || '6379'
+      const password = process.env.REDIS_PASSWORD
+      const redisUrl = password
+        ? `redis://:${password}@${host}:${port}`
+        : `redis://${host}:${port}`
+      const redisCache = new RedisCache(redisUrl)
+      globalCache = new CacheRegistry(redisCache)
+      globalCache.register('redis', redisCache)
+      globalCache.register('memory', new MemoryCache())
+      globalCache.register('null', new NullCache())
+      logger.info('Redis cache initialized')
+      return globalCache
+    } catch (error) {
+      logger.warn(`Failed to initialize Redis cache, falling back to memory cache: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // 回退到同步初始化
+  return initializeCache()
 }
 
 // 初始化缓存并导出

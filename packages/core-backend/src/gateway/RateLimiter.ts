@@ -1,7 +1,36 @@
-// @ts-nocheck
-import { Request, Response, NextFunction } from 'express'
-import crypto from 'crypto'
-import EventEmitter from 'events'
+import type { Request, Response, NextFunction } from 'express'
+import * as crypto from 'crypto'
+import { EventEmitter } from 'events'
+
+// Redis client interface - compatible with both redis and ioredis
+export interface RedisClient {
+  get(key: string): Promise<string | null>
+  set(key: string, value: string, mode?: string, duration?: number): Promise<unknown>
+  del(...keys: string[]): Promise<number>
+  keys(pattern: string): Promise<string[]>
+  multi(): RedisMulti
+  ttl(key: string): Promise<number>
+}
+
+export interface RedisMulti {
+  get(key: string): RedisMulti
+  ttl(key: string): RedisMulti
+  exec(): Promise<Array<[Error | null, unknown]>>
+}
+
+// Extended Request types
+export interface AuthenticatedUser {
+  id: string | number
+  [key: string]: unknown
+}
+
+export interface RequestWithRateLimit extends Request {
+  rateLimit?: RateLimitInfo
+}
+
+export interface RequestWithUser extends Request {
+  user?: AuthenticatedUser
+}
 
 export interface RateLimitConfig {
   windowMs?: number        // Time window in milliseconds
@@ -112,9 +141,9 @@ export class MemoryRateLimitStore implements RateLimitStore {
 
 // Redis store for distributed rate limiting
 export class RedisRateLimitStore implements RateLimitStore {
-  private redis: any // Redis client type
+  private redis: RedisClient
 
-  constructor(redisClient: any) {
+  constructor(redisClient: RedisClient) {
     this.redis = redisClient
   }
 
@@ -122,16 +151,19 @@ export class RedisRateLimitStore implements RateLimitStore {
     const data = await this.redis.get(`ratelimit:${key}`)
     if (!data) return null
 
-    const entry = JSON.parse(data)
-    entry.resetTime = new Date(entry.resetTime)
-    entry.firstRequest = new Date(entry.firstRequest)
+    const entry = JSON.parse(data) as Record<string, unknown>
+    const rateLimitEntry: RateLimitEntry = {
+      count: typeof entry.count === 'number' ? entry.count : 0,
+      resetTime: new Date(entry.resetTime as string | number | Date),
+      firstRequest: new Date(entry.firstRequest as string | number | Date)
+    }
 
-    if (entry.resetTime < new Date()) {
+    if (rateLimitEntry.resetTime < new Date()) {
       await this.redis.del(`ratelimit:${key}`)
       return null
     }
 
-    return entry
+    return rateLimitEntry
   }
 
   async set(key: string, entry: RateLimitEntry, ttlMs: number): Promise<void> {
@@ -147,19 +179,23 @@ export class RedisRateLimitStore implements RateLimitStore {
     multi.get(redisKey)
     multi.ttl(redisKey)
 
-    const [[error1, data], [error2, ttl]] = await multi.exec()
+    const results = await multi.exec()
+    const [[error1, data], [error2, ttl]] = results
 
     if (error1 || error2) {
       throw new Error('Redis operation failed')
     }
 
-    if (data) {
-      const entry = JSON.parse(data)
-      entry.count += weight
-      entry.resetTime = new Date(entry.resetTime)
-      entry.firstRequest = new Date(entry.firstRequest)
+    if (data && typeof data === 'string') {
+      const parsedEntry = JSON.parse(data) as Record<string, unknown>
+      const entry: RateLimitEntry = {
+        count: (typeof parsedEntry.count === 'number' ? parsedEntry.count : 0) + weight,
+        resetTime: new Date(parsedEntry.resetTime as string | number | Date),
+        firstRequest: new Date(parsedEntry.firstRequest as string | number | Date)
+      }
 
-      await this.redis.set(redisKey, JSON.stringify(entry), 'PX', ttl * 1000)
+      const ttlSeconds = typeof ttl === 'number' ? ttl : 60
+      await this.redis.set(redisKey, JSON.stringify(entry), 'PX', ttlSeconds * 1000)
       return entry
     }
 
@@ -269,7 +305,9 @@ export class RateLimiter extends EventEmitter {
 
         // Check if limit exceeded
         if (entry.count >= this.config.maxRequests) {
-          res.setHeader('Retry-After', info.retryAfter)
+          if (info.retryAfter !== undefined) {
+            res.setHeader('Retry-After', info.retryAfter)
+          }
 
           this.emit('limitReached', { req, res, key, info })
           this.config.onLimitReached(req, res)
@@ -280,24 +318,27 @@ export class RateLimiter extends EventEmitter {
         // Increment counter
         await this.store.increment(key, weight)
 
-        // Store info for later use
-        ;(req as any).rateLimit = info
+        // Store info for later use with type assertion
+        const extendedReq = req as RequestWithRateLimit
+        extendedReq.rateLimit = info
 
         // Hook to skip counting successful/failed requests
         const originalSend = res.send
-        res.send = function(data) {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        const rateLimiter = this
+        res.send = function(this: Response, data: unknown) {
           const shouldSkip = (
-            (res.statusCode < 400 && this.config.skipSuccessfulRequests) ||
-            (res.statusCode >= 400 && this.config.skipFailedRequests)
+            (res.statusCode < 400 && rateLimiter.config.skipSuccessfulRequests) ||
+            (res.statusCode >= 400 && rateLimiter.config.skipFailedRequests)
           )
 
           if (shouldSkip) {
             // Decrement the counter
-            this.store.increment(key, -weight).catch(() => {})
+            rateLimiter.store.increment(key, -weight).catch(() => {})
           }
 
           return originalSend.call(this, data)
-        }.bind(this)
+        }
 
         next()
       } catch (error) {
@@ -384,9 +425,9 @@ export function createUserRateLimiter(): RateLimiter {
     standardHeaders: true,
     keyGenerator: (req) => {
       // Use user ID if authenticated
-      const user = (req as any).user
-      if (user?.id) {
-        return `user:${user.id}`
+      const userReq = req as RequestWithUser
+      if (userReq.user?.id) {
+        return `user:${userReq.user.id}`
       }
       return req.ip || 'unknown'
     }

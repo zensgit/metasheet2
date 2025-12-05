@@ -5,9 +5,10 @@
  * based on snapshot properties and operations.
  */
 
-import { Kysely, sql } from 'kysely';
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely';
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // Create protection_rules table
   await db.schema
     .createTable('protection_rules')
@@ -79,7 +80,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   console.log('✅ Created protection_rules and rule_execution_log tables');
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   // Drop audit log table
   await db.schema.dropTable('rule_execution_log').ifExists().execute();
 

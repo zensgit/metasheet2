@@ -3,9 +3,10 @@
  * Creates all tables required for the Event Bus system (Phase 1)
  */
 
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // 1. event_types - Event type definitions
   await db.schema
     .createTable('event_types')
@@ -255,7 +256,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   console.log('✅ Event Bus tables created successfully')
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   await db.schema.dropTable('dead_letter_events').ifExists().execute()
   await db.schema.dropTable('plugin_event_permissions').ifExists().execute()
   await db.schema.dropTable('event_aggregates').ifExists().execute()

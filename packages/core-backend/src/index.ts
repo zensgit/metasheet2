@@ -1,17 +1,20 @@
-// @ts-nocheck
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
  */
 
-import express, { Application, Request, Response, NextFunction } from 'express'
+import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';
+import type { Server as HttpServer } from 'http';
+import express from 'express'
 import { createServer } from 'http'
 import { Server as SocketServer } from 'socket.io'
 import cors from 'cors'
+import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
 import { PluginLoader } from './core/plugin-loader'
-import { Logger } from './core/logger'
-import { CoreAPI } from './types/plugin'
+import { Logger, setLogContext } from './core/logger'
+import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData } from './types/plugin'
+import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
@@ -27,6 +30,7 @@ import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
+import changeManagementRouter from './routes/change-management'
 import { permissionsRouter } from './routes/permissions'
 import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
@@ -34,13 +38,15 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
-import { initAdminRoutes, updateAdminServices } from './routes/admin-routes'
+import { initAdminRoutes } from './routes/admin-routes'
 import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
+import { loadObservabilityConfig } from './config/observability'
+import { initObservability } from './observability/otel'
 
 export class MetaSheetServer {
   private app: Application
-  private httpServer: any
+  private httpServer: HttpServer
   private io: SocketServer
   private pluginLoader: PluginLoader
   private logger: Logger
@@ -50,6 +56,8 @@ export class MetaSheetServer {
   private wsAdapterType: 'local' | 'redis' = 'local'
   private wsRedis = { enabled: false, attached: false }
   private snapshotService: SnapshotService
+  private observabilityShutdown?: () => Promise<void>
+  private observabilityEnabled = false
 
   constructor() {
     this.app = express()
@@ -78,22 +86,22 @@ export class MetaSheetServer {
    * 创建核心API
    */
   private createCoreAPI(): CoreAPI {
-    const routes = new Map<string, any>()
+    const routes = new Map<string, RequestHandler>()
 
     return {
       http: {
-        addRoute: (method: string, path: string, handler: any) => {
+        addRoute: (method: string, path: string, handler: RequestHandler) => {
           const key = `${method.toUpperCase()}:${path}`
           routes.set(key, handler)
 
           // 动态注册路由到Express
-          const methodLower = method.toLowerCase()
-          ;(this.app as any)[methodLower](path,
+          const methodLower = method.toLowerCase() as 'get' | 'post' | 'put' | 'delete' | 'patch'
+          this.app[methodLower](path,
             // 保护 /api/**（auth 白名单在全局中间件判定）
-            async (req: Request, res: Response) => {
-              const endTimer = (res as any).__metricsTimer?.({ route: path, method: req.method })
+            async (req: Request, res: Response, next: NextFunction) => {
+              const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
               try {
-                await handler(req, res)
+                await handler(req, res, next)
               } catch (error) {
                 this.logger.error(`Route handler error: ${path}`, error as Error)
                 if (!res.headersSent) {
@@ -101,7 +109,7 @@ export class MetaSheetServer {
                 }
               } finally {
                 // 结束计时（如果已安装指标中间件）
-                if (typeof endTimer === 'function') endTimer(res.statusCode)
+                if (typeof endTimer === 'function') endTimer({ route: path, method: req.method })(res.statusCode)
               }
             }
           )
@@ -113,55 +121,101 @@ export class MetaSheetServer {
           // In production, you'd need a more sophisticated solution
           this.logger.warn(`Route removal not implemented: ${path}`)
         },
-        middleware: (name: string) => {
+        middleware: (_name: string) => {
           // Return middleware by name
           return undefined
         }
       },
 
       database: {
-        query: async (sql: string, params?: any[]) => {
+        query: async (sql: string, params?: unknown[]) => {
           return (await poolManager.get().query(sql, params)).rows
         },
-        transaction: async (callback: Function) => {
-          return poolManager.get().transaction(async (client) => callback(client))
+        transaction: async <T>(callback: (trx: import('./types/plugin').DatabaseTransaction) => Promise<T>): Promise<T> => {
+          return poolManager.get().transaction(async (client) => {
+            // Adapt the pool client to DatabaseTransaction interface
+            const trx: import('./types/plugin').DatabaseTransaction = {
+              query: async (sql: string, params?: unknown[]) => {
+                const result = await client.query(sql, params)
+                return result.rows
+              },
+              commit: async () => {
+                // Commit is handled by the pool manager
+              },
+              rollback: async () => {
+                // Rollback is handled by the pool manager
+              }
+            }
+            return callback(trx)
+          })
         },
-        model: (_name: string) => ({})
+        model: (_name: string): import('./types/plugin').DatabaseModel => ({
+          find: async () => [],
+          findOne: async () => null,
+          create: async (data) => data,
+          update: async () => 0,
+          delete: async () => 0
+        })
       },
 
       auth: {
         verifyToken: async (token: string) => {
           return await authService.verifyToken(token)
         },
-        checkPermission: (user: any, resource: string, action: string) => {
-          return authService.checkPermission(user, resource, action)
+        checkPermission: (user: UserInfo, resource: string, action: string) => {
+          // Convert UserInfo to User for authService
+          const userAsUser: User = {
+            id: user.id,
+            email: user.email || '',
+            name: user.name || '',
+            role: user.roles?.[0] || 'user',
+            permissions: user.permissions || [],
+            created_at: new Date(),
+            updated_at: new Date()
+          }
+          return authService.checkPermission(userAsUser, resource, action)
         },
-        createToken: (user: any, options?: any) => {
-          return authService.createToken(user)
+        createToken: (user: UserInfo, _options?: TokenOptions) => {
+          // Convert UserInfo to User for authService
+          const userAsUser: User = {
+            id: user.id,
+            email: user.email || '',
+            name: user.name || '',
+            role: user.roles?.[0] || 'user',
+            permissions: user.permissions || [],
+            created_at: new Date(),
+            updated_at: new Date()
+          }
+          return authService.createToken(userAsUser)
         }
       },
 
       events: {
-        on: (evt: string | RegExp, handler: Function) => eventBus.subscribe(evt as any, handler as any),
-        once: (evt: string, handler: Function) => {
-          const wrappedHandler = (data: any) => {
-            handler(data)
-            eventBus.unsubscribe(subscriptionId)
-          }
-          const subscriptionId = eventBus.subscribe(evt as any, wrappedHandler as any)
-          return subscriptionId
+        on: (evt: string | RegExp, handler: MessageHandler) => {
+          // Adapt MessageHandler to eventBus handler signature
+          const adaptedHandler = (payload: unknown) => handler(payload, evt as string)
+          return eventBus.subscribe(evt as string, adaptedHandler)
         },
-        emit: (evt: string, data?: any) => eventBus.emit(evt, data),
+        once: (evt: string, handler: MessageHandler) => {
+          const subscriptionId: { value: string } = { value: '' }
+          const wrappedHandler = (data: unknown) => {
+            handler(data, evt)
+            eventBus.unsubscribe(subscriptionId.value)
+          }
+          subscriptionId.value = eventBus.subscribe(evt, wrappedHandler)
+          return subscriptionId.value
+        },
+        emit: (evt: string, data?: unknown) => eventBus.emit(evt, data),
         off: (idOrPlugin: string) => eventBus.unsubscribe(idOrPlugin)
       },
 
       storage: {
-        upload: async (file: Buffer, options: any) => {
+        upload: async (_file: Buffer, _options: UploadOptions) => {
           const fileId = `file_${Date.now()}`
           this.logger.info(`File uploaded: ${fileId}`)
           return fileId
         },
-        download: async (fileId: string) => {
+        download: async (_fileId: string) => {
           return Buffer.from('mock file content')
         },
         delete: async (fileId: string) => {
@@ -173,32 +227,29 @@ export class MetaSheetServer {
       },
 
       cache: {
-        get: async (key: string) => {
+        get: async <T = unknown>(key: string): Promise<T | null> => {
           const result = await cache.get(key)
-          return result.ok ? result.value : null
+          return result.ok ? (result.value as T) : null
         },
-        set: async (key: string, value: any, ttl?: number) => {
-          const result = await cache.set(key, value, ttl)
-          return result.ok
+        set: async <T = unknown>(key: string, value: T, ttl?: number): Promise<void> => {
+          await cache.set(key, value, ttl)
         },
-        delete: async (key: string) => {
-          const result = await cache.del(key)
-          return result.ok
+        delete: async (key: string): Promise<void> => {
+          await cache.del(key)
         },
-        clear: async () => {
+        clear: async (): Promise<void> => {
           // 清空缓存 - 对于内存缓存，需要扩展API
-          console.warn('Cache clear not implemented for all cache types')
-          return true
+          this.logger.warn('Cache clear not implemented for all cache types')
         }
       },
 
       queue: {
-        push: async (job: any) => {
+        push: async <T = unknown>(job: QueueJobData | T): Promise<string> => {
           const jobId = `job_${Date.now()}`
-          this.logger.info(`Job queued: ${jobId}`)
+          this.logger.info(`Job queued: ${jobId}`, { job })
           return jobId
         },
-        process: (type: string, handler: Function) => {
+        process: <T = unknown>(type: string, _handler: (job: import('./types/plugin').Job<T>) => Promise<unknown>) => {
           this.logger.info(`Queue processor registered: ${type}`)
         },
         cancel: async (jobId: string) => {
@@ -207,23 +258,42 @@ export class MetaSheetServer {
       },
 
       websocket: {
-        broadcast: (event: string, data: any) => {
+        broadcast: (event: string, data: unknown) => {
           this.io.emit(event, data)
         },
-        sendTo: (userId: string, event: string, data: any) => {
+        sendTo: (userId: string, event: string, data: unknown) => {
           this.io.to(userId).emit(event, data)
         },
-        onConnection: (handler: Function) => {
-          this.io.on('connection', handler as any)
+        onConnection: (handler: (socket: import('./types/plugin').SocketInfo) => void | Promise<void>) => {
+          this.io.on('connection', handler as (socket: unknown) => void)
         }
       },
       messaging: {
-        publish: (topic: string, payload: any, opts?: any) => messageBus.publish(topic, payload, opts),
-        subscribe: (topic: string, handler: any) => messageBus.subscribe(topic, handler),
-        subscribePattern: (pattern: string, handler: any) => messageBus.subscribePattern(pattern, handler),
+        publish: <T = unknown>(topic: string, payload: T, opts?: import('./types/plugin').PublishOptions) => {
+          // Adapt PublishOptions - messageBus uses MessagePriority string, plugin uses number
+          const adaptedOpts = opts ? {
+            ...opts,
+            priority: opts.priority !== undefined
+              ? (opts.priority <= 3 ? 'low' : opts.priority <= 6 ? 'normal' : 'high') as 'low' | 'normal' | 'high'
+              : undefined
+          } : undefined
+          messageBus.publish(topic, payload, adaptedOpts)
+        },
+        subscribe: <T = unknown>(topic: string, handler: MessageHandler<T>) => {
+          // Adapt MessageHandler to messageBus Handler signature
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const adaptedHandler = (msg: any) => handler(msg.payload as T, msg.topic)
+          return messageBus.subscribe(topic, adaptedHandler)
+        },
+        subscribePattern: <T = unknown>(pattern: string, handler: MessageHandler<T>) => {
+          // Adapt MessageHandler to messageBus Handler signature
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const adaptedHandler = (msg: any) => handler(msg.payload as T, msg.topic)
+          return messageBus.subscribePattern(pattern, adaptedHandler)
+        },
         unsubscribe: (id: string) => messageBus.unsubscribe(id),
-        request: (topic: string, payload: any, timeoutMs?: number) => messageBus.request(topic, payload, timeoutMs),
-        rpcHandler: (topic: string, handler: any) => messageBus.createRpcHandler(topic, handler)
+        request: <T = unknown, R = unknown>(topic: string, payload: T, timeoutMs?: number): Promise<R> => messageBus.request(topic, payload, timeoutMs),
+        rpcHandler: <T = unknown, R = unknown>(topic: string, handler: RpcHandler<T, R>) => messageBus.createRpcHandler(topic, handler)
       }
     }
   }
@@ -234,6 +304,13 @@ export class MetaSheetServer {
   private setupMiddleware(): void {
     // CORS
     this.app.use(cors())
+
+    // 请求上下文（requestId + trace bridge）
+    this.app.use((req, _res, next) => {
+      const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID()
+      setLogContext({ requestId })
+      next()
+    })
 
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
@@ -269,15 +346,15 @@ export class MetaSheetServer {
 
     // 健康检查
     this.app.get('/health', (req, res) => {
-      const endTimer = (res as any).__metricsTimer?.({ route: '/health', method: 'GET' })
+      const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         const stats = getPoolStats()
         // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
-        let pluginsSummary: any = undefined
+        let pluginsSummary: Record<string, unknown> | undefined = undefined
         try {
           // 与 /api/plugins 的 summary 保持一致结构
-          pluginsSummary = (this.pluginLoader as any).getSummary?.()
-        } catch {}
+          pluginsSummary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.()
+        } catch { /* ignore plugin summary errors */ }
         res.json({
           status: 'ok',
           timestamp: new Date().toISOString(),
@@ -287,9 +364,9 @@ export class MetaSheetServer {
           wsAdapter: this.wsAdapterType,
           redis: this.wsRedis
         })
-        endTimer?.(200)
+        endTimer?.({ route: '/health', method: 'GET' })(200)
       } catch (err) {
-        endTimer?.(500)
+        endTimer?.({ route: '/health', method: 'GET' })(500)
         throw err
       }
     })
@@ -312,6 +389,9 @@ export class MetaSheetServer {
     // 路由：快照（Snapshot MVP）
     this.app.use(snapshotsRouter())
 
+    // 路由：变更管理 (Sprint 3)
+    this.app.use('/api', changeManagementRouter)
+
     // 路由：事件总线
     this.app.use(eventsRouter())
 
@@ -325,8 +405,8 @@ export class MetaSheetServer {
         .then(m => {
           if (m?.default) this.app.use(m.default)
         })
-        .catch(() => {})
-    } catch {}
+        .catch(() => { /* fallback-test route not available */ })
+    } catch { /* dynamic import error */ }
 
     // 路由：缓存测试端点 (dev only)
     this.app.use('/api/cache-test', cacheTestRouter)
@@ -334,8 +414,8 @@ export class MetaSheetServer {
     // 路由：模拟错误 (用于观测 HTTP 成功率下降 & Burn Rate 测试，仅在非生产且允许不安全 admin 时暴露)
     if (process.env.ALLOW_UNSAFE_ADMIN === 'true') {
       this.app.get('/api/sim-error', (req, res) => {
-        const endTimer = (res as any).__metricsTimer?.({ route: '/api/sim-error', method: 'GET' })
-        endTimer?.(500)
+        const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
+        endTimer?.({ route: '/api/sim-error', method: 'GET' })(500)
         res.status(500).json({ ok: false, error: { code: 'SIMULATED_ERROR', message: 'Simulated failure' } })
       })
     }
@@ -348,61 +428,61 @@ export class MetaSheetServer {
 
     // V2 测试端点
     this.app.get('/api/v2/hello', (req, res) => {
-      const endTimer = (res as any).__metricsTimer?.({ route: '/api/v2/hello', method: 'GET' })
+      const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         res.json({ ok: true, message: 'Hello from MetaSheet V2!', version: '2.0.0-alpha.1' })
-        endTimer?.(200)
+        endTimer?.({ route: '/api/v2/hello', method: 'GET' })(200)
       } catch (err) {
-        endTimer?.(500)
+        endTimer?.({ route: '/api/v2/hello', method: 'GET' })(500)
         throw err
       }
     })
 
     this.app.get('/api/v2/rpc-test', async (req, res) => {
-      const endTimer = (res as any).__metricsTimer?.({ route: '/api/v2/rpc-test', method: 'GET' })
+      const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         // 测试 RPC 功能
         const testTopic = 'test.rpc'
         const testPayload = { message: 'ping' }
 
         // 创建测试 RPC handler
-        messageBus.createRpcHandler(testTopic, async (payload: any) => {
+        messageBus.createRpcHandler(testTopic, async (payload: { message: string }) => {
           return { ok: true, echo: payload, timestamp: Date.now() }
         })
 
         // 发送 RPC 请求
         const result = await messageBus.request(testTopic, testPayload, 1000)
         res.json({ ok: true, rpcTest: 'passed', result })
-        endTimer?.(200)
-      } catch (error: any) {
-        res.json({ ok: true, rpcTest: 'skipped', reason: error.message })
-        endTimer?.(200)
+        endTimer?.({ route: '/api/v2/rpc-test', method: 'GET' })(200)
+      } catch (error: unknown) {
+        res.json({ ok: true, rpcTest: 'skipped', reason: error instanceof Error ? error.message : String(error) })
+        endTimer?.({ route: '/api/v2/rpc-test', method: 'GET' })(200)
       }
     })
 
     // 插件信息
     this.app.get('/api/plugins', (req, res) => {
-      const endTimer = (res as any).__metricsTimer?.({ route: '/api/plugins', method: 'GET' })
+      const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
-        const list = this.pluginLoader.getList?.() || []
-        const summary = this.pluginLoader.getSummary?.() || {}
+        const list = (this.pluginLoader as unknown as Record<string, () => unknown[]>).getList?.() || []
+        const summary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.() || {}
         res.json({ list, summary })
-        endTimer?.(200)
-      } catch (e: any) {
-        res.json({ list: [], summary: { error: e?.message || String(e) } })
-        endTimer?.(500)
+        endTimer?.({ route: '/api/plugins', method: 'GET' })(200)
+      } catch (e: unknown) {
+        res.json({ list: [], summary: { error: e instanceof Error ? e.message : String(e) } })
+        endTimer?.({ route: '/api/plugins', method: 'GET' })(500)
       }
     })
 
     // Metrics (JSON minimal)
     this.app.get('/internal/metrics', async (_req, res) => {
-      const endTimer = (res as any).__metricsTimer?.({ route: '/internal/metrics', method: 'GET' })
+      const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         const { coreMetrics } = await import('./integration/metrics/metrics')
         res.json(coreMetrics.get())
-        endTimer?.(200)
+        endTimer?.({ route: '/internal/metrics', method: 'GET' })(200)
       } catch (err) {
-        endTimer?.(500)
+        endTimer?.({ route: '/internal/metrics', method: 'GET' })(500)
         throw err
       }
     })
@@ -454,47 +534,6 @@ export class MetaSheetServer {
   }
 
   /**
-   * 启动服务器
-   */
-  async start(): Promise<void> {
-    // 初始化EventBusService (允许降级跳过以保证度量端可用)
-    if (process.env.DISABLE_EVENT_BUS === 'true') {
-      this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS=true)')
-    } else {
-      this.logger.info('Initializing EventBusService...')
-      const coreAPI = this.createCoreAPI()
-      try {
-        await initializeEventBusService(coreAPI)
-      } catch (e) {
-        // 降级容错：记录错误但继续启动，使 Redis / metrics 在缺表或总线故障时仍可观测
-        this.logger.error('EventBusService initialization failed; continuing in degraded mode', e as Error)
-      }
-    }
-
-    // 加载插件并启动 HTTP 服务
-    if (process.env.SKIP_PLUGINS === 'true') {
-      this.logger.warn('Skipping plugin load (SKIP_PLUGINS=true)')
-    } else {
-      this.logger.info('Loading plugins...')
-      try {
-        await this.pluginLoader.loadPlugins()
-        this.logger.info('Plugins loaded successfully')
-      } catch (e) {
-        this.logger.error('Plugin loading failed; continuing startup without full plugin set', e as Error)
-      }
-    }
-
-    this.logger.info('Starting HTTP server listen phase...')
-    this.httpServer.listen(this.port, () => {
-      this.logger.info(`MetaSheet v2 core listening on http://localhost:${this.port}`)
-      this.logger.info(`Health:  http://localhost:${this.port}/health`)
-      this.logger.info(`Metrics: http://localhost:${this.port}/metrics/prom`)
-      this.logger.info(`Plugins: http://localhost:${this.port}/api/plugins`)
-      this.logger.info(`Events:  http://localhost:${this.port}/api/events`)
-    })
-  }
-
-  /**
    * 停止服务器
    */
   async stop(signal = 'SIGTERM'): Promise<void> {
@@ -508,7 +547,7 @@ export class MetaSheetServer {
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
         if (this.httpServer.listening) {
-          this.httpServer.close((err: any) => {
+          this.httpServer.close((err: Error | undefined) => {
             if (err) {
               this.logger.warn(`HTTP server close error: ${err.message}`)
             } else {
@@ -548,6 +587,18 @@ export class MetaSheetServer {
       }
     })())
 
+    // 4. Shutdown observability SDK if enabled
+    if (this.observabilityShutdown) {
+      shutdownTasks.push((async () => {
+        try {
+          await this.observabilityShutdown?.()
+          this.logger.info('Observability shutdown complete')
+        } catch (err) {
+          this.logger.warn(`Observability shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      })())
+    }
+
     // 4. Destroy API Gateway resources
     // shutdownTasks.push((async () => {
     //   try {
@@ -574,6 +625,19 @@ export class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
+    // 初始化可观测性（可选）
+    const observabilityConfig = loadObservabilityConfig()
+    try {
+      const obsResult = await initObservability(observabilityConfig, this.logger)
+      this.observabilityEnabled = obsResult.started
+      this.observabilityShutdown = obsResult.shutdown
+    } catch (err) {
+      this.logger.error('OpenTelemetry initialization failed', err as Error)
+      if (observabilityConfig.strict) {
+        throw err
+      }
+    }
+
     // 初始化EventBusService (允许降级跳过以保证度量端可用)
     if (process.env.DISABLE_EVENT_BUS === 'true') {
       this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS=true)')

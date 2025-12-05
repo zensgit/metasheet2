@@ -1,6 +1,7 @@
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // Create operation_audit_logs table (minimal placeholder to satisfy startup writes)
   await db.schema
     .createTable('operation_audit_logs')
@@ -83,4 +84,8 @@ export async function up(db: Kysely<any>): Promise<void> {
     ADD COLUMN IF NOT EXISTS latency_ms int,
     ADD COLUMN IF NOT EXISTS meta jsonb
   `.execute(db)
+}
+
+export async function down(db: Kysely<unknown>): Promise<void> {
+  await db.schema.dropTable('operation_audit_logs').ifExists().execute()
 }

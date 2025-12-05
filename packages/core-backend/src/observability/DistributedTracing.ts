@@ -1,36 +1,190 @@
-// @ts-nocheck
 /**
  * Distributed Tracing System
  * OpenTelemetry-based tracing for distributed system observability
  */
 
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node'
-import { Resource } from '@opentelemetry/resources'
-import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions'
-import {
-  BatchSpanProcessor,
-  ConsoleSpanExporter,
-  SimpleSpanProcessor,
-  SpanExporter
-} from '@opentelemetry/sdk-trace-base'
-import { JaegerExporter } from '@opentelemetry/exporter-jaeger'
-import { ZipkinExporter } from '@opentelemetry/exporter-zipkin'
-import { PrometheusExporter } from '@opentelemetry/exporter-prometheus'
-import { registerInstrumentations } from '@opentelemetry/instrumentation'
-import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
-import { ExpressInstrumentation } from '@opentelemetry/instrumentation-express'
-import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis'
-import {
-  trace,
-  context,
-  Span,
-  SpanKind,
-  SpanStatus,
-  SpanStatusCode,
-  Context,
-  Tracer
-} from '@opentelemetry/api'
+// OpenTelemetry type imports - using unknown for optional dependencies
+type NodeTracerProviderType = unknown
+type ResourceType = unknown
+type SpanExporterType = unknown
+type SpanType = unknown
+type TracerType = unknown
+type ContextType = unknown
+type SpanProcessorType = unknown
+type InstrumentationType = unknown
+type AttributeValue = string | number | boolean | Array<string | number | boolean>
+
+// Dynamic OpenTelemetry imports with proper typing
+interface OtelSdkTraceNode {
+  NodeTracerProvider: new (config: {
+    resource: ResourceType
+    forceFlushTimeoutMillis?: number
+  }) => NodeTracerProviderType
+}
+
+interface ResourceClass {
+  default: () => ResourceType
+  new (attributes: Record<string, AttributeValue>): ResourceType
+}
+
+interface ResourceWithMerge {
+  merge: (other: ResourceType) => ResourceType
+}
+
+interface OtelResources {
+  Resource: ResourceClass
+}
+
+interface OtelSemanticConventions {
+  SemanticResourceAttributes: {
+    SERVICE_NAME: string
+    SERVICE_VERSION: string
+    DEPLOYMENT_ENVIRONMENT: string
+  }
+}
+
+interface OtelSdkTraceBase {
+  BatchSpanProcessor: new (exporter: SpanExporterType) => SpanProcessorType
+  ConsoleSpanExporter: new () => SpanExporterType
+  SimpleSpanProcessor: new (exporter: SpanExporterType) => SpanProcessorType
+}
+
+interface OtelExporterJaeger {
+  JaegerExporter: new (config: {
+    endpoint: string
+    username?: string
+    password?: string
+  }) => SpanExporterType
+}
+
+interface OtelExporterZipkin {
+  ZipkinExporter: new (config: {
+    url: string
+    serviceName?: string
+  }) => SpanExporterType
+}
+
+interface InstrumentationConfig {
+  requestHook?: (span: SpanType, request: unknown) => void
+  responseHook?: (span: SpanType, response: unknown) => void
+  ignoreIncomingPaths?: string[]
+}
+
+interface OtelInstrumentation {
+  registerInstrumentations: (config: {
+    instrumentations: InstrumentationType[]
+  }) => void
+}
+
+interface OtelInstrumentationHttp {
+  HttpInstrumentation: new (config: InstrumentationConfig) => InstrumentationType
+}
+
+interface OtelInstrumentationExpress {
+  ExpressInstrumentation: new (config: {
+    requestHook?: (span: SpanType, info: { route?: string; request: { params?: unknown } }) => void
+  }) => InstrumentationType
+}
+
+interface OtelInstrumentationIoredis {
+  IORedisInstrumentation: new (config: {
+    requestHook?: (span: SpanType, info: { command: { name: string; args?: unknown[] } }) => void
+  }) => InstrumentationType
+}
+
+interface OtelApi {
+  trace: {
+    getTracer: (name: string, version: string) => TracerType
+    getActiveSpan: () => SpanType | undefined
+    setSpan: (context: ContextType, span: SpanType) => ContextType
+  }
+  context: {
+    active: () => ContextType
+  }
+  SpanKind: {
+    INTERNAL: number
+    SERVER: number
+    CLIENT: number
+    PRODUCER: number
+    CONSUMER: number
+  }
+  SpanStatusCode: {
+    UNSET: number
+    OK: number
+    ERROR: number
+  }
+}
+
+let otelSdkTraceNode: OtelSdkTraceNode | null = null
+let otelResources: OtelResources | null = null
+let otelSemanticConventions: OtelSemanticConventions | null = null
+let otelSdkTraceBase: OtelSdkTraceBase | null = null
+let otelExporterJaeger: OtelExporterJaeger | null = null
+let otelExporterZipkin: OtelExporterZipkin | null = null
+let otelInstrumentation: OtelInstrumentation | null = null
+let otelInstrumentationHttp: OtelInstrumentationHttp | null = null
+let otelInstrumentationExpress: OtelInstrumentationExpress | null = null
+let otelInstrumentationIoredis: OtelInstrumentationIoredis | null = null
+let otelApi: OtelApi | null = null
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelSdkTraceNode = require('@opentelemetry/sdk-trace-node') as OtelSdkTraceNode
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelResources = require('@opentelemetry/resources') as OtelResources
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelSemanticConventions = require('@opentelemetry/semantic-conventions') as OtelSemanticConventions
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelSdkTraceBase = require('@opentelemetry/sdk-trace-base') as OtelSdkTraceBase
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelApi = require('@opentelemetry/api') as OtelApi
+} catch {
+  // OpenTelemetry core packages not installed
+}
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelExporterJaeger = require('@opentelemetry/exporter-jaeger') as OtelExporterJaeger
+} catch {
+  // Jaeger exporter not installed
+}
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelExporterZipkin = require('@opentelemetry/exporter-zipkin') as OtelExporterZipkin
+} catch {
+  // Zipkin exporter not installed
+}
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelInstrumentation = require('@opentelemetry/instrumentation') as OtelInstrumentation
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelInstrumentationHttp = require('@opentelemetry/instrumentation-http') as OtelInstrumentationHttp
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelInstrumentationExpress = require('@opentelemetry/instrumentation-express') as OtelInstrumentationExpress
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  otelInstrumentationIoredis = require('@opentelemetry/instrumentation-ioredis') as OtelInstrumentationIoredis
+} catch {
+  // Instrumentation packages not installed
+}
+
 import { EventEmitter } from 'eventemitter3'
+
+// Re-export SpanKind and SpanStatusCode for external use
+export const SpanKind = otelApi?.SpanKind || {
+  INTERNAL: 0,
+  SERVER: 1,
+  CLIENT: 2,
+  PRODUCER: 3,
+  CONSUMER: 4
+}
+
+export const SpanStatusCode = otelApi?.SpanStatusCode || {
+  UNSET: 0,
+  OK: 1,
+  ERROR: 2
+}
 
 export interface TracingConfig {
   serviceName: string
@@ -47,7 +201,7 @@ export interface TracingConfig {
       url: string
       serviceName?: string
     }
-    custom?: SpanExporter
+    custom?: SpanExporterType
   }
   sampling?: {
     probability: number
@@ -71,30 +225,77 @@ export interface TraceContext {
   baggage?: Record<string, string>
 }
 
+export interface SpanStatus {
+  code: number
+  message?: string
+}
+
 export interface SpanMetadata {
   name: string
-  kind: SpanKind
-  attributes?: Record<string, any>
+  kind: number
+  attributes?: Record<string, AttributeValue>
   events?: Array<{
     name: string
-    attributes?: Record<string, any>
+    attributes?: Record<string, AttributeValue>
     timestamp?: number
   }>
   links?: Array<{
     context: TraceContext
-    attributes?: Record<string, any>
+    attributes?: Record<string, AttributeValue>
   }>
-  status?: {
-    code: SpanStatusCode
-    message?: string
+  status?: SpanStatus
+}
+
+// Internal interfaces for span operations
+interface SpanWithContext {
+  spanContext: () => {
+    spanId: string
+    traceId: string
+    traceFlags: number
   }
+  setStatus: (status: SpanStatus) => void
+  end: () => void
+  recordException: (error: Error) => void
+  setAttributes: (attributes: Record<string, AttributeValue>) => void
+  addEvent: (name: string, attributes?: Record<string, AttributeValue>, timestamp?: number) => void
+}
+
+interface TracerProviderWithMethods {
+  addSpanProcessor: (processor: SpanProcessorType) => void
+  register: () => void
+  forceFlush: () => Promise<void>
+  shutdown: () => Promise<void>
+}
+
+interface TracerWithStartSpan {
+  startSpan: (
+    name: string,
+    options?: {
+      kind?: number
+      attributes?: Record<string, AttributeValue>
+    },
+    context?: ContextType
+  ) => SpanWithContext
+}
+
+interface BaggageEntry {
+  value: string
+}
+
+interface Baggage {
+  setEntry: (key: string, entry: BaggageEntry) => void
+  getEntry: (key: string) => BaggageEntry | undefined
+}
+
+interface ContextWithBaggage {
+  getValue: (key: symbol) => Baggage | undefined
 }
 
 export class DistributedTracing extends EventEmitter {
-  private provider: NodeTracerProvider
-  private tracer: Tracer
+  private provider: NodeTracerProviderType
+  private tracer: TracerType
   private config: TracingConfig
-  private activeSpans: Map<string, Span> = new Map()
+  private activeSpans: Map<string, SpanType> = new Map()
   private spanMetrics: {
     created: number
     completed: number
@@ -109,9 +310,14 @@ export class DistributedTracing extends EventEmitter {
 
   constructor(config: TracingConfig) {
     super()
+
+    if (!otelSdkTraceNode || !otelResources || !otelSemanticConventions || !otelSdkTraceBase || !otelApi) {
+      throw new Error('OpenTelemetry core packages are not installed')
+    }
+
     this.config = config
     this.provider = this.initializeProvider()
-    this.tracer = trace.getTracer(config.serviceName, config.serviceVersion)
+    this.tracer = otelApi.trace.getTracer(config.serviceName, config.serviceVersion)
     this.setupInstrumentations()
     this.emit('tracing:initialized', config)
   }
@@ -119,25 +325,34 @@ export class DistributedTracing extends EventEmitter {
   /**
    * Initialize the tracer provider
    */
-  private initializeProvider(): NodeTracerProvider {
-    const resource = Resource.default().merge(
+  private initializeProvider(): NodeTracerProviderType {
+    if (!otelSdkTraceNode || !otelResources || !otelSemanticConventions) {
+      throw new Error('OpenTelemetry packages not available')
+    }
+
+    const Resource = otelResources.Resource
+    const SemanticResourceAttributes = otelSemanticConventions.SemanticResourceAttributes
+
+    const defaultResource = Resource.default() as unknown as ResourceWithMerge
+    const resource = defaultResource.merge(
       new Resource({
         [SemanticResourceAttributes.SERVICE_NAME]: this.config.serviceName,
         [SemanticResourceAttributes.SERVICE_VERSION]: this.config.serviceVersion,
         [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: this.config.environment
       })
-    )
+    );
 
-    const provider = new NodeTracerProvider({
+    const provider = new otelSdkTraceNode.NodeTracerProvider({
       resource,
       forceFlushTimeoutMillis: 10000
-    })
+    });
 
     // Add exporters
-    this.setupExporters(provider)
+    const exporterSetup = this.configureSpanExporters.bind(this);
+    exporterSetup(provider);
 
     // Register the provider
-    provider.register()
+    (provider as unknown as TracerProviderWithMethods).register()
 
     return provider
   }
@@ -145,37 +360,40 @@ export class DistributedTracing extends EventEmitter {
   /**
    * Setup span exporters
    */
-  private setupExporters(provider: NodeTracerProvider): void {
+  private configureSpanExporters(provider: NodeTracerProviderType): void {
+    if (!otelSdkTraceBase) return
+
     const exporters = this.config.exporters || {}
+    const typedProvider = provider as unknown as TracerProviderWithMethods
 
     // Console exporter for development
     if (exporters.console) {
-      const consoleExporter = new ConsoleSpanExporter()
-      provider.addSpanProcessor(new SimpleSpanProcessor(consoleExporter))
+      const consoleExporter = new otelSdkTraceBase.ConsoleSpanExporter()
+      typedProvider.addSpanProcessor(new otelSdkTraceBase.SimpleSpanProcessor(consoleExporter))
     }
 
     // Jaeger exporter
-    if (exporters.jaeger) {
-      const jaegerExporter = new JaegerExporter({
+    if (exporters.jaeger && otelExporterJaeger) {
+      const jaegerExporter = new otelExporterJaeger.JaegerExporter({
         endpoint: exporters.jaeger.endpoint,
         username: exporters.jaeger.username,
         password: exporters.jaeger.password
       })
-      provider.addSpanProcessor(new BatchSpanProcessor(jaegerExporter))
+      typedProvider.addSpanProcessor(new otelSdkTraceBase.BatchSpanProcessor(jaegerExporter))
     }
 
     // Zipkin exporter
-    if (exporters.zipkin) {
-      const zipkinExporter = new ZipkinExporter({
+    if (exporters.zipkin && otelExporterZipkin) {
+      const zipkinExporter = new otelExporterZipkin.ZipkinExporter({
         url: exporters.zipkin.url,
         serviceName: exporters.zipkin.serviceName || this.config.serviceName
       })
-      provider.addSpanProcessor(new BatchSpanProcessor(zipkinExporter))
+      typedProvider.addSpanProcessor(new otelSdkTraceBase.BatchSpanProcessor(zipkinExporter))
     }
 
     // Custom exporter
     if (exporters.custom) {
-      provider.addSpanProcessor(new BatchSpanProcessor(exporters.custom))
+      typedProvider.addSpanProcessor(new otelSdkTraceBase.BatchSpanProcessor(exporters.custom))
     }
   }
 
@@ -183,20 +401,26 @@ export class DistributedTracing extends EventEmitter {
    * Setup auto-instrumentations
    */
   private setupInstrumentations(): void {
-    const instrumentations = this.config.instrumentations || {}
-    const instrumentationList = []
+    if (!otelInstrumentation) return
 
-    if (instrumentations.http !== false) {
+    const instrumentations = this.config.instrumentations || {}
+    const instrumentationList: InstrumentationType[] = []
+
+    if (instrumentations.http !== false && otelInstrumentationHttp) {
       instrumentationList.push(
-        new HttpInstrumentation({
-          requestHook: (span, request) => {
-            span.setAttributes({
-              'http.request.body.size': request.headers['content-length'] || 0
+        new otelInstrumentationHttp.HttpInstrumentation({
+          requestHook: (span: SpanType, request: unknown) => {
+            const typedSpan = span as unknown as SpanWithContext
+            const req = request as { headers?: Record<string, string | number> }
+            typedSpan.setAttributes({
+              'http.request.body.size': req.headers?.['content-length'] || 0
             })
           },
-          responseHook: (span, response) => {
-            span.setAttributes({
-              'http.response.body.size': response.headers?.['content-length'] || 0
+          responseHook: (span: SpanType, response: unknown) => {
+            const typedSpan = span as unknown as SpanWithContext
+            const res = response as { headers?: Record<string, string | number> }
+            typedSpan.setAttributes({
+              'http.response.body.size': res.headers?.['content-length'] || 0
             })
           },
           ignoreIncomingPaths: ['/health', '/metrics', '/metrics/prom']
@@ -204,33 +428,35 @@ export class DistributedTracing extends EventEmitter {
       )
     }
 
-    if (instrumentations.express !== false) {
+    if (instrumentations.express !== false && otelInstrumentationExpress) {
       instrumentationList.push(
-        new ExpressInstrumentation({
-          requestHook: (span, info) => {
-            span.setAttributes({
-              'express.route': info.route,
-              'express.params': JSON.stringify(info.request.params)
+        new otelInstrumentationExpress.ExpressInstrumentation({
+          requestHook: (span: SpanType, info: { route?: string; request: { params?: unknown } }) => {
+            const typedSpan = span as unknown as SpanWithContext
+            typedSpan.setAttributes({
+              'express.route': info.route || '',
+              'express.params': JSON.stringify(info.request.params || {})
             })
           }
         })
       )
     }
 
-    if (instrumentations.redis !== false) {
+    if (instrumentations.redis !== false && otelInstrumentationIoredis) {
       instrumentationList.push(
-        new IORedisInstrumentation({
-          requestHook: (span, info) => {
-            span.setAttributes({
+        new otelInstrumentationIoredis.IORedisInstrumentation({
+          requestHook: (span: SpanType, info: { command: { name: string; args?: unknown[] } }) => {
+            const typedSpan = span as unknown as SpanWithContext
+            typedSpan.setAttributes({
               'redis.command': info.command.name,
-              'redis.key': info.command.args?.[0]
+              'redis.key': String(info.command.args?.[0] || '')
             })
           }
         })
       )
     }
 
-    registerInstrumentations({
+    otelInstrumentation.registerInstrumentations({
       instrumentations: instrumentationList
     })
   }
@@ -241,29 +467,36 @@ export class DistributedTracing extends EventEmitter {
   startSpan(
     name: string,
     options?: {
-      kind?: SpanKind
-      attributes?: Record<string, any>
-      parent?: Context | Span
+      kind?: number
+      attributes?: Record<string, AttributeValue>
+      parent?: ContextType | SpanType
     }
-  ): Span {
+  ): SpanType {
+    if (!otelApi) {
+      throw new Error('OpenTelemetry API not available')
+    }
+
     const spanOptions = {
       kind: options?.kind || SpanKind.INTERNAL,
       attributes: options?.attributes
     }
 
-    let span: Span
-    if (options?.parent) {
-      const parentContext = 'spanContext' in options.parent
-        ? trace.setSpan(context.active(), options.parent)
-        : options.parent
+    const typedTracer = this.tracer as unknown as TracerWithStartSpan
+    let span: SpanWithContext
 
-      span = this.tracer.startSpan(name, spanOptions, parentContext)
+    if (options?.parent) {
+      const parent = options.parent as { spanContext?: () => unknown }
+      const parentContext = parent.spanContext
+        ? otelApi.trace.setSpan(otelApi.context.active(), options.parent as SpanType)
+        : options.parent as ContextType
+
+      span = typedTracer.startSpan(name, spanOptions, parentContext)
     } else {
-      span = this.tracer.startSpan(name, spanOptions)
+      span = typedTracer.startSpan(name, spanOptions)
     }
 
     const spanId = span.spanContext().spanId
-    this.activeSpans.set(spanId, span)
+    this.activeSpans.set(spanId, span as unknown as SpanType)
     this.spanMetrics.created++
     this.spanMetrics.active++
 
@@ -273,20 +506,22 @@ export class DistributedTracing extends EventEmitter {
       traceId: span.spanContext().traceId
     })
 
-    return span
+    return span as unknown as SpanType
   }
 
   /**
    * End a span
    */
-  endSpan(span: Span, status?: SpanStatus): void {
+  endSpan(span: SpanType, status?: SpanStatus): void {
+    const typedSpan = span as unknown as SpanWithContext
+
     if (status) {
-      span.setStatus(status)
+      typedSpan.setStatus(status)
     }
 
-    span.end()
+    typedSpan.end()
 
-    const spanId = span.spanContext().spanId
+    const spanId = typedSpan.spanContext().spanId
     this.activeSpans.delete(spanId)
     this.spanMetrics.completed++
     this.spanMetrics.active--
@@ -297,7 +532,7 @@ export class DistributedTracing extends EventEmitter {
 
     this.emit('span:ended', {
       spanId,
-      traceId: span.spanContext().traceId,
+      traceId: typedSpan.spanContext().traceId,
       status
     })
   }
@@ -305,16 +540,17 @@ export class DistributedTracing extends EventEmitter {
   /**
    * Create a traced function
    */
-  traceFunction<T extends (...args: any[]) => any>(
+  traceFunction<T extends (...args: unknown[]) => unknown>(
     name: string,
     fn: T,
     options?: {
-      kind?: SpanKind
-      attributes?: Record<string, any>
+      kind?: number
+      attributes?: Record<string, AttributeValue>
     }
   ): T {
-    return ((...args: any[]) => {
+    return ((...args: unknown[]) => {
       const span = this.startSpan(name, options)
+      const typedSpan = span as unknown as SpanWithContext
 
       try {
         const result = fn(...args)
@@ -325,11 +561,12 @@ export class DistributedTracing extends EventEmitter {
               this.endSpan(span, { code: SpanStatusCode.OK })
               return value
             })
-            .catch((error) => {
-              span.recordException(error)
+            .catch((error: unknown) => {
+              const err = error instanceof Error ? error : new Error(String(error))
+              typedSpan.recordException(err)
               this.endSpan(span, {
                 code: SpanStatusCode.ERROR,
-                message: error.message
+                message: err.message
               })
               throw error
             })
@@ -337,11 +574,12 @@ export class DistributedTracing extends EventEmitter {
 
         this.endSpan(span, { code: SpanStatusCode.OK })
         return result
-      } catch (error: any) {
-        span.recordException(error)
+      } catch (error: unknown) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        typedSpan.recordException(err)
         this.endSpan(span, {
           code: SpanStatusCode.ERROR,
-          message: error.message
+          message: err.message
         })
         throw error
       }
@@ -351,26 +589,28 @@ export class DistributedTracing extends EventEmitter {
   /**
    * Create a traced async function
    */
-  traceAsyncFunction<T extends (...args: any[]) => Promise<any>>(
+  traceAsyncFunction<T extends (...args: unknown[]) => Promise<unknown>>(
     name: string,
     fn: T,
     options?: {
-      kind?: SpanKind
-      attributes?: Record<string, any>
+      kind?: number
+      attributes?: Record<string, AttributeValue>
     }
   ): T {
-    return (async (...args: any[]) => {
+    return (async (...args: unknown[]) => {
       const span = this.startSpan(name, options)
+      const typedSpan = span as unknown as SpanWithContext
 
       try {
         const result = await fn(...args)
         this.endSpan(span, { code: SpanStatusCode.OK })
         return result
-      } catch (error: any) {
-        span.recordException(error)
+      } catch (error: unknown) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        typedSpan.recordException(err)
         this.endSpan(span, {
           code: SpanStatusCode.ERROR,
-          message: error.message
+          message: err.message
         })
         throw error
       }
@@ -383,9 +623,9 @@ export class DistributedTracing extends EventEmitter {
   async traceHttpRequest(
     method: string,
     url: string,
-    handler: () => Promise<any>,
+    handler: () => Promise<unknown>,
     headers?: Record<string, string>
-  ): Promise<any> {
+  ): Promise<unknown> {
     const span = this.startSpan(`HTTP ${method} ${url}`, {
       kind: SpanKind.CLIENT,
       attributes: {
@@ -394,28 +634,31 @@ export class DistributedTracing extends EventEmitter {
         'http.headers': JSON.stringify(headers || {})
       }
     })
+    const typedSpan = span as unknown as SpanWithContext
 
     try {
       const startTime = Date.now()
       const result = await handler()
       const duration = Date.now() - startTime
 
-      span.setAttributes({
-        'http.status_code': result.status || 200,
+      const res = result as { status?: number }
+      typedSpan.setAttributes({
+        'http.status_code': res.status || 200,
         'http.response_time': duration
       })
 
       this.endSpan(span, { code: SpanStatusCode.OK })
       return result
-    } catch (error: any) {
-      span.recordException(error)
-      span.setAttributes({
-        'http.error': error.message
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      typedSpan.recordException(err)
+      typedSpan.setAttributes({
+        'http.error': err.message
       })
 
       this.endSpan(span, {
         code: SpanStatusCode.ERROR,
-        message: error.message
+        message: err.message
       })
 
       throw error
@@ -428,9 +671,9 @@ export class DistributedTracing extends EventEmitter {
   async traceDbQuery(
     operation: string,
     query: string,
-    handler: () => Promise<any>,
-    params?: any[]
-  ): Promise<any> {
+    handler: () => Promise<unknown>,
+    params?: unknown[]
+  ): Promise<unknown> {
     const span = this.startSpan(`DB ${operation}`, {
       kind: SpanKind.CLIENT,
       attributes: {
@@ -439,28 +682,31 @@ export class DistributedTracing extends EventEmitter {
         'db.params': JSON.stringify(params || [])
       }
     })
+    const typedSpan = span as unknown as SpanWithContext
 
     try {
       const startTime = Date.now()
       const result = await handler()
       const duration = Date.now() - startTime
 
-      span.setAttributes({
-        'db.rows_affected': result.rowCount || 0,
+      const dbResult = result as { rowCount?: number }
+      typedSpan.setAttributes({
+        'db.rows_affected': dbResult.rowCount || 0,
         'db.duration': duration
       })
 
       this.endSpan(span, { code: SpanStatusCode.OK })
       return result
-    } catch (error: any) {
-      span.recordException(error)
-      span.setAttributes({
-        'db.error': error.message
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      typedSpan.recordException(err)
+      typedSpan.setAttributes({
+        'db.error': err.message
       })
 
       this.endSpan(span, {
         code: SpanStatusCode.ERROR,
-        message: error.message
+        message: err.message
       })
 
       throw error
@@ -472,22 +718,26 @@ export class DistributedTracing extends EventEmitter {
    */
   addEvent(
     name: string,
-    attributes?: Record<string, any>,
+    attributes?: Record<string, AttributeValue>,
     timestamp?: number
   ): void {
-    const span = trace.getActiveSpan()
+    if (!otelApi) return
+    const span = otelApi.trace.getActiveSpan()
     if (span) {
-      span.addEvent(name, attributes, timestamp)
+      const typedSpan = span as unknown as SpanWithContext
+      typedSpan.addEvent(name, attributes, timestamp)
     }
   }
 
   /**
    * Set attributes on current span
    */
-  setAttributes(attributes: Record<string, any>): void {
-    const span = trace.getActiveSpan()
+  setAttributes(attributes: Record<string, AttributeValue>): void {
+    if (!otelApi) return
+    const span = otelApi.trace.getActiveSpan()
     if (span) {
-      span.setAttributes(attributes)
+      const typedSpan = span as unknown as SpanWithContext
+      typedSpan.setAttributes(attributes)
     }
   }
 
@@ -495,7 +745,9 @@ export class DistributedTracing extends EventEmitter {
    * Set baggage
    */
   setBaggage(key: string, value: string): void {
-    const baggage = context.active().getValue(Symbol.for('OpenTelemetry Baggage'))
+    if (!otelApi) return
+    const context = otelApi.context.active() as unknown as ContextWithBaggage
+    const baggage = context.getValue(Symbol.for('OpenTelemetry Baggage'))
     if (baggage) {
       baggage.setEntry(key, { value })
     }
@@ -505,7 +757,9 @@ export class DistributedTracing extends EventEmitter {
    * Get baggage
    */
   getBaggage(key: string): string | undefined {
-    const baggage = context.active().getValue(Symbol.for('OpenTelemetry Baggage'))
+    if (!otelApi) return undefined
+    const context = otelApi.context.active() as unknown as ContextWithBaggage
+    const baggage = context.getValue(Symbol.for('OpenTelemetry Baggage'))
     if (baggage) {
       const entry = baggage.getEntry(key)
       return entry?.value
@@ -535,10 +789,12 @@ export class DistributedTracing extends EventEmitter {
    * Inject trace context into headers
    */
   injectTraceContext(headers: Record<string, string>): Record<string, string> {
-    const span = trace.getActiveSpan()
+    if (!otelApi) return headers
+    const span = otelApi.trace.getActiveSpan()
     if (!span) return headers
 
-    const spanContext = span.spanContext()
+    const typedSpan = span as unknown as SpanWithContext
+    const spanContext = typedSpan.spanContext()
     headers['traceparent'] = `00-${spanContext.traceId}-${spanContext.spanId}-0${spanContext.traceFlags}`
 
     return headers
@@ -549,12 +805,12 @@ export class DistributedTracing extends EventEmitter {
    */
   createChildSpan(
     name: string,
-    parentSpan: Span,
+    parentSpan: SpanType,
     options?: {
-      kind?: SpanKind
-      attributes?: Record<string, any>
+      kind?: number
+      attributes?: Record<string, AttributeValue>
     }
-  ): Span {
+  ): SpanType {
     return this.startSpan(name, {
       ...options,
       parent: parentSpan
@@ -564,14 +820,15 @@ export class DistributedTracing extends EventEmitter {
   /**
    * Get active span
    */
-  getActiveSpan(): Span | undefined {
-    return trace.getActiveSpan()
+  getActiveSpan(): SpanType | undefined {
+    if (!otelApi) return undefined
+    return otelApi.trace.getActiveSpan() as SpanType | undefined
   }
 
   /**
    * Get span by ID
    */
-  getSpan(spanId: string): Span | undefined {
+  getSpan(spanId: string): SpanType | undefined {
     return this.activeSpans.get(spanId)
   }
 
@@ -597,22 +854,25 @@ export class DistributedTracing extends EventEmitter {
    * Force flush all spans
    */
   async flush(): Promise<void> {
-    await this.provider.forceFlush()
+    const typedProvider = this.provider as unknown as TracerProviderWithMethods
+    await typedProvider.forceFlush()
   }
 
   /**
    * Shutdown tracing
    */
   async shutdown(): Promise<void> {
-    // End all active spans
-    for (const [spanId, span] of this.activeSpans) {
+    // End all active spans - use Array.from to avoid iteration issues with unknown type
+    const spans = Array.from(this.activeSpans.entries())
+    for (const [_spanId, span] of spans) {
       this.endSpan(span, {
         code: SpanStatusCode.ERROR,
         message: 'Shutdown forced'
       })
     }
 
-    await this.provider.shutdown()
+    const typedProvider = this.provider as unknown as TracerProviderWithMethods
+    await typedProvider.shutdown()
     this.removeAllListeners()
     this.emit('tracing:shutdown')
   }

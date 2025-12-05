@@ -1,3 +1,29 @@
+// JSON Schema type for configuration
+export interface JSONSchema {
+  type?: string | string[]
+  properties?: Record<string, JSONSchema>
+  required?: string[]
+  items?: JSONSchema
+  additionalProperties?: boolean | JSONSchema
+  enum?: unknown[]
+  default?: unknown
+  description?: string
+  [key: string]: unknown
+}
+
+// Event handler function type
+export type EventHandler = (...args: unknown[]) => void | Promise<void>
+
+// Plugin export function type - allows any function signature
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PluginFunction = (...args: any[]) => any
+
+// Component type for UI frameworks (Vue/React)
+export type UIComponent = unknown
+
+// Metadata type for logging
+export type LogMetadata = Record<string, unknown>
+
 export interface PluginManifest {
   id: string
   name: string
@@ -57,9 +83,9 @@ export interface PluginManifest {
 
   // Configuration schema
   config?: {
-    schema: Record<string, any> // JSON Schema
-    defaults?: Record<string, any>
-    ui?: Record<string, any> // UI hints for config
+    schema: JSONSchema // JSON Schema
+    defaults?: Record<string, unknown>
+    ui?: Record<string, unknown> // UI hints for config
   }
 
   // Assets
@@ -98,7 +124,7 @@ export interface PluginInstance {
   status: 'loading' | 'active' | 'disabled' | 'error'
   loadedAt: Date
   context: PluginContext
-  exports: any
+  exports: PluginExports
   error?: Error
   metrics?: PluginMetrics
 }
@@ -115,15 +141,15 @@ export interface PluginContext {
 }
 
 export interface PluginLogger {
-  debug: (message: string, meta?: any) => void
-  info: (message: string, meta?: any) => void
-  warn: (message: string, meta?: any) => void
-  error: (message: string, meta?: any) => void
+  debug: (message: string, meta?: LogMetadata) => void
+  info: (message: string, meta?: LogMetadata) => void
+  warn: (message: string, meta?: LogMetadata) => void
+  error: (message: string, meta?: LogMetadata) => void
 }
 
 export interface PluginAPI {
-  callPlugin: (pluginId: string, method: string, ...args: any[]) => Promise<any>
-  executeHook: (hookName: string, data: any) => Promise<any[]>
+  callPlugin: (pluginId: string, method: string, ...args: unknown[]) => Promise<unknown>
+  executeHook: (hookName: string, data: unknown) => Promise<unknown[]>
   getPlugin: (pluginId: string) => {
     id: string
     name: string
@@ -133,15 +159,15 @@ export interface PluginAPI {
 }
 
 export interface PluginEvents {
-  on: (event: string, handler: Function) => void
-  off: (event: string, handler: Function) => void
-  emit: (event: string, data: any) => void
-  once: (event: string, handler: Function) => void
+  on: (event: string, handler: EventHandler) => void
+  off: (event: string, handler: EventHandler) => void
+  emit: (event: string, data: unknown) => void
+  once: (event: string, handler: EventHandler) => void
 }
 
 export interface PluginStorage {
-  get: (key: string) => Promise<any>
-  set: (key: string, value: any) => Promise<void>
+  get: (key: string) => Promise<unknown>
+  set: (key: string, value: unknown) => Promise<void>
   delete: (key: string) => Promise<void>
   list: () => Promise<string[]>
 }
@@ -149,7 +175,7 @@ export interface PluginStorage {
 export interface PluginHook {
   pluginId: string
   hookName: string
-  handler: string | Function
+  handler: string | EventHandler
   priority?: number
   required?: boolean
 }
@@ -165,7 +191,7 @@ export interface PluginMetrics {
 }
 
 export interface PluginConfig {
-  [key: string]: any
+  [key: string]: unknown
 }
 
 export interface PluginLifecycle {
@@ -176,14 +202,14 @@ export interface PluginLifecycle {
 }
 
 export interface PluginExports extends PluginLifecycle {
-  [key: string]: any
+  [key: string]: PluginFunction | undefined
 }
 
 // Hook definitions
 export interface HookContext {
   pluginId: string
   hookName: string
-  data: any
+  data: unknown
   timestamp: Date
   cancelled?: boolean
   stopPropagation?: boolean
@@ -191,7 +217,7 @@ export interface HookContext {
 
 export interface HookResult {
   success: boolean
-  data?: any
+  data?: unknown
   error?: Error
   modified?: boolean
   _stopPropagation?: boolean
@@ -201,7 +227,7 @@ export interface HookResult {
 export interface PluginEvent {
   type: string
   source: string
-  data: any
+  data: unknown
   timestamp: Date
 }
 
@@ -227,8 +253,8 @@ export interface UIPanel {
   pluginId: string
   title: string
   icon?: string
-  component: any // Vue/React component
-  props?: Record<string, any>
+  component: UIComponent // Vue/React component
+  props?: Record<string, unknown>
   position: 'left' | 'right' | 'bottom' | 'modal'
   visible: boolean
 }
@@ -262,18 +288,18 @@ export interface PluginMessage {
   from: string
   to: string
   type: string
-  data: any
+  data: unknown
   timestamp: Date
   replyTo?: string
 }
 
 export interface PluginRequest extends PluginMessage {
   method: string
-  params: any[]
+  params: unknown[]
 }
 
 export interface PluginResponse extends PluginMessage {
-  result?: any
+  result?: unknown
   error?: Error
 }
 

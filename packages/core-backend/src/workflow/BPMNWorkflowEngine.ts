@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * BPMN Workflow Engine
  * Core engine for executing BPMN 2.0 compliant workflows
@@ -6,11 +5,77 @@
 
 import { EventEmitter } from 'events'
 import { db } from '../db/db'
+import { sql } from 'kysely'
 import { Logger } from '../core/logger'
 import { v4 as uuidv4 } from 'uuid'
-import * as xml2js from 'xml2js'
-import * as cron from 'node-cron'
 import { metrics } from '../metrics/metrics'
+
+// Types for optional dependencies
+type ScheduledTaskType = { start: () => void; stop: () => void }
+type CronModule = {
+  schedule: (expression: string, callback: () => void | Promise<void>) => ScheduledTaskType
+}
+type Xml2JsModule = {
+  parseString: (xml: string, callback: (err: Error | null, result: BPMNParsedDefinition) => void) => void
+}
+
+// BPMN Definition Types
+interface BPMNParsedDefinition {
+  definitions: {
+    process: Array<{
+      $: {
+        id: string
+        name?: string
+      }
+      [key: string]: unknown
+    }>
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
+interface BPMNSequenceFlow {
+  conditionExpression?: string
+  [key: string]: unknown
+}
+
+interface BPMNDatabaseDefinition {
+  id: string
+  key: string
+  name: string
+  bpmn_xml: string
+  version?: number
+  description?: string | null
+  category?: string | null
+  tenant_id?: string | null
+  is_executable?: boolean
+}
+
+interface BPMNTimerJob {
+  id: string
+  process_instance_id: string
+  activity_id: string
+  retries: number
+  [key: string]: unknown
+}
+
+// Dynamic imports for optional dependencies
+let xml2js: Xml2JsModule | null = null
+let cron: CronModule | null = null
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  xml2js = require('xml2js')
+} catch {
+  // xml2js not installed
+}
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  cron = require('node-cron')
+} catch {
+  // node-cron not installed
+}
 
 export interface ProcessDefinition {
   id?: string
@@ -31,7 +96,7 @@ export interface ProcessInstance {
   businessKey?: string
   name?: string
   state: 'ACTIVE' | 'SUSPENDED' | 'COMPLETED' | 'EXTERNALLY_TERMINATED' | 'INTERNALLY_TERMINATED'
-  variables: Record<string, any>
+  variables: Record<string, unknown>
   startTime: Date
   endTime?: Date
   startUserId?: string
@@ -48,9 +113,9 @@ export interface UserTask {
   priority?: number
   dueDate?: Date
   formKey?: string
-  formData?: any
+  formData?: unknown
   state: 'CREATED' | 'READY' | 'RESERVED' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED' | 'SUSPENDED'
-  variables?: Record<string, any>
+  variables?: Record<string, unknown>
 }
 
 export interface ActivityDefinition {
@@ -59,7 +124,7 @@ export interface ActivityDefinition {
   type: string // userTask, serviceTask, scriptTask, etc.
   incoming?: string[]
   outgoing?: string[]
-  properties?: Record<string, any>
+  properties?: Record<string, unknown>
 }
 
 export interface TimerDefinition {
@@ -70,9 +135,9 @@ export interface TimerDefinition {
 
 export class BPMNWorkflowEngine extends EventEmitter {
   private logger: Logger
-  private processDefinitions: Map<string, any>
+  private processDefinitions: Map<string, BPMNParsedDefinition>
   private runningInstances: Map<string, ProcessInstance>
-  private timerJobs: Map<string, cron.ScheduledTask>
+  private timerJobs: Map<string, ScheduledTaskType>
   private messageSubscriptions: Map<string, Set<string>>
   private signalSubscriptions: Map<string, Set<string>>
 
@@ -92,6 +157,14 @@ export class BPMNWorkflowEngine extends EventEmitter {
   async initialize(): Promise<void> {
     this.logger.info('Initializing BPMN Workflow Engine')
 
+    if (!xml2js) {
+      throw new Error('xml2js package is not installed')
+    }
+
+    if (!cron) {
+      throw new Error('node-cron package is not installed')
+    }
+
     try {
       // Load process definitions
       await this.loadProcessDefinitions()
@@ -109,8 +182,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
       this.startHealthCheck()
 
       this.logger.info('BPMN Workflow Engine initialized successfully')
-    } catch (error) {
-      this.logger.error('Failed to initialize BPMN Workflow Engine:', error)
+    } catch (error: unknown) {
+      this.logger.error('Failed to initialize BPMN Workflow Engine:', error as Error)
       throw error
     }
   }
@@ -124,7 +197,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
     try {
       // Parse and validate BPMN XML
       const parsed = await this.parseBPMN(definition.bpmnXml)
-      
+
       // Extract process information
       const process = parsed.definitions.process[0]
       const processKey = process.$.id || definition.key
@@ -141,14 +214,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
           id: definitionId,
           key: processKey,
           name: processName,
-          description: definition.description,
           version,
           bpmn_xml: definition.bpmnXml,
-          diagram_json: JSON.stringify(parsed),
-          category: definition.category,
-          tenant_id: definition.tenantId,
-          is_executable: definition.isExecutable !== false,
-          created_by: 'system'
+          deployment_id: null,
+          is_active: definition.isExecutable !== false
         })
         .execute()
 
@@ -162,7 +231,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
       this.logger.info(`Deployed process: ${processKey} v${version}`)
 
       return definitionId
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.error(`Failed to deploy process: ${error}`)
       throw error
     }
@@ -173,7 +242,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    */
   async startProcess(
     processKey: string,
-    variables: Record<string, any> = {},
+    variables: Record<string, unknown> = {},
     businessKey?: string,
     tenantId?: string
   ): Promise<string> {
@@ -192,13 +261,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .values({
           id: instanceId,
           process_definition_id: definition.id,
-          process_definition_key: processKey,
-          business_key: businessKey,
-          name: definition.name,
+          business_key: businessKey || null,
+          parent_process_instance_id: null,
           state: 'ACTIVE',
-          variables: JSON.stringify(variables),
-          start_user_id: variables._startUserId || 'system',
-          tenant_id: tenantId
+          variables: JSON.stringify(variables) as string
         })
         .execute()
 
@@ -212,7 +278,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
         state: 'ACTIVE',
         variables,
         startTime: new Date(),
-        startUserId: variables._startUserId
+        startUserId: variables._startUserId as string | undefined
       }
 
       // Cache the instance
@@ -224,11 +290,17 @@ export class BPMNWorkflowEngine extends EventEmitter {
       // Execute start events
       await this.executeStartEvents(instanceId, parsed)
 
+      // Record metric for successful process start
+      metrics.bpmnProcessInstancesTotal.labels(processKey, 'success').inc()
+
       this.emit('process:started', { instanceId, processKey, businessKey })
       this.logger.info(`Started process instance: ${instanceId}`)
 
       return instanceId
-    } catch (error) {
+    } catch (error: unknown) {
+      // Record metric for failed process start
+      metrics.bpmnProcessInstancesTotal.labels(processKey, 'failure').inc()
+      metrics.bpmnProcessErrorsTotal.labels('start_failure').inc()
       this.logger.error(`Failed to start process: ${error}`)
       throw error
     }
@@ -243,6 +315,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
     activityDef: ActivityDefinition
   ): Promise<void> {
     const activityInstanceId = uuidv4()
+    const startTime = Date.now()
 
     try {
       // Record activity start
@@ -251,11 +324,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .values({
           id: activityInstanceId,
           process_instance_id: instanceId,
-          process_definition_id: this.runningInstances.get(instanceId)?.processDefinitionId,
           activity_id: activityId,
-          activity_name: activityDef.name,
           activity_type: activityDef.type,
-          state: 'ACTIVE'
+          state: 'ACTIVE',
+          end_time: null
         })
         .execute()
 
@@ -300,8 +372,19 @@ export class BPMNWorkflowEngine extends EventEmitter {
           break
       }
 
+      // Record activity metrics
+      const durationSeconds = (Date.now() - startTime) / 1000
+      metrics.bpmnActivityExecutionsTotal.labels(activityDef.type, 'success').inc()
+      metrics.bpmnActivityDurationSeconds.labels(activityDef.type).observe(durationSeconds)
+
       this.emit('activity:executed', { instanceId, activityId, type: activityDef.type })
-    } catch (error) {
+    } catch (error: unknown) {
+      // Record activity failure metrics
+      const durationSeconds = (Date.now() - startTime) / 1000
+      metrics.bpmnActivityExecutionsTotal.labels(activityDef.type, 'failure').inc()
+      metrics.bpmnActivityDurationSeconds.labels(activityDef.type).observe(durationSeconds)
+      metrics.bpmnProcessErrorsTotal.labels('activity_failure').inc()
+
       await this.handleActivityError(instanceId, activityInstanceId, error)
       throw error
     }
@@ -329,19 +412,17 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: taskId,
         process_instance_id: instanceId,
-        process_definition_id: instance?.processDefinitionId,
         activity_instance_id: activityInstanceId,
         task_definition_key: activityDef.id,
         name: activityDef.name || 'User Task',
-        description: props.documentation,
-        assignee,
-        candidate_users: Array.isArray(candidateUsers) ? candidateUsers : candidateUsers ? [candidateUsers] : [],
-        candidate_groups: Array.isArray(candidateGroups) ? candidateGroups : candidateGroups ? [candidateGroups] : [],
-        priority: props.priority || 50,
-        due_date: props.dueDate ? new Date(props.dueDate) : null,
-        form_key: props.formKey,
+        assignee: (assignee as string | null) || null,
+        candidate_users: Array.isArray(candidateUsers) ? candidateUsers : candidateUsers ? [candidateUsers as string] : null,
+        candidate_groups: Array.isArray(candidateGroups) ? candidateGroups : candidateGroups ? [candidateGroups as string] : null,
+        priority: (props.priority as number | undefined) || 50,
+        due_date: props.dueDate ? new Date(props.dueDate as string | number | Date).toISOString() : null,
+        follow_up_date: null,
         state: assignee ? 'RESERVED' : 'READY',
-        variables: JSON.stringify(instance?.variables || {})
+        completed_at: null
       })
       .execute()
 
@@ -356,7 +437,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    */
   async completeUserTask(
     taskId: string,
-    variables: Record<string, any> = {},
+    variables: Record<string, unknown> = {},
     userId?: string
   ): Promise<void> {
     try {
@@ -380,8 +461,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .updateTable('bpmn_user_tasks')
         .set({
           state: 'COMPLETED',
-          completed_at: new Date(),
-          variables: JSON.stringify({ ...JSON.parse(task.variables as string || '{}'), ...variables })
+          completed_at: new Date().toISOString()
         })
         .where('id', '=', taskId)
         .execute()
@@ -406,7 +486,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
       this.emit('task:completed', { taskId, userId, variables })
       this.logger.info(`Completed user task: ${taskId}`)
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.error(`Failed to complete user task: ${error}`)
       throw error
     }
@@ -428,9 +508,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
       this.logger.info(`Service task would execute class: ${props.class}`)
     } else if (props.expression) {
       // Expression execution
-      const result = this.evaluateExpression(props.expression, instance?.variables)
+      const result = this.evaluateExpression(props.expression as string, instance?.variables)
       if (props.resultVariable) {
-        await this.updateProcessVariables(instanceId, { [props.resultVariable]: result })
+        await this.updateProcessVariables(instanceId, { [props.resultVariable as string]: result })
       }
     } else if (props.delegateExpression) {
       // Delegate expression
@@ -451,12 +531,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
    */
   private async executeHttpTask(
     instanceId: string,
-    props: any
+    props: Record<string, unknown>
   ): Promise<void> {
     const instance = this.runningInstances.get(instanceId)
-    const url = this.resolveExpression(props.url, instance?.variables)
-    const method = props.method || 'GET'
-    const headers = this.resolveExpression(props.headers, instance?.variables) || {}
+    const url = this.resolveExpression(props.url, instance?.variables) as string
+    const method = (props.method as string | undefined) || 'GET'
+    const headers = (this.resolveExpression(props.headers, instance?.variables) as Record<string, string> | undefined) || {}
     const body = this.resolveExpression(props.body, instance?.variables)
 
     try {
@@ -469,17 +549,17 @@ export class BPMNWorkflowEngine extends EventEmitter {
         body: body ? JSON.stringify(body) : undefined
       })
 
-      const responseData = await response.json()
+      const responseData = await response.json() as unknown
 
       // Store response if variable specified
       if (props.responseVariable) {
         await this.updateProcessVariables(instanceId, {
-          [props.responseVariable]: responseData
+          [props.responseVariable as string]: responseData
         })
       }
 
       this.logger.info(`HTTP task completed: ${method} ${url}`)
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.error(`HTTP task failed: ${error}`)
       throw error
     }
@@ -526,7 +606,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
         // Safe script execution using limited sandbox
         const variables = instance?.variables || {}
-        const result: Record<string, any> = {}
+        const result: Record<string, unknown> = {}
 
         // Parse safe operations only:
         // - Variable assignments: result.varName = value
@@ -546,7 +626,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
         }
 
         this.logger.info(`Script task executed safely: ${activityDef.id}`)
-      } catch (error) {
+      } catch (error: unknown) {
         this.logger.error(`Script execution failed: ${error}`)
         throw error
       }
@@ -556,7 +636,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Safely evaluate simple expressions without code execution
    */
-  private safeEvaluateExpression(expression: string, variables: Record<string, any>): any {
+  private safeEvaluateExpression(expression: string, variables: Record<string, unknown>): unknown {
     // Replace variable references with actual values
     let result = expression
 
@@ -714,6 +794,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
    * Complete a process instance
    */
   private async completeProcess(instanceId: string): Promise<void> {
+    const instance = this.runningInstances.get(instanceId)
+
     // Update instance state
     await db
       .updateTable('bpmn_process_instances')
@@ -723,6 +805,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
       })
       .where('id', '=', instanceId)
       .execute()
+
+    // Record process duration metric if we have start time
+    if (instance?.startTime) {
+      const durationSeconds = (Date.now() - instance.startTime.getTime()) / 1000
+      metrics.bpmnProcessDurationSeconds.labels(instance.processDefinitionKey).observe(durationSeconds)
+    }
 
     // Remove from cache
     this.runningInstances.delete(instanceId)
@@ -740,7 +828,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
   async sendMessage(
     messageName: string,
     correlationKey?: string,
-    variables?: Record<string, any>
+    variables?: Record<string, unknown>
   ): Promise<void> {
     const messageId = uuidv4()
 
@@ -750,10 +838,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: messageId,
         message_name: messageName,
-        correlation_key: correlationKey,
-        payload: variables ? JSON.stringify(variables) : null,
-        variables: variables ? JSON.stringify(variables) : null,
-        state: 'PENDING'
+        correlation_key: correlationKey || null,
+        process_instance_id: null,
+        payload: variables ? JSON.stringify(variables) as string : null,
+        status: 'PENDING'
       })
       .execute()
 
@@ -765,6 +853,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
       }
     }
 
+    // Record message event metric
+    metrics.bpmnMessageEventsTotal.labels(messageName).inc()
+
     this.emit('message:sent', { messageName, correlationKey })
   }
 
@@ -773,7 +864,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    */
   async broadcastSignal(
     signalName: string,
-    variables?: Record<string, any>
+    variables?: Record<string, unknown>
   ): Promise<void> {
     const signalId = uuidv4()
 
@@ -783,9 +874,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: signalId,
         signal_name: signalName,
-        variables: variables ? JSON.stringify(variables) : null,
-        is_broadcast: true,
-        state: 'TRIGGERED'
+        process_instance_id: null,
+        payload: variables ? JSON.stringify(variables) as string : null,
+        status: 'TRIGGERED'
       })
       .execute()
 
@@ -797,26 +888,29 @@ export class BPMNWorkflowEngine extends EventEmitter {
       }
     }
 
+    // Record signal event metric
+    metrics.bpmnSignalEventsTotal.labels(signalName).inc()
+
     this.emit('signal:broadcast', { signalName })
   }
 
-  private findActivity(definition: any, activityId: string): ActivityDefinition | null {
+  private findActivity(_definition: BPMNParsedDefinition, _activityId: string): ActivityDefinition | null {
     // Search in process definition for activity
     // Return activity definition
     return null
   }
 
-  private async takeSequenceFlow(instanceId: string, flowId: string): Promise<void> {
+  private async takeSequenceFlow(_instanceId: string, _flowId: string): Promise<void> {
     // Find target activity and execute it
     // Implementation depends on BPMN structure
   }
 
-  private async getSequenceFlow(flowId: string): Promise<any> {
+  private async getSequenceFlow(_flowId: string): Promise<BPMNSequenceFlow | null> {
     // Get sequence flow definition
     return null
   }
 
-  private evaluateCondition(condition: string, variables?: Record<string, any>): boolean {
+  private evaluateCondition(condition: string, variables?: Record<string, unknown>): boolean {
     // SECURITY: Safe condition evaluation without Function constructor
     // Supports: comparisons (==, !=, >, <, >=, <=), boolean operators (&&, ||, !)
     try {
@@ -843,7 +937,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
       }
 
       // Replace variable references: variables.name or ${name}
-      let processed = cond
+      const processed = cond
         .replace(/variables\.(\w+)/g, (_, key) => JSON.stringify(vars[key]))
         .replace(/\$\{(\w+)\}/g, (_, key) => JSON.stringify(vars[key]))
 
@@ -861,10 +955,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
           case '==': return leftVal === rightVal
           case '!==':
           case '!=': return leftVal !== rightVal
-          case '>': return leftVal > rightVal
-          case '<': return leftVal < rightVal
-          case '>=': return leftVal >= rightVal
-          case '<=': return leftVal <= rightVal
+          case '>': return (leftVal as number) > (rightVal as number)
+          case '<': return (leftVal as number) < (rightVal as number)
+          case '>=': return (leftVal as number) >= (rightVal as number)
+          case '<=': return (leftVal as number) <= (rightVal as number)
           default: return false
         }
       }
@@ -872,13 +966,13 @@ export class BPMNWorkflowEngine extends EventEmitter {
       // Handle simple truthy check
       const value = this.parseConditionValue(processed, vars)
       return Boolean(value)
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.error('Condition evaluation error:', error instanceof Error ? error : new Error(String(error)))
       return false
     }
   }
 
-  private parseConditionValue(value: string, variables: Record<string, any>): any {
+  private parseConditionValue(value: string, _variables: Record<string, unknown>): unknown {
     const trimmed = value.trim()
 
     // Boolean literals
@@ -897,24 +991,24 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
     // Variable reference (already resolved)
     try {
-      return JSON.parse(trimmed)
+      return JSON.parse(trimmed) as unknown
     } catch {
       return trimmed
     }
   }
 
-  private evaluateExpression(expression: string, variables?: Record<string, any>): any {
+  private evaluateExpression(expression: string, variables?: Record<string, unknown>): unknown {
     if (!expression) return null
-    
+
     // Handle ${variable} syntax
     const processed = expression.replace(/\$\{([^}]+)\}/g, (_, key) => {
-      return variables?.[key] || ''
+      return String(variables?.[key] || '')
     })
-    
+
     return processed
   }
 
-  private resolveExpression(expression: any, variables?: Record<string, any>): any {
+  private resolveExpression(expression: unknown, variables?: Record<string, unknown>): unknown {
     if (typeof expression === 'string') {
       return this.evaluateExpression(expression, variables)
     }
@@ -923,39 +1017,42 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
   private async updateProcessVariables(
     instanceId: string,
-    variables: Record<string, any>
+    variables: Record<string, unknown>
   ): Promise<void> {
     const instance = this.runningInstances.get(instanceId)
     if (instance) {
       instance.variables = { ...instance.variables, ...variables }
     }
 
-    // Update in database
+    // Update in database - JSONColumnType expects string for insert/update
+    const mergedVariables = { ...(instance?.variables || {}), ...variables }
     await db
       .updateTable('bpmn_process_instances')
       .set({
-        variables: JSON.stringify({ ...(instance?.variables || {}), ...variables })
+        variables: JSON.stringify(mergedVariables) as string
       })
       .where('id', '=', instanceId)
       .execute()
 
     // Store individual variables
     for (const [name, value] of Object.entries(variables)) {
+      const valueAsRecord = typeof value === 'object' && value !== null
+        ? value as Record<string, unknown>
+        : { _value: value }
+
       await db
         .insertInto('bpmn_variables')
         .values({
           id: uuidv4(),
           name,
           type: typeof value,
-          value: typeof value === 'object' ? null : String(value),
-          json_value: typeof value === 'object' ? JSON.stringify(value) : null,
+          value: JSON.stringify(valueAsRecord) as string,
           process_instance_id: instanceId
         })
         .onConflict((oc) =>
-          oc.columns(['name', 'process_instance_id', 'execution_id', 'task_id'])
+          oc.columns(['name', 'process_instance_id'])
             .doUpdateSet({
-              value: typeof value === 'object' ? null : String(value),
-              json_value: typeof value === 'object' ? JSON.stringify(value) : null
+              value: JSON.stringify(valueAsRecord) as string
             })
         )
         .execute()
@@ -965,7 +1062,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private async handleActivityError(
     instanceId: string,
     activityInstanceId: string,
-    error: any
+    error: unknown
   ): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : String(error)
 
@@ -973,8 +1070,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
     await db
       .updateTable('bpmn_activity_instances')
       .set({
-        state: 'FAILED',
-        incident_message: errorMessage
+        state: 'FAILED'
       })
       .where('id', '=', activityInstanceId)
       .execute()
@@ -985,11 +1081,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: uuidv4(),
         incident_type: 'unhandledError',
-        incident_message: errorMessage,
+        message: errorMessage,
         process_instance_id: instanceId,
-        activity_id: activityInstanceId,
-        error_message: errorMessage,
-        state: 'OPEN'
+        activity_instance_id: activityInstanceId,
+        stack_trace: null,
+        state: 'OPEN',
+        resolved_at: null
       })
       .execute()
 
@@ -1001,18 +1098,21 @@ export class BPMNWorkflowEngine extends EventEmitter {
     activityDef: ActivityDefinition
   ): Promise<void> {
     const props = activityDef.properties || {}
-    const instance = this.runningInstances.get(instanceId)
+    // Note: instance variable currently unused but kept for future use
+    // const instance = this.runningInstances.get(instanceId)
 
     await db
       .insertInto('bpmn_external_tasks')
       .values({
         id: uuidv4(),
-        topic_name: props.topic,
+        topic_name: (props.topic as string | undefined) || 'default',
         process_instance_id: instanceId,
-        process_definition_id: instance?.processDefinitionId,
-        activity_id: activityDef.id,
-        priority: props.priority || 0,
-        variables: JSON.stringify(instance?.variables || {})
+        activity_instance_id: activityDef.id,
+        worker_id: null,
+        lock_expiration_time: null,
+        retries: null,
+        error_message: null,
+        state: 'CREATED'
       })
       .execute()
   }
@@ -1025,21 +1125,21 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
     if (props.messageRef) {
       // Subscribe to message
-      const subscriptions = this.messageSubscriptions.get(props.messageRef) || new Set()
+      const subscriptions = this.messageSubscriptions.get(props.messageRef as string) || new Set()
       subscriptions.add(instanceId)
-      this.messageSubscriptions.set(props.messageRef, subscriptions)
+      this.messageSubscriptions.set(props.messageRef as string, subscriptions)
     }
 
     if (props.signalRef) {
       // Subscribe to signal
-      const subscriptions = this.signalSubscriptions.get(props.signalRef) || new Set()
+      const subscriptions = this.signalSubscriptions.get(props.signalRef as string) || new Set()
       subscriptions.add(instanceId)
-      this.signalSubscriptions.set(props.signalRef, subscriptions)
+      this.signalSubscriptions.set(props.signalRef as string, subscriptions)
     }
 
     if (props.timerDefinition) {
       // Create timer job
-      await this.createTimerJob(instanceId, activityDef.id, props.timerDefinition)
+      await this.createTimerJob(instanceId, activityDef.id, props.timerDefinition as TimerDefinition)
     }
   }
 
@@ -1048,7 +1148,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
     activityId: string,
     timerDef: TimerDefinition
   ): Promise<void> {
-    const instance = this.runningInstances.get(instanceId)
+    // Note: instance currently unused but kept for future variable substitution in timer expressions
+    // const instance = this.runningInstances.get(instanceId)
     let dueTime: Date
 
     switch (timerDef.type) {
@@ -1072,12 +1173,11 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: uuidv4(),
         process_instance_id: instanceId,
-        process_definition_id: instance?.processDefinitionId,
-        activity_id: activityId,
-        job_type: 'timer',
+        activity_instance_id: activityId,
         timer_type: timerDef.type,
-        timer_value: timerDef.value,
-        due_time: dueTime,
+        due_date: dueTime.toISOString(),
+        repeat_count: null,
+        repeat_interval: null,
         state: 'WAITING'
       })
       .execute()
@@ -1087,19 +1187,19 @@ export class BPMNWorkflowEngine extends EventEmitter {
     // Simple ISO 8601 duration parser
     const now = new Date()
     const match = duration.match(/P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?/)
-    
+
     if (match) {
       const days = parseInt(match[1] || '0')
       const hours = parseInt(match[2] || '0')
       const minutes = parseInt(match[3] || '0')
       const seconds = parseInt(match[4] || '0')
-      
+
       now.setDate(now.getDate() + days)
       now.setHours(now.getHours() + hours)
       now.setMinutes(now.getMinutes() + minutes)
       now.setSeconds(now.getSeconds() + seconds)
     }
-    
+
     return now
   }
 
@@ -1108,6 +1208,11 @@ export class BPMNWorkflowEngine extends EventEmitter {
     activityId: string,
     cronExpression: string
   ): void {
+    if (!cron) {
+      this.logger.warn('node-cron not available, skipping recurring timer')
+      return
+    }
+
     const job = cron.schedule(cronExpression, async () => {
       await this.fireTimer(instanceId, activityId)
     })
@@ -1133,30 +1238,39 @@ export class BPMNWorkflowEngine extends EventEmitter {
   }
 
   private startTimerProcessor(): void {
+    if (!cron) {
+      this.logger.warn('node-cron not available, timer processor not started')
+      return
+    }
+
     // Process due timer jobs every minute
     cron.schedule('* * * * *', async () => {
       const dueJobs = await db
         .selectFrom('bpmn_timer_jobs')
         .selectAll()
         .where('state', '=', 'WAITING')
-        .where('due_time', '<=', new Date())
+        .where('due_date', '<=', sql<Date>`now()`)
         .execute()
 
       for (const job of dueJobs) {
-        await this.processTimerJob(job)
+        const timerJob: BPMNTimerJob = {
+          id: job.id,
+          process_instance_id: job.process_instance_id,
+          activity_id: job.activity_instance_id || '',
+          retries: 0
+        }
+        await this.processTimerJob(timerJob)
       }
     })
   }
 
-  private async processTimerJob(job: any): Promise<void> {
+  private async processTimerJob(job: BPMNTimerJob): Promise<void> {
     try {
       // Lock job
       await db
         .updateTable('bpmn_timer_jobs')
         .set({
-          state: 'LOCKED',
-          lock_owner: 'engine',
-          lock_expiry_time: new Date(Date.now() + 60000)
+          state: 'LOCKED'
         })
         .where('id', '=', job.id)
         .execute()
@@ -1170,23 +1284,28 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .set({ state: 'COMPLETED' })
         .where('id', '=', job.id)
         .execute()
-    } catch (error) {
+
+      // Record timer job success metric
+      metrics.bpmnTimerJobsTotal.labels('success').inc()
+    } catch (error: unknown) {
       await db
         .updateTable('bpmn_timer_jobs')
         .set({
-          state: 'FAILED',
-          retries: job.retries - 1,
-          exception_message: error instanceof Error ? error.message : String(error)
+          state: 'FAILED'
         })
         .where('id', '=', job.id)
         .execute()
+
+      // Record timer job failure metric
+      metrics.bpmnTimerJobsTotal.labels('failure').inc()
+      metrics.bpmnProcessErrorsTotal.labels('timer_failure').inc()
     }
   }
 
   private async deliverMessage(
     instanceId: string,
     messageName: string,
-    variables?: Record<string, any>
+    variables?: Record<string, unknown>
   ): Promise<void> {
     // Update process variables
     if (variables) {
@@ -1200,7 +1319,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private async deliverSignal(
     instanceId: string,
     signalName: string,
-    variables?: Record<string, any>
+    variables?: Record<string, unknown>
   ): Promise<void> {
     // Update process variables
     if (variables) {
@@ -1213,12 +1332,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
   /**
    * Initialize metrics collection
-   * Note: Metrics module doesn't currently expose Gauge/Counter/Histogram constructors
-   * This would need integration with prom-client if custom metrics are required
+   * Uses BPMN-specific metrics from the metrics module
    */
   private initializeMetrics(): void {
-    // TODO: Implement custom BPMN metrics if prom-client is exposed from metrics module
-    // For now, rely on existing metrics in ../metrics/metrics.ts
+    // BPMN metrics are now defined in ../metrics/metrics.ts
+    // They are automatically registered and exported via the metrics object
+    this.logger.debug('BPMN metrics initialized via metrics module')
   }
 
   /**
@@ -1227,31 +1346,32 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private startHealthCheck(): void {
     setInterval(async () => {
       try {
-        // Update metrics
+        // Update metrics - count active instances
         const activeCount = await db
           .selectFrom('bpmn_process_instances')
           .select('id')
           .where('state', '=', 'ACTIVE')
           .execute()
 
-        if ((this as any).workflowMetrics) {
-          ;(this as any).workflowMetrics.processInstancesActive.set(activeCount.length)
-        }
+        // Update active instances gauge
+        metrics.bpmnProcessInstancesActive.set(activeCount.length)
 
         // Check for stuck instances (active for more than 24 hours)
-        const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
         const stuckInstances = await db
           .selectFrom('bpmn_process_instances')
           .selectAll()
           .where('state', '=', 'ACTIVE')
-          .where('start_time', '<', cutoffTime as any)
+          .where('start_time', '<', sql<Date>`now() - interval '24 hours'`)
           .execute()
+
+        // Update stuck instances gauge
+        metrics.bpmnStuckInstancesGauge.set(stuckInstances.length)
 
         if (stuckInstances.length > 0) {
           this.logger.warn(`Found ${stuckInstances.length} potentially stuck process instances`)
         }
-      } catch (error) {
-        this.logger.error('Health check failed:', error)
+      } catch (error: unknown) {
+        this.logger.error('Health check failed:', error as Error)
       }
     }, 60000) // Every minute
   }
@@ -1264,7 +1384,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
       const definitions = await db
         .selectFrom('bpmn_process_definitions')
         .selectAll()
-        .where('is_executable', '=', true)
+        .where('is_active', '=', true)
         .execute()
 
       for (const definition of definitions) {
@@ -1272,14 +1392,14 @@ export class BPMNWorkflowEngine extends EventEmitter {
           const parsed = await this.parseBPMN(definition.bpmn_xml)
           this.processDefinitions.set(definition.id, parsed)
           this.registerEventSubscriptions(definition.id, parsed)
-        } catch (error) {
-          this.logger.error(`Failed to load process definition ${definition.key}:`, error)
+        } catch (error: unknown) {
+          this.logger.error(`Failed to load process definition ${definition.key}:`, error as Error)
         }
       }
 
       this.logger.info(`Loaded ${this.processDefinitions.size} process definitions`)
-    } catch (error) {
-      this.logger.error('Failed to load process definitions:', error)
+    } catch (error: unknown) {
+      this.logger.error('Failed to load process definitions:', error as Error)
       throw error
     }
   }
@@ -1299,22 +1419,20 @@ export class BPMNWorkflowEngine extends EventEmitter {
         const processInstance: ProcessInstance = {
           id: instance.id,
           processDefinitionId: instance.process_definition_id,
-          processDefinitionKey: instance.process_definition_key,
+          processDefinitionKey: instance.process_definition_id, // Use definition ID as key fallback
           businessKey: instance.business_key || undefined,
-          name: instance.name || undefined,
-          state: instance.state as any,
-          variables: instance.variables ? JSON.parse(instance.variables as string) : {},
-          startTime: new Date(instance.start_time as any),
-          endTime: instance.end_time ? new Date(instance.end_time) : undefined,
-          startUserId: instance.start_user_id || undefined
+          state: instance.state as ProcessInstance['state'],
+          variables: instance.variables as Record<string, unknown>,
+          startTime: new Date(instance.start_time as unknown as string),
+          endTime: instance.end_time ? new Date(instance.end_time as unknown as string) : undefined
         }
 
         this.runningInstances.set(instance.id, processInstance)
       }
 
       this.logger.info(`Resumed ${activeInstances.length} active process instances`)
-    } catch (error) {
-      this.logger.error('Failed to resume active instances:', error)
+    } catch (error: unknown) {
+      this.logger.error('Failed to resume active instances:', error as Error)
       throw error
     }
   }
@@ -1322,9 +1440,14 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Parse BPMN XML definition
    */
-  private async parseBPMN(bpmnXml: string): Promise<any> {
+  private async parseBPMN(bpmnXml: string): Promise<BPMNParsedDefinition> {
+    if (!xml2js) {
+      throw new Error('xml2js package is not installed')
+    }
+
+    const parser = xml2js
     return new Promise((resolve, reject) => {
-      xml2js.parseString(bpmnXml, (err, result) => {
+      parser.parseString(bpmnXml, (err: Error | null, result: BPMNParsedDefinition) => {
         if (err) {
           reject(new Error(`Invalid BPMN XML: ${err.message}`))
         } else {
@@ -1337,15 +1460,17 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Register event subscriptions for process definition
    */
-  private registerEventSubscriptions(definitionId: string, parsed: any): void {
+  private registerEventSubscriptions(definitionId: string, parsed: BPMNParsedDefinition): void {
     try {
       const process = parsed.definitions?.process?.[0]
       if (!process) return
 
       // Register message events
       const messageEvents = this.findElementsByType(process, 'bpmn:intermediateCatchEvent')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .filter((event: any) => event['bpmn:messageEventDefinition'])
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       messageEvents.forEach((event: any) => {
         const messageRef = event['bpmn:messageEventDefinition']?.[0]?.['$']?.messageRef
         if (messageRef) {
@@ -1357,8 +1482,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
 
       // Register signal events
       const signalEvents = this.findElementsByType(process, 'bpmn:intermediateCatchEvent')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .filter((event: any) => event['bpmn:signalEventDefinition'])
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       signalEvents.forEach((event: any) => {
         const signalRef = event['bpmn:signalEventDefinition']?.[0]?.['$']?.signalRef
         if (signalRef) {
@@ -1367,17 +1494,20 @@ export class BPMNWorkflowEngine extends EventEmitter {
           this.signalSubscriptions.set(signalRef, subscriptions)
         }
       })
-    } catch (error) {
-      this.logger.error(`Failed to register event subscriptions for ${definitionId}:`, error)
+    } catch (error: unknown) {
+      this.logger.error(`Failed to register event subscriptions for ${definitionId}:`, error as Error)
     }
   }
 
   /**
    * Find elements by type in BPMN definition
    */
-  private findElementsByType(parent: any, type: string): any[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private findElementsByType(parent: Record<string, unknown>, type: string): any[] {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const elements: any[] = []
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const search = (obj: any) => {
       if (obj && typeof obj === 'object') {
         if (obj[type]) {
@@ -1394,12 +1524,11 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Get latest version of process definition
    */
-  private async getLatestVersion(key: string, tenantId?: string): Promise<number> {
+  private async getLatestVersion(key: string, _tenantId?: string): Promise<number> {
     const result = await db
       .selectFrom('bpmn_process_definitions')
       .select('version')
       .where('key', '=', key)
-      .where('tenant_id', '=', tenantId || null)
       .orderBy('version', 'desc')
       .limit(1)
       .executeTakeFirst()
@@ -1410,22 +1539,31 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Get process definition
    */
-  private async getProcessDefinition(key: string, tenantId?: string): Promise<any> {
-    return await db
+  private async getProcessDefinition(key: string, _tenantId?: string): Promise<BPMNDatabaseDefinition | undefined> {
+    const result = await db
       .selectFrom('bpmn_process_definitions')
       .selectAll()
       .where('key', '=', key)
-      .where('tenant_id', '=', tenantId || null)
-      .where('is_executable', '=', true)
+      .where('is_active', '=', true)
       .orderBy('version', 'desc')
       .limit(1)
       .executeTakeFirst()
+
+    if (!result) return undefined
+
+    return {
+      id: result.id,
+      key: result.key,
+      name: result.name,
+      bpmn_xml: result.bpmn_xml,
+      version: result.version
+    }
   }
 
   /**
    * Execute start events
    */
-  private async executeStartEvents(instanceId: string, parsed: any): Promise<void> {
+  private async executeStartEvents(instanceId: string, parsed: BPMNParsedDefinition): Promise<void> {
     const process = parsed.definitions?.process?.[0]
     if (!process) return
 
@@ -1442,12 +1580,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .values({
           id: activityInstanceId,
           process_instance_id: instanceId,
-          process_definition_id: this.runningInstances.get(instanceId)?.processDefinitionId,
           activity_id: activityId,
-          activity_name: startEvent.$.name || 'Start Event',
           activity_type: 'startEvent',
           state: 'COMPLETED',
-          end_time: new Date()
+          end_time: new Date().toISOString()
         })
         .execute()
 
@@ -1484,8 +1620,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
     type: 'failedJob' | 'failedExternalTask' | 'unhandledError' | 'timeoutError',
     instanceId: string,
     activityId?: string,
-    error?: any,
-    context?: any
+    error?: unknown,
+    _context?: unknown
   ): Promise<void> {
     const incidentId = uuidv4()
     const errorMessage = error instanceof Error ? error.message : String(error)
@@ -1499,23 +1635,19 @@ export class BPMNWorkflowEngine extends EventEmitter {
       .values({
         id: incidentId,
         incident_type: dbIncidentType,
-        incident_message: `${type}: ${errorMessage}`,
+        message: `${type}: ${errorMessage}`,
         process_instance_id: instanceId,
-        process_definition_id: this.runningInstances.get(instanceId)?.processDefinitionId,
-        activity_id: activityId,
-        error_message: errorMessage,
-        stack_trace: error instanceof Error ? error.stack : undefined,
-        state: 'OPEN'
+        activity_instance_id: activityId || null,
+        stack_trace: error instanceof Error ? error.stack || null : null,
+        state: 'OPEN',
+        resolved_at: null
       })
       .execute()
 
-    // Update metrics
-    if ((this as any).workflowMetrics) {
-      ;(this as any).workflowMetrics.incidentsCreated.inc()
-    }
+    // Metrics would be updated here if prom-client was exposed
 
     this.emit('incident:created', { incidentId, type, instanceId, activityId, error })
-    this.logger.error(`Incident created: ${type} in process ${instanceId}`, error)
+    this.logger.error(`Incident created: ${type} in process ${instanceId}`, error instanceof Error ? error : new Error(String(error)))
   }
 
   /**

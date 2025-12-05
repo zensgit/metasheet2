@@ -8,6 +8,9 @@ export interface CoreMetricsSnapshot {
   startedAt: number
 }
 
+// Type for numeric fields only (excluding startedAt)
+type NumericMetricField = Exclude<keyof CoreMetricsSnapshot, 'startedAt'>
+
 export class MetricsCollector {
   private snapshot: CoreMetricsSnapshot = {
     messagesProcessed: 0,
@@ -24,7 +27,10 @@ export class MetricsCollector {
 
   inc(field: keyof CoreMetricsSnapshot, by = 1) {
     if (field === 'startedAt') return
-    ;(this.snapshot as any)[field] += by
+
+    // Type-safe increment for numeric fields
+    const numericField = field as NumericMetricField
+    this.snapshot[numericField] += by
   }
 
   get(): CoreMetricsSnapshot {
@@ -34,9 +40,9 @@ export class MetricsCollector {
   /**
    * Increment a counter metric (Prometheus-style API)
    * @param name Metric name
-   * @param valueOrMetadata Increment value (number) or metadata object (any) - if object, increments by 1
+   * @param valueOrMetadata Increment value (number) or metadata object - if object, increments by 1
    */
-  increment(name: string, valueOrMetadata: number | any = 1): void {
+  increment(name: string, valueOrMetadata: number | Record<string, unknown> = 1): void {
     // If metadata object is provided, increment by 1 and ignore the metadata for now
     const incrementValue = typeof valueOrMetadata === 'number' ? valueOrMetadata : 1
     const current = this.customMetrics.get(name) || 0
@@ -49,7 +55,7 @@ export class MetricsCollector {
    * @param value Metric value
    * @param metadata Optional metadata (currently ignored)
    */
-  gauge(name: string, value: number, metadata?: any): void {
+  gauge(name: string, value: number, _metadata?: Record<string, unknown>): void {
     this.customMetrics.set(name, value)
   }
 
@@ -59,7 +65,7 @@ export class MetricsCollector {
    * @param value Metric value
    * @param metadata Optional metadata (currently ignored)
    */
-  histogram(name: string, value: number, metadata?: any): void {
+  histogram(name: string, value: number, _metadata?: Record<string, unknown>): void {
     // Simple implementation: store as gauge for now
     this.customMetrics.set(name, value)
   }

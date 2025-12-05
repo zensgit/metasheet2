@@ -1,0 +1,6 @@
+declare module '@opentelemetry/sdk-node'
+declare module '@opentelemetry/resources'
+declare module '@opentelemetry/semantic-conventions'
+declare module '@opentelemetry/auto-instrumentations-node'
+declare module '@opentelemetry/exporter-trace-otlp-http'
+declare module '@opentelemetry/api'

@@ -1,14 +1,14 @@
 import { metrics } from '../../metrics/metrics'
 import type { Cache, Result } from '../../types/cache'
 
-type Entry = { value: any; expiresAt?: number }
+type Entry = { value: unknown; expiresAt?: number }
 
 export class MemoryCache implements Cache {
   private store = new Map<string, Entry>()
   readonly impl = 'memory'
 
   constructor() {
-    try { metrics.cache_enabled.set({ impl: this.impl }, 1) } catch {}
+    try { metrics.cache_enabled.set({ impl: this.impl }, 1) } catch { /* metrics unavailable */ }
   }
 
   private pattern(key: string): string {
@@ -16,7 +16,7 @@ export class MemoryCache implements Cache {
     return idx === -1 ? key : key.slice(0, idx)
   }
 
-  async get<T = any>(key: string): Promise<Result<T | null>> {
+  async get<T = unknown>(key: string): Promise<Result<T | null>> {
     const now = Date.now()
     const e = this.store.get(key)
     const kp = this.pattern(key)
@@ -33,12 +33,12 @@ export class MemoryCache implements Cache {
       metrics.cache_hits_total.inc({ impl: this.impl, key_pattern: kp })
       return { ok: true, value: e.value as T }
     } catch (error) {
-      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch {}
+      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch { /* metrics unavailable */ }
       return { ok: false, error: error as Error }
     }
   }
 
-  async set(key: string, value: any, ttlSec?: number): Promise<Result<void>> {
+  async set(key: string, value: unknown, ttlSec?: number): Promise<Result<void>> {
     const kp = this.pattern(key)
     try {
       const expiresAt = ttlSec ? Date.now() + ttlSec * 1000 : undefined
@@ -46,7 +46,7 @@ export class MemoryCache implements Cache {
       metrics.cache_set_total.inc({ impl: this.impl, key_pattern: kp })
       return { ok: true, value: undefined }
     } catch (error) {
-      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch {}
+      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch { /* metrics unavailable */ }
       return { ok: false, error: error as Error }
     }
   }
@@ -58,7 +58,7 @@ export class MemoryCache implements Cache {
       metrics.cache_del_total.inc({ impl: this.impl, key_pattern: kp })
       return { ok: true, value: undefined }
     } catch (error) {
-      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch {}
+      try { metrics.cache_errors_total.inc({ impl: this.impl, error_type: 'runtime' }) } catch { /* metrics unavailable */ }
       return { ok: false, error: error as Error }
     }
   }

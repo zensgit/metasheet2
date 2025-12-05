@@ -1,71 +1,154 @@
-// @ts-nocheck
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios'
-import {
-  BaseDataAdapter,
-  DataSourceConfig,
+// Axios types (optional dependency) - proper interfaces to avoid `any`
+interface AxiosRequestConfig {
+  url?: string;
+  method?: string;
+  baseURL?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  params?: Record<string, unknown>;
+  data?: unknown;
+  auth?: { username: string; password: string };
+}
+
+interface AxiosResponse<T = unknown> {
+  data: T;
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  config: AxiosRequestConfig;
+}
+
+interface AxiosInstance {
+  defaults: {
+    headers: {
+      common: Record<string, string>;
+    };
+    auth?: { username: string; password: string };
+  };
+  interceptors: {
+    request: {
+      use(
+        onFulfilled: (config: AxiosRequestConfig) => AxiosRequestConfig,
+        onRejected: (error: unknown) => Promise<never>
+      ): void;
+    };
+    response: {
+      use(
+        onFulfilled: (response: AxiosResponse) => AxiosResponse,
+        onRejected: (error: unknown) => Promise<never>
+      ): void;
+    };
+  };
+  create(config: AxiosRequestConfig): AxiosInstance;
+  request<T = unknown>(config: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  put<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  delete<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  head<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+}
+
+interface AxiosStatic {
+  create(config?: AxiosRequestConfig): AxiosInstance;
+  default: AxiosStatic;
+}
+
+// Dynamic axios import
+let axios: AxiosStatic | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  axios = require('axios').default as AxiosStatic
+} catch {
+  // axios not installed
+}
+import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
   TableInfo,
   ColumnInfo
+} from './BaseAdapter';
+import {
+  BaseDataAdapter,
+  DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
 
 interface HTTPQueryOptions extends QueryOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
   headers?: Record<string, string>
-  params?: Record<string, any>
-  data?: any
+  params?: Record<string, unknown>
+  data?: unknown
   endpoint?: string
+}
+
+interface EndpointConfig {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  transformRequest?: (data: unknown) => unknown;
+  transformResponse?: (data: unknown) => unknown;
+}
+
+interface BatchRequestItem {
+  method: string;
+  endpoint: string;
+  data?: unknown;
+  params?: unknown;
 }
 
 export class HTTPAdapter extends BaseDataAdapter {
   private client: AxiosInstance | null = null
-  private endpoints: Map<string, {
-    url: string
-    method: string
-    headers?: Record<string, string>
-    transformRequest?: (data: any) => any
-    transformResponse?: (data: any) => any
-  }> = new Map()
+  private endpoints: Map<string, EndpointConfig> = new Map()
 
   async connect(): Promise<void> {
     if (this.connected) {
       return
     }
 
+    if (!axios) {
+      throw new Error('axios package is not installed')
+    }
+
     try {
-      const baseURL = this.config.connection.baseURL || this.config.connection.url
+      const baseURL = String(this.config.connection.baseURL || this.config.connection.url || '')
+      const timeout = typeof this.config.options?.timeout === 'number' ? this.config.options.timeout : 30000
+      const customHeaders = this.config.connection.headers as Record<string, string> | undefined
 
       this.client = axios.create({
         baseURL,
-        timeout: this.config.options?.timeout || 30000,
+        timeout,
         headers: {
           'Content-Type': 'application/json',
-          ...this.config.connection.headers
+          ...customHeaders
         }
       })
 
       // Add auth if provided
       if (this.config.credentials) {
-        if (this.config.credentials.apiKey) {
-          this.client.defaults.headers.common['X-API-Key'] = this.config.credentials.apiKey
-        } else if (this.config.credentials.bearerToken) {
-          this.client.defaults.headers.common['Authorization'] = `Bearer ${this.config.credentials.bearerToken}`
-        } else if (this.config.credentials.username && this.config.credentials.password) {
+        const apiKey = this.config.credentials.apiKey
+        const bearerToken = this.config.credentials.bearerToken
+        const username = this.config.credentials.username
+        const password = this.config.credentials.password
+
+        if (apiKey) {
+          this.client.defaults.headers.common['X-API-Key'] = String(apiKey)
+        } else if (bearerToken) {
+          this.client.defaults.headers.common['Authorization'] = `Bearer ${String(bearerToken)}`
+        } else if (username && password) {
           this.client.defaults.auth = {
-            username: this.config.credentials.username,
-            password: this.config.credentials.password
+            username: String(username),
+            password: String(password)
           }
         }
       }
 
       // Add request interceptor for logging
       this.client.interceptors.request.use(
-        (config) => {
+        (config: AxiosRequestConfig) => {
           this.emit('request', { method: config.method, url: config.url })
           return config
         },
-        (error) => {
+        (error: unknown) => {
           this.emit('error', { error })
           return Promise.reject(error)
         }
@@ -73,11 +156,11 @@ export class HTTPAdapter extends BaseDataAdapter {
 
       // Add response interceptor for error handling
       this.client.interceptors.response.use(
-        (response) => {
+        (response: AxiosResponse) => {
           this.emit('response', { status: response.status, url: response.config.url })
           return response
         },
-        (error) => {
+        (error: unknown) => {
           this.emit('error', { error })
           return Promise.reject(error)
         }
@@ -86,7 +169,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       // Register predefined endpoints if provided
       if (this.config.options?.endpoints) {
         for (const [name, endpoint] of Object.entries(this.config.options.endpoints)) {
-          this.registerEndpoint(name, endpoint as any)
+          this.registerEndpoint(name, endpoint as EndpointConfig)
         }
       }
 
@@ -115,7 +198,7 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
 
     try {
-      const healthEndpoint = this.config.options?.healthCheckEndpoint || '/health'
+      const healthEndpoint = String(this.config.options?.healthCheckEndpoint || '/health')
       const response = await this.client.get(healthEndpoint)
       return response.status >= 200 && response.status < 300
     } catch {
@@ -129,20 +212,11 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  registerEndpoint(
-    name: string,
-    config: {
-      url: string
-      method: string
-      headers?: Record<string, string>
-      transformRequest?: (data: any) => any
-      transformResponse?: (data: any) => any
-    }
-  ): void {
+  registerEndpoint(name: string, config: EndpointConfig): void {
     this.endpoints.set(name, config)
   }
 
-  async query<T = any>(endpoint: string, params?: any[]): Promise<QueryResult<T>> {
+  async query<T = unknown>(endpoint: string, params?: unknown[]): Promise<QueryResult<T>> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
     }
@@ -154,7 +228,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       if (endpointConfig) {
         const requestConfig: AxiosRequestConfig = {
           url: endpointConfig.url,
-          method: endpointConfig.method as any,
+          method: endpointConfig.method,
           headers: endpointConfig.headers
         }
 
@@ -163,13 +237,13 @@ export class HTTPAdapter extends BaseDataAdapter {
           requestConfig.data = endpointConfig.transformRequest(params)
         } else if (params) {
           if (['GET', 'DELETE'].includes(endpointConfig.method.toUpperCase())) {
-            requestConfig.params = params[0]
+            requestConfig.params = params[0] as Record<string, unknown>
           } else {
             requestConfig.data = params[0]
           }
         }
 
-        const response = await this.client.request(requestConfig)
+        const response = await this.client.request<T>(requestConfig)
 
         // Apply response transformation if provided
         const data = endpointConfig.transformResponse
@@ -186,7 +260,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       }
 
       // Direct endpoint call
-      const response = await this.client.get(endpoint, { params: params?.[0] })
+      const response = await this.client.get<T>(endpoint, { params: params?.[0] as Record<string, unknown> })
       const data = response.data
 
       return {
@@ -204,7 +278,7 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  async select<T = any>(endpoint: string, options?: HTTPQueryOptions): Promise<QueryResult<T>> {
+  async select<T = unknown>(endpoint: string, options?: HTTPQueryOptions): Promise<QueryResult<T>> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
     }
@@ -239,12 +313,12 @@ export class HTTPAdapter extends BaseDataAdapter {
         }
       }
 
-      const response = await this.client.request(requestConfig)
+      const response = await this.client.request<T | { data?: T[]; items?: T[]; results?: T[]; total?: number; count?: number; totalCount?: number }>(requestConfig)
       const data = response.data
 
       // Handle paginated responses
-      let resultData = data
-      let totalCount = undefined
+      let resultData: unknown = data
+      let totalCount: number | undefined = undefined
 
       if (data && typeof data === 'object' && !Array.isArray(data)) {
         // Check for common pagination patterns
@@ -258,11 +332,11 @@ export class HTTPAdapter extends BaseDataAdapter {
 
         // Extract total count if available
         if ('total' in data) {
-          totalCount = data.total
+          totalCount = data.total as number
         } else if ('count' in data) {
-          totalCount = data.count
+          totalCount = data.count as number
         } else if ('totalCount' in data) {
-          totalCount = data.totalCount
+          totalCount = data.totalCount as number
         }
       }
 
@@ -281,13 +355,13 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  async insert<T = any>(endpoint: string, data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>> {
+  async insert<T = unknown>(endpoint: string, data: Record<string, unknown> | Record<string, unknown>[]): Promise<QueryResult<T>> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
     }
 
     try {
-      const response = await this.client.post(endpoint, data)
+      const response = await this.client.post<T>(endpoint, data)
       const responseData = response.data
 
       return {
@@ -304,10 +378,10 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  async update<T = any>(
+  async update<T = unknown>(
     endpoint: string,
-    data: Record<string, any>,
-    where: Record<string, any>
+    data: Record<string, unknown>,
+    where: Record<string, unknown>
   ): Promise<QueryResult<T>> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
@@ -318,7 +392,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
 
-      const response = await this.client.put(url, data, {
+      const response = await this.client.put<T>(url, data, {
         params: id ? undefined : where
       })
 
@@ -338,7 +412,7 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  async delete<T = any>(endpoint: string, where: Record<string, any>): Promise<QueryResult<T>> {
+  async delete<T = unknown>(endpoint: string, where: Record<string, unknown>): Promise<QueryResult<T>> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
     }
@@ -348,7 +422,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
 
-      const response = await this.client.delete(url, {
+      const response = await this.client.delete<T>(url, {
         params: id ? undefined : where
       })
 
@@ -369,7 +443,7 @@ export class HTTPAdapter extends BaseDataAdapter {
   }
 
   // Schema operations (limited for HTTP)
-  async getSchema(schema?: string): Promise<SchemaInfo> {
+  async getSchema(_schema?: string): Promise<SchemaInfo> {
     // HTTP APIs typically don't expose schema information
     // This could be implemented for specific APIs that provide metadata endpoints
     return {
@@ -377,21 +451,21 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
-  async getTableInfo(table: string, schema?: string): Promise<TableInfo> {
+  async getTableInfo(table: string, _schema?: string): Promise<TableInfo> {
     // Would need API-specific implementation
     return {
       name: table,
-      schema,
+      schema: _schema,
       columns: []
     }
   }
 
-  async getColumns(table: string, schema?: string): Promise<ColumnInfo[]> {
+  async getColumns(_table: string, _schema?: string): Promise<ColumnInfo[]> {
     // Would need API-specific implementation
     return []
   }
 
-  async tableExists(table: string, schema?: string): Promise<boolean> {
+  async tableExists(table: string, _schema?: string): Promise<boolean> {
     // Try to access the endpoint
     try {
       const response = await this.client!.head(table)
@@ -402,26 +476,26 @@ export class HTTPAdapter extends BaseDataAdapter {
   }
 
   // Transaction support (not applicable for HTTP)
-  async beginTransaction(): Promise<any> {
+  async beginTransaction(): Promise<void> {
     throw new Error('Transactions not supported in HTTP adapter')
   }
 
-  async commit(transaction: any): Promise<void> {
+  async commit(_transaction: unknown): Promise<void> {
     throw new Error('Transactions not supported in HTTP adapter')
   }
 
-  async rollback(transaction: any): Promise<void> {
+  async rollback(_transaction: unknown): Promise<void> {
     throw new Error('Transactions not supported in HTTP adapter')
   }
 
-  async inTransaction(transaction: any, callback: () => Promise<any>): Promise<any> {
+  async inTransaction<T>(_transaction: unknown, callback: () => Promise<T>): Promise<T> {
     // Just execute the callback without transaction support
     return callback()
   }
 
-  async *stream<T = any>(
+  async *stream<T = unknown>(
     endpoint: string,
-    params?: any[],
+    params?: unknown[],
     options?: { highWaterMark?: number }
   ): AsyncIterableIterator<T> {
     if (!this.client) {
@@ -433,23 +507,32 @@ export class HTTPAdapter extends BaseDataAdapter {
     const pageSize = options?.highWaterMark || 100
 
     while (true) {
-      const response = await this.client.get(endpoint, {
+      const response = await this.client.get<unknown>(endpoint, {
         params: {
-          ...params?.[0],
+          ...(params?.[0] as Record<string, unknown>),
           page,
           limit: pageSize
         }
       })
 
       const data = response.data
-      const items = Array.isArray(data) ? data : (data.data || data.items || data.results || [])
+      const items = Array.isArray(data)
+        ? data
+        : (
+            typeof data === 'object' && data !== null
+              ? (data as { data?: unknown[]; items?: unknown[]; results?: unknown[] }).data ||
+                (data as { data?: unknown[]; items?: unknown[]; results?: unknown[] }).items ||
+                (data as { data?: unknown[]; items?: unknown[]; results?: unknown[] }).results ||
+                []
+              : []
+          )
 
       if (items.length === 0) {
         break
       }
 
       for (const item of items) {
-        yield item
+        yield item as T
       }
 
       // Check if there are more pages
@@ -462,7 +545,7 @@ export class HTTPAdapter extends BaseDataAdapter {
   }
 
   // Helper methods
-  private extractColumns(data: any): Array<{ name: string; type: string; nullable?: boolean }> {
+  private extractColumns(data: unknown): Array<{ name: string; type: string; nullable?: boolean }> {
     if (!data) return []
 
     const sample = Array.isArray(data) ? data[0] : data
@@ -470,19 +553,14 @@ export class HTTPAdapter extends BaseDataAdapter {
 
     return Object.keys(sample).map(key => ({
       name: key,
-      type: typeof sample[key],
-      nullable: sample[key] === null || sample[key] === undefined
+      type: typeof (sample as Record<string, unknown>)[key],
+      nullable: (sample as Record<string, unknown>)[key] === null || (sample as Record<string, unknown>)[key] === undefined
     }))
   }
 
   // Batch operations using HTTP
-  async batchRequest<T = any>(
-    requests: Array<{
-      method: string
-      endpoint: string
-      data?: any
-      params?: any
-    }>
+  async batchRequest<T = unknown>(
+    requests: BatchRequestItem[]
   ): Promise<QueryResult<T>[]> {
     if (!this.client) {
       throw new Error('HTTP client not initialized')
@@ -491,8 +569,9 @@ export class HTTPAdapter extends BaseDataAdapter {
     const results: QueryResult<T>[] = []
 
     // Execute requests in parallel with concurrency control
-    const concurrency = this.config.options?.batchConcurrency || 5
-    const chunks: typeof requests[] = []
+    const concurrencyOption = this.config.options?.batchConcurrency
+    const concurrency = typeof concurrencyOption === 'number' ? concurrencyOption : 5
+    const chunks: BatchRequestItem[][] = []
 
     for (let i = 0; i < requests.length; i += concurrency) {
       chunks.push(requests.slice(i, i + concurrency))
@@ -501,11 +580,11 @@ export class HTTPAdapter extends BaseDataAdapter {
     for (const chunk of chunks) {
       const promises = chunk.map(async (req) => {
         try {
-          const response = await this.client!.request({
-            method: req.method as any,
+          const response = await this.client!.request<T>({
+            method: req.method,
             url: req.endpoint,
             data: req.data,
-            params: req.params
+            params: req.params as Record<string, unknown>
           })
 
           return {
@@ -520,7 +599,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       })
 
       const chunkResults = await Promise.all(promises)
-      results.push(...(chunkResults as QueryResult<T>[]))
+      results.push(...chunkResults as QueryResult<T>[])
     }
 
     return results

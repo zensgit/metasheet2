@@ -184,8 +184,8 @@ describe('Metrics Integration', () => {
 
     it('should have the expected number of exported metrics', () => {
       const exportedKeys = Object.keys(metrics)
-      // 43 metrics as of current metrics module (including RBAC metrics)
-      expect(exportedKeys.length).toBe(43)
+      // 61 metrics as of current metrics module (including RBAC, SLO, Schema, and BPMN workflow metrics)
+      expect(exportedKeys.length).toBe(61)
     })
   })
 })

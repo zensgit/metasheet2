@@ -3,6 +3,24 @@
  * Pre-defined safe functions that can be exposed to sandboxed scripts
  */
 
+// Type for nested arrays that can be flattened
+type NestedArray<T> = T | NestedArray<T>[];
+
+// Schema validation types
+interface ValidationRule {
+  required?: boolean;
+  type?: 'string' | 'number' | 'boolean' | 'object';
+  min?: number;
+  max?: number;
+}
+
+type ValidationSchema = Record<string, ValidationRule>;
+
+interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
 export const SafeMathFunctions = {
   // Basic math operations
   sum: (arr: number[]): number => arr.reduce((a, b) => a + b, 0),
@@ -56,7 +74,7 @@ export const SafeStringFunctions = {
 
   titleCase: (str: string): string => {
     return str.replace(/\w\S*/g, txt =>
-      txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase()
+      txt.charAt(0).toUpperCase() + txt.substring(1).toLowerCase()
     )
   },
 
@@ -122,8 +140,8 @@ export const SafeArrayFunctions = {
     return [...new Set(arr)]
   },
 
-  flatten: <T>(arr: any[]): T[] => {
-    return arr.reduce((flat, item) => {
+  flatten: <T>(arr: NestedArray<T>[]): T[] => {
+    return arr.reduce<T[]>((flat, item) => {
       return flat.concat(Array.isArray(item) ? SafeArrayFunctions.flatten(item) : item)
     }, [])
   },
@@ -281,7 +299,7 @@ export const SafeObjectFunctions = {
   ): Record<keyof T, R> => {
     const result = {} as Record<keyof T, R>
     for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
         result[key] = fn(obj[key], key)
       }
     }
@@ -291,7 +309,7 @@ export const SafeObjectFunctions = {
   invert: <T extends Record<PropertyKey, PropertyKey>>(obj: T): Record<T[keyof T], keyof T> => {
     const result = {} as Record<T[keyof T], keyof T>
     for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
         result[obj[key]] = key
       }
     }
@@ -299,36 +317,40 @@ export const SafeObjectFunctions = {
   },
 
   // Deep operations (with cycle protection)
-  deepClone: <T>(obj: T, visited = new WeakSet()): T => {
+  deepClone: <T>(obj: T, visited = new WeakSet<object>()): T => {
     if (obj === null || typeof obj !== 'object') return obj
-    if (visited.has(obj as any)) return obj
-    visited.add(obj as any)
 
-    if (obj instanceof Date) return new Date(obj.getTime()) as any
+    // Type guard to ensure obj is an object for WeakSet
+    const objAsObject = obj as object
+    if (visited.has(objAsObject)) return obj
+    visited.add(objAsObject)
+
+    if (obj instanceof Date) return new Date(obj.getTime()) as T
     if (obj instanceof Array) {
-      return obj.map(item => SafeObjectFunctions.deepClone(item, visited)) as any
+      return obj.map(item => SafeObjectFunctions.deepClone(item, visited)) as T
     }
 
-    const clonedObj: any = {}
+    const clonedObj = {} as Record<string, unknown>
     for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
         clonedObj[key] = SafeObjectFunctions.deepClone(obj[key], visited)
       }
     }
-    return clonedObj
+    return clonedObj as T
   }
 }
 
 export const SafeValidationFunctions = {
-  // Type checking
-  isString: (value: any): value is string => typeof value === 'string',
-  isNumber: (value: any): value is number => typeof value === 'number' && !isNaN(value),
-  isBoolean: (value: any): value is boolean => typeof value === 'boolean',
-  isArray: (value: any): value is any[] => Array.isArray(value),
-  isObject: (value: any): value is object => value !== null && typeof value === 'object' && !Array.isArray(value),
-  isNull: (value: any): value is null => value === null,
-  isUndefined: (value: any): value is undefined => value === undefined,
-  isFunction: (value: any): value is Function => typeof value === 'function',
+  // Type checking - using `unknown` for type guards is intentional and correct
+  isString: (value: unknown): value is string => typeof value === 'string',
+  isNumber: (value: unknown): value is number => typeof value === 'number' && !isNaN(value),
+  isBoolean: (value: unknown): value is boolean => typeof value === 'boolean',
+  isArray: (value: unknown): value is unknown[] => Array.isArray(value),
+  isObject: (value: unknown): value is object => value !== null && typeof value === 'object' && !Array.isArray(value),
+  isNull: (value: unknown): value is null => value === null,
+  isUndefined: (value: unknown): value is undefined => value === undefined,
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  isFunction: (value: unknown): value is Function => typeof value === 'function',
 
   // Value validation
   inRange: (value: number, min: number, max: number): boolean => {
@@ -341,7 +363,7 @@ export const SafeValidationFunctions = {
   },
 
   // Schema validation (simple)
-  validateSchema: (obj: any, schema: Record<string, any>): { valid: boolean; errors: string[] } => {
+  validateSchema: (obj: Record<string, unknown>, schema: ValidationSchema): ValidationResult => {
     const errors: string[] = []
 
     for (const key in schema) {
@@ -392,8 +414,31 @@ export const SafeFunctions = {
   validation: SafeValidationFunctions
 }
 
+// Type for the safe context
+type SafeContextValue =
+  | typeof SafeMathFunctions.sum
+  | typeof SafeMathFunctions.average
+  | typeof SafeMathFunctions.median
+  | typeof SafeMathFunctions.round
+  | typeof SafeStringFunctions.capitalize
+  | typeof SafeStringFunctions.titleCase
+  | typeof SafeStringFunctions.isEmail
+  | typeof SafeStringFunctions.truncate
+  | typeof SafeArrayFunctions.unique
+  | typeof SafeArrayFunctions.flatten
+  | typeof SafeArrayFunctions.chunk
+  | typeof SafeDateFunctions.formatDate
+  | typeof SafeDateFunctions.addDays
+  | typeof SafeDateFunctions.daysBetween
+  | typeof SafeObjectFunctions.pick
+  | typeof SafeObjectFunctions.omit
+  | typeof SafeObjectFunctions.merge
+  | typeof SafeValidationFunctions.isString
+  | typeof SafeValidationFunctions.isNumber
+  | typeof SafeValidationFunctions.validateSchema;
+
 // Create a context with all safe functions for sandbox execution
-export function createSafeContext(): Record<string, any> {
+export function createSafeContext(): Record<string, SafeContextValue> {
   return {
     // Math functions
     sum: SafeMathFunctions.sum,

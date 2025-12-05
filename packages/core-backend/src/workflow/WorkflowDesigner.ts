@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Visual Workflow Designer (n8n Style)
  * BPMN/DAG workflow visual editor backend support
@@ -9,13 +8,28 @@ import { Logger } from '../core/logger'
 import { db } from '../db/db'
 import { v4 as uuidv4 } from 'uuid'
 
+// Type definitions for node properties
+interface PropertyDefinition {
+  type: 'string' | 'number' | 'boolean' | 'date' | 'array' | 'code' | 'select'
+  label: string
+  default?: string | number | boolean
+  language?: string
+  options?: string[]
+  required?: boolean
+}
+
+interface TimerDefinition {
+  type: 'duration' | 'date' | 'cycle'
+  value: string
+}
+
 export interface WorkflowNode {
   id: string
   type: 'startEvent' | 'endEvent' | 'userTask' | 'serviceTask' | 'scriptTask' | 'exclusiveGateway' | 'parallelGateway' | 'intermediateCatchEvent'
   name: string
   position: { x: number; y: number }
   data: {
-    properties?: Record<string, any>
+    properties?: Record<string, unknown>
     formKey?: string
     assignee?: string
     candidateUsers?: string[]
@@ -23,7 +37,7 @@ export interface WorkflowNode {
     script?: string
     serviceClass?: string
     condition?: string
-    timerDefinition?: any
+    timerDefinition?: TimerDefinition
     messageRef?: string
     signalRef?: string
   }
@@ -38,6 +52,12 @@ export interface WorkflowEdge {
   type?: 'default' | 'conditional'
 }
 
+interface VariableDefinition {
+  type: string
+  required?: boolean
+  default?: unknown
+}
+
 export interface WorkflowDefinition {
   id?: string
   name: string
@@ -45,14 +65,58 @@ export interface WorkflowDefinition {
   version?: number
   nodes: WorkflowNode[]
   edges: WorkflowEdge[]
-  variables?: Record<string, any>
+  variables?: Record<string, VariableDefinition>
   category?: string
   tags?: string[]
 }
 
+// Node type definition structure
+interface NodeTypeDefinition {
+  type: string
+  name: string
+  description: string
+  icon: string
+  category: string
+  properties: Record<string, PropertyDefinition>
+}
+
+// Database workflow row interface - matches WorkflowDefinitionsTable
+interface WorkflowRow {
+  id: string
+  name: string
+  description: string | null
+  version: number
+  status: string
+  is_active: boolean
+  created_at: Date
+  updated_at: Date
+}
+
+// Workflow list item interface
+interface WorkflowListItem {
+  id: string
+  name: string
+  version: number
+  status: string
+  created_at: Date
+  updated_at: Date
+  tags: string[]
+  description: string
+  category: string
+}
+
+// Stored workflow definition structure
+interface StoredWorkflowDefinition {
+  visual: WorkflowDefinition
+  bpmn: string
+  description?: string
+  category?: string
+  tags: string[]
+}
+
 export class WorkflowDesigner extends EventEmitter {
   private logger: Logger
-  private nodeTypes: Map<string, any>
+  private nodeTypes: Map<string, NodeTypeDefinition>
   private templates: Map<string, WorkflowDefinition>
 
   constructor() {
@@ -68,7 +132,7 @@ export class WorkflowDesigner extends EventEmitter {
    * Initialize available node types
    */
   private initializeNodeTypes(): void {
-    const nodeTypes = {
+    const nodeTypes: Record<string, NodeTypeDefinition> = {
       startEvent: {
         type: 'startEvent',
         name: 'Start Event',
@@ -172,7 +236,7 @@ export class WorkflowDesigner extends EventEmitter {
    * Load workflow templates
    */
   private async loadTemplates(): Promise<void> {
-    const templates = [
+    const templates: WorkflowDefinition[] = [
       {
         id: 'simple-approval',
         name: 'Simple Approval Workflow',
@@ -314,7 +378,7 @@ export class WorkflowDesigner extends EventEmitter {
     ]
 
     for (const template of templates) {
-      this.templates.set(template.id, template as WorkflowDefinition)
+      this.templates.set(template.id as string, template)
     }
 
     this.logger.info(`Loaded ${this.templates.size} workflow templates`)
@@ -323,7 +387,7 @@ export class WorkflowDesigner extends EventEmitter {
   /**
    * Get available node types
    */
-  getNodeTypes(): any[] {
+  getNodeTypes(): NodeTypeDefinition[] {
     return Array.from(this.nodeTypes.values())
   }
 
@@ -344,35 +408,33 @@ export class WorkflowDesigner extends EventEmitter {
       // Convert visual definition to BPMN XML
       const bpmnXml = this.convertToBPMN(definition)
 
+      const storedDefinition: StoredWorkflowDefinition = {
+        visual: definition,
+        bpmn: bpmnXml,
+        description: definition.description,
+        category: definition.category,
+        tags: definition.tags || []
+      }
+
       // Save to database using workflow_definitions table
+      // Note: version should be number, definition is JSONColumnType expecting string for insert
       await db
         .insertInto('workflow_definitions')
         .values({
           name: definition.name,
-          version: String(definition.version || 1),
-          type: 'BPMN',
-          definition: JSON.stringify({
-            visual: definition,
-            bpmn: bpmnXml,
-            description: definition.description,
-            category: definition.category,
-            tags: definition.tags || []
-          }),
+          description: definition.description || null,
+          version: definition.version || 1,
+          definition: JSON.stringify(storedDefinition),
           status: 'ACTIVE',
-          variables_schema: null,
-          settings: JSON.stringify({}),
-          created_by: null
+          is_active: true,
+          created_by: 'system'  // Required field, use system as default
         })
-        .onConflict((oc) => oc.column('id').doUpdateSet({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .onConflict((oc: any) => oc.column('id').doUpdateSet({
           name: definition.name,
-          version: String(definition.version || 1),
-          definition: JSON.stringify({
-            visual: definition,
-            bpmn: bpmnXml,
-            description: definition.description,
-            category: definition.category,
-            tags: definition.tags || []
-          })
+          description: definition.description || null,
+          version: definition.version || 1,
+          definition: JSON.stringify(storedDefinition)
         }))
         .execute()
 
@@ -401,8 +463,12 @@ export class WorkflowDesigner extends EventEmitter {
         return null
       }
 
-      const definition = JSON.parse(workflow.definition as string)
-      return definition.visual as WorkflowDefinition
+      // workflow.definition may be returned as object or string depending on driver
+      const definitionData = typeof workflow.definition === 'string'
+        ? workflow.definition
+        : JSON.stringify(workflow.definition)
+      const definition = JSON.parse(definitionData) as StoredWorkflowDefinition
+      return definition.visual
     } catch (error) {
       this.logger.error(`Failed to load workflow: ${error}`)
       throw error
@@ -412,11 +478,11 @@ export class WorkflowDesigner extends EventEmitter {
   /**
    * List workflows
    */
-  async listWorkflows(category?: string): Promise<any[]> {
+  async listWorkflows(_category?: string): Promise<WorkflowListItem[]> {
     try {
-      let query = db
+      const query = db
         .selectFrom('workflow_definitions')
-        .select(['id', 'name', 'version', 'type', 'status', 'created_at', 'updated_at'])
+        .select(['id', 'name', 'description', 'version', 'status', 'is_active', 'created_at', 'updated_at'])
 
       // Note: category filtering would need to be done by parsing definition JSON
       // For now, we just list all workflows
@@ -426,17 +492,19 @@ export class WorkflowDesigner extends EventEmitter {
         .execute()
 
       // Parse definition JSON to extract additional metadata like tags
-      return workflows.map(w => {
-        try {
-          const definition = JSON.parse((w as any).definition as string)
-          return {
-            ...w,
-            tags: definition.tags || [],
-            description: definition.description || '',
-            category: definition.category || ''
-          }
-        } catch {
-          return { ...w, tags: [], description: '', category: '' }
+      return workflows.map((w): WorkflowListItem => {
+        // Cast to WorkflowRow for proper typing
+        const row = w as unknown as WorkflowRow
+        return {
+          id: row.id,
+          name: row.name,
+          version: row.version,
+          status: row.status,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          tags: [] as string[],
+          description: row.description || '',
+          category: ''
         }
       })
     } catch (error) {
@@ -757,18 +825,9 @@ export class WorkflowDesigner extends EventEmitter {
       throw new Error(`Workflow validation failed: ${validation.errors.join(', ')}`)
     }
 
-    // Convert to BPMN and deploy via workflow engine
-    const bpmnXml = this.convertToBPMN(workflow)
-
-    // Here you would integrate with BPMNWorkflowEngine
-    // const engine = new BPMNWorkflowEngine()
-    // return await engine.deployProcess({
-    //   key: workflow.id!,
-    //   name: workflow.name,
-    //   description: workflow.description,
-    //   bpmnXml,
-    //   category: workflow.category
-    // })
+    // Convert to BPMN to validate the workflow can be converted
+    // The actual deployment to BPMNWorkflowEngine would happen here
+    this.convertToBPMN(workflow)
 
     this.emit('workflow:deployed', { workflowId, name: workflow.name })
     this.logger.info(`Deployed workflow: ${workflow.name}`)

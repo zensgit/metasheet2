@@ -1,11 +1,20 @@
 import { EventEmitter } from 'eventemitter3'
 import { coreMetrics } from '../metrics/metrics'
+import { Logger } from '../../core/logger'
+
+const logger = new Logger('EventBus')
+
+// Generic event payload type - can be extended by specific event types
+type EventPayload = Record<string, unknown> | unknown
+
+// Event handler that returns void or Promise<void>
+type EventHandler<T = EventPayload> = (payload: T) => void | Promise<void>
 
 interface ListenerMeta {
   id: string
   plugin?: string
   pattern: string | RegExp
-  handler: (payload: any) => any | Promise<any>
+  handler: EventHandler
 }
 
 let _idSeq = 0
@@ -14,7 +23,7 @@ export class EventBus {
   private emitter = new EventEmitter()
   private listeners: Map<string, ListenerMeta> = new Map()
 
-  private dispatch(type: string, payload: any): void {
+  private dispatch(type: string, payload: EventPayload): void {
     coreMetrics.inc('eventsEmitted')
     this.emitter.emit(type, payload)
     // regex listeners
@@ -23,27 +32,23 @@ export class EventBus {
         try {
           meta.handler(payload)
         } catch (err) {
-          console.error('[event-bus][regex-handler-error]', {
-            pattern: meta.pattern.toString(),
-            plugin: meta.plugin,
-            error: err instanceof Error ? err.message : String(err)
-          })
+          logger.error(`Regex handler error for pattern ${meta.pattern.toString()} (plugin: ${meta.plugin})`, err instanceof Error ? err : undefined)
         }
       }
     }
   }
 
-  subscribe(pattern: string | RegExp, handler: (payload: any) => any, plugin?: string): string {
+  subscribe<T = EventPayload>(pattern: string | RegExp, handler: EventHandler<T>, plugin?: string): string {
     const id = `evt_${++_idSeq}`
-    const meta: ListenerMeta = { id, plugin, pattern, handler }
+    // Type assertion needed here as we're storing generic handlers
+    const meta: ListenerMeta = { id, plugin, pattern, handler: handler as EventHandler }
     this.listeners.set(id, meta)
 
-    const wrapper = (data: any) => {
+    const wrapper = (data: unknown) => {
       try {
-        handler(data)
+        handler(data as T)
       } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error('[event-bus][handler-error]', { id, pattern, error: (e as Error).message })
+        logger.error(`Handler error for pattern ${String(pattern)} (id: ${id})`, e instanceof Error ? e : undefined)
       }
     }
 
@@ -52,7 +57,7 @@ export class EventBus {
       this.emitter.on(pattern, wrapper)
     } else {
       // For RegExp, wrap a generic listener: track all emits
-      const regexWrapper = (event: string, data: any) => {
+      const _regexWrapper = (event: string, data: unknown) => {
         if (pattern.test(event)) wrapper(data)
       }
       // Attach low-level listener map (simulate by hooking into emit path)
@@ -64,13 +69,13 @@ export class EventBus {
     return id
   }
 
-  emit(type: string, payload?: any): void {
-    this.dispatch(type, payload)
+  emit<T = EventPayload>(type: string, payload?: T): void {
+    this.dispatch(type, payload ?? {})
   }
 
   // Deprecated: publish alias to emit (kept for backward compatibility)
-  publish(type: string, payload?: any): void {
-    this.dispatch(type, payload)
+  publish<T = EventPayload>(type: string, payload?: T): void {
+    this.dispatch(type, payload ?? {})
   }
 
   unsubscribe(id: string): boolean {
@@ -94,7 +99,7 @@ export class EventBus {
     return count
   }
 
-  subscribeForPlugin(pattern: string | RegExp, handler: (payload: any) => any, plugin: string): string {
+  subscribeForPlugin<T = EventPayload>(pattern: string | RegExp, handler: EventHandler<T>, plugin: string): string {
     return this.subscribe(pattern, handler, plugin)
   }
 }

@@ -37,7 +37,7 @@ export const FEATURE_FLAGS = {
  * @returns boolean - true if enabled, false otherwise
  */
 export function isFeatureEnabled(flag: keyof typeof FEATURE_FLAGS): boolean {
-  return FEATURE_FLAGS[flag] === true;
+  return !!FEATURE_FLAGS[flag];
 }
 
 export function getFeatureFlags() {

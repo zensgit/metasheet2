@@ -1,7 +1,10 @@
-import { Request, Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import { metrics } from '../metrics/metrics'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('JWTMiddleware')
 
 const AUTH_WHITELIST = [
   '/health',
@@ -19,6 +22,10 @@ const AUTH_WHITELIST = [
   '/api/permissions/health'
 ]
 
+// Use the global Express.Request type which already includes user property
+// Exported for use by other modules that need authenticated request typing
+export type AuthenticatedRequest = Request
+
 export function isWhitelisted(path: string): boolean {
   return AUTH_WHITELIST.some(p => path.startsWith(p))
 }
@@ -34,12 +41,12 @@ function getJwtSecret(): string {
   }
 
   if (process.env.NODE_ENV === 'production') {
-    console.error('🔴 CRITICAL: JWT_SECRET missing in production!')
+    logger.error('CRITICAL: JWT_SECRET missing in production!')
     // Generate a cryptographically secure random secret for this session
     return crypto.randomBytes(64).toString('hex')
   }
 
-  console.warn('⚠️  JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
+  logger.warn('JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
   return 'fallback-development-secret-change-in-production'
 }
 
@@ -65,7 +72,10 @@ export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunctio
 
     const secret = getSecret()
     const payload = jwt.verify(token, secret)
-    ;(req as any).user = payload
+    // JWT payload is an object with user information
+    if (typeof payload === 'object' && payload !== null) {
+      req.user = payload as Express.Request['user']
+    }
     return next()
   } catch (err: unknown) {
     const errorMessage = err instanceof jwt.TokenExpiredError ? 'expired_token' : 'invalid_token'

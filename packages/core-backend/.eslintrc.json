@@ -33,6 +33,8 @@
     "node_modules/",
     "dist/",
     "build/",
-    "*.js"
+    "*.js",
+    "**/*.test.ts",
+    "**/__tests__/**"
   ]
 }

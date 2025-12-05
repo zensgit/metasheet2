@@ -1,12 +1,23 @@
-// @ts-nocheck
 /**
  * Base Repository Pattern Implementation
  * Provides common CRUD operations for all entities
+ *
+ * Note: Uses `any` type assertions in places where Kysely's complex union types
+ * (62 tables) cause "union type too complex" TypeScript errors. This is a known
+ * limitation when working with large database schemas in Kysely.
  */
 
-import type { Kysely, Insertable, Selectable, Updateable } from 'kysely'
+import type { Kysely, Insertable, Selectable, Updateable, SelectQueryBuilder, UpdateQueryBuilder, DeleteQueryBuilder } from 'kysely'
 import type { Database } from '../types'
 import { db, transaction } from '../kysely'
+
+// Type alias for query builders with any - needed due to Kysely's complex union types
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnySelectQueryBuilder = SelectQueryBuilder<any, any, any>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyUpdateQueryBuilder = UpdateQueryBuilder<any, any, any, any>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyDeleteQueryBuilder = DeleteQueryBuilder<any, any, any>
 
 export abstract class BaseRepository<
   TTable extends keyof Database,
@@ -29,9 +40,12 @@ export abstract class BaseRepository<
    * Find record by ID
    */
   async findById(id: string): Promise<TSelect | undefined> {
-    return await this.db
-      .selectFrom(this.tableName)
-      .selectAll()
+    // Cast to any to avoid Kysely's complex union type errors with dynamic table names
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const query = (this.db.selectFrom(this.tableName as any) as any)
+      .selectAll() as AnySelectQueryBuilder
+
+    return await query
       .where('id', '=', id)
       .executeTakeFirst() as TSelect | undefined
   }
@@ -45,19 +59,18 @@ export abstract class BaseRepository<
     offset?: number
     orderBy?: { column: string; order?: 'asc' | 'desc' }
   }): Promise<TSelect[]> {
-    let query = this.db.selectFrom(this.tableName).selectAll()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query = (this.db.selectFrom(this.tableName as any) as any)
+      .selectAll() as AnySelectQueryBuilder
 
     if (options?.where) {
       for (const [key, value] of Object.entries(options.where)) {
-        query = query.where(key as any, '=', value as any)
+        query = query.where(key, '=', value)
       }
     }
 
     if (options?.orderBy) {
-      query = query.orderBy(
-        options.orderBy.column as any,
-        options.orderBy.order || 'asc'
-      )
+      query = query.orderBy(options.orderBy.column, options.orderBy.order || 'asc')
     }
 
     if (options?.limit) {
@@ -75,10 +88,12 @@ export abstract class BaseRepository<
    * Find one record matching conditions
    */
   async findOne(where: Partial<TSelect>): Promise<TSelect | undefined> {
-    let query = this.db.selectFrom(this.tableName).selectAll()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query = (this.db.selectFrom(this.tableName as any) as any)
+      .selectAll() as AnySelectQueryBuilder
 
     for (const [key, value] of Object.entries(where)) {
-      query = query.where(key as any, '=', value as any)
+      query = query.where(key, '=', value)
     }
 
     return await query.executeTakeFirst() as TSelect | undefined
@@ -88,27 +103,30 @@ export abstract class BaseRepository<
    * Count records matching conditions
    */
   async count(where?: Partial<TSelect>): Promise<number> {
-    let query = this.db
-      .selectFrom(this.tableName)
-      .select(this.db.fn.count('id').as('count'))
+    // Cast early to avoid union type complexity
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const baseQuery = this.db.selectFrom(this.tableName as any) as any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query = baseQuery.select((eb: any) => eb.fn.count('id').as('count')) as AnySelectQueryBuilder
 
     if (where) {
       for (const [key, value] of Object.entries(where)) {
-        query = query.where(key as any, '=', value as any)
+        query = query.where(key, '=', value)
       }
     }
 
     const result = await query.executeTakeFirst()
-    return Number(result?.count || 0)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return Number((result as any)?.count || 0)
   }
 
   /**
    * Create new record
    */
   async create(data: TInsert): Promise<TSelect> {
-    const result = await this.db
-      .insertInto(this.tableName)
-      .values(data as any)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (this.db.insertInto(this.tableName as any) as any)
+      .values(data)
       .returningAll()
       .executeTakeFirstOrThrow()
 
@@ -121,9 +139,9 @@ export abstract class BaseRepository<
   async createMany(data: TInsert[]): Promise<TSelect[]> {
     if (data.length === 0) return []
 
-    const results = await this.db
-      .insertInto(this.tableName)
-      .values(data as any)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const results = await (this.db.insertInto(this.tableName as any) as any)
+      .values(data)
       .returningAll()
       .execute()
 
@@ -134,9 +152,12 @@ export abstract class BaseRepository<
    * Update record by ID
    */
   async update(id: string, data: TUpdate): Promise<TSelect | undefined> {
-    const result = await this.db
-      .updateTable(this.tableName)
-      .set(data as any)
+    // Cast early to avoid union type complexity
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const baseQuery = this.db.updateTable(this.tableName as any) as any
+    const query = baseQuery.set(data) as AnyUpdateQueryBuilder
+
+    const result = await query
       .where('id', '=', id)
       .returningAll()
       .executeTakeFirst()
@@ -151,10 +172,13 @@ export abstract class BaseRepository<
     where: Partial<TSelect>,
     data: TUpdate
   ): Promise<number> {
-    let query = this.db.updateTable(this.tableName).set(data as any)
+    // Cast early to avoid union type complexity
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const baseQuery = this.db.updateTable(this.tableName as any) as any
+    let query = baseQuery.set(data) as AnyUpdateQueryBuilder
 
     for (const [key, value] of Object.entries(where)) {
-      query = query.where(key as any, '=', value as any)
+      query = query.where(key, '=', value)
     }
 
     const result = await query.execute()
@@ -165,8 +189,10 @@ export abstract class BaseRepository<
    * Delete record by ID
    */
   async delete(id: string): Promise<boolean> {
-    const result = await this.db
-      .deleteFrom(this.tableName)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const query = this.db.deleteFrom(this.tableName as any) as AnyDeleteQueryBuilder
+
+    const result = await query
       .where('id', '=', id)
       .execute()
 
@@ -177,10 +203,11 @@ export abstract class BaseRepository<
    * Delete multiple records
    */
   async deleteMany(where: Partial<TSelect>): Promise<number> {
-    let query = this.db.deleteFrom(this.tableName)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query = this.db.deleteFrom(this.tableName as any) as AnyDeleteQueryBuilder
 
     for (const [key, value] of Object.entries(where)) {
-      query = query.where(key as any, '=', value as any)
+      query = query.where(key, '=', value)
     }
 
     const result = await query.execute()
@@ -240,4 +267,3 @@ export abstract class BaseRepository<
     }
   }
 }
-// @ts-nocheck

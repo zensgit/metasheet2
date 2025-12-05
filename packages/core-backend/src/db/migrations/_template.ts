@@ -15,7 +15,9 @@
  * Example filename: 20251029120000_create_user_preferences.ts
  */
 
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { checkTableExists, addColumnIfNotExists, createIndexIfNotExists } from './_patterns'
 
 /**
@@ -27,7 +29,7 @@ import { checkTableExists, addColumnIfNotExists, createIndexIfNotExists } from '
  * - Migrate data if needed
  * - Use IF NOT EXISTS where possible
  */
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // 1. Check if table already exists (using helper from _patterns.ts)
   const tableExists = await checkTableExists(db, 'your_table_name')
 
@@ -143,7 +145,7 @@ export async function up(db: Kysely<any>): Promise<void> {
  * - Use IF EXISTS where possible
  * - Be safe to run multiple times
  */
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   console.log('[Migration] Rolling back: dropping your_table_name')
 
   // 1. Drop triggers (if any)

@@ -1,19 +1,40 @@
-// @ts-nocheck
 /**
  * Telemetry middleware for Express
  */
 
-import { Request, Response, NextFunction } from 'express'
-import { getTelemetry, StructuredLogger } from '../services/TelemetryService'
+import type { Request, Response, NextFunction } from 'express'
+import { getTelemetry } from '../services/TelemetryService'
+import type { StructuredLogger } from '../services/TelemetryService'
+
+interface OTelSpan {
+  recordException(exception: Error): void
+  setStatus(status: { code: number; message?: string }): void
+  setAttributes(attributes: Record<string, unknown>): void
+  end(): void
+}
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      span?: any
+      span?: OTelSpan
       correlationId?: string
       logger?: StructuredLogger
     }
   }
+}
+
+/**
+ * Log HTTP request
+ */
+function logRequest(logger: StructuredLogger, req: Request): void {
+  logger.info('HTTP request received', {
+    method: req.method,
+    path: req.path,
+    query: req.query,
+    ip: req.ip,
+    userAgent: req.get('user-agent')
+  })
 }
 
 /**
@@ -28,29 +49,27 @@ export function telemetryMiddleware() {
     const middleware = telemetry.expressMiddleware()
 
     // Add correlation ID
-    req.correlationId = req.headers['x-correlation-id'] as string || require('crypto').randomUUID()
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const correlationId = (req.headers['x-correlation-id'] as string) || require('crypto').randomUUID()
+    req.correlationId = correlationId
 
     // Add structured logger to request
-    req.logger = telemetry.getLogger(`http.${req.method}.${req.path}`)
-    req.logger.setCorrelationId(req.correlationId)
+    const reqLogger = telemetry.getLogger(`http.${req.method}.${req.path}`)
+    reqLogger.setCorrelationId(correlationId)
+    req.logger = reqLogger
 
     // Set correlation ID in response
-    res.setHeader('x-correlation-id', req.correlationId)
+    res.setHeader('x-correlation-id', correlationId);
 
     // Log request
-    req.logger.info('HTTP request received', {
-      method: req.method,
-      path: req.path,
-      query: req.query,
-      ip: req.ip,
-      userAgent: req.get('user-agent')
-    })
+    logRequest(reqLogger, req);
 
-    // Apply telemetry middleware
-    middleware(req, res, () => {
+    // Apply telemetry middleware - use type assertion to handle Express type differences
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (middleware as any)(req, res, () => {
       // Log response on finish
       res.on('finish', () => {
-        req.logger?.info('HTTP request completed', {
+        reqLogger.info('HTTP request completed', {
           method: req.method,
           path: req.path,
           statusCode: res.statusCode,
@@ -111,7 +130,7 @@ export function traceDbQuery<T>(
   const tracer = telemetry.getTracer('database')
   const metrics = telemetry.getMetrics()
 
-  return tracer.startActiveSpan(`db.${operation}.${table}`, async (span) => {
+  return tracer.startActiveSpan(`db.${operation}.${table}`, async (span: OTelSpan) => {
     const startTime = Date.now()
 
     try {
@@ -156,7 +175,7 @@ export function traceCacheOperation<T>(
   const tracer = telemetry.getTracer('cache')
   const metrics = telemetry.getMetrics()
 
-  return tracer.startActiveSpan(`cache.${operation}`, async (span) => {
+  return tracer.startActiveSpan(`cache.${operation}`, async (span: OTelSpan) => {
     try {
       span.setAttributes({
         'cache.operation': operation,
@@ -199,12 +218,12 @@ export function traceCacheOperation<T>(
 export async function traceAsync<T>(
   name: string,
   fn: () => Promise<T>,
-  attributes?: Record<string, any>
+  attributes?: Record<string, unknown>
 ): Promise<T> {
   const telemetry = getTelemetry()
   const tracer = telemetry.getTracer('async')
 
-  return tracer.startActiveSpan(name, { attributes }, async (span) => {
+  return tracer.startActiveSpan(name, { attributes }, async (span: OTelSpan) => {
     try {
       const result = await fn()
       span.setStatus({ code: 1 }) // OK

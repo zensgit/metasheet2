@@ -1,10 +1,10 @@
-// @ts-nocheck
 /**
  * Telemetry initialization and setup
  */
 
 import { getTelemetry } from '../services/TelemetryService'
-import { getConfig } from '../config'
+import { getConfig } from '../config/index'
+import type { AppConfig } from '../config/index'
 import { metrics } from '../metrics/metrics'
 import { Logger } from '../core/logger'
 
@@ -19,14 +19,14 @@ export async function initializeTelemetry() {
     const app = getConfig()
     const telemetry = getTelemetry({
       serviceName: 'metasheet-backend',
-      serviceVersion: (process as any).env.npm_package_version || '1.0.0',
+      serviceVersion: process.env.npm_package_version || '1.0.0',
       environment: (process.env.NODE_ENV as string) || 'development',
-      jaegerEndpoint: (app as any)?.telemetry?.jaegerEndpoint,
-      prometheusPort: Number((app as any)?.telemetry?.prometheusPort ?? 0),
-      enableAutoInstrumentation: String((app as any)?.telemetry?.autoInstrumentation) === 'true',
-      enableMetrics: String((app as any)?.telemetry?.metricsEnabled) === 'true',
-      enableTracing: String((app as any)?.telemetry?.tracingEnabled) === 'true',
-      samplingRate: Number((app as any)?.telemetry?.samplingRate ?? 1)
+      jaegerEndpoint: app.telemetry.jaegerEndpoint,
+      prometheusPort: Number(app.telemetry.prometheusPort ?? 0),
+      enableAutoInstrumentation: app.telemetry.autoInstrumentation === 'true',
+      enableMetrics: app.telemetry.metricsEnabled === 'true',
+      enableTracing: app.telemetry.tracingEnabled === 'true',
+      samplingRate: Number(app.telemetry.samplingRate ?? 1)
     })
 
     await telemetry.initialize()
@@ -62,11 +62,15 @@ export function getTelemetryInstance() {
 /**
  * Restart telemetry when critical config changes
  */
-export async function restartTelemetryIfNeeded(oldCfg: any, newCfg: any) {
-  const wasEnabled = oldCfg?.telemetry?.enabled === 'true'
-  const nowEnabled = newCfg?.telemetry?.enabled === 'true'
-  const criticalKeys = ['jaegerEndpoint','prometheusPort','tracingEnabled','metricsEnabled','autoInstrumentation','samplingRate']
-  const changed = criticalKeys.filter(k => (oldCfg?.telemetry?.[k] ?? undefined) !== (newCfg?.telemetry?.[k] ?? undefined))
+export async function restartTelemetryIfNeeded(oldCfg: AppConfig, newCfg: AppConfig) {
+  const wasEnabled = oldCfg.telemetry.enabled === 'true'
+  const nowEnabled = newCfg.telemetry.enabled === 'true'
+  const criticalKeys = ['jaegerEndpoint','prometheusPort','tracingEnabled','metricsEnabled','autoInstrumentation','samplingRate'] as const
+  const changed = criticalKeys.filter(k => {
+    const oldVal = oldCfg.telemetry[k]
+    const newVal = newCfg.telemetry[k]
+    return oldVal !== newVal
+  })
   let restarted = false
   if (nowEnabled) {
     // If newly enabled or critical fields changed

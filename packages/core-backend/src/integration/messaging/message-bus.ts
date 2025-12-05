@@ -1,5 +1,12 @@
 import { randomUUID } from 'crypto'
 import { coreMetrics } from '../metrics/metrics'
+import { delayService } from '../../services/DelayService'
+import { dlqService } from '../../services/DeadLetterQueueService'
+import { BackoffStrategy } from '../../utils/BackoffStrategy'
+import type { BackoffOptions } from '../../utils/BackoffStrategy'
+import { Logger } from '../../core/logger'
+
+const logger = new Logger('MessageBus')
 
 export type MessagePriority = 'low' | 'normal' | 'high'
 
@@ -11,12 +18,15 @@ interface PublishOptions {
   timeoutMs?: number // for request/reply
   expiryMs?: number // relative milliseconds until expiry
   expiresAt?: number // absolute epoch ms; overrides expiryMs
+  delay?: number // delay in ms
+  backoff?: BackoffOptions
+  headers?: Record<string, unknown>
 }
 
-interface InternalMessage {
+interface InternalMessage<T = unknown> {
   id: string
   topic: string
-  payload: any
+  payload: T
   priority: MessagePriority
   attempts: number
   maxRetries: number
@@ -25,27 +35,35 @@ interface InternalMessage {
   source?: string
   createdAt: number
   expiresAt?: number
+  backoff?: BackoffOptions
+  headers?: Record<string, unknown>
 }
 
-type Handler = (msg: InternalMessage) => Promise<any> | any
+type Handler<T = unknown, R = unknown> = (msg: InternalMessage<T>) => Promise<R> | R
 
 interface Subscription {
   id: string
   topic: string
-  handler: Handler
+  handler: Handler<unknown, unknown>
   plugin?: string
+}
+
+interface PendingRpc<T = unknown> {
+  resolve: (value: T) => void
+  reject: (reason?: Error) => void
+  timeout: NodeJS.Timeout
 }
 
 class MessageBus {
   private subs: Map<string, Subscription[]> = new Map()
-  private patternSubs: { id: string; pattern: string; regex: RegExp; handler: Handler; plugin?: string }[] = []
+  private patternSubs: { id: string; pattern: string; regex: RegExp; handler: Handler<unknown, unknown>; plugin?: string }[] = []
   private queue: InternalMessage[] = []
   private processing = false
-  private pendingRpc: Map<string, { resolve: Function; reject: Function; timeout: NodeJS.Timeout }> = new Map()
+  private pendingRpc: Map<string, PendingRpc> = new Map()
   private defaultRetries = 2
 
-  subscribe(topic: string, handler: Handler, plugin?: string): string {
-    const sub: Subscription = { id: `sub_${randomUUID()}`, topic, handler, plugin }
+  subscribe<T = unknown, R = unknown>(topic: string, handler: Handler<T, R>, plugin?: string): string {
+    const sub: Subscription = { id: `sub_${randomUUID()}`, topic, handler: handler as Handler<unknown, unknown>, plugin }
     if (!this.subs.has(topic)) this.subs.set(topic, [])
     this.subs.get(topic)!.push(sub)
     return sub.id
@@ -61,7 +79,7 @@ class MessageBus {
    *   - Reject multiple '*' or middle '*' usages (e.g. order.*.created)
    *   - Reject lone '*' (ambiguous / too broad)
    */
-  subscribePattern(pattern: string, handler: Handler, plugin?: string): string {
+  subscribePattern<T = unknown, R = unknown>(pattern: string, handler: Handler<T, R>, plugin?: string): string {
     const stars = (pattern.match(/\*/g) || []).length
     if (pattern === '*' || pattern === '.*') {
       throw new Error('Wildcard "*" alone not supported; use specific prefix like "order.*"')
@@ -81,7 +99,7 @@ class MessageBus {
       regex = new RegExp('^' + escapedExact + '$')
     }
     const id = `psub_${randomUUID()}`
-    this.patternSubs.push({ id, pattern, regex, handler, plugin })
+    this.patternSubs.push({ id, pattern, regex, handler: handler as Handler<unknown, unknown>, plugin })
     return id
   }
 
@@ -118,12 +136,20 @@ class MessageBus {
   }
 
   /** Track subscriptions by plugin name for lifecycle cleanup */
-  subscribeWithPlugin(topic: string, handler: Handler, plugin: string): string {
+  subscribeWithPlugin<T = unknown, R = unknown>(topic: string, handler: Handler<T, R>, plugin: string): string {
     return this.subscribe(topic, handler, plugin)
   }
 
-  async publish(topic: string, payload: any, opts: PublishOptions = {}): Promise<string> {
-    const msg: InternalMessage = {
+  async publish<T = unknown>(topic: string, payload: T, opts: PublishOptions = {}): Promise<string> {
+    // Handle delay
+    if (opts.delay && opts.delay > 0) {
+      return delayService.schedule(topic, payload, opts.delay, {
+        priority: opts.priority,
+        headers: opts.headers
+      })
+    }
+
+    const msg: InternalMessage<T> = {
       id: `msg_${randomUUID()}`,
       topic,
       payload,
@@ -133,7 +159,9 @@ class MessageBus {
       correlationId: opts.correlationId,
       replyTo: opts.replyTo,
       createdAt: Date.now(),
-      expiresAt: opts.expiresAt ?? (opts.expiryMs ? Date.now() + opts.expiryMs : undefined)
+      expiresAt: opts.expiresAt ?? (opts.expiryMs ? Date.now() + opts.expiryMs : undefined),
+      backoff: opts.backoff,
+      headers: opts.headers
     }
     // Immediate expiry short-circuit (avoid enqueuing stale messages)
     if (msg.expiresAt && msg.expiresAt <= Date.now()) {
@@ -189,11 +217,34 @@ class MessageBus {
           msg.attempts += 1
           coreMetrics.inc('messagesRetried')
           if (msg.attempts <= msg.maxRetries) {
-            this.enqueue(msg)
-          } else if (msg.correlationId && this.pendingRpc.has(msg.correlationId)) {
-            const pending = this.pendingRpc.get(msg.correlationId)!
-            pending.reject(e)
-            this.pendingRpc.delete(msg.correlationId)
+            // Handle backoff
+            const delay = msg.backoff ? BackoffStrategy.calculate(msg.attempts, msg.backoff) : 0
+            if (delay > 0) {
+              delayService.schedule(msg.topic, msg.payload, delay, {
+                priority: msg.priority,
+                headers: { ...msg.headers, 'x-retry-attempt': msg.attempts }
+              })
+            } else {
+              this.enqueue(msg)
+            }
+          } else {
+            // Send to DLQ
+            try {
+              await dlqService.enqueue(msg.topic, msg.payload, e instanceof Error ? e : new Error(String(e)), {
+                ...msg.headers,
+                originalMessageId: msg.id,
+                correlationId: msg.correlationId,
+                attempts: msg.attempts
+              })
+            } catch (dlqError) {
+              logger.error('Failed to enqueue to DLQ', dlqError instanceof Error ? dlqError : undefined)
+            }
+
+            if (msg.correlationId && this.pendingRpc.has(msg.correlationId)) {
+              const pending = this.pendingRpc.get(msg.correlationId)!
+              pending.reject(e instanceof Error ? e : new Error(String(e)))
+              this.pendingRpc.delete(msg.correlationId)
+            }
           }
         }
       }
@@ -202,23 +253,23 @@ class MessageBus {
   }
 
   // RPC request
-  async request(topic: string, payload: any, timeoutMs = 3000): Promise<any> {
+  async request<TRequest = unknown, TResponse = unknown>(topic: string, payload: TRequest, timeoutMs = 3000): Promise<TResponse> {
     const correlationId = randomUUID()
     const replyTopic = `__rpc.reply.${correlationId}`
-    return new Promise((resolve, reject) => {
+    return new Promise<TResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRpc.delete(correlationId)
         coreMetrics.inc('rpcTimeouts')
         reject(new Error('RPC timeout'))
       }, timeoutMs)
 
-      this.pendingRpc.set(correlationId, { resolve, reject, timeout })
+      this.pendingRpc.set(correlationId, { resolve: resolve as (value: unknown) => void, reject, timeout })
 
       // subscribe once for reply & capture id for cleanup
-      const replySubId = this.subscribe(replyTopic, (msg) => {
+      const replySubId = this.subscribe<TResponse>(replyTopic, (msg) => {
         if (msg.correlationId !== correlationId) return
         const pending = this.pendingRpc.get(correlationId)
-        pending?.resolve(msg.payload)
+        pending?.resolve(msg.payload as TResponse)
         if (pending) clearTimeout(pending.timeout)
         this.pendingRpc.delete(correlationId)
         this.unsubscribe(replySubId)
@@ -229,14 +280,19 @@ class MessageBus {
   }
 
   // Handler utility for RPC responders
-  createRpcHandler(topic: string, handler: (payload: any) => Promise<any> | any, plugin?: string): string {
-    return this.subscribe(topic, async (msg) => {
+  createRpcHandler<TRequest = unknown, TResponse = unknown>(
+    topic: string,
+    handler: (payload: TRequest) => Promise<TResponse> | TResponse,
+    plugin?: string
+  ): string {
+    return this.subscribe<TRequest>(topic, async (msg) => {
       if (!msg.replyTo || !msg.correlationId) return
       try {
         const result = await handler(msg.payload)
         await this.publish(msg.replyTo, result, { correlationId: msg.correlationId })
-      } catch (e: any) {
-        await this.publish(msg.replyTo, { error: e.message || 'RPC_ERROR' }, { correlationId: msg.correlationId })
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : 'RPC_ERROR'
+        await this.publish(msg.replyTo, { error: errorMessage }, { correlationId: msg.correlationId })
       }
     }, plugin)
   }

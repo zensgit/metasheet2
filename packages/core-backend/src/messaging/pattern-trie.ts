@@ -6,9 +6,9 @@
 export interface Subscription {
   id: string
   pattern: string
-  callback: (topic: string, message: any) => void
+  callback: (topic: string, message: unknown) => void
   createdAt: number
-  metadata?: any
+  metadata?: Record<string, unknown>
 }
 
 export interface TrieStats {
@@ -284,8 +284,6 @@ export class PatternTrie {
 
       // If this node has wildcard subscriptions, they match
       if (node.isWildcard && node.subscriptions.size > 0) {
-        const currentPrefix = path.join('')
-
         // Check if we're at a valid boundary (next char is '.' or end)
         const nextCharIndex = path.length
         if (nextCharIndex >= topic.length || topic[nextCharIndex] === '.') {
@@ -303,7 +301,7 @@ export class PatternTrie {
     if (!suffixSubs) return
 
     for (const sub of suffixSubs) {
-      const reversedSuffix = sub.metadata?.reversedSuffix
+      const reversedSuffix = sub.metadata?.reversedSuffix as string | undefined
       if (reversedSuffix) {
         const reversedTopic = topic.split('').reverse().join('')
         if (reversedTopic.startsWith(reversedSuffix)) {
@@ -322,7 +320,7 @@ export class PatternTrie {
     if (!complexSubs) return
 
     for (const sub of complexSubs) {
-      const regex = sub.metadata?.regex
+      const regex = sub.metadata?.regex as RegExp | undefined
       if (regex && regex.test(topic)) {
         matches.add(sub)
       }

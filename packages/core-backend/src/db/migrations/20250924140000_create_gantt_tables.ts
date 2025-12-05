@@ -3,9 +3,10 @@
  * Timestamp: 2025-09-24 14:00:00
  */
 
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
   // Create gantt_tasks table
   await db.schema
@@ -240,7 +241,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   `.execute(db)
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   // Drop triggers
   await sql`DROP TRIGGER IF EXISTS update_gantt_resources_updated_at ON gantt_resources`.execute(db)
   await sql`DROP TRIGGER IF EXISTS update_gantt_tasks_updated_at ON gantt_tasks`.execute(db)

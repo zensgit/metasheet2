@@ -1,46 +1,25 @@
-import { Logger } from '../core/logger'
-import { pool } from '../db/pg'
+import { AuditService } from './AuditService'
 
-const logger = new Logger('Audit')
+export const auditService = new AuditService()
 
-export type AuditMeta = Record<string, any>
-
-export async function auditLog(params: {
+export interface AuditLogOptions {
   actorId?: string
-  actorType: 'user' | 'system' | 'service'
+  actorType: string
   action: string
   resourceType: string
-  resourceId?: string
-  requestId?: string
-  ip?: string
-  userAgent?: string
-  meta?: AuditMeta
-}) {
-  // 尝试落库；若未配置数据库则退化为日志
-  try {
-    if (pool) {
-      await pool.query(
-        `INSERT INTO operation_audit_logs
-         (actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent, meta)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [
-          params.actorId || null,
-          params.actorType,
-          params.action,
-          params.resourceType,
-          params.resourceId || null,
-          params.requestId || null,
-          params.ip || null,
-          params.userAgent || null,
-          JSON.stringify(params.meta || {})
-        ]
-      )
-      return
-    }
-  } catch (e) {
-    // 落库失败则记录日志并继续
-    logger.warn('audit insert failed, fallback to log')
-  }
+  resourceId: string
+  meta?: Record<string, unknown>
+}
 
-  logger.info('audit', params)
+export async function auditLog(options: AuditLogOptions): Promise<void> {
+  await auditService.logEvent(
+    options.action.toUpperCase(),
+    options.action,
+    {
+      userId: options.actorType === 'user' && options.actorId ? parseInt(options.actorId) : undefined,
+      resourceType: options.resourceType,
+      resourceId: options.resourceId,
+      actionDetails: options.meta
+    }
+  )
 }

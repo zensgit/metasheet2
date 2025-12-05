@@ -1,9 +1,7 @@
 import { z } from 'zod'
 import { Logger } from '../core/logger'
-import { EventEmitter } from 'eventemitter3'
 
 const logger = new Logger('Config')
-const bus = new EventEmitter()
 
 const ServerSchema = z.object({
   host: z.string().default('0.0.0.0'),
@@ -63,20 +61,20 @@ export function loadConfig(): AppConfig {
     server: { host: process.env.HOST, port: process.env.PORT, env: process.env.NODE_ENV },
     db: { url: process.env.DATABASE_URL, poolMax: process.env.PGPOOL_MAX, idleTimeoutMs: process.env.PG_IDLE_TIMEOUT_MS, connTimeoutMs: process.env.PG_CONN_TIMEOUT_MS },
     jwt: { secret: process.env.JWT_SECRET },
-    ws: { redisEnabled: process.env.WS_REDIS_ENABLED as any },
-    auth: { kanbanAuthRequired: process.env.KANBAN_AUTH_REQUIRED as any },
+    ws: { redisEnabled: process.env.WS_REDIS_ENABLED as 'true' | 'false' | undefined },
+    auth: { kanbanAuthRequired: process.env.KANBAN_AUTH_REQUIRED as 'true' | 'false' | undefined },
     featureFlags: {
-      useKyselyDB: process.env.USE_KYSELY as any,
-      kanbanDB: process.env.KANBAN_DB as any,
-      workflowEnabled: process.env.WORKFLOW_ENABLED as any
+      useKyselyDB: process.env.USE_KYSELY as 'true' | 'false' | undefined,
+      kanbanDB: process.env.KANBAN_DB as 'true' | 'false' | undefined,
+      workflowEnabled: process.env.WORKFLOW_ENABLED as 'true' | 'false' | undefined
     },
     telemetry: {
-      enabled: process.env.OTEL_ENABLED as any,
+      enabled: process.env.OTEL_ENABLED as 'true' | 'false' | undefined,
       jaegerEndpoint: process.env.JAEGER_ENDPOINT,
       prometheusPort: process.env.PROMETHEUS_PORT,
-      autoInstrumentation: process.env.TELEMETRY_AUTO_INSTRUMENT as any,
-      metricsEnabled: process.env.TELEMETRY_METRICS as any,
-      tracingEnabled: process.env.TELEMETRY_TRACING as any,
+      autoInstrumentation: process.env.TELEMETRY_AUTO_INSTRUMENT as 'true' | 'false' | undefined,
+      metricsEnabled: process.env.TELEMETRY_METRICS as 'true' | 'false' | undefined,
+      tracingEnabled: process.env.TELEMETRY_TRACING as 'true' | 'false' | undefined,
       samplingRate: process.env.TELEMETRY_SAMPLING_RATE
     }
   })
@@ -89,6 +87,15 @@ export function loadConfig(): AppConfig {
 
 export function getConfig(): AppConfig {
   return cached || loadConfig()
+}
+
+/**
+ * Reload configuration from environment variables
+ * Forces a fresh parse of all config values
+ */
+export function reloadConfig(): AppConfig {
+  cached = undefined
+  return loadConfig()
 }
 
 export function sanitizeConfig(cfg: AppConfig) {

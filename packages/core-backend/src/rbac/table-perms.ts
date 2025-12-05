@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Table-level RBAC permission checks
  *
@@ -40,7 +39,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
       logger.warn(`Read access denied: no user ID provided for table ${tableId}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('read', 'deny').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return false
     }
 
@@ -50,7 +49,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
       logger.debug(`Read access granted: user ${user.id} is admin for table ${tableId}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('read', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -61,7 +60,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
       logger.debug(`Read access granted: user ${user.id} has ${specificPermission}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('read', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -72,7 +71,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
       logger.debug(`Read access granted: user ${user.id} has ${wildcardPermission}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('read', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -82,7 +81,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
       logger.debug(`Read access granted: user ${user.id} has ${TABLE_READ_PERMISSION}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('read', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -95,7 +94,7 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
         logger.warn(`Read access granted in non-strict mode: no RBAC permissions found for user ${user.id}`)
         try {
           metrics.rbacPermissionChecksTotal.labels('read', 'allow').inc()
-        } catch {}
+        } catch { /* metrics unavailable */ }
         return true
       }
     }
@@ -104,20 +103,20 @@ export async function canReadTable(user: User, tableId: string): Promise<boolean
     logger.info(`Read access denied: user ${user.id} lacks permission for table ${tableId}`)
     try {
       metrics.rbacPermissionChecksTotal.labels('read', 'deny').inc()
-    } catch {}
+    } catch { /* metrics unavailable */ }
     return false
-  } catch (error) {
-    logger.error(`Error checking read permission for table ${tableId}:`, error)
+  } catch (error: unknown) {
+    logger.error(`Error checking read permission for table ${tableId}:`, error as Error)
     try {
       metrics.rbacPermissionChecksTotal.labels('read', 'error').inc()
-    } catch {}
+    } catch { /* metrics unavailable */ }
     // Fail closed: deny access on error
     return false
   } finally {
     try {
       const dur = Number((process.hrtime.bigint() - start)) / 1e9
       metrics.rbacCheckLatencySeconds.labels('read').observe(dur)
-    } catch {}
+    } catch { /* metrics unavailable */ }
   }
 }
 
@@ -135,7 +134,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.warn(`Write access denied: no user ID provided for table ${tableId}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'deny').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return false
     }
 
@@ -145,7 +144,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.debug(`Write access granted: user ${user.id} is admin for table ${tableId}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -156,7 +155,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.debug(`Write access granted: user ${user.id} has ${adminPermission}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -167,7 +166,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.debug(`Write access granted: user ${user.id} has ${specificPermission}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -178,7 +177,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.debug(`Write access granted: user ${user.id} has ${wildcardPermission}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -188,7 +187,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
       logger.debug(`Write access granted: user ${user.id} has ${TABLE_WRITE_PERMISSION}`)
       try {
         metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return true
     }
 
@@ -200,7 +199,7 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
         logger.warn(`Write access granted in non-strict mode: no RBAC permissions found for user ${user.id}`)
         try {
           metrics.rbacPermissionChecksTotal.labels('write', 'allow').inc()
-        } catch {}
+        } catch { /* metrics unavailable */ }
         return true
       }
     }
@@ -209,19 +208,19 @@ export async function canWriteTable(user: User, tableId: string): Promise<boolea
     logger.info(`Write access denied: user ${user.id} lacks permission for table ${tableId}`)
     try {
       metrics.rbacPermissionChecksTotal.labels('write', 'deny').inc()
-    } catch {}
+    } catch { /* metrics unavailable */ }
     return false
-  } catch (error) {
-    logger.error(`Error checking write permission for table ${tableId}:`, error)
+  } catch (error: unknown) {
+    logger.error(`Error checking write permission for table ${tableId}:`, error as Error)
     try {
       metrics.rbacPermissionChecksTotal.labels('write', 'error').inc()
-    } catch {}
+    } catch { /* metrics unavailable */ }
     // Fail closed: deny access on error
     return false
   } finally {
     try {
       const dur = Number((process.hrtime.bigint() - start)) / 1e9
       metrics.rbacCheckLatencySeconds.labels('write').observe(dur)
-    } catch {}
+    } catch { /* metrics unavailable */ }
   }
 }

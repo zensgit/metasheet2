@@ -1,5 +1,29 @@
 import { AuditService } from './AuditService';
-import { DataChangeData } from './AuditRepository';
+import type { Pool, QueryResult } from 'pg';
+import { Logger } from '../core/logger';
+
+/**
+ * Represents a database record with unknown structure
+ */
+type DatabaseRecord = Record<string, unknown>;
+
+/**
+ * Represents a query result from the database
+ */
+interface DatabaseQueryResult {
+  rows?: DatabaseRecord[];
+  rowCount?: number | null;
+  id?: string | number;
+}
+
+/**
+ * Represents a field change in an update operation
+ */
+interface FieldChange {
+  field: string;
+  oldValue?: unknown;
+  newValue?: unknown;
+}
 
 /**
  * Database query interceptor for automatic audit logging
@@ -8,6 +32,7 @@ export class AuditInterceptor {
   private auditService: AuditService;
   private enabledTables: Set<string>;
   private excludedOperations: Set<string>;
+  private logger = new Logger('AuditInterceptor');
 
   constructor(
     auditService: AuditService,
@@ -38,8 +63,8 @@ export class AuditInterceptor {
    */
   async interceptQuery(
     query: string,
-    params: any[],
-    result: any
+    params: unknown[],
+    result: DatabaseQueryResult
   ): Promise<void> {
     try {
       const operation = this.extractOperation(query);
@@ -64,7 +89,7 @@ export class AuditInterceptor {
           break;
       }
     } catch (error) {
-      console.error('Audit interceptor error:', error);
+      this.logger.error('Audit interceptor error', error instanceof Error ? error : undefined);
       // Don't throw - audit failures shouldn't break operations
     }
   }
@@ -75,13 +100,9 @@ export class AuditInterceptor {
   private async logInsert(
     tableName: string,
     recordId: string,
-    result: any
+    result: DatabaseQueryResult
   ): Promise<void> {
-    const changes: Array<{
-      field: string;
-      oldValue?: any;
-      newValue?: any;
-    }> = [];
+    const changes: FieldChange[] = [];
 
     // Extract inserted values from result
     if (result.rows && result.rows[0]) {
@@ -111,10 +132,10 @@ export class AuditInterceptor {
     tableName: string,
     recordId: string,
     query: string,
-    params: any[]
+    params: unknown[]
   ): Promise<void> {
     const changes = this.extractUpdateFields(query, params);
-    
+
     await this.auditService.logDataChange(
       tableName,
       recordId,
@@ -152,10 +173,10 @@ export class AuditInterceptor {
    */
   private extractTableName(query: string): string {
     const patterns = [
-      /FROM\s+["\`]?([\w_]+)["\`]?/i,
-      /UPDATE\s+["\`]?([\w_]+)["\`]?/i,
-      /INSERT\s+INTO\s+["\`]?([\w_]+)["\`]?/i,
-      /DELETE\s+FROM\s+["\`]?([\w_]+)["\`]?/i
+      /FROM\s+["`]?([\w_]+)["`]?/i,
+      /UPDATE\s+["`]?([\w_]+)["`]?/i,
+      /INSERT\s+INTO\s+["`]?([\w_]+)["`]?/i,
+      /DELETE\s+FROM\s+["`]?([\w_]+)["`]?/i
     ];
 
     for (const pattern of patterns) {
@@ -171,8 +192,8 @@ export class AuditInterceptor {
    */
   private extractRecordId(
     query: string,
-    params: any[],
-    result: any
+    params: unknown[],
+    result: DatabaseQueryResult
   ): string | null {
     // Try to extract from WHERE clause
     const whereMatch = query.match(/WHERE\s+id\s*=\s*\$?(\d+)/i);
@@ -197,10 +218,10 @@ export class AuditInterceptor {
    */
   private extractUpdateFields(
     query: string,
-    params: any[]
-  ): Array<{ field: string; oldValue?: any; newValue?: any }> {
-    const changes: Array<{ field: string; oldValue?: any; newValue?: any }> = [];
-    
+    params: unknown[]
+  ): FieldChange[] {
+    const changes: FieldChange[] = [];
+
     // Match SET clause fields
     const setMatch = query.match(/SET\s+(.+?)\s+(WHERE|RETURNING|$)/i);
     if (!setMatch) return changes;
@@ -209,12 +230,12 @@ export class AuditInterceptor {
     const fieldAssignments = setClause.split(',');
 
     for (const assignment of fieldAssignments) {
-      const match = assignment.match(/([\w_]+)\s*=\s*\$?(\d+|'[^']*'|[\w\.]+)/i);
+      const match = assignment.match(/([\w_]+)\s*=\s*\$?(\d+|'[^']*'|[\w.]+)/i);
       if (match) {
         const field = match[1].trim();
         const valueRef = match[2];
-        
-        let newValue: any;
+
+        let newValue: unknown;
         if (valueRef.startsWith('$')) {
           const paramIndex = parseInt(valueRef.substring(1));
           newValue = params[paramIndex - 1];
@@ -234,24 +255,56 @@ export class AuditInterceptor {
 }
 
 /**
+ * Pool query function type
+ */
+type PoolQueryFunction = (text: string, params?: unknown[]) => Promise<QueryResult>;
+
+/**
+ * Pool with query method
+ */
+interface PoolWithQuery {
+  query: PoolQueryFunction;
+}
+
+/**
  * Monkey patch pg Pool to add audit interceptor
  */
 export function enableAuditInterceptor(
-  pool: any,
+  pool: Pool,
   auditService: AuditService,
-  config?: any
+  config?: {
+    enabledTables?: string[];
+    excludedOperations?: string[];
+  }
 ): void {
   const interceptor = new AuditInterceptor(auditService, config);
-  const originalQuery = pool.query.bind(pool);
+  const poolWithQuery = pool as PoolWithQuery;
+  const originalQuery = poolWithQuery.query.bind(pool);
 
-  pool.query = async function(text: string, params?: any[]) {
+  poolWithQuery.query = async function(text: string, params?: unknown[]): Promise<QueryResult> {
     const result = await originalQuery(text, params);
-    
+
     // Intercept for audit logging
-    await interceptor.interceptQuery(text, params || [], result);
-    
+    await interceptor.interceptQuery(text, params || [], result as DatabaseQueryResult);
+
     return result;
   };
+}
+
+/**
+ * Decorator target interface
+ */
+interface DecoratorTarget {
+  constructor: {
+    name: string;
+  };
+}
+
+/**
+ * Object with audit service
+ */
+interface WithAuditService {
+  auditService?: AuditService;
 }
 
 /**
@@ -262,19 +315,19 @@ export function Audited(
   eventCategory: string = 'SYSTEM'
 ) {
   return function(
-    target: any,
+    target: DecoratorTarget,
     propertyKey: string,
     descriptor: PropertyDescriptor
   ) {
-    const originalMethod = descriptor.value;
+    const originalMethod = descriptor.value as (...args: unknown[]) => Promise<unknown>;
 
-    descriptor.value = async function(...args: any[]) {
-      const auditService = (this as any).auditService || new AuditService();
+    descriptor.value = async function(this: WithAuditService, ...args: unknown[]) {
+      const auditService = this.auditService || new AuditService();
       const startTime = Date.now();
-      
+
       try {
         const result = await originalMethod.apply(this, args);
-        
+
         // Log successful operation
         await auditService.logEvent(
           eventType,
@@ -289,7 +342,7 @@ export function Audited(
             }
           }
         );
-        
+
         return result;
       } catch (error) {
         // Log failed operation
@@ -308,7 +361,7 @@ export function Audited(
             }
           }
         );
-        
+
         throw error;
       }
     };
@@ -325,19 +378,20 @@ export function Compliant(
   requirement?: string
 ) {
   return function(
-    target: any,
+    target: DecoratorTarget,
     propertyKey: string,
     descriptor: PropertyDescriptor
   ) {
-    const originalMethod = descriptor.value;
+    const originalMethod = descriptor.value as (...args: unknown[]) => Promise<unknown>;
 
-    descriptor.value = async function(...args: any[]) {
-      const auditService = (this as any).auditService || new AuditService();
-      
+    descriptor.value = async function(this: WithAuditService, ...args: unknown[]) {
+      const auditService = this.auditService || new AuditService();
+
       // Log compliance event before operation
       await auditService.logComplianceEvent(
         regulation,
         {
+          regulation,
           requirement,
           processingPurpose: `${target.constructor.name}.${propertyKey}`,
           dataEncrypted: true,
@@ -347,7 +401,7 @@ export function Compliant(
           }
         }
       );
-      
+
       return originalMethod.apply(this, args);
     };
 

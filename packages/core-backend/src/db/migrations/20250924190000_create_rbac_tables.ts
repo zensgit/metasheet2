@@ -1,6 +1,7 @@
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>) {
+export async function up(db: Kysely<unknown>) {
   // Create permissions table (base table for permission codes)
   await db.schema
     .createTable('permissions')
@@ -120,7 +121,7 @@ export async function up(db: Kysely<any>) {
   await sql`CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id ON role_permissions(role_id)`.execute(db)
 }
 
-export async function down(db: Kysely<any>) {
+export async function down(db: Kysely<unknown>) {
   await db.schema.dropTable('role_permissions').execute()
   await db.schema.dropTable('user_permissions').execute()
   await db.schema.dropTable('user_roles').execute()

@@ -3,17 +3,20 @@
  * Issue #35: Integrates permission checking with metrics collection
  */
 
-import { Request, Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 import { permissionMetrics } from '../metrics/permission-metrics'
 
-export interface AuthenticatedRequest extends Request {
-  user?: {
+// Use the global Express.Request type which already includes user and startTime properties
+export type AuthenticatedRequest = Request
+
+interface JWTPayload {
+  exp: number
+  user: {
     id: string
     role: string
     department?: string
     permissions?: string[]
   }
-  startTime?: number
 }
 
 /**
@@ -39,7 +42,7 @@ export class PermissionMetricsMiddleware {
     // Hook into response to track 401/403 responses
     const originalSend = res.send
 
-    res.send = function(data: any): Response {
+    res.send = function(data: unknown): Response {
       const statusCode = res.statusCode
 
       if (statusCode === 401) {
@@ -47,7 +50,9 @@ export class PermissionMetricsMiddleware {
         permissionMetrics.incrementAuthFailure(reason, req.path, req.method)
         permissionMetrics.incrementApiRequest(req.path, req.method, 401)
       } else if (statusCode === 403) {
-        const reason = data?.reason || 'permission_denied'
+        const reason = (data && typeof data === 'object' && 'reason' in data && typeof data.reason === 'string')
+          ? data.reason
+          : 'permission_denied'
         permissionMetrics.incrementAuthFailure(reason, req.path, req.method)
         permissionMetrics.incrementApiRequest(req.path, req.method, 403)
 
@@ -218,7 +223,7 @@ export class PermissionMetricsMiddleware {
   /**
    * Session tracking
    */
-  static trackSession(action: 'login' | 'logout'): void {
+  static trackSession(_action: 'login' | 'logout'): void {
     // In production, this would track actual session count
     const currentSessions = Math.floor(Math.random() * 100) + 1
     permissionMetrics.setActiveSessions(currentSessions)
@@ -245,7 +250,7 @@ function mapMethodToAction(method: string): string {
   return mapping[method.toUpperCase()] || 'unknown'
 }
 
-async function validateJWT(token: string): Promise<any> {
+async function validateJWT(token: string): Promise<JWTPayload> {
   // Simulated JWT validation
   if (token === 'expired-token') {
     return { exp: Date.now() / 1000 - 3600, user: { id: 'test', role: 'viewer' } }
@@ -264,7 +269,7 @@ async function validateJWT(token: string): Promise<any> {
   }
 }
 
-function isTokenExpired(decoded: any): boolean {
+function isTokenExpired(decoded: JWTPayload): boolean {
   if (!decoded.exp) return false
   return decoded.exp < Date.now() / 1000
 }
@@ -275,7 +280,12 @@ function isTokenRevoked(token: string): boolean {
   return revokedTokens.includes(token)
 }
 
-function checkUserPermission(user: any, requiredPermission: string): boolean {
+function checkUserPermission(
+  user: AuthenticatedRequest['user'],
+  requiredPermission: string
+): boolean {
+  if (!user) return false
+
   // Role-based permission mapping
   const rolePermissions: Record<string, string[]> = {
     admin: ['admin:read', 'admin:write', 'spreadsheet:all', 'workflow:all'],
@@ -284,7 +294,7 @@ function checkUserPermission(user: any, requiredPermission: string): boolean {
   }
 
   const userPermissions = [
-    ...(rolePermissions[user.role] || []),
+    ...(user.role ? rolePermissions[user.role] || [] : []),
     ...(user.permissions || [])
   ]
 
@@ -294,7 +304,7 @@ function checkUserPermission(user: any, requiredPermission: string): boolean {
   }
 
   // Check wildcard permissions
-  const [resource, action] = requiredPermission.split(':')
+  const [resource, _action] = requiredPermission.split(':')
   return userPermissions.includes(`${resource}:all`) || userPermissions.includes('*:*')
 }
 

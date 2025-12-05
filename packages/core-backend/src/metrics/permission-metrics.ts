@@ -15,6 +15,17 @@ interface Metric {
   timestamp?: number
 }
 
+interface MetricValue {
+  value: number
+  type: 'counter' | 'gauge' | 'histogram'
+  labels: MetricLabel
+}
+
+interface MetricWithLabels {
+  value: number
+  labels: MetricLabel
+}
+
 export class PermissionMetrics {
   private metrics: Map<string, Metric[]> = new Map()
 
@@ -169,8 +180,8 @@ export class PermissionMetrics {
   /**
    * Get all metrics as object
    */
-  getMetrics(): Record<string, any> {
-    const result: Record<string, any> = {}
+  getMetrics(): Record<string, MetricValue | MetricWithLabels[]> {
+    const result: Record<string, MetricValue | MetricWithLabels[]> = {}
 
     for (const [metricName, metricValues] of this.metrics) {
       if (metricValues.length === 1 && Object.keys(metricValues[0].labels).length === 0) {

@@ -4,20 +4,21 @@
  */
 
 import { EventEmitter } from 'eventemitter3'
-import {
-  PluginManifest,
-  PluginInstance,
-  PluginRegistration,
-  PluginServices,
-  CoreAPI,
-  PluginStatus,
+import type {
   PluginCapability
+} from '../types/plugin';
+import {
+  type PluginManifest,
+  type PluginRegistration,
+  type PluginServices,
+  type CoreAPI,
+  PluginStatus
 } from '../types/plugin'
-import { PluginRegistry } from './plugin-registry'
-import { PluginLoader } from './plugin-loader'
+import { PluginRegistry, type PluginRegistrationWithId } from './plugin-registry'
+import { PluginLoader, type LoadedPlugin } from './plugin-loader'
 import { PluginConfigManager } from './plugin-config-manager'
 import { PluginServiceFactory, type ServiceFactoryOptions } from './plugin-service-factory'
-import { createEnhancedPluginContext } from './enhanced-plugin-context'
+import { createEnhancedPluginContext, type EnhancedPluginContext } from './enhanced-plugin-context'
 import { Logger } from './logger'
 
 /**
@@ -46,6 +47,43 @@ export interface PluginManagerConfig {
 }
 
 /**
+ * 服务统计信息
+ */
+interface ServiceStats {
+  cache?: unknown
+  queue?: unknown
+  websocket?: unknown
+  security?: unknown
+  storage?: unknown
+  scheduler?: unknown
+  notification?: unknown
+  validation?: unknown
+}
+
+/**
+ * 健康检查结果
+ */
+interface HealthCheckResult {
+  manager: {
+    status: 'healthy' | 'initializing' | 'error'
+    initialized: boolean
+  }
+  registry: {
+    status: 'healthy' | 'error'
+    pluginCount: number
+  }
+  services: Record<string, unknown> | null
+}
+
+/**
+ * 扩展的 LoadedPlugin，包含可选的 context
+ * Exported for use by plugin extensions
+ */
+export interface LoadedPluginWithContext extends LoadedPlugin {
+  context?: EnhancedPluginContext
+}
+
+/**
  * 插件管理器
  */
 export class PluginManager extends EventEmitter {
@@ -57,8 +95,10 @@ export class PluginManager extends EventEmitter {
   private config: PluginManagerConfig
   private logger: Logger
   private initialized = false
+  // Store plugin contexts separately since LoadedPlugin doesn't have context
+  private pluginContexts: Map<string, EnhancedPluginContext> = new Map()
 
-  constructor(coreAPI: CoreAPI, config: PluginManagerConfig = {}) {
+  constructor(_coreAPI: CoreAPI, config: PluginManagerConfig = {}) {
     super()
     this.config = {
       autoLoad: true,
@@ -75,20 +115,16 @@ export class PluginManager extends EventEmitter {
     // 创建服务工厂
     this.serviceFactory = new PluginServiceFactory(config.services)
 
-    // 创建注册中心
-    this.registry = new PluginRegistry(coreAPI)
+    // 创建注册中心 (PluginRegistry 不接受参数)
+    this.registry = new PluginRegistry()
 
-    // 创建加载器（pluginDirectories config option not yet implemented in PluginLoader）
-    this.loader = new PluginLoader(coreAPI)
+    // 创建加载器 (PluginLoader 接受可选的 basePath 或 CoreAPI)
+    this.loader = new PluginLoader(config.pluginDirectories?.[0] || './plugins')
 
-    // 创建配置管理器
-    this.configManager = new PluginConfigManager(
-      config.configStorage === 'database'
-        ? PluginConfigManager.createDatabaseStorage(null) // 需要传入实际的db实例
-        : PluginConfigManager.createFileSystemStorage(config.configPath)
-    )
+    // 创建配置管理器 (PluginConfigManager 不接受参数)
+    this.configManager = new PluginConfigManager()
 
-    this.setupEventListeners()
+    // 注意: setupEventListeners 已移除，因为这些类不是 EventEmitter
   }
 
   /**
@@ -142,7 +178,9 @@ export class PluginManager extends EventEmitter {
 
       for (const [name, instance] of loadedPlugins) {
         try {
-          const registration = await this.registry.registerPlugin(instance.manifest)
+          // 创建 PluginRegistration 并注册
+          const registration = this.createRegistrationFromManifest(instance.manifest)
+          this.registry.register(registration)
           registrations.push(registration)
           this.logger.info(`Discovered and registered plugin: ${name}`)
         } catch (error) {
@@ -159,10 +197,32 @@ export class PluginManager extends EventEmitter {
   }
 
   /**
+   * 从 manifest 创建 PluginRegistration
+   */
+  private createRegistrationFromManifest(manifest: PluginManifest): PluginRegistration {
+    return {
+      manifest,
+      status: PluginStatus.INSTALLED,
+      installedAt: new Date(),
+      capabilities: this.extractCapabilities(manifest)
+    }
+  }
+
+  /**
+   * 从 manifest 提取能力列表
+   */
+  private extractCapabilities(manifest: PluginManifest): PluginCapability[] {
+    // manifest.capabilities 是 string[] | undefined
+    if (!manifest.capabilities) return []
+    // 将 string[] 转换为 PluginCapability[]
+    return manifest.capabilities as unknown as PluginCapability[]
+  }
+
+  /**
    * 启动已安装的插件
    */
   async startInstalledPlugins(): Promise<void> {
-    const installedPlugins = this.registry.getPluginsByStatus(PluginStatus.INSTALLED)
+    const installedPlugins = this.registry.getByStatus(PluginStatus.INSTALLED)
 
     for (const registration of installedPlugins) {
       try {
@@ -180,15 +240,15 @@ export class PluginManager extends EventEmitter {
     this.logger.info(`Installing plugin: ${manifest.name}`)
 
     try {
-      // 1. 注册插件
-      const registration = await this.registry.registerPlugin(manifest)
+      // 1. 创建并注册插件
+      const registration = this.createRegistrationFromManifest(manifest)
+      this.registry.register(registration)
 
       // 2. 创建默认配置
       if (manifest.contributes?.configuration) {
-        await this.configManager.setConfig(
+        this.configManager.set(
           manifest.name,
-          manifest.contributes.configuration.default || {},
-          'system:install'
+          manifest.contributes.configuration.default || {}
         )
       }
 
@@ -207,7 +267,7 @@ export class PluginManager extends EventEmitter {
     this.logger.info(`Starting plugin: ${pluginName}`)
 
     try {
-      const registration = this.registry.getPlugin(pluginName)
+      const registration = this.registry.get(pluginName)
       if (!registration) {
         throw new Error(`Plugin not found: ${pluginName}`)
       }
@@ -217,25 +277,24 @@ export class PluginManager extends EventEmitter {
         return
       }
 
-      // 1. 启用插件
-      await this.registry.enablePlugin(pluginName)
+      // 1. 更新插件状态为 ENABLED
+      this.registry.updateStatus(pluginName, PluginStatus.ENABLED)
 
       // 2. 创建增强的插件上下文
       if (this.services) {
-        const context = createEnhancedPluginContext(
-          registration.manifest,
-          this.createCoreAPIForPlugin(registration),
-          this.services
-        )
+        const context = createEnhancedPluginContext({
+          manifest: registration.manifest,
+          core: this.createCoreAPIForPlugin(registration),
+          services: this.services,
+          capabilities: {}
+        })
 
-        // 更新加载器中的插件实例
-        const instance = this.loader.getPlugin(pluginName)
-        if (instance) {
-          instance.context = context
-        }
+        // 存储插件上下文
+        this.pluginContexts.set(pluginName, context)
       }
 
       this.emit('plugin:started', pluginName)
+      this.emit('plugin:enabled', pluginName)
     } catch (error) {
       this.logger.error(`Failed to start plugin: ${pluginName}`, error as Error)
       throw error
@@ -249,8 +308,12 @@ export class PluginManager extends EventEmitter {
     this.logger.info(`Stopping plugin: ${pluginName}`)
 
     try {
-      await this.registry.disablePlugin(pluginName)
+      // 更新状态为 DISABLED
+      this.registry.updateStatus(pluginName, PluginStatus.DISABLED)
+      // 清理上下文
+      this.pluginContexts.delete(pluginName)
       this.emit('plugin:stopped', pluginName)
+      this.emit('plugin:disabled', pluginName)
     } catch (error) {
       this.logger.error(`Failed to stop plugin: ${pluginName}`, error as Error)
       throw error
@@ -265,16 +328,19 @@ export class PluginManager extends EventEmitter {
 
     try {
       // 1. 停止插件
-      const registration = this.registry.getPlugin(pluginName)
+      const registration = this.registry.get(pluginName)
       if (registration && registration.status === PluginStatus.ENABLED) {
         await this.stopPlugin(pluginName)
       }
 
       // 2. 删除配置
-      await this.configManager.deleteConfig(pluginName)
+      this.configManager.delete(pluginName)
 
-      // 3. 卸载插件
-      await this.registry.uninstallPlugin(pluginName)
+      // 3. 从注册中心移除
+      this.registry.unregister(pluginName)
+
+      // 4. 从加载器卸载
+      this.loader.unload(pluginName)
 
       this.emit('plugin:uninstalled', pluginName)
     } catch (error) {
@@ -288,14 +354,15 @@ export class PluginManager extends EventEmitter {
    */
   async updatePluginConfig(
     pluginName: string,
-    config: Record<string, any>,
-    modifiedBy?: string
+    config: Record<string, unknown>,
+    _modifiedBy?: string
   ): Promise<void> {
     try {
-      await this.configManager.setConfig(pluginName, config, modifiedBy)
+      // PluginConfigManager.set 只接受 2 个参数
+      this.configManager.set(pluginName, config)
 
       // 通知插件配置变更
-      const instance = this.loader.getPlugin(pluginName)
+      const instance = this.loader.get(pluginName)
       if (instance && instance.plugin.onConfigChange) {
         instance.plugin.onConfigChange(config)
       }
@@ -310,10 +377,10 @@ export class PluginManager extends EventEmitter {
   /**
    * 获取插件配置
    */
-  async getPluginConfig(pluginName: string): Promise<Record<string, any> | null> {
+  async getPluginConfig(pluginName: string): Promise<Record<string, unknown> | null> {
     try {
-      const config = await this.configManager.getConfig(pluginName)
-      return config?.config || null
+      const config = this.configManager.get(pluginName)
+      return config || null
     } catch (error) {
       this.logger.error(`Failed to get config for plugin: ${pluginName}`, error as Error)
       throw error
@@ -324,28 +391,31 @@ export class PluginManager extends EventEmitter {
    * 获取所有插件
    */
   getPlugins(): PluginRegistration[] {
-    return this.registry.getAllPlugins()
+    return this.registry.getAll()
   }
 
   /**
    * 获取特定插件
    */
   getPlugin(pluginName: string): PluginRegistration | null {
-    return this.registry.getPlugin(pluginName)
+    return this.registry.get(pluginName) || null
   }
 
   /**
    * 按状态获取插件
    */
   getPluginsByStatus(status: PluginStatus): PluginRegistration[] {
-    return this.registry.getPluginsByStatus(status)
+    return this.registry.getByStatus(status)
   }
 
   /**
    * 按能力获取插件
+   * 注意: PluginRegistry 没有 getByCapability 方法，需要手动过滤
    */
   getPluginsByCapability(capability: PluginCapability): PluginRegistration[] {
-    return this.registry.getPluginsByCapability(capability)
+    return this.registry.getAll().filter(reg =>
+      reg.capabilities?.includes(capability)
+    )
   }
 
   /**
@@ -356,39 +426,75 @@ export class PluginManager extends EventEmitter {
     enabled: number
     disabled: number
     error: number
-    capabilities: Record<PluginCapability, number>
-    services: Record<string, any>
+    capabilities: Record<string, number>
+    services: ServiceStats
   } {
-    const registryStats = this.registry.getStats()
-    const serviceStats = this.services ? {
-      cache: (this.services.cache as any).getMetrics?.() || 'N/A',
-      queue: 'N/A', // 可以添加队列统计
-      websocket: (this.services.websocket as any).getStats?.() || 'N/A',
-      security: (this.services.security as any).getStats?.() || 'N/A',
-      storage: 'N/A', // 可以添加存储统计
-      scheduler: 'N/A', // 可以添加调度器统计
-      notification: (this.services.notification as any).getStats?.() || 'N/A',
+    const allPlugins = this.registry.getAll()
+    const enabledPlugins = this.registry.getByStatus(PluginStatus.ENABLED)
+    const disabledPlugins = this.registry.getByStatus(PluginStatus.DISABLED)
+    const errorPlugins = this.registry.getByStatus(PluginStatus.ERROR)
+
+    // 统计能力
+    const capabilityCount: Record<string, number> = {}
+    for (const plugin of allPlugins) {
+      if (plugin.capabilities) {
+        for (const cap of plugin.capabilities) {
+          capabilityCount[cap] = (capabilityCount[cap] || 0) + 1
+        }
+      }
+    }
+
+    const serviceStats: ServiceStats = this.services ? {
+      cache: this.hasMethod(this.services.cache, 'getMetrics')
+        ? (this.services.cache as unknown as { getMetrics(): unknown }).getMetrics()
+        : 'N/A',
+      queue: 'N/A',
+      websocket: this.hasMethod(this.services.websocket, 'getStats')
+        ? (this.services.websocket as unknown as { getStats(): unknown }).getStats()
+        : 'N/A',
+      security: this.hasMethod(this.services.security, 'getStats')
+        ? (this.services.security as unknown as { getStats(): unknown }).getStats()
+        : 'N/A',
+      storage: 'N/A',
+      scheduler: 'N/A',
+      notification: this.hasMethod(this.services.notification, 'getStats')
+        ? (this.services.notification as unknown as { getStats(): unknown }).getStats()
+        : 'N/A',
       validation: 'N/A'
     } : {}
 
     return {
-      ...registryStats,
+      total: allPlugins.length,
+      enabled: enabledPlugins.length,
+      disabled: disabledPlugins.length,
+      error: errorPlugins.length,
+      capabilities: capabilityCount,
       services: serviceStats
     }
   }
 
   /**
+   * 类型安全的方法检查辅助函数
+   */
+  private hasMethod(obj: unknown, methodName: string): boolean {
+    return typeof obj === 'object' &&
+           obj !== null &&
+           methodName in obj &&
+           typeof (obj as Record<string, unknown>)[methodName] === 'function'
+  }
+
+  /**
    * 获取健康状态
    */
-  async getHealth(): Promise<Record<string, any>> {
-    const health = {
+  async getHealth(): Promise<HealthCheckResult> {
+    const health: HealthCheckResult = {
       manager: {
         status: this.initialized ? 'healthy' : 'initializing',
         initialized: this.initialized
       },
       registry: {
         status: 'healthy',
-        pluginCount: this.registry.getAllPlugins().length
+        pluginCount: this.registry.count()
       },
       services: this.serviceFactory ? await this.serviceFactory.getHealth() : null
     }
@@ -404,7 +510,7 @@ export class PluginManager extends EventEmitter {
 
     try {
       // 停止所有运行的插件
-      const enabledPlugins = this.registry.getPluginsByStatus(PluginStatus.ENABLED)
+      const enabledPlugins = this.registry.getByStatus(PluginStatus.ENABLED)
       for (const plugin of enabledPlugins) {
         try {
           await this.stopPlugin(plugin.manifest.name)
@@ -418,6 +524,9 @@ export class PluginManager extends EventEmitter {
         await this.serviceFactory.destroy()
       }
 
+      // 清理上下文
+      this.pluginContexts.clear()
+
       this.initialized = false
       this.emit('manager:destroyed')
       this.logger.info('Plugin manager destroyed')
@@ -428,45 +537,9 @@ export class PluginManager extends EventEmitter {
   }
 
   /**
-   * 设置事件监听器
-   */
-  private setupEventListeners(): void {
-    // 注册中心事件
-    this.registry.on('plugin:installed', (pluginName: string) => {
-      this.emit('plugin:installed', pluginName)
-    })
-
-    this.registry.on('plugin:enabled', (pluginName: string) => {
-      this.emit('plugin:enabled', pluginName)
-    })
-
-    this.registry.on('plugin:disabled', (pluginName: string) => {
-      this.emit('plugin:disabled', pluginName)
-    })
-
-    this.registry.on('plugin:error', (event: any) => {
-      this.emit('plugin:error', event)
-    })
-
-    // 加载器事件
-    this.loader.on('plugin:loaded', (pluginName: string) => {
-      this.emit('plugin:loaded', pluginName)
-    })
-
-    this.loader.on('plugin:error', (event: any) => {
-      this.emit('plugin:error', event)
-    })
-
-    // 配置管理器事件
-    this.configManager.on('config:changed', (event: any) => {
-      this.emit('plugin:config:changed', event)
-    })
-  }
-
-  /**
    * 为插件创建CoreAPI实例
    */
-  private createCoreAPIForPlugin(registration: PluginRegistration): CoreAPI {
+  private createCoreAPIForPlugin(_registration: PluginRegistrationWithId | PluginRegistration): CoreAPI {
     // 这里可以基于插件的权限和能力创建定制的CoreAPI
     // 目前返回标准的CoreAPI，实际实现中应该注入真实的CoreAPI
     return {} as CoreAPI

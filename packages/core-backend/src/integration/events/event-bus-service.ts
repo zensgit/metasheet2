@@ -4,7 +4,7 @@
  */
 
 import { EventBusService } from '../../core/EventBusService'
-import { CoreAPI } from '../../types/plugin'
+import type { CoreAPI } from '../../types/plugin'
 
 let eventBusServiceInstance: EventBusService | null = null
 

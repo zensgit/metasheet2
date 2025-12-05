@@ -4,8 +4,9 @@
  * 功能: 基于事件总线实现插件间的远程方法调用
  */
 
-import { EventBus } from '../integration/events/event-bus';
-import { Logger, createLogger } from './logger';
+import type { EventBus } from '../integration/events/event-bus';
+import type { Logger} from './logger';
+import { createLogger } from './logger';
 
 /**
  * RPC 调用请求
@@ -13,7 +14,7 @@ import { Logger, createLogger } from './logger';
 export interface RpcRequest {
   id: string;
   method: string;
-  params: any[];
+  params: unknown[];
   timeout?: number;
   metadata?: {
     callerId: string;
@@ -27,7 +28,7 @@ export interface RpcRequest {
  */
 export interface RpcResponse {
   id: string;
-  result?: any;
+  result?: unknown;
   error?: RpcError;
   metadata?: {
     responderId: string;
@@ -42,7 +43,7 @@ export interface RpcResponse {
 export interface RpcError {
   code: number;
   message: string;
-  data?: any;
+  data?: unknown;
 }
 
 /**
@@ -62,9 +63,9 @@ export enum RpcErrorCode {
  * RPC 方法处理器
  */
 export type RpcMethodHandler = (
-  params: any[],
-  metadata?: any
-) => any | Promise<any>;
+  params: unknown[],
+  metadata?: Record<string, unknown>
+) => unknown | Promise<unknown>;
 
 /**
  * RPC 方法定义
@@ -74,8 +75,8 @@ export interface RpcMethodDefinition {
   handler: RpcMethodHandler;
   description?: string;
   schema?: {
-    params?: any;
-    returns?: any;
+    params?: Record<string, unknown>;
+    returns?: Record<string, unknown>;
   };
   rateLimit?: {
     maxCalls: number;
@@ -111,6 +112,26 @@ interface MethodStats {
   failures: number;
   totalDuration: number;
   lastCall?: Date;
+}
+
+/**
+ * 事件数据接口
+ */
+interface EventData {
+  data: unknown;
+}
+
+/**
+ * 将未知类型转换为 Error 对象
+ */
+function toError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  if (typeof error === 'string') {
+    return new Error(error);
+  }
+  return new Error('Unknown error');
 }
 
 /**
@@ -198,7 +219,7 @@ export class RpcServer {
   /**
    * 处理 RPC 请求
    */
-  private async handleRpcRequest(event: any): Promise<void> {
+  private async handleRpcRequest(event: EventData): Promise<void> {
     const request = event.data as RpcRequest;
     const startTime = Date.now();
 
@@ -242,7 +263,7 @@ export class RpcServer {
 
       // 设置超时
       const timeout = request.timeout || this.config.defaultTimeout!;
-      const timeoutPromise = new Promise((_, reject) => {
+      const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('RPC timeout')), timeout);
       });
 
@@ -274,19 +295,21 @@ export class RpcServer {
         this.logger.debug(`RPC call succeeded: ${methodName}`);
       }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 发送错误响应
+      const err = toError(error);
+
       await this.sendError(request, {
         code: RpcErrorCode.INTERNAL_ERROR,
-        message: error.message || 'Internal server error',
-        data: error.stack
+        message: err.message,
+        data: err.stack
       });
 
       const methodName = request.method;
       this.updateStats(methodName, false, Date.now() - startTime);
 
       if (this.config.enableLogging) {
-        this.logger.error(`RPC call failed: ${methodName}`, error);
+        this.logger.error(`RPC call failed: ${methodName}`, err);
       }
     } finally {
       this.activeCalls--;
@@ -403,6 +426,15 @@ export class RpcServer {
 }
 
 /**
+ * 待处理的调用信息
+ */
+interface PendingCall {
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+  timeout: NodeJS.Timeout;
+}
+
+/**
  * RPC 客户端 - 调用其他插件提供的方法
  */
 export class RpcClient {
@@ -410,11 +442,7 @@ export class RpcClient {
   private eventBus: EventBus;
   private logger: Logger;
   private config: RpcClientConfig;
-  private pendingCalls: Map<string, {
-    resolve: (value: any) => void;
-    reject: (error: any) => void;
-    timeout: NodeJS.Timeout;
-  }>;
+  private pendingCalls: Map<string, PendingCall>;
 
   constructor(
     pluginId: string,
@@ -436,10 +464,10 @@ export class RpcClient {
   /**
    * 调用远程方法
    */
-  public async call<T = any>(
+  public async call<T = unknown>(
     targetPlugin: string,
     method: string,
-    params: any[] = [],
+    params: unknown[] = [],
     options?: {
       timeout?: number;
       retries?: number;
@@ -451,7 +479,7 @@ export class RpcClient {
       ...options
     };
 
-    let lastError: any;
+    let lastError: unknown;
 
     for (let attempt = 0; attempt <= actualOptions.retries!; attempt++) {
       try {
@@ -487,7 +515,7 @@ export class RpcClient {
   private async doCall<T>(
     targetPlugin: string,
     method: string,
-    params: any[],
+    params: unknown[],
     timeout: number
   ): Promise<T> {
     const requestId = this.generateId();
@@ -512,7 +540,7 @@ export class RpcClient {
 
       // 保存待处理调用
       this.pendingCalls.set(requestId, {
-        resolve,
+        resolve: resolve as (value: unknown) => void,
         reject,
         timeout: timeoutHandle
       });
@@ -520,7 +548,7 @@ export class RpcClient {
       // 订阅响应事件
       const listenerId = this.eventBus.subscribe(
         `rpc:response:${requestId}`,
-        (event: any) => {
+        (event: EventData) => {
           const response = event.data as RpcResponse;
           const pending = this.pendingCalls.get(requestId);
 
@@ -532,7 +560,7 @@ export class RpcClient {
             if (response.error) {
               reject(new Error(response.error.message));
             } else {
-              resolve(response.result);
+              resolve(response.result as T);
             }
           }
         },
@@ -557,11 +585,11 @@ export class RpcClient {
   /**
    * 批量调用
    */
-  public async callBatch<T = any>(
+  public async callBatch<T = unknown>(
     calls: Array<{
       plugin: string;
       method: string;
-      params?: any[];
+      params?: unknown[];
     }>
   ): Promise<T[]> {
     return Promise.all(
@@ -575,7 +603,7 @@ export class RpcClient {
    * 生成唯一ID
    */
   private generateId(): string {
-    return `${this.pluginId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `${this.pluginId}_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 
   /**
@@ -583,7 +611,7 @@ export class RpcClient {
    */
   public destroy(): void {
     // 取消所有待处理调用
-    for (const [id, pending] of this.pendingCalls) {
+    for (const [_id, pending] of this.pendingCalls) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('RPC client destroyed'));
     }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 插件配置管理器
  * 提供插件特定的配置管理、环境变量注入、配置验证和动态更新
@@ -6,12 +5,13 @@
 
 import * as crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
-import type {
-  PluginManifest,
-  DatabaseAPI,
-  ValidationService
-} from '../types/plugin'
+import type { DatabaseAPI, ValidationService } from '../types/plugin'
 import { Logger } from '../core/logger'
+
+/**
+ * Config value type based on ConfigType
+ */
+type ConfigValueType = string | number | boolean | unknown[] | Record<string, unknown>
 
 /**
  * 配置项类型
@@ -35,11 +35,11 @@ export interface ConfigItem {
   key: string
   type: ConfigType
   required: boolean
-  defaultValue?: any
+  defaultValue?: unknown
   description?: string
   validator?: string // 验证器名称
   sensitive?: boolean // 是否敏感信息（需要加密）
-  options?: any[] // 枚举选项
+  options?: ConfigValueType[] // 枚举选项
   min?: number // 数值最小值或字符串最小长度
   max?: number // 数值最大值或字符串最大长度
   pattern?: string // 正则表达式模式
@@ -66,7 +66,7 @@ export interface ConfigSchema {
  */
 export interface ConfigValue {
   key: string
-  value: any
+  value: unknown
   encrypted: boolean
   scope: string
   userId?: string
@@ -81,10 +81,30 @@ export interface ConfigValue {
 export interface ConfigChangeEvent {
   pluginName: string
   key: string
-  oldValue: any
-  newValue: any
+  oldValue: unknown
+  newValue: unknown
   scope: string
   userId?: string
+  updatedBy?: string
+}
+
+/**
+ * Options for config operations
+ */
+interface ConfigOptions {
+  scope?: 'global' | 'user' | 'tenant'
+  userId?: string
+  tenantId?: string
+  includeDefaults?: boolean
+}
+
+/**
+ * Options for set config operations
+ */
+interface SetConfigOptions {
+  scope?: 'global' | 'user' | 'tenant'
+  userId?: string
+  tenantId?: string
   updatedBy?: string
 }
 
@@ -139,7 +159,7 @@ export class PluginConfigManager extends EventEmitter {
       this.logger.info(`Registered config schema for plugin: ${pluginName}`)
 
     } catch (error) {
-      this.logger.error(`Failed to register config schema for plugin ${pluginName}`, error as Error)
+      this.logger.error(`Failed to register config schema for plugin ${pluginName}`, error instanceof Error ? error : undefined)
       throw error
     }
   }
@@ -157,13 +177,8 @@ export class PluginConfigManager extends EventEmitter {
   async setConfig(
     pluginName: string,
     key: string,
-    value: any,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-      updatedBy?: string
-    } = {}
+    value: unknown,
+    options: SetConfigOptions = {}
   ): Promise<void> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
@@ -225,10 +240,10 @@ export class PluginConfigManager extends EventEmitter {
         updatedBy: options.updatedBy
       } as ConfigChangeEvent)
 
-      this.logger.debug(`Set config ${pluginName}.${key} = ${encrypted ? '[ENCRYPTED]' : validatedValue}`)
+      this.logger.debug(`Set config ${pluginName}.${key} = ${encrypted ? '[ENCRYPTED]' : String(validatedValue)}`)
 
     } catch (error) {
-      this.logger.error(`Failed to set config ${pluginName}.${key}`, error as Error)
+      this.logger.error(`Failed to set config ${pluginName}.${key}`, error instanceof Error ? error : undefined)
       throw error
     }
   }
@@ -239,13 +254,8 @@ export class PluginConfigManager extends EventEmitter {
   async getConfig(
     pluginName: string,
     key: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-      includeDefaults?: boolean
-    } = {}
-  ): Promise<any> {
+    options: ConfigOptions = {}
+  ): Promise<unknown> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
       throw new Error(`No config schema found for plugin: ${pluginName}`)
@@ -287,20 +297,16 @@ export class PluginConfigManager extends EventEmitter {
    */
   async getAllConfigs(
     pluginName: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-      includeDefaults?: boolean
+    options: ConfigOptions & {
       includeSensitive?: boolean
     } = {}
-  ): Promise<Record<string, any>> {
+  ): Promise<Record<string, unknown>> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
       throw new Error(`No config schema found for plugin: ${pluginName}`)
     }
 
-    const result: Record<string, any> = {}
+    const result: Record<string, unknown> = {}
 
     for (const item of schema.items) {
       // 跳过敏感信息（除非明确要求）
@@ -314,7 +320,7 @@ export class PluginConfigManager extends EventEmitter {
           result[item.key] = value
         }
       } catch (error) {
-        this.logger.warn(`Failed to get config ${pluginName}.${item.key}`, error as Error)
+        this.logger.warn(`Failed to get config ${pluginName}.${item.key}`, { error })
       }
     }
 
@@ -327,11 +333,7 @@ export class PluginConfigManager extends EventEmitter {
   async deleteConfig(
     pluginName: string,
     key: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-    } = {}
+    options: Omit<SetConfigOptions, 'updatedBy'> = {}
   ): Promise<void> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
@@ -378,11 +380,7 @@ export class PluginConfigManager extends EventEmitter {
    */
   async validateAllConfigs(
     pluginName: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-    } = {}
+    options: Omit<ConfigOptions, 'includeDefaults'> = {}
   ): Promise<{ valid: boolean; errors: Array<{ key: string; error: string }> }> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
@@ -418,11 +416,7 @@ export class PluginConfigManager extends EventEmitter {
    */
   async resetToDefaults(
     pluginName: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
-    } = {}
+    options: Omit<SetConfigOptions, 'updatedBy'> = {}
   ): Promise<void> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
@@ -450,13 +444,10 @@ export class PluginConfigManager extends EventEmitter {
    */
   async exportConfigs(
     pluginName: string,
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
+    options: ConfigOptions & {
       includeSensitive?: boolean
     } = {}
-  ): Promise<{ schema: ConfigSchema; configs: Record<string, any> }> {
+  ): Promise<{ schema: ConfigSchema; configs: Record<string, unknown> }> {
     const schema = this.schemas.get(pluginName)
     if (!schema) {
       throw new Error(`No config schema found for plugin: ${pluginName}`)
@@ -472,11 +463,8 @@ export class PluginConfigManager extends EventEmitter {
    */
   async importConfigs(
     pluginName: string,
-    data: { schema?: ConfigSchema; configs: Record<string, any> },
-    options: {
-      scope?: 'global' | 'user' | 'tenant'
-      userId?: string
-      tenantId?: string
+    data: { schema?: ConfigSchema; configs: Record<string, unknown> },
+    options: SetConfigOptions & {
       overwrite?: boolean
     } = {}
   ): Promise<void> {
@@ -514,18 +502,18 @@ export class PluginConfigManager extends EventEmitter {
   /**
    * 获取环境变量映射
    */
-  getEnvironmentVariables(pluginName: string): Record<string, any> {
+  async getEnvironmentVariables(pluginName: string): Promise<Record<string, ConfigValueType>> {
     const schema = this.schemas.get(pluginName)
     if (!schema) return {}
 
-    const env: Record<string, any> = {}
+    const env: Record<string, ConfigValueType> = {}
 
     for (const item of schema.items) {
       try {
-        const value = this.getConfig(pluginName, item.key, { includeDefaults: true })
+        const value = await this.getConfig(pluginName, item.key, { includeDefaults: true })
         if (value !== undefined && !item.sensitive) {
           const envKey = `PLUGIN_${pluginName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_${item.key.toUpperCase()}`
-          env[envKey] = value
+          env[envKey] = value as ConfigValueType
         }
       } catch {
         // 忽略获取失败的配置
@@ -543,9 +531,12 @@ export class PluginConfigManager extends EventEmitter {
 
     try {
       // 加载schemas
-      const schemas = await this.database.query('SELECT * FROM plugin_config_schemas')
+      const schemas = await this.database.query('SELECT * FROM plugin_config_schemas') as Array<{
+        plugin_name: string
+        schema: string
+      }>
       for (const row of schemas) {
-        const schema = JSON.parse(row.schema)
+        const schema = JSON.parse(row.schema) as ConfigSchema
         this.schemas.set(row.plugin_name, schema)
         if (!this.configs.has(row.plugin_name)) {
           this.configs.set(row.plugin_name, new Map())
@@ -553,7 +544,17 @@ export class PluginConfigManager extends EventEmitter {
       }
 
       // 加载配置值
-      const configs = await this.database.query('SELECT * FROM plugin_configs')
+      const configs = await this.database.query('SELECT * FROM plugin_configs') as Array<{
+        plugin_name: string
+        config_key: string
+        value: unknown
+        encrypted: boolean
+        scope: string
+        user_id?: string
+        tenant_id?: string
+        updated_at: string | number | Date
+        updated_by?: string
+      }>
       for (const row of configs) {
         const configValue: ConfigValue = {
           key: row.config_key,
@@ -579,7 +580,7 @@ export class PluginConfigManager extends EventEmitter {
       this.logger.info(`Loaded ${schemas.length} config schemas and ${configs.length} config values from database`)
 
     } catch (error) {
-      this.logger.error('Failed to load configs from database', error as Error)
+      this.logger.error('Failed to load configs from database', error instanceof Error ? error : undefined)
     }
   }
 
@@ -615,7 +616,7 @@ export class PluginConfigManager extends EventEmitter {
   /**
    * 验证配置值
    */
-  private async validateConfigValue(item: ConfigItem, value: any): Promise<any> {
+  private async validateConfigValue(item: ConfigItem, value: unknown): Promise<ConfigValueType> {
     // 类型验证
     switch (item.type) {
       case ConfigType.STRING:
@@ -634,9 +635,9 @@ export class PluginConfigManager extends EventEmitter {
             throw new Error(`Config ${item.key} does not match required pattern`)
           }
         }
-        break
+        return value
 
-      case ConfigType.NUMBER:
+      case ConfigType.NUMBER: {
         const num = Number(value)
         if (isNaN(num)) {
           throw new Error(`Config ${item.key} must be a number`)
@@ -648,6 +649,7 @@ export class PluginConfigManager extends EventEmitter {
           throw new Error(`Config ${item.key} must be at most ${item.max}`)
         }
         return num
+      }
 
       case ConfigType.BOOLEAN:
         if (typeof value !== 'boolean') {
@@ -659,25 +661,25 @@ export class PluginConfigManager extends EventEmitter {
           }
           throw new Error(`Config ${item.key} must be a boolean`)
         }
-        break
+        return value
 
       case ConfigType.ARRAY:
         if (!Array.isArray(value)) {
           throw new Error(`Config ${item.key} must be an array`)
         }
-        break
+        return value
 
       case ConfigType.OBJECT:
         if (typeof value !== 'object' || value === null || Array.isArray(value)) {
           throw new Error(`Config ${item.key} must be an object`)
         }
-        break
+        return value as Record<string, unknown>
 
       case ConfigType.EMAIL:
         if (typeof value !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
           throw new Error(`Config ${item.key} must be a valid email address`)
         }
-        break
+        return value
 
       case ConfigType.URL:
         if (typeof value !== 'string') {
@@ -688,26 +690,33 @@ export class PluginConfigManager extends EventEmitter {
         } catch {
           throw new Error(`Config ${item.key} must be a valid URL`)
         }
-        break
+        return value
+
+      case ConfigType.SECRET:
+      case ConfigType.FILE_PATH:
+        if (typeof value !== 'string') {
+          throw new Error(`Config ${item.key} must be a string`)
+        }
+        return value
     }
 
     // 选项验证
-    if (item.options && !item.options.includes(value)) {
+    if (item.options && !item.options.includes(value as ConfigValueType)) {
       throw new Error(`Config ${item.key} must be one of: ${item.options.join(', ')}`)
     }
 
     // 自定义验证器
-    if (item.validator && this.validationService) {
+    if (item.validator && this.validationService?.getValidator) {
       const validator = this.validationService.getValidator(item.validator)
-      if (validator) {
-        const result = validator(value)
+      if (validator !== null) {
+        const result = (validator as (value: unknown) => boolean | string)(value)
         if (result !== true) {
-          throw new Error(`Config ${item.key} validation failed: ${result}`)
+          throw new Error(`Config ${item.key} validation failed: ${String(result)}`)
         }
       }
     }
 
-    return value
+    return value as ConfigValueType
   }
 
   /**
@@ -737,7 +746,7 @@ export class PluginConfigManager extends EventEmitter {
   private async checkDependencies(
     pluginName: string,
     dependencies: string[],
-    options: any
+    options: ConfigOptions
   ): Promise<void> {
     for (const depKey of dependencies) {
       const depValue = await this.getConfig(pluginName, depKey, options)
@@ -802,7 +811,7 @@ export class PluginConfigManager extends EventEmitter {
   /**
    * 加密敏感信息
    */
-  private encrypt(value: any): string {
+  private encrypt(value: unknown): string {
     const text = typeof value === 'string' ? value : JSON.stringify(value)
     const cipher = crypto.createCipher('aes-256-cbc', this.encryptionKey)
     let encrypted = cipher.update(text, 'utf8', 'hex')
@@ -813,7 +822,11 @@ export class PluginConfigManager extends EventEmitter {
   /**
    * 解密敏感信息
    */
-  private decrypt(encryptedValue: string): any {
+  private decrypt(encryptedValue: unknown): ConfigValueType {
+    if (typeof encryptedValue !== 'string') {
+      throw new Error('Encrypted value must be a string')
+    }
+
     try {
       const decipher = crypto.createDecipher('aes-256-cbc', this.encryptionKey)
       let decrypted = decipher.update(encryptedValue, 'hex', 'utf8')
@@ -821,12 +834,12 @@ export class PluginConfigManager extends EventEmitter {
 
       // 尝试解析JSON，如果失败则返回字符串
       try {
-        return JSON.parse(decrypted)
+        return JSON.parse(decrypted) as ConfigValueType
       } catch {
         return decrypted
       }
     } catch (error) {
-      this.logger.error('Failed to decrypt config value', error as Error)
+      this.logger.error('Failed to decrypt config value', error instanceof Error ? error : undefined)
       throw new Error('Failed to decrypt sensitive configuration')
     }
   }
@@ -911,12 +924,4 @@ export class PluginConfigManager extends EventEmitter {
       tenantId || ''
     ])
   }
-}
-
-export {
-  ConfigType,
-  ConfigItem,
-  ConfigSchema,
-  ConfigValue,
-  ConfigChangeEvent
 }

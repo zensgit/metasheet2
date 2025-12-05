@@ -10,8 +10,8 @@ import type {
   PluginRegistration,
   PluginDependency,
   DatabaseAPI
-} from '../types/plugin'
-import { PluginStatus, PluginEventType, PluginCapability } from '../types/plugin'
+, PluginCapability } from '../types/plugin'
+import { PluginStatus, PluginEventType } from '../types/plugin'
 import { PluginCapabilityManager } from './PluginCapabilities'
 import { Logger } from '../core/logger'
 
@@ -843,7 +843,15 @@ export class PluginRegistry extends EventEmitter {
     if (!this.database) return
 
     try {
-      const result = await this.database.query('SELECT * FROM plugin_registry')
+      const result = await this.database.query('SELECT * FROM plugin_registry') as Array<{
+        name: string
+        manifest: string
+        capabilities: string | null
+        status: PluginStatus
+        installed_at: string | number | Date
+        last_activated: string | number | Date | null
+        error?: string
+      }>
 
       for (const row of result) {
         const registration: PluginRegistration = {

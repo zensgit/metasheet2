@@ -7,6 +7,8 @@ import * as jwt from 'jsonwebtoken'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
+import { Logger } from '../core/logger'
+import { secretManager } from '../security/SecretManager'
 
 export interface User {
   id: string
@@ -16,6 +18,13 @@ export interface User {
   permissions: string[]
   created_at: Date
   updated_at: Date
+  // Index signature for compatibility with Express.Request.user
+  [key: string]: unknown
+}
+
+// Database user row type (includes password_hash)
+interface UserRow extends User {
+  password_hash: string
 }
 
 export interface TokenPayload {
@@ -34,10 +43,13 @@ export interface AuthConfig {
 
 export class AuthService {
   private config: AuthConfig
+  private logger: Logger
 
   constructor() {
+    this.logger = new Logger('AuthService')
+    const secret = secretManager.get('JWT_SECRET', { required: process.env.NODE_ENV === 'production' })
     this.config = {
-      jwtSecret: process.env.JWT_SECRET || this.generateSecretWarning(),
+      jwtSecret: secret || this.generateSecretWarning(),
       jwtExpiry: process.env.JWT_EXPIRY || '24h',
       saltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS || '10')
     }
@@ -47,11 +59,11 @@ export class AuthService {
   }
 
   private generateSecretWarning(): string {
-    console.warn('⚠️  JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
+    this.logger.warn('JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
 
     // In production, generate a more secure temporary secret but still warn
     if (process.env.NODE_ENV === 'production') {
-      console.error('🔴 CRITICAL: JWT_SECRET missing in production! Generating temporary secret.')
+      this.logger.error('CRITICAL: JWT_SECRET missing in production! Generating temporary secret.')
       // Generate a cryptographically secure random secret for this session
       return crypto.randomBytes(64).toString('hex')
     }
@@ -77,13 +89,13 @@ export class AuthService {
 
       // Check JWT expiry
       if (this.config.jwtExpiry === '24h') {
-        console.warn('⚠️  Using default JWT expiry (24h). Consider shorter expiry for production.')
+        this.logger.warn('Using default JWT expiry (24h). Consider shorter expiry for production.')
       }
 
       if (issues.length > 0) {
-        console.error('🔴 PRODUCTION SECURITY ISSUES:')
-        issues.forEach(issue => console.error(`  - ${issue}`))
-        console.error('🔴 Please fix these issues before deploying to production!')
+        this.logger.error('PRODUCTION SECURITY ISSUES:')
+        issues.forEach(issue => this.logger.error(`  - ${issue}`))
+        this.logger.error('Please fix these issues before deploying to production!')
 
         // In strict production mode, could throw an error here
         // throw new Error('Critical security configuration issues detected')
@@ -112,7 +124,7 @@ export class AuthService {
 
       return user
     } catch (error) {
-      console.warn('Token verification failed:', error instanceof Error ? error.message : error)
+      this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -174,10 +186,10 @@ export class AuthService {
       await this.updateLastLogin(user.id)
 
       // 返回用户信息（不包含密码hash）
-      const { password_hash, ...safeUser } = user
+      const { password_hash: _password_hash, ...safeUser } = user
       return { user: safeUser as User, token }
     } catch (error) {
-      console.error('Login error:', error)
+      this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -209,7 +221,7 @@ export class AuthService {
 
       return newUser
     } catch (error) {
-      console.error('Registration error:', error)
+      this.logger.error('Registration error', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -228,14 +240,20 @@ export class AuthService {
         )
 
         if (result.rows.length > 0) {
-          const user = result.rows[0]
+          const row = result.rows[0] as UserRow
           return {
-            ...user,
-            permissions: Array.isArray(user.permissions) ? user.permissions : []
+            id: row.id,
+            email: row.email,
+            name: row.name,
+            role: row.role,
+            permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            password_hash: row.password_hash,
+            created_at: row.created_at,
+            updated_at: row.updated_at
           }
         }
       } catch (dbError) {
-        console.warn('Database query failed:', dbError)
+        this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
       // 降级：返回mock用户（仅开发环境）
@@ -254,7 +272,7 @@ export class AuthService {
 
       return null
     } catch (error) {
-      console.error('Get user by ID error:', error)
+      this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -272,18 +290,24 @@ export class AuthService {
         )
 
         if (result.rows.length > 0) {
-          const user = result.rows[0]
+          const row = result.rows[0] as UserRow
           return {
-            ...user,
-            permissions: Array.isArray(user.permissions) ? user.permissions : []
+            id: row.id,
+            email: row.email,
+            name: row.name,
+            role: row.role,
+            permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            password_hash: row.password_hash,
+            created_at: row.created_at,
+            updated_at: row.updated_at
           }
         }
       } catch (dbError) {
-        console.warn('Database query failed:', dbError)
+        this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
       return null
     } catch (error) {
-      console.error('Get user by email error:', error)
+      this.logger.error('Get user by email error', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -310,18 +334,23 @@ export class AuthService {
         )
 
         if (result.rows.length > 0) {
-          const user = result.rows[0]
+          const row = result.rows[0] as User
           return {
-            ...user,
-            permissions: Array.isArray(user.permissions) ? user.permissions : []
+            id: row.id,
+            email: row.email,
+            name: row.name,
+            role: row.role,
+            permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            created_at: row.created_at,
+            updated_at: row.updated_at
           }
         }
       } catch (dbError) {
-        console.warn('Database insert failed:', dbError)
+        this.logger.warn('Database insert failed', dbError instanceof Error ? dbError : undefined)
       }
       return null
     } catch (error) {
-      console.error('Create user error:', error)
+      this.logger.error('Create user error', error instanceof Error ? error : undefined)
       return null
     }
   }
@@ -338,10 +367,10 @@ export class AuthService {
           [userId]
         )
       } catch (dbError) {
-        console.warn('Database update failed:', dbError)
+        this.logger.warn('Database update failed', dbError instanceof Error ? dbError : undefined)
       }
     } catch (error) {
-      console.error('Update last login error:', error)
+      this.logger.error('Update last login error', error instanceof Error ? error : undefined)
     }
   }
 
@@ -362,7 +391,7 @@ export class AuthService {
       // 生成新token
       return this.createToken(user)
     } catch (error) {
-      console.warn('Token refresh failed:', error instanceof Error ? error.message : error)
+      this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
       return null
     }
   }

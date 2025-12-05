@@ -1,19 +1,76 @@
-// @ts-nocheck
-import mysql, { Pool, PoolConnection, RowDataPacket, FieldPacket } from 'mysql2/promise'
-import {
-  BaseDataAdapter,
-  DataSourceConfig,
+// MySQL types (optional dependency)
+interface MySQLConnection {
+  ping(): Promise<void>
+  release(): void
+  beginTransaction(): Promise<void>
+  commit(): Promise<void>
+  rollback(): Promise<void>
+  execute(sql: string, params?: unknown[]): {
+    stream(): AsyncIterable<unknown>
+  } & Promise<[unknown[], unknown[]]>
+}
+
+interface MySQLPool {
+  getConnection(): Promise<MySQLConnection>
+  execute(sql: string, params?: unknown[]): Promise<[unknown[], unknown[]]>
+  end(): Promise<void>
+}
+
+type PoolConnection = MySQLConnection
+
+interface MySQLFieldPacket {
+  name: string
+  type?: number
+  flags?: number
+}
+
+interface MySQLModule {
+  createPool(config: Record<string, unknown>): MySQLPool
+}
+
+interface MySQLResultRow {
+  insertId?: number
+  [key: string]: unknown
+}
+
+// Dynamic mysql2 import
+let mysql: MySQLModule | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  mysql = require('mysql2/promise') as MySQLModule
+} catch {
+  // mysql2 not installed
+}
+import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
   TableInfo,
   ColumnInfo,
   IndexInfo,
-  ForeignKeyInfo
+  ForeignKeyInfo,
+  DbValue
+} from './BaseAdapter';
+import {
+  BaseDataAdapter,
+  DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
 
 export class MySQLAdapter extends BaseDataAdapter {
-  private pool: Pool | null = null
+  protected override pool: MySQLPool | null = null
+
+  /**
+   * Convert DbValue to string, ensuring it's a valid database name
+   */
+  private dbValueToString(value: DbValue): string {
+    if (typeof value === 'string') {
+      return value
+    }
+    if (value === null || value === undefined) {
+      throw new Error('Database name cannot be null or undefined')
+    }
+    return String(value)
+  }
 
   /**
    * Sanitize and quote MySQL identifier (table/column names)
@@ -29,6 +86,10 @@ export class MySQLAdapter extends BaseDataAdapter {
   async connect(): Promise<void> {
     if (this.connected) {
       return
+    }
+
+    if (!mysql) {
+      throw new Error('mysql2 package is not installed')
     }
 
     try {
@@ -95,19 +156,19 @@ export class MySQLAdapter extends BaseDataAdapter {
     }
   }
 
-  async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
+  async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>> {
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
 
     try {
-      const [rows, fields] = await this.pool.execute<RowDataPacket[]>(sql, params)
+      const [rows, fields] = await this.pool.execute(sql, params) as [unknown[], MySQLFieldPacket[]]
 
       return {
         data: rows as T[],
         metadata: {
           totalCount: Array.isArray(rows) ? rows.length : 0,
-          columns: fields?.map((field: FieldPacket) => ({
+          columns: fields?.map((field: MySQLFieldPacket) => ({
             name: field.name,
             type: this.mapMySQLType(field.type!),
             nullable: !!(field.flags! & 1)
@@ -122,13 +183,13 @@ export class MySQLAdapter extends BaseDataAdapter {
     }
   }
 
-  async select<T = any>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
+  async select<T = Record<string, unknown>>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
     const selectClause = options.select?.length
       ? options.select.map(col => this.sanitizeMySQLIdentifier(col)).join(', ')
       : '*'
 
     let sql = `SELECT ${selectClause} FROM ${this.sanitizeMySQLIdentifier(table)}`
-    const params: any[] = []
+    const params: unknown[] = []
 
     // Add joins
     if (options.joins?.length) {
@@ -185,7 +246,7 @@ export class MySQLAdapter extends BaseDataAdapter {
     return this.query<T>(sql, params)
   }
 
-  async insert<T = any>(table: string, data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>> {
+  async insert<T = Record<string, unknown>>(table: string, data: Record<string, unknown> | Record<string, unknown>[]): Promise<QueryResult<T>> {
     const records = Array.isArray(data) ? data : [data]
     if (records.length === 0) {
       return { data: [] }
@@ -193,7 +254,7 @@ export class MySQLAdapter extends BaseDataAdapter {
 
     const columns = Object.keys(records[0])
     const columnNames = columns.map(col => this.sanitizeMySQLIdentifier(col)).join(', ')
-    const values: any[] = []
+    const values: unknown[] = []
     const valuePlaceholders: string[] = []
 
     for (const record of records) {
@@ -215,17 +276,20 @@ export class MySQLAdapter extends BaseDataAdapter {
 
     // MySQL doesn't return inserted rows by default
     // We need to query them separately if needed
-    if ((result as any).insertId) {
-      const selectSql = `SELECT * FROM ${sanitizedTable} WHERE id >= ? LIMIT ?`
-      return this.query<T>(selectSql, [(result as any).insertId, records.length])
+    if (result.data.length > 0) {
+      const firstRow = result.data[0] as MySQLResultRow
+      if (firstRow.insertId !== undefined) {
+        const selectSql = `SELECT * FROM ${sanitizedTable} WHERE id >= ? LIMIT ?`
+        return this.query<T>(selectSql, [firstRow.insertId, records.length])
+      }
     }
 
     return result
   }
 
-  async update<T = any>(table: string, data: Record<string, any>, where: Record<string, any>): Promise<QueryResult<T>> {
+  async update<T = Record<string, unknown>>(table: string, data: Record<string, unknown>, where: Record<string, unknown>): Promise<QueryResult<T>> {
     const setClause: string[] = []
-    const values: any[] = []
+    const values: unknown[] = []
 
     for (const [key, value] of Object.entries(data)) {
       setClause.push(`${this.sanitizeMySQLIdentifier(key)} = ?`)
@@ -251,9 +315,9 @@ export class MySQLAdapter extends BaseDataAdapter {
     return this.query<T>(sql, values)
   }
 
-  async delete<T = any>(table: string, where: Record<string, any>): Promise<QueryResult<T>> {
+  async delete<T = Record<string, unknown>>(table: string, where: Record<string, unknown>): Promise<QueryResult<T>> {
     const conditions: string[] = []
-    const values: any[] = []
+    const values: unknown[] = []
 
     for (const [key, value] of Object.entries(where)) {
       if (value === null) {
@@ -273,7 +337,7 @@ export class MySQLAdapter extends BaseDataAdapter {
   }
 
   async getSchema(schema?: string): Promise<SchemaInfo> {
-    const database = schema || this.config.connection.database
+    const database = schema || this.dbValueToString(this.config.connection.database)
 
     const tablesQuery = `
       SELECT
@@ -317,7 +381,7 @@ export class MySQLAdapter extends BaseDataAdapter {
   }
 
   async getTableInfo(table: string, schema?: string): Promise<TableInfo> {
-    const database = schema || this.config.connection.database
+    const database = schema || this.dbValueToString(this.config.connection.database)
     const columns = await this.getColumns(table, database)
 
     // Get primary key info
@@ -395,7 +459,7 @@ export class MySQLAdapter extends BaseDataAdapter {
   }
 
   async getColumns(table: string, schema?: string): Promise<ColumnInfo[]> {
-    const database = schema || this.config.connection.database
+    const database = schema || this.dbValueToString(this.config.connection.database)
 
     const query = `
       SELECT
@@ -437,7 +501,7 @@ export class MySQLAdapter extends BaseDataAdapter {
   }
 
   async tableExists(table: string, schema?: string): Promise<boolean> {
-    const database = schema || this.config.connection.database
+    const database = schema || this.dbValueToString(this.config.connection.database)
 
     const query = `
       SELECT COUNT(*) as count
@@ -477,7 +541,7 @@ export class MySQLAdapter extends BaseDataAdapter {
     }
   }
 
-  async inTransaction(transaction: PoolConnection, callback: () => Promise<any>): Promise<any> {
+  async inTransaction<T>(transaction: PoolConnection, callback: () => Promise<T>): Promise<T> {
     try {
       const result = await callback()
       await this.commit(transaction)
@@ -488,10 +552,10 @@ export class MySQLAdapter extends BaseDataAdapter {
     }
   }
 
-  async *stream<T = any>(
+  async *stream<T = Record<string, unknown>>(
     sql: string,
-    params?: any[],
-    options?: { highWaterMark?: number }
+    params?: unknown[],
+    _options?: { highWaterMark?: number }
   ): AsyncIterableIterator<T> {
     if (!this.pool) {
       throw new Error('Not connected to database')
@@ -533,7 +597,12 @@ export class MySQLAdapter extends BaseDataAdapter {
     return typeMap[type] || 'unknown'
   }
 
-  private formatColumnType(column: any): string {
+  private formatColumnType(column: {
+    data_type: string
+    max_length: number | null
+    precision: number | null
+    scale: number | null
+  }): string {
     let type = column.data_type
 
     if (column.max_length && ['varchar', 'char'].includes(column.data_type)) {
@@ -549,4 +618,3 @@ export class MySQLAdapter extends BaseDataAdapter {
     return type
   }
 }
-// @ts-nocheck

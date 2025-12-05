@@ -1,6 +1,7 @@
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // Plugin registry table for plugin metadata and status
   await db.schema
     .createTable('plugin_registry')
@@ -323,7 +324,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   }
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   // Drop triggers first
   const tablesWithUpdatedAt = [
     'plugin_registry',

@@ -14,21 +14,21 @@ export class NullCache implements Cache {
   /**
    * Always returns cache miss
    */
-  async get<T = any>(key: string): Promise<Result<T | null>> {
+  async get<T = unknown>(_key: string): Promise<Result<T | null>> {
     return { ok: true, value: null }
   }
 
   /**
    * Does nothing, immediately succeeds
    */
-  async set(key: string, value: any, ttl?: number): Promise<Result<void>> {
+  async set(_key: string, _value: unknown, _ttl?: number): Promise<Result<void>> {
     return { ok: true, value: undefined }
   }
 
   /**
    * Does nothing, immediately succeeds
    */
-  async del(key: string): Promise<Result<void>> {
+  async del(_key: string): Promise<Result<void>> {
     return { ok: true, value: undefined }
   }
 }

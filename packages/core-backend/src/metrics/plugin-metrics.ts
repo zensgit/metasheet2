@@ -2,10 +2,14 @@
 // Provides optional prom-client counters for plugin lifecycle.
 // Safe to import even if prom-client initialization order varies.
 
-let prom: any = null
+interface PromClient {
+  Counter: new (config: { name: string; help: string }) => { inc: () => void }
+}
+
+let prom: PromClient | null = null
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  prom = require('prom-client')
+  prom = require('prom-client') as PromClient
 } catch {
   /* prom-client not available or not initialized */
 }
@@ -31,4 +35,3 @@ export const pluginValidationFailTotal = makeCounter(
 
 // Future candidates (left for later instrumentation):
 // export const pluginSandboxWrapFailTotal = makeCounter('plugin_sandbox_wrap_fail_total', 'Sandbox wrapping failures');
-

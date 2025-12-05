@@ -1,10 +1,9 @@
-// @ts-nocheck
 /**
  * Formula Calculation Engine
  * Handles formula parsing, dependency resolution, and calculation
  */
 
-import { db, DB } from '../db/db'
+import { db } from '../db/db'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('FormulaEngine')
@@ -16,15 +15,93 @@ export interface CellReference {
   absolute: boolean
 }
 
+// Cell value can be various types
+export type CellValue = string | number | boolean | Date | null | undefined
+
 export interface FormulaContext {
   sheetId: string
   spreadsheetId: string
   currentCell: { row: number; col: number }
-  cache: Map<string, any>
+  cache: Map<string, CellValue>
 }
 
+// AST Node Types
+export interface ASTNode {
+  type: 'number' | 'boolean' | 'null' | 'array' | 'string' | 'cell' | 'range' | 'error' | 'function' | 'operator'
+}
+
+export interface NumberNode extends ASTNode {
+  type: 'number'
+  value: number
+}
+
+export interface BooleanNode extends ASTNode {
+  type: 'boolean'
+  value: boolean
+}
+
+export interface NullNode extends ASTNode {
+  type: 'null'
+  value: null
+}
+
+export interface ArrayNode extends ASTNode {
+  type: 'array'
+  value: unknown[]
+}
+
+export interface StringNode extends ASTNode {
+  type: 'string'
+  value: string
+}
+
+export interface CellNode extends ASTNode {
+  type: 'cell'
+  row: number
+  col: number
+}
+
+export interface RangeNode extends ASTNode {
+  type: 'range'
+  start: { row: number; col: number }
+  end: { row: number; col: number }
+}
+
+export interface ErrorNode extends ASTNode {
+  type: 'error'
+  value: string
+}
+
+export interface FunctionNode extends ASTNode {
+  type: 'function'
+  name: string
+  arguments: ASTNodeUnion[]
+}
+
+export interface OperatorNode extends ASTNode {
+  type: 'operator'
+  operator: string
+  left: ASTNodeUnion
+  right: ASTNodeUnion
+}
+
+export type ASTNodeUnion =
+  | NumberNode
+  | BooleanNode
+  | NullNode
+  | ArrayNode
+  | StringNode
+  | CellNode
+  | RangeNode
+  | ErrorNode
+  | FunctionNode
+  | OperatorNode
+
+// Function type for spreadsheet functions
+type SpreadsheetFunction = (...args: unknown[]) => unknown
+
 export class FormulaEngine {
-  private functions: Map<string, Function> = new Map()
+  private functions: Map<string, SpreadsheetFunction> = new Map()
   private calculationOrder: string[] = []
   private dependencyGraph: Map<string, Set<string>> = new Map()
 
@@ -42,30 +119,44 @@ export class FormulaEngine {
     this.functions.set('COUNT', this.count.bind(this))
     this.functions.set('MAX', this.max.bind(this))
     this.functions.set('MIN', this.min.bind(this))
-    this.functions.set('ABS', (x: number) => Math.abs(x))
-    this.functions.set('ROUND', (x: number, digits = 0) => Math.round(x * Math.pow(10, digits)) / Math.pow(10, digits))
-    this.functions.set('CEILING', Math.ceil)
-    this.functions.set('FLOOR', Math.floor)
-    this.functions.set('POWER', Math.pow)
-    this.functions.set('SQRT', Math.sqrt)
-    this.functions.set('MOD', (a: number, b: number) => a % b)
+    this.functions.set('ABS', (x: unknown) => Math.abs(Number(x)))
+    this.functions.set('ROUND', (x: unknown, digits: unknown = 0) => {
+      const num = Number(x)
+      const d = Number(digits)
+      return Math.round(num * Math.pow(10, d)) / Math.pow(10, d)
+    })
+    this.functions.set('CEILING', (x: unknown) => Math.ceil(Number(x)))
+    this.functions.set('FLOOR', (x: unknown) => Math.floor(Number(x)))
+    this.functions.set('POWER', (a: unknown, b: unknown) => Math.pow(Number(a), Number(b)))
+    this.functions.set('SQRT', (x: unknown) => Math.sqrt(Number(x)))
+    this.functions.set('MOD', (a: unknown, b: unknown) => Number(a) % Number(b))
 
     // Text functions
     this.functions.set('CONCATENATE', this.concatenate.bind(this))
-    this.functions.set('LEFT', (text: string, chars: number) => text.substring(0, chars))
-    this.functions.set('RIGHT', (text: string, chars: number) => text.substring(text.length - chars))
-    this.functions.set('MID', (text: string, start: number, length: number) => text.substring(start - 1, start - 1 + length))
-    this.functions.set('LEN', (text: string) => text.length)
-    this.functions.set('UPPER', (text: string) => text.toUpperCase())
-    this.functions.set('LOWER', (text: string) => text.toLowerCase())
-    this.functions.set('TRIM', (text: string) => text.trim())
-    this.functions.set('SUBSTITUTE', (text: string, old: string, newText: string) => text.replace(new RegExp(old, 'g'), newText))
+    this.functions.set('LEFT', (text: unknown, chars: unknown) => String(text).substring(0, Number(chars)))
+    this.functions.set('RIGHT', (text: unknown, chars: unknown) => {
+      const str = String(text)
+      return str.substring(str.length - Number(chars))
+    })
+    this.functions.set('MID', (text: unknown, start: unknown, length: unknown) => {
+      const str = String(text)
+      const s = Number(start)
+      const l = Number(length)
+      return str.substring(s - 1, s - 1 + l)
+    })
+    this.functions.set('LEN', (text: unknown) => String(text).length)
+    this.functions.set('UPPER', (text: unknown) => String(text).toUpperCase())
+    this.functions.set('LOWER', (text: unknown) => String(text).toLowerCase())
+    this.functions.set('TRIM', (text: unknown) => String(text).trim())
+    this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) =>
+      String(text).replace(new RegExp(String(old), 'g'), String(newText))
+    )
 
     // Logical functions
     this.functions.set('IF', this.ifFunction.bind(this))
     this.functions.set('AND', this.andFunction.bind(this))
     this.functions.set('OR', this.orFunction.bind(this))
-    this.functions.set('NOT', (value: any) => !value)
+    this.functions.set('NOT', (value: unknown) => !value)
     this.functions.set('TRUE', () => true)
     this.functions.set('FALSE', () => false)
 
@@ -76,16 +167,27 @@ export class FormulaEngine {
       date.setHours(0, 0, 0, 0)
       return date
     })
-    this.functions.set('DATE', (year: number, month: number, day: number) => new Date(year, month - 1, day))
-    this.functions.set('YEAR', (date: Date) => date.getFullYear())
-    this.functions.set('MONTH', (date: Date) => date.getMonth() + 1)
-    this.functions.set('DAY', (date: Date) => date.getDate())
+    this.functions.set('DATE', (year: unknown, month: unknown, day: unknown) =>
+      new Date(Number(year), Number(month) - 1, Number(day))
+    )
+    this.functions.set('YEAR', (date: unknown) => {
+      const d = date instanceof Date ? date : new Date(String(date))
+      return d.getFullYear()
+    })
+    this.functions.set('MONTH', (date: unknown) => {
+      const d = date instanceof Date ? date : new Date(String(date))
+      return d.getMonth() + 1
+    })
+    this.functions.set('DAY', (date: unknown) => {
+      const d = date instanceof Date ? date : new Date(String(date))
+      return d.getDate()
+    })
 
-    // Lookup functions
-    this.functions.set('VLOOKUP', this.vlookup.bind(this))
-    this.functions.set('HLOOKUP', this.hlookup.bind(this))
-    this.functions.set('INDEX', this.index.bind(this))
-    this.functions.set('MATCH', this.match.bind(this))
+    // Lookup functions - these need wrapper functions for proper typing
+    this.functions.set('VLOOKUP', (...args: unknown[]) => this.vlookup(args[0], args[1], args[2], args[3]))
+    this.functions.set('HLOOKUP', (...args: unknown[]) => this.hlookup(args[0], args[1], args[2], args[3]))
+    this.functions.set('INDEX', (...args: unknown[]) => this.index(args[0], args[1], args[2]))
+    this.functions.set('MATCH', (...args: unknown[]) => this.match(args[0], args[1], args[2]))
 
     // Statistical functions
     this.functions.set('STDEV', this.stdev.bind(this))
@@ -97,7 +199,7 @@ export class FormulaEngine {
   /**
    * Parse and calculate a formula
    */
-  async calculate(formula: string, context: FormulaContext): Promise<any> {
+  async calculate(formula: string, context: FormulaContext): Promise<CellValue | string | CellValue[][]> {
     try {
       // Remove leading '=' if present
       if (formula.startsWith('=')) {
@@ -118,7 +220,7 @@ export class FormulaEngine {
   /**
    * Parse formula string into AST
    */
-  private parseFormula(formula: string): any {
+  private parseFormula(formula: string): ASTNodeUnion {
     // Simple tokenizer and parser (simplified for demo)
     // In production, use a proper parser like PEG.js or write a full recursive descent parser
 
@@ -162,7 +264,6 @@ export class FormulaEngine {
     for (const op of operators) {
       const parts = formula.split(op)
       if (parts.length === 2) {
-        // console.log(`Found operator ${op} in ${formula}`)
         return {
           type: 'operator',
           operator: op,
@@ -227,8 +328,8 @@ export class FormulaEngine {
   /**
    * Parse function arguments
    */
-  private parseArguments(argsString: string): any[] {
-    const args: any[] = []
+  private parseArguments(argsString: string): ASTNodeUnion[] {
+    const args: ASTNodeUnion[] = []
     let current = ''
     let depth = 0
     let inQuotes = false
@@ -263,7 +364,7 @@ export class FormulaEngine {
   /**
    * Evaluate AST node
    */
-  private async evaluateAST(node: any, context: FormulaContext): Promise<any> {
+  private async evaluateAST(node: ASTNodeUnion, context: FormulaContext): Promise<CellValue | string | CellValue[][]> {
     switch (node.type) {
       case 'number':
         return node.value
@@ -275,7 +376,7 @@ export class FormulaEngine {
         return null
 
       case 'array':
-        return node.value
+        return node.value as CellValue[][]
 
       case 'string':
         return node.value
@@ -289,40 +390,42 @@ export class FormulaEngine {
       case 'error':
         return node.value
 
-      case 'function':
+      case 'function': {
         const func = this.functions.get(node.name)
         if (!func) {
           throw new Error(`Unknown function: ${node.name}`)
         }
         const args = await Promise.all(
-          node.arguments.map((arg: any) => this.evaluateAST(arg, context))
+          node.arguments.map((arg: ASTNodeUnion) => this.evaluateAST(arg, context))
         )
-        return func(...args)
+        return func(...args) as CellValue | string | CellValue[][]
+      }
 
-      case 'operator':
+      case 'operator': {
         const left = await this.evaluateAST(node.left, context)
         const right = await this.evaluateAST(node.right, context)
         return this.evaluateOperator(node.operator, left, right)
+      }
 
       default:
-        throw new Error(`Unknown node type: ${node.type}`)
+        throw new Error(`Unknown node type: ${(node as ASTNode).type}`)
     }
   }
 
   /**
    * Evaluate binary operator
    */
-  private evaluateOperator(operator: string, left: any, right: any): any {
+  private evaluateOperator(operator: string, left: unknown, right: unknown): number | boolean | string {
     switch (operator) {
-      case '+': return left + right
-      case '-': return left - right
-      case '*': return left * right
-      case '/': return right === 0 ? '#DIV/0!' : left / right
+      case '+': return (left as number) + (right as number)
+      case '-': return (left as number) - (right as number)
+      case '*': return (left as number) * (right as number)
+      case '/': return right === 0 ? '#DIV/0!' : (left as number) / (right as number)
       case '=': return left === right
-      case '>': return left > right
-      case '<': return left < right
-      case '>=': return left >= right
-      case '<=': return left <= right
+      case '>': return (left as number) > (right as number)
+      case '<': return (left as number) < (right as number)
+      case '>=': return (left as number) >= (right as number)
+      case '<=': return (left as number) <= (right as number)
       case '<>': return left !== right
       default:
         throw new Error(`Unknown operator: ${operator}`)
@@ -332,15 +435,15 @@ export class FormulaEngine {
   /**
    * Get cell value from database
    */
-  private async getCellValue(row: number, col: number, context: FormulaContext): Promise<any> {
+  private async getCellValue(row: number, col: number, context: FormulaContext): Promise<CellValue | string> {
     const cacheKey = `${context.sheetId}:${row}:${col}`
 
     if (context.cache.has(cacheKey)) {
-      return context.cache.get(cacheKey)
+      return context.cache.get(cacheKey)!
     }
 
     if (!db) {
-      console.log('getCellValue: db is undefined')
+      logger.warn('getCellValue: db is undefined')
       return null
     }
 
@@ -353,41 +456,56 @@ export class FormulaEngine {
       .executeTakeFirst()
 
     if (!cell) {
-      // console.log(`getCellValue: cell not found for ${row},${col}`)
       return '#ERROR!'
     }
 
-    let value = cell.value
+    // Extract actual value from JSONB column - may be stored as {value: x} or directly as primitive
+    const rawValue = cell.value
+    let value: CellValue | string = rawValue === null ? null :
+      typeof rawValue === 'object' && 'value' in rawValue ? (rawValue as { value: CellValue }).value :
+      rawValue as unknown as CellValue
 
     // Convert based on data type
-    if (cell.data_type === 'number') {
-      value = parseFloat(value!)
-    } else if (cell.data_type === 'boolean') {
+    if (cell.data_type === 'number' && typeof value === 'string') {
+      value = parseFloat(value)
+    } else if (cell.data_type === 'boolean' && typeof value === 'string') {
       value = value === 'true' || value === '1'
-    } else if (cell.data_type === 'date') {
-      value = new Date(value!)
+    } else if (cell.data_type === 'date' && typeof value === 'string') {
+      value = new Date(value)
     }
 
     // If cell has a formula, calculate it
     if (cell.formula) {
-      value = await this.calculate(cell.formula, context)
+      const calculated = await this.calculate(cell.formula, context)
+      // Only store simple cell values in cache, not arrays
+      if (!Array.isArray(calculated)) {
+        value = calculated
+      }
     }
 
-    context.cache.set(cacheKey, value)
+    // Only cache simple cell values
+    if (!Array.isArray(value)) {
+      context.cache.set(cacheKey, value as CellValue)
+    }
     return value
   }
 
   /**
    * Get range of cell values
    */
-  private async getRangeValues(start: any, end: any, context: FormulaContext): Promise<any[][]> {
-    const values: any[][] = []
+  private async getRangeValues(start: { row: number; col: number }, end: { row: number; col: number }, context: FormulaContext): Promise<CellValue[][]> {
+    const values: CellValue[][] = []
 
     for (let row = start.row; row <= end.row; row++) {
-      const rowValues: any[] = []
+      const rowValues: CellValue[] = []
       for (let col = start.col; col <= end.col; col++) {
         const value = await this.getCellValue(row, col, context)
-        rowValues.push(value)
+        // Arrays shouldn't be nested in ranges, take first value if array
+        if (Array.isArray(value)) {
+          rowValues.push(value[0]?.[0] ?? null)
+        } else {
+          rowValues.push(value as CellValue)
+        }
       }
       values.push(rowValues)
     }
@@ -419,120 +537,140 @@ export class FormulaEngine {
 
   // Built-in function implementations
 
-  private sum(...args: any[]): number {
-    return this.flattenValues(args).reduce((acc, val) => acc + (parseFloat(val) || 0), 0)
+  private sum(...args: unknown[]): number {
+    const values = this.flattenValues(args)
+    return values.reduce<number>((acc, val) => acc + (parseFloat(String(val)) || 0), 0)
   }
 
-  private average(...args: any[]): number {
+  private average(...args: unknown[]): number {
     const values = this.flattenValues(args)
-    const sum = values.reduce((acc, val) => acc + (parseFloat(val) || 0), 0)
+    const sum = values.reduce<number>((acc, val) => acc + (parseFloat(String(val)) || 0), 0)
     return sum / values.length
   }
 
-  private count(...args: any[]): number {
+  private count(...args: unknown[]): number {
     return this.flattenValues(args).filter(val => val !== null && val !== '').length
   }
 
-  private max(...args: any[]): number {
-    return Math.max(...this.flattenValues(args).map(val => parseFloat(val) || 0))
+  private max(...args: unknown[]): number {
+    return Math.max(...this.flattenValues(args).map(val => parseFloat(String(val)) || 0))
   }
 
-  private min(...args: any[]): number {
-    return Math.min(...this.flattenValues(args).map(val => parseFloat(val) || 0))
+  private min(...args: unknown[]): number {
+    return Math.min(...this.flattenValues(args).map(val => parseFloat(String(val)) || 0))
   }
 
-  private concatenate(...args: any[]): string {
+  private concatenate(...args: unknown[]): string {
     return this.flattenValues(args).join('')
   }
 
-  private ifFunction(condition: any, trueValue: any, falseValue: any): any {
+  private ifFunction(condition: unknown, trueValue: unknown, falseValue: unknown): unknown {
     return condition ? trueValue : falseValue
   }
 
-  private andFunction(...args: any[]): boolean {
+  private andFunction(...args: unknown[]): boolean {
     return this.flattenValues(args).every(val => !!val)
   }
 
-  private orFunction(...args: any[]): boolean {
+  private orFunction(...args: unknown[]): boolean {
     return this.flattenValues(args).some(val => !!val)
   }
 
-  private vlookup(lookupValue: any, range: any[][], colIndex: number, exactMatch = true): any {
-    for (const row of range) {
-      if (exactMatch ? row[0] === lookupValue : row[0] >= lookupValue) {
-        return row[colIndex - 1]
+  private vlookup(lookupValue: unknown, range: unknown, colIndex: unknown, exactMatch: unknown = true): unknown {
+    const rangeArray = range as unknown[][]
+    const colIdx = Number(colIndex)
+    const exact = Boolean(exactMatch)
+
+    for (const row of rangeArray) {
+      const rowArray = row as unknown[]
+      if (exact ? rowArray[0] === lookupValue : (rowArray[0] as number) >= (lookupValue as number)) {
+        return rowArray[colIdx - 1]
       }
     }
     return '#N/A'
   }
 
-  private hlookup(lookupValue: any, range: any[][], rowIndex: number, exactMatch = true): any {
-    if (!range[0]) return '#N/A'
+  private hlookup(lookupValue: unknown, range: unknown, rowIndex: unknown, exactMatch: unknown = true): unknown {
+    const rangeArray = range as unknown[][]
+    const rowIdx = Number(rowIndex)
+    const exact = Boolean(exactMatch)
 
-    const colIndex = range[0].findIndex((val: any) =>
-      exactMatch ? val === lookupValue : val >= lookupValue
+    if (!rangeArray[0]) return '#N/A'
+
+    const firstRow = rangeArray[0] as unknown[]
+    const colIndex = firstRow.findIndex((val: unknown) =>
+      exact ? val === lookupValue : (val as number) >= (lookupValue as number)
     )
 
     if (colIndex === -1) return '#N/A'
-    return range[rowIndex - 1]?.[colIndex] ?? '#N/A'
+    const targetRow = rangeArray[rowIdx - 1] as unknown[] | undefined
+    return targetRow?.[colIndex] ?? '#N/A'
   }
 
-  private index(range: any[][], row: number, col?: number): any {
+  private index(range: unknown, row: unknown, col?: unknown): unknown {
+    const rangeArray = range as unknown[][]
+    const rowNum = Number(row)
+
     if (col === undefined) {
-      return range[row - 1]
+      return rangeArray[rowNum - 1]
     }
-    return range[row - 1]?.[col - 1] ?? '#REF!'
+    const colNum = Number(col)
+    const targetRow = rangeArray[rowNum - 1] as unknown[] | undefined
+    return targetRow?.[colNum - 1] ?? '#REF!'
   }
 
-  private match(lookupValue: any, lookupArray: any[], matchType = 0): number {
-    for (let i = 0; i < lookupArray.length; i++) {
-      if (matchType === 0 && lookupArray[i] === lookupValue) {
+  private match(lookupValue: unknown, lookupArray: unknown, matchType: unknown = 0): number {
+    const array = lookupArray as unknown[]
+    const type = Number(matchType)
+
+    for (let i = 0; i < array.length; i++) {
+      if (type === 0 && array[i] === lookupValue) {
         return i + 1
-      } else if (matchType === 1 && lookupArray[i] <= lookupValue) {
-        if (i === lookupArray.length - 1 || lookupArray[i + 1] > lookupValue) {
+      } else if (type === 1 && (array[i] as number) <= (lookupValue as number)) {
+        if (i === array.length - 1 || (array[i + 1] as number) > (lookupValue as number)) {
           return i + 1
         }
-      } else if (matchType === -1 && lookupArray[i] >= lookupValue) {
+      } else if (type === -1 && (array[i] as number) >= (lookupValue as number)) {
         return i + 1
       }
     }
     return -1
   }
 
-  private stdev(...args: any[]): number {
-    const values = this.flattenValues(args).map(val => parseFloat(val) || 0)
+  private stdev(...args: unknown[]): number {
+    const values = this.flattenValues(args).map(val => parseFloat(String(val)) || 0)
     const mean = values.reduce((a, b) => a + b) / values.length
     const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
     const variance = squaredDiffs.reduce((a, b) => a + b) / (values.length - 1)
     return Math.sqrt(variance)
   }
 
-  private variance(...args: any[]): number {
-    const values = this.flattenValues(args).map(val => parseFloat(val) || 0)
+  private variance(...args: unknown[]): number {
+    const values = this.flattenValues(args).map(val => parseFloat(String(val)) || 0)
     const mean = values.reduce((a, b) => a + b) / values.length
     const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
     return squaredDiffs.reduce((a, b) => a + b) / (values.length - 1)
   }
 
-  private median(...args: any[]): number {
+  private median(...args: unknown[]): number {
     const values = this.flattenValues(args)
-      .map(val => parseFloat(val) || 0)
+      .map(val => parseFloat(String(val)) || 0)
       .sort((a, b) => a - b)
 
     const mid = Math.floor(values.length / 2)
     return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2
   }
 
-  private mode(...args: any[]): any {
+  private mode(...args: unknown[]): unknown {
     const values = this.flattenValues(args)
-    const counts = new Map<any, number>()
+    const counts = new Map<unknown, number>()
 
     for (const val of values) {
       counts.set(val, (counts.get(val) || 0) + 1)
     }
 
     let maxCount = 0
-    let mode = null
+    let mode: unknown = null
 
     for (const [val, count] of counts.entries()) {
       if (count > maxCount) {
@@ -547,15 +685,17 @@ export class FormulaEngine {
   /**
    * Flatten nested arrays into single array
    */
-  private flattenValues(args: any[]): any[] {
-    const result: any[] = []
+  private flattenValues(args: unknown[]): unknown[] {
+    const result: unknown[] = []
 
     for (const arg of args) {
       if (Array.isArray(arg)) {
         if (Array.isArray(arg[0])) {
           // 2D array (range)
           for (const row of arg) {
-            result.push(...row)
+            if (Array.isArray(row)) {
+              result.push(...row)
+            }
           }
         } else {
           // 1D array

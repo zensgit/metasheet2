@@ -1,26 +1,122 @@
-// @ts-nocheck
-import { MongoClient, Db, Collection, Filter, FindOptions } from 'mongodb'
-import {
-  BaseDataAdapter,
-  DataSourceConfig,
+// MongoDB types for optional dependency
+interface MongoClientOptions {
+  maxPoolSize?: number;
+  minPoolSize?: number;
+  serverSelectionTimeoutMS?: number;
+  [key: string]: unknown;
+}
+
+interface MongoClientSession {
+  startTransaction(): void;
+  commitTransaction(): Promise<void>;
+  abortTransaction(): Promise<void>;
+  endSession(): Promise<void>;
+}
+
+interface MongoClientType {
+  connect(): Promise<void>;
+  close(): Promise<void>;
+  db(name?: string): MongoDb;
+  startSession(): MongoClientSession;
+}
+
+interface MongoDb {
+  collection(name: string): MongoCollection;
+  admin(): { ping(): Promise<Record<string, unknown>> };
+  listCollections(filter?: { name?: string }): { toArray(): Promise<MongoCollectionInfo[]> };
+}
+
+interface MongoCollectionInfo {
+  name: string;
+  type?: string;
+  options?: Record<string, unknown>;
+  info?: Record<string, unknown>;
+}
+
+interface MongoCursor<T = unknown> {
+  toArray(): Promise<T[]>;
+  batchSize(size: number): this;
+  limit(count: number): this;
+  [Symbol.asyncIterator](): AsyncIterator<T>;
+}
+
+interface MongoCollection {
+  aggregate(pipeline: Record<string, unknown>[]): MongoCursor;
+  find(filter?: Record<string, unknown>, options?: MongoFindOptions): MongoCursor;
+  findOne(filter?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+  insertOne(doc: Record<string, unknown>): Promise<{ insertedId: unknown }>;
+  insertMany(docs: Record<string, unknown>[]): Promise<{ insertedIds: Record<number, unknown> }>;
+  updateOne(filter: Record<string, unknown>, update: Record<string, unknown>): Promise<{ modifiedCount: number }>;
+  updateMany(filter: Record<string, unknown>, update: Record<string, unknown>): Promise<{ modifiedCount: number }>;
+  deleteOne(filter: Record<string, unknown>): Promise<{ deletedCount: number }>;
+  deleteMany(filter: Record<string, unknown>): Promise<{ deletedCount: number }>;
+  countDocuments(filter?: Record<string, unknown>): Promise<number>;
+  indexes(): Promise<MongoIndexInfo[]>;
+}
+
+interface MongoFindOptions {
+  projection?: Record<string, number>;
+  sort?: Record<string, number>;
+  limit?: number;
+  skip?: number;
+}
+
+interface MongoIndexInfo {
+  name: string;
+  key?: Record<string, number>;
+  unique?: boolean;
+}
+
+interface MongoFilter {
+  [key: string]: unknown | { [operator: string]: unknown };
+}
+
+interface MongoDocument extends Record<string, unknown> {
+  _id?: unknown;
+}
+
+import type {
+  DbValue,
+  WhereValue,
   QueryOptions,
   QueryResult,
   SchemaInfo,
   TableInfo,
-  ColumnInfo
+  ColumnInfo,
+  IndexInfo,
+  Transaction
+} from './BaseAdapter';
+import {
+  BaseDataAdapter,
+  DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
 
+// Dynamic mongodb import
+let MongoClient: (new (uri: string, options?: MongoClientOptions) => MongoClientType) | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  MongoClient = require('mongodb').MongoClient
+} catch {
+  // mongodb not installed
+}
+
 export class MongoDBAdapter extends BaseDataAdapter {
-  private client: MongoClient | null = null
-  private db: Db | null = null
+  private client: MongoClientType | null = null
+  private db: MongoDb | null = null
 
   async connect(): Promise<void> {
     if (this.connected) {
       return
     }
 
+    if (!MongoClient) {
+      throw new Error('mongodb package is not installed')
+    }
+
     try {
-      const uri = this.config.connection.uri || this.buildConnectionUri()
+      const uri = typeof this.config.connection.uri === 'string'
+        ? this.config.connection.uri
+        : this.buildConnectionUri()
 
       this.client = new MongoClient(uri, {
         maxPoolSize: this.config.poolConfig?.max || 20,
@@ -30,7 +126,11 @@ export class MongoDBAdapter extends BaseDataAdapter {
       })
 
       await this.client.connect()
-      this.db = this.client.db(this.config.connection.database)
+
+      const dbName = typeof this.config.connection.database === 'string'
+        ? this.config.connection.database
+        : undefined
+      this.db = this.client.db(dbName)
 
       this.connected = true
       await this.onConnect()
@@ -74,7 +174,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async query<T = any>(collection: string, pipeline?: any[]): Promise<QueryResult<T>> {
+  async query<T = Record<string, DbValue>>(collection: string, params?: DbValue[]): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
@@ -82,10 +182,10 @@ export class MongoDBAdapter extends BaseDataAdapter {
     try {
       const coll = this.db.collection(collection)
 
-      let cursor
-      if (pipeline && pipeline.length > 0) {
-        // Use aggregation pipeline
-        cursor = coll.aggregate(pipeline)
+      let cursor: MongoCursor
+      // If params is provided and it's an array of objects, treat as aggregation pipeline
+      if (params && Array.isArray(params) && params.length > 0 && typeof params[0] === 'object') {
+        cursor = coll.aggregate(params as Record<string, unknown>[])
       } else {
         // Simple find
         cursor = coll.find()
@@ -97,7 +197,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
         data: data as T[],
         metadata: {
           totalCount: data.length,
-          columns: this.extractColumns(data)
+          columns: this.extractColumns(data as MongoDocument[])
         }
       }
     } catch (error) {
@@ -108,7 +208,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async select<T = any>(collection: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
+  async select<T = Record<string, DbValue>>(collection: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
@@ -116,8 +216,8 @@ export class MongoDBAdapter extends BaseDataAdapter {
     try {
       const coll = this.db.collection(collection)
 
-      const filter: Filter<any> = this.buildMongoFilter(options.where || {})
-      const findOptions: FindOptions = {}
+      const filter: MongoFilter = this.buildMongoFilter(options.where || {})
+      const findOptions: MongoFindOptions = {}
 
       // Add projection
       if (options.select?.length) {
@@ -151,7 +251,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
         data: data as T[],
         metadata: {
           totalCount,
-          columns: this.extractColumns(data)
+          columns: this.extractColumns(data as MongoDocument[])
         }
       }
     } catch (error) {
@@ -162,7 +262,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async insert<T = any>(collection: string, data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>> {
+  async insert<T = Record<string, DbValue>>(collection: string, data: Record<string, DbValue> | Record<string, DbValue>[]): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
@@ -172,11 +272,11 @@ export class MongoDBAdapter extends BaseDataAdapter {
       const docs = Array.isArray(data) ? data : [data]
 
       const result = docs.length === 1
-        ? await coll.insertOne(docs[0])
-        : await coll.insertMany(docs)
+        ? await coll.insertOne(docs[0] as Record<string, unknown>)
+        : await coll.insertMany(docs as Record<string, unknown>[])
 
       // Fetch inserted documents
-      const insertedIds = Array.isArray(result.insertedIds)
+      const insertedIds = 'insertedIds' in result
         ? Object.values(result.insertedIds)
         : [result.insertedId]
 
@@ -198,10 +298,10 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async update<T = any>(
+  async update<T = Record<string, DbValue>>(
     collection: string,
-    data: Record<string, any>,
-    where: Record<string, any>
+    data: Record<string, DbValue>,
+    where: Record<string, WhereValue>
   ): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
@@ -233,7 +333,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async delete<T = any>(collection: string, where: Record<string, any>): Promise<QueryResult<T>> {
+  async delete<T = Record<string, DbValue>>(collection: string, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
@@ -279,7 +379,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
   }
 
   async getTableInfo(collection: string, database?: string): Promise<TableInfo> {
-    const db = database ? this.client!.db(database) : this.db!
+    const _db = database ? this.client!.db(database) : this.db!
 
     return {
       name: collection,
@@ -311,18 +411,18 @@ export class MongoDBAdapter extends BaseDataAdapter {
     const fieldMap = new Map<string, { types: Set<string>; nullable: boolean }>()
 
     for (const doc of samples) {
-      this.analyzeDocument(doc, '', fieldMap)
+      this.analyzeDocument(doc as MongoDocument, '', fieldMap)
     }
 
     const columns: ColumnInfo[] = []
-    for (const [name, info] of fieldMap) {
+    fieldMap.forEach((info, name) => {
       columns.push({
         name,
         type: Array.from(info.types).join(' | '),
         nullable: info.nullable,
         primaryKey: name === '_id'
       })
-    }
+    })
 
     return columns
   }
@@ -335,27 +435,29 @@ export class MongoDBAdapter extends BaseDataAdapter {
   }
 
   // MongoDB doesn't have traditional transactions for all deployments
-  async beginTransaction(): Promise<any> {
+  async beginTransaction(): Promise<Transaction> {
     if (!this.client) {
       throw new Error('Not connected to database')
     }
 
     const session = this.client.startSession()
     session.startTransaction()
-    return session
+    return session as unknown as Transaction
   }
 
-  async commit(transaction: any): Promise<void> {
-    await transaction.commitTransaction()
-    await transaction.endSession()
+  async commit(transaction: Transaction): Promise<void> {
+    const session = transaction as unknown as MongoClientSession
+    await session.commitTransaction()
+    await session.endSession()
   }
 
-  async rollback(transaction: any): Promise<void> {
-    await transaction.abortTransaction()
-    await transaction.endSession()
+  async rollback(transaction: Transaction): Promise<void> {
+    const session = transaction as unknown as MongoClientSession
+    await session.abortTransaction()
+    await session.endSession()
   }
 
-  async inTransaction(transaction: any, callback: () => Promise<any>): Promise<any> {
+  async inTransaction<R = unknown>(transaction: Transaction, callback: () => Promise<R>): Promise<R> {
     try {
       const result = await callback()
       await this.commit(transaction)
@@ -366,17 +468,17 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async *stream<T = any>(
+  async *stream<T = Record<string, DbValue>>(
     collection: string,
-    filter?: any,
-    options?: { batchSize?: number }
+    _params?: DbValue[],
+    options?: { highWaterMark?: number; objectMode?: boolean; batchSize?: number; filter?: Record<string, unknown> }
   ): AsyncIterableIterator<T> {
     if (!this.db) {
       throw new Error('Not connected to database')
     }
 
     const coll = this.db.collection(collection)
-    const cursor = coll.find(filter || {})
+    const cursor = coll.find(options?.filter || {})
 
     if (options?.batchSize) {
       cursor.batchSize(options.batchSize)
@@ -395,20 +497,22 @@ export class MongoDBAdapter extends BaseDataAdapter {
     let uri = 'mongodb://'
 
     if (username && password) {
-      uri += `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+      const user = String(username)
+      const pass = String(password)
+      uri += `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@`
     }
 
-    uri += `${host}:${port || 27017}`
+    uri += `${String(host)}:${port || 27017}`
 
     if (database) {
-      uri += `/${database}`
+      uri += `/${String(database)}`
     }
 
     return uri
   }
 
-  private buildMongoFilter(where: Record<string, any>): Filter<any> {
-    const filter: Filter<any> = {}
+  private buildMongoFilter(where: Record<string, WhereValue>): MongoFilter {
+    const filter: MongoFilter = {}
 
     for (const [key, value] of Object.entries(where)) {
       if (value === null) {
@@ -417,7 +521,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
         filter[key] = { $in: value }
       } else if (typeof value === 'object' && value !== null) {
         // Handle operators
-        const operators: Record<string, any> = {}
+        const operators: Record<string, unknown> = {}
         for (const [op, val] of Object.entries(value)) {
           const mongoOp = this.mapOperatorToMongo(op)
           operators[mongoOp] = val
@@ -446,7 +550,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
     return operatorMap[op] || op
   }
 
-  private extractColumns(data: any[]): Array<{ name: string; type: string; nullable?: boolean }> {
+  private extractColumns(data: MongoDocument[]): Array<{ name: string; type: string; nullable?: boolean }> {
     if (data.length === 0) return []
 
     const fieldMap = new Map<string, { types: Set<string>; nullable: boolean }>()
@@ -456,19 +560,19 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
 
     const columns: Array<{ name: string; type: string; nullable?: boolean }> = []
-    for (const [name, info] of fieldMap) {
+    fieldMap.forEach((info, name) => {
       columns.push({
         name,
         type: Array.from(info.types).join(' | '),
         nullable: info.nullable
       })
-    }
+    })
 
     return columns
   }
 
   private analyzeDocument(
-    obj: any,
+    obj: MongoDocument,
     prefix: string,
     fieldMap: Map<string, { types: Set<string>; nullable: boolean }>
   ): void {
@@ -488,22 +592,21 @@ export class MongoDBAdapter extends BaseDataAdapter {
         field.types.add(type)
 
         if (type === 'object' && !Array.isArray(value)) {
-          this.analyzeDocument(value, fieldName, fieldMap)
+          this.analyzeDocument(value as MongoDocument, fieldName, fieldMap)
         }
       }
     }
   }
 
-  private async getIndexes(collection: string, database?: string): Promise<any[]> {
+  private async getIndexes(collection: string, database?: string): Promise<IndexInfo[]> {
     const db = database ? this.client!.db(database) : this.db!
     const coll = db.collection(collection)
 
     const indexes = await coll.indexes()
-    return indexes.map(index => ({
+    return indexes.map((index) => ({
       name: index.name,
       columns: Object.keys(index.key || {}),
       unique: index.unique || false
     }))
   }
 }
-// @ts-nocheck

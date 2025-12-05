@@ -31,7 +31,7 @@ export class RedisCache implements Cache {
       this.client.connect().then(() => {
         this.connected = true
         metrics.redisRecoveryAttemptsTotal.labels('success').inc()
-      }).catch(err => {
+      }).catch(_err => {
         metrics.redisRecoveryAttemptsTotal.labels('error').inc()
         metrics.redisLastFailureTimestamp.set(Date.now() / 1000)
       })
@@ -72,11 +72,11 @@ export class RedisCache implements Cache {
     metrics.redisOperationDuration.labels(op).observe(0.00001)
   }
 
-  async get<T = any>(key: string): Promise<Result<T | null>> {
+  async get<T = unknown>(key: string): Promise<Result<T | null>> {
     const labels = { impl: 'redis', key_pattern: keyPrefix(key) }
     try {
       if (!this.connected) this.tryConnect()
-      let value: any = null
+      let value: unknown = null
       if (this.connected && this.client) {
         const raw = await this.opWrap('get', () => this.client!.get(key))
         if (raw !== null) {
@@ -91,7 +91,7 @@ export class RedisCache implements Cache {
       } else {
         metrics.cache_hits_total.inc(labels)
       }
-      return { ok: true, value }
+      return { ok: true, value: value as T | null }
     } catch (e) {
       metrics.cache_errors_total.inc(labels)
       metrics.redisLastFailureTimestamp.set(Date.now() / 1000)
@@ -100,7 +100,7 @@ export class RedisCache implements Cache {
     }
   }
 
-  async set(key: string, value: any, ttl?: number): Promise<Result<void>> {
+  async set(key: string, value: unknown, ttl?: number): Promise<Result<void>> {
     const labels = { impl: 'redis', key_pattern: keyPrefix(key) }
     try {
       if (!this.connected) this.tryConnect()

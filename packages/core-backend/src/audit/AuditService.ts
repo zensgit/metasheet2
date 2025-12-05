@@ -1,13 +1,16 @@
 import { EventEmitter } from 'events';
 import {
   AuditRepository,
+} from './AuditRepository';
+import type {
   AuditLogData,
   DataChangeData,
   SecurityEventData,
   ComplianceData
 } from './AuditRepository';
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import * as geoip from 'geoip-lite';
+import { Logger } from '../core/logger';
 
 export interface AuditContext {
   userId?: number;
@@ -28,10 +31,71 @@ export interface AuditOptions {
   retentionDays?: number;
 }
 
+// Type for Express request with user property
+interface RequestWithUser extends Request {
+  user?: {
+    id?: number;
+    name?: string;
+    email?: string;
+    roles?: string[];
+  };
+  session?: {
+    id?: string;
+  };
+}
+
+// Type for response body that might contain error information
+interface ErrorResponse {
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
+// Type for audit log query filters
+export interface AuditLogFilters {
+  eventType?: string;
+  eventCategory?: string;
+  resourceType?: string;
+  resourceId?: string;
+  userId?: number;
+  startDate?: Date;
+  endDate?: Date;
+  severity?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// Type for user activity summary
+export interface UserActivitySummary {
+  total_actions: string;
+  active_days: string;
+  resource_types_accessed: string;
+  last_activity: Date | null;
+  total_sessions: string;
+  avg_response_time: string | null;
+}
+
+// Type for security event summary
+export interface SecurityEventSummary {
+  security_event_type: string;
+  threat_level: string | null;
+  count: string;
+  last_occurrence: Date;
+}
+
+// Type for data changes with proper value types
+export interface DataChange {
+  field: string;
+  oldValue?: unknown;
+  newValue?: unknown;
+}
+
 export class AuditService extends EventEmitter {
   private repository: AuditRepository;
   private context: AuditContext = {};
   private performanceStart: Map<string, number> = new Map();
+  private logger = new Logger('AuditService');
 
   constructor(repository?: AuditRepository) {
     super();
@@ -58,18 +122,18 @@ export class AuditService extends EventEmitter {
   middleware(options: AuditOptions = {}) {
     return async (req: Request, res: Response, next: NextFunction) => {
       const startTime = Date.now();
-      const requestId = req.headers['x-request-id'] as string || 
-                       `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const requestId = req.headers['x-request-id'] as string ||
+                       `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
 
       // Extract user information from request
-      const user = (req as any).user;
+      const reqWithUser = req as RequestWithUser;
+      const user = reqWithUser.user;
       const context: AuditContext = {
         userId: user?.id,
         userName: user?.name,
         userEmail: user?.email,
         userRoles: user?.roles,
-        // Express 5 typings don't include session by default; keep it optional
-        sessionId: (req as any).session?.id || (req.headers['x-session-id'] as string),
+        sessionId: reqWithUser.session?.id || (req.headers['x-session-id'] as string),
         requestId
       };
 
@@ -78,11 +142,11 @@ export class AuditService extends EventEmitter {
 
       // Capture original send
       const originalSend = res.send;
-      let responseBody: any;
-      
-      res.send = function(data: any) {
+      let responseBody: unknown;
+
+      res.send = function(data: unknown) {
         responseBody = data;
-        return originalSend.call(this, data);
+        return originalSend.call(this, data as never);
       };
 
       // Log on response finish
@@ -123,7 +187,7 @@ export class AuditService extends EventEmitter {
             geoLongitude: geo?.ll?.[1],
             requestMethod: req.method,
             requestPath: req.path,
-            requestQuery: req.query,
+            requestQuery: this.toRecordStringUnknown(req.query),
             requestBody: sanitizedBody,
             requestHeaders: sanitizedHeaders,
             responseStatus: res.statusCode,
@@ -137,15 +201,16 @@ export class AuditService extends EventEmitter {
           // Add error information if response indicates error
           if (res.statusCode >= 400) {
             auditData.eventSeverity = res.statusCode >= 500 ? 'ERROR' : 'WARNING';
-            if (responseBody?.error) {
-              auditData.errorCode = responseBody.error.code;
-              auditData.errorMessage = responseBody.error.message;
+            const errorBody = responseBody as ErrorResponse;
+            if (errorBody?.error) {
+              auditData.errorCode = errorBody.error.code;
+              auditData.errorMessage = errorBody.error.message;
             }
           }
 
           await this.repository.createAuditLog(auditData);
         } catch (error) {
-          console.error('Failed to create audit log:', error);
+          this.logger.error('Failed to create audit log', error instanceof Error ? error : undefined);
           this.emit('error', error);
         }
       });
@@ -182,11 +247,7 @@ export class AuditService extends EventEmitter {
     tableName: string,
     recordId: string,
     operation: 'INSERT' | 'UPDATE' | 'DELETE',
-    changes: Array<{
-      field: string;
-      oldValue?: any;
-      newValue?: any;
-    }>,
+    changes: DataChange[],
     options: AuditOptions = {}
   ): Promise<void> {
     // Create main audit log
@@ -222,7 +283,7 @@ export class AuditService extends EventEmitter {
     eventType: string,
     details: SecurityEventData & Partial<AuditLogData>
   ): Promise<void> {
-    const { 
+    const {
       securityEventType,
       threatLevel,
       authMethod,
@@ -401,21 +462,21 @@ export class AuditService extends EventEmitter {
   /**
    * Query audit logs
    */
-  async queryLogs(filters: any): Promise<any[]> {
+  async queryLogs(filters: AuditLogFilters): Promise<unknown[]> {
     return this.repository.queryAuditLogs(filters);
   }
 
   /**
    * Get user activity summary
    */
-  async getUserActivity(userId: number, days?: number): Promise<any> {
+  async getUserActivity(userId: number, days?: number): Promise<UserActivitySummary> {
     return this.repository.getUserActivitySummary(userId, days);
   }
 
   /**
    * Get security events summary
    */
-  async getSecuritySummary(days?: number): Promise<any[]> {
+  async getSecuritySummary(days?: number): Promise<SecurityEventSummary[]> {
     return this.repository.getSecurityEventsSummary(days);
   }
 
@@ -431,16 +492,33 @@ export class AuditService extends EventEmitter {
   /**
    * Helper: Sanitize sensitive data
    */
-  private sanitizeData(data: any, sensitiveFields: string[]): any {
-    if (!data || typeof data !== 'object') return data;
+  private sanitizeData(
+    data: unknown,
+    sensitiveFields: string[]
+  ): Record<string, unknown> | undefined {
+    if (!data || typeof data !== 'object') {
+      return undefined;
+    }
 
-    const sanitized = { ...data };
+    const sanitized = { ...(data as Record<string, unknown>) };
     for (const field of sensitiveFields) {
       if (field in sanitized) {
         sanitized[field] = '[REDACTED]';
       }
     }
     return sanitized;
+  }
+
+  /**
+   * Helper: Convert query object to Record<string, unknown>
+   */
+  private toRecordStringUnknown(
+    query: unknown
+  ): Record<string, unknown> | undefined {
+    if (!query || typeof query !== 'object') {
+      return undefined;
+    }
+    return query as Record<string, unknown>;
   }
 
   /**
@@ -478,7 +556,7 @@ export class AuditService extends EventEmitter {
    */
   private detectDeviceType(userAgent?: string): string {
     if (!userAgent) return 'unknown';
-    
+
     if (/mobile/i.test(userAgent)) return 'mobile';
     if (/tablet/i.test(userAgent)) return 'tablet';
     if (/bot/i.test(userAgent)) return 'bot';
@@ -488,7 +566,7 @@ export class AuditService extends EventEmitter {
   /**
    * Helper: Detect value type
    */
-  private detectValueType(value: any): string {
+  private detectValueType(value: unknown): string {
     if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'boolean') return 'BOOLEAN';
     if (typeof value === 'number') return 'NUMBER';

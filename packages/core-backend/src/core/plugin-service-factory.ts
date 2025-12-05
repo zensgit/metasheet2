@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 插件服务工厂
  * 负责创建和管理所有插件相关服务的实例
@@ -13,16 +12,24 @@ import { QueueServiceImpl } from '../services/QueueService'
 import { StorageServiceImpl } from '../services/StorageService'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
 import { NotificationServiceImpl } from '../services/NotificationService'
-// 类型宽容：某些实现可能缺少类型声明，使用 any 断言避免编译阻塞
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore
 import { WebSocketServiceImpl } from '../services/WebSocketService'
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore
 import { SecurityServiceImpl } from '../services/SecurityService'
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore
 import { ValidationServiceImpl } from '../services/ValidationService'
+
+/**
+ * Email configuration for notification service
+ */
+export interface EmailConfig {
+  provider?: 'smtp' | 'sendgrid' | 'ses'
+  host?: string
+  port?: number
+  auth?: {
+    user?: string
+    pass?: string
+  }
+  apiKey?: string
+  [key: string]: unknown
+}
 
 /**
  * 服务配置选项
@@ -74,7 +81,7 @@ export interface ServiceFactoryOptions {
     channels?: string[]
     email?: {
       provider?: 'smtp' | 'sendgrid' | 'ses'
-      config?: any
+      config?: EmailConfig
     }
     webhook?: {
       timeout?: number
@@ -83,7 +90,7 @@ export interface ServiceFactoryOptions {
 
   // WebSocket配置
   websocket?: {
-    io?: any // Socket.IO实例
+    io?: unknown // Socket.IO实例
   }
 
   // 安全配置
@@ -99,6 +106,60 @@ export interface ServiceFactoryOptions {
   validation?: {
     strict?: boolean
   }
+}
+
+/**
+ * 带有事件能力的服务接口
+ */
+interface ServiceWithEvents {
+  on?: (event: string, handler: (...args: unknown[]) => void | Promise<void>) => void
+}
+
+/**
+ * 调度服务任务接口
+ */
+interface SchedulerJob {
+  name: string
+  data: unknown
+}
+
+/**
+ * 通知批处理接口
+ */
+interface NotificationBatch {
+  type?: string
+  recipients?: unknown[]
+  content?: unknown
+  [key: string]: unknown
+}
+
+/**
+ * 存储服务文件上传事件
+ */
+interface FileUploadEvent {
+  fileId: string
+  metadata: Record<string, unknown>
+}
+
+/**
+ * 带有配置提供者能力的服务
+ */
+interface StorageServiceWithProvider {
+  configureProvider?: (provider: string, config: unknown) => void
+}
+
+/**
+ * 带有清理能力的服务
+ */
+interface ServiceWithCleanup {
+  cleanup?: () => void
+}
+
+/**
+ * 带有统计能力的服务
+ */
+interface ServiceWithStats {
+  getStats?: () => Record<string, unknown>
 }
 
 /**
@@ -144,7 +205,7 @@ export class PluginServiceFactory {
 
       return services
     } catch (error) {
-      this.logger.error('Failed to create plugin services', error as Error)
+      this.logger.error('Failed to create plugin services', error instanceof Error ? error : undefined)
       throw error
     }
   }
@@ -164,7 +225,7 @@ export class PluginServiceFactory {
           const redis = new Redis(config.redis || {})
           return CacheServiceImpl.createRedisService(redis)
         } catch (error) {
-          this.logger.warn('Redis not available, falling back to memory cache', error as Error)
+          this.logger.warn('Redis not available, falling back to memory cache', { error })
           return CacheServiceImpl.createMemoryService()
         }
 
@@ -190,7 +251,7 @@ export class PluginServiceFactory {
           const queueService = new QueueServiceImpl()
           return queueService
         } catch (error) {
-          this.logger.warn('Bull not available, falling back to memory queue', error as Error)
+          this.logger.warn('Bull not available, falling back to memory queue', { error })
           return new QueueServiceImpl()
         }
 
@@ -206,7 +267,8 @@ export class PluginServiceFactory {
   private async createStorageService() {
     const config = this.options.storage || {}
 
-    const service: any = new (StorageServiceImpl as any)()
+    // Type assertion for service with provider configuration
+    const service = new (StorageServiceImpl as unknown as new () => PluginServices['storage'] & StorageServiceWithProvider)()
 
     switch (config.provider) {
       case 's3':
@@ -220,7 +282,7 @@ export class PluginServiceFactory {
             service.configureProvider('s3', s3)
           }
         } catch (error) {
-          this.logger.warn('AWS SDK not available, using local storage', error as Error)
+          this.logger.warn('AWS SDK not available, using local storage', { error })
         }
         break
 
@@ -275,7 +337,7 @@ export class PluginServiceFactory {
               break
           }
         } catch (error) {
-          this.logger.warn(`Failed to register notification channel: ${channel}`, error as Error)
+          this.logger.warn(`Failed to register notification channel: ${channel}`, { error })
         }
       }
     }
@@ -288,7 +350,8 @@ export class PluginServiceFactory {
    */
   private async createWebSocketService() {
     const config = this.options.websocket || {}
-    const service: any = new (WebSocketServiceImpl as any)(config.io)
+    // Type assertion for WebSocket service constructor
+    const service = new (WebSocketServiceImpl as unknown as new (io: unknown) => PluginServices['websocket'])(config.io)
     return service
   }
 
@@ -297,7 +360,8 @@ export class PluginServiceFactory {
    */
   private async createSecurityService() {
     const config = this.options.security || {}
-    const service: any = new (SecurityServiceImpl as any)(config.encryptionKey)
+    // Type assertion for Security service constructor
+    const service = new (SecurityServiceImpl as unknown as new (encryptionKey?: string) => PluginServices['security'])(config.encryptionKey)
     return service
   }
 
@@ -305,8 +369,8 @@ export class PluginServiceFactory {
    * 创建验证服务
    */
   private async createValidationService() {
-    const config = this.options.validation || {}
-    const service: any = new (ValidationServiceImpl as any)()
+    // Type assertion for Validation service constructor
+    const service = new (ValidationServiceImpl as unknown as new () => PluginServices['validation'])()
     return service
   }
 
@@ -315,16 +379,20 @@ export class PluginServiceFactory {
    */
   private setupServiceInterconnections(services: PluginServices): void {
     // 调度服务使用队列服务执行任务
-    ;(services.scheduler as any).on?.('job:execute', async (job: any) => {
-      await services.queue.add('scheduled', job.name, job.data, {
+    const schedulerWithEvents = services.scheduler as PluginServices['scheduler'] & ServiceWithEvents
+    schedulerWithEvents.on?.('job:execute', async (job: unknown) => {
+      const schedulerJob = job as SchedulerJob
+      await services.queue.add('scheduled', schedulerJob.name, schedulerJob.data, {
         delay: 0,
         attempts: 1
       })
     })
 
     // 通知服务使用队列服务处理大量通知
-    ;(services.notification as any).on?.('notification:batch', async (notifications: any[]) => {
-      for (const notification of notifications) {
+    const notificationWithEvents = services.notification as PluginServices['notification'] & ServiceWithEvents
+    notificationWithEvents.on?.('notification:batch', async (notifications: unknown) => {
+      const notificationArray = notifications as NotificationBatch[]
+      for (const notification of notificationArray) {
         await services.queue.add('notifications', 'send', notification, {
           attempts: 3,
           backoff: 'exponential'
@@ -333,25 +401,29 @@ export class PluginServiceFactory {
     })
 
     // 安全服务使用缓存服务缓存权限检查结果
-    const originalCheckPermission = services.security.checkPermission
-    services.security.checkPermission = async (pluginName: string, permission: string) => {
-      const cacheKey = `perm:${pluginName}:${permission}`
+    const originalCheckPermission = services.security.checkPermission?.bind(services.security)
+    if (originalCheckPermission) {
+      services.security.checkPermission = async (pluginName: string, permission: string): Promise<boolean> => {
+        const cacheKey = `perm:${pluginName}:${permission}`
 
-      let cached = await services.cache.get(cacheKey)
-      if (cached !== null) {
-        return cached
+        const cached = await services.cache.get<boolean>(cacheKey)
+        if (cached !== null) {
+          return cached
+        }
+
+        const result = await originalCheckPermission(pluginName, permission)
+        await services.cache.set(cacheKey, result, { ttl: 300 }) // 5分钟缓存
+
+        return result
       }
-
-      const result = await originalCheckPermission.call(services.security, pluginName, permission)
-      await services.cache.set(cacheKey, result, { ttl: 300 }) // 5分钟缓存
-
-      return result
     }
 
     // 存储服务使用缓存服务缓存文件元数据
-    ;(services.storage as any).on?.('file:uploaded', async (event: any) => {
-      const cacheKey = `file:${event.fileId}`
-      await services.cache.set(cacheKey, event.metadata, { ttl: 3600 }) // 1小时缓存
+    const storageWithEvents = services.storage as PluginServices['storage'] & ServiceWithEvents
+    storageWithEvents.on?.('file:uploaded', async (event: unknown) => {
+      const fileEvent = event as FileUploadEvent
+      const cacheKey = `file:${fileEvent.fileId}`
+      await services.cache.set(cacheKey, fileEvent.metadata, { ttl: 3600 }) // 1小时缓存
     })
 
     this.logger.debug('Service interconnections established')
@@ -380,13 +452,18 @@ export class PluginServiceFactory {
       await this.services.cache.clear()
 
       // 停止调度器
-      const scheduledJobs = await this.services.scheduler.listJobs()
-      for (const job of scheduledJobs) {
-        await this.services.scheduler.unschedule(job.name)
+      if (this.services.scheduler.listJobs) {
+        const scheduledJobs = await this.services.scheduler.listJobs()
+        for (const job of scheduledJobs) {
+          if (this.services.scheduler.unschedule && job.name) {
+            await this.services.scheduler.unschedule(job.name)
+          }
+        }
       }
 
       // 清理WebSocket连接
-      (this.services.websocket as any).cleanup?.()
+      const websocketWithCleanup = this.services.websocket as PluginServices['websocket'] & ServiceWithCleanup
+      websocketWithCleanup.cleanup?.()
 
       // 清理队列
       // 注意: 这里可能需要等待正在运行的任务完成
@@ -394,7 +471,7 @@ export class PluginServiceFactory {
       this.services = null
       this.logger.info('All plugin services destroyed')
     } catch (error) {
-      this.logger.error('Error during service destruction', error as Error)
+      this.logger.error('Error during service destruction', error instanceof Error ? error : undefined)
       throw error
     }
   }
@@ -402,12 +479,12 @@ export class PluginServiceFactory {
   /**
    * 获取服务健康状态
    */
-  async getHealth(): Promise<Record<string, any>> {
+  async getHealth(): Promise<Record<string, unknown>> {
     if (!this.services) {
       return { status: 'not_initialized' }
     }
 
-    const health: Record<string, any> = {}
+    const health: Record<string, unknown> = {}
 
     try {
       // 缓存健康检查
@@ -431,9 +508,10 @@ export class PluginServiceFactory {
 
     try {
       // WebSocket健康检查
+      const websocketWithStats = this.services.websocket as PluginServices['websocket'] & ServiceWithStats
       health.websocket = {
         status: 'healthy',
-        stats: (this.services.websocket as any).getStats?.()
+        stats: websocketWithStats.getStats?.()
       }
     } catch (error) {
       health.websocket = { status: 'unhealthy', error: (error as Error).message }
@@ -441,11 +519,15 @@ export class PluginServiceFactory {
 
     try {
       // 调度器健康检查
-      const jobs = await this.services.scheduler.listJobs()
-      health.scheduler = {
-        status: 'healthy',
-        jobCount: jobs.length,
-        activeJobs: jobs.filter(j => !j.isPaused).length
+      if (this.services.scheduler.listJobs) {
+        const jobs = await this.services.scheduler.listJobs()
+        health.scheduler = {
+          status: 'healthy',
+          jobCount: jobs.length,
+          activeJobs: jobs.filter((j: { isPaused?: boolean }) => !j.isPaused).length
+        }
+      } else {
+        health.scheduler = { status: 'healthy', jobCount: 0, activeJobs: 0 }
       }
     } catch (error) {
       health.scheduler = { status: 'unhealthy', error: (error as Error).message }

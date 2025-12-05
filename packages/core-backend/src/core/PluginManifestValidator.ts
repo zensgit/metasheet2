@@ -4,10 +4,42 @@
  */
 
 import * as semver from 'semver'
-import type { PluginManifest } from '../types/plugin'
+import type { PluginManifest as _PluginManifest } from '../types/plugin'
 
 // Plugin manifest schema version
 export const MANIFEST_VERSION = '2.0.0'
+
+// JSON Schema property definition
+export interface JsonSchemaProperty {
+  type?: string | string[]
+  description?: string
+  default?: unknown
+  enum?: unknown[]
+  minimum?: number
+  maximum?: number
+  minLength?: number
+  maxLength?: number
+  pattern?: string
+  items?: JsonSchemaProperty
+  properties?: Record<string, JsonSchemaProperty>
+  required?: string[]
+  [key: string]: unknown
+}
+
+// Configuration schema type
+export interface ConfigSchema {
+  type: 'object'
+  properties: Record<string, JsonSchemaProperty>
+  required?: string[]
+}
+
+// Workflow node configuration type
+export interface WorkflowNodeConfig {
+  inputs?: Record<string, JsonSchemaProperty>
+  outputs?: Record<string, JsonSchemaProperty>
+  settings?: Record<string, unknown>
+  [key: string]: unknown
+}
 
 // Plugin manifest standard interface
 export interface PluginManifestV2 {
@@ -122,7 +154,7 @@ export interface PluginManifestV2 {
     name: string
     category: string
     executor: string
-    config?: any
+    config?: WorkflowNodeConfig
   }>
 
   // Database migrations
@@ -133,14 +165,10 @@ export interface PluginManifestV2 {
   }>
 
   // Configuration schema
-  configSchema?: {
-    type: 'object'
-    properties: Record<string, any>
-    required?: string[]
-  }
+  configSchema?: ConfigSchema
 
   // Default configuration
-  defaultConfig?: Record<string, any>
+  defaultConfig?: Record<string, unknown>
 
   // Publishing info
   repository?: {
@@ -161,6 +189,24 @@ export interface PluginManifestV2 {
   os?: string[]
 }
 
+// Type guard for unknown input
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// Type guard for string array
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string')
+}
+
+// Type guard for ConfigSchema
+function isConfigSchema(value: unknown): value is ConfigSchema {
+  if (!isRecord(value)) return false
+  if (value.type !== 'object') return false
+  if (!isRecord(value.properties)) return false
+  return true
+}
+
 /**
  * Manifest validator
  */
@@ -171,7 +217,7 @@ export class ManifestValidator {
   /**
    * Validate a plugin manifest
    */
-  validate(manifest: any): {
+  validate(manifest: unknown): {
     valid: boolean
     errors: string[]
     warnings: string[]
@@ -179,6 +225,15 @@ export class ManifestValidator {
   } {
     this.errors = []
     this.warnings = []
+
+    if (!isRecord(manifest)) {
+      this.errors.push('Manifest must be an object')
+      return {
+        valid: false,
+        errors: this.errors,
+        warnings: this.warnings
+      }
+    }
 
     // Check required fields
     this.validateRequiredFields(manifest)
@@ -214,7 +269,7 @@ export class ManifestValidator {
     }
   }
 
-  private validateRequiredFields(manifest: any) {
+  private validateRequiredFields(manifest: Record<string, unknown>) {
     const required = [
       'manifestVersion',
       'name',
@@ -235,46 +290,46 @@ export class ManifestValidator {
     }
 
     // Validate name format
-    if (manifest.name && !/^[a-z0-9-]+$/.test(manifest.name)) {
+    if (manifest.name && typeof manifest.name === 'string' && !/^[a-z0-9-]+$/.test(manifest.name)) {
       this.errors.push('Plugin name must be lowercase letters, numbers, and hyphens only')
     }
 
     // Validate manifest version
-    if (manifest.manifestVersion && !semver.valid(manifest.manifestVersion)) {
+    if (manifest.manifestVersion && typeof manifest.manifestVersion === 'string' && !semver.valid(manifest.manifestVersion)) {
       this.errors.push('Invalid manifestVersion format')
     }
 
     // Check manifest version compatibility
-    if (manifest.manifestVersion && !semver.satisfies(MANIFEST_VERSION, manifest.manifestVersion)) {
+    if (manifest.manifestVersion && typeof manifest.manifestVersion === 'string' && !semver.satisfies(MANIFEST_VERSION, manifest.manifestVersion)) {
       this.warnings.push(`Manifest version ${manifest.manifestVersion} may not be fully compatible with current version ${MANIFEST_VERSION}`)
     }
   }
 
-  private validateVersions(manifest: any) {
+  private validateVersions(manifest: Record<string, unknown>) {
     // Validate plugin version
-    if (manifest.version && !semver.valid(manifest.version)) {
+    if (manifest.version && typeof manifest.version === 'string' && !semver.valid(manifest.version)) {
       this.errors.push('Invalid plugin version format')
     }
 
     // Validate engine constraints
-    if (manifest.engine) {
-      if (manifest.engine.metasheet && !semver.validRange(manifest.engine.metasheet)) {
+    if (manifest.engine && isRecord(manifest.engine)) {
+      if (manifest.engine.metasheet && typeof manifest.engine.metasheet === 'string' && !semver.validRange(manifest.engine.metasheet)) {
         this.errors.push('Invalid MetaSheet version constraint')
       }
 
-      if (manifest.engine.node && !semver.validRange(manifest.engine.node)) {
+      if (manifest.engine.node && typeof manifest.engine.node === 'string' && !semver.validRange(manifest.engine.node)) {
         this.errors.push('Invalid Node.js version constraint')
       }
     }
   }
 
-  private validateCapabilities(manifest: any) {
-    if (!manifest.capabilities) return
+  private validateCapabilities(manifest: Record<string, unknown>) {
+    if (!manifest.capabilities || !isRecord(manifest.capabilities)) return
 
     const validViewTypes = ['grid', 'kanban', 'calendar', 'gallery', 'form', 'gantt', 'timeline']
     const validWorkflowTypes = ['action', 'trigger', 'condition', 'transform']
 
-    if (manifest.capabilities.views) {
+    if (manifest.capabilities.views && isStringArray(manifest.capabilities.views)) {
       for (const view of manifest.capabilities.views) {
         if (!validViewTypes.includes(view)) {
           this.warnings.push(`Unknown view type: ${view}`)
@@ -282,7 +337,7 @@ export class ManifestValidator {
       }
     }
 
-    if (manifest.capabilities.workflows) {
+    if (manifest.capabilities.workflows && isStringArray(manifest.capabilities.workflows)) {
       for (const workflow of manifest.capabilities.workflows) {
         if (!validWorkflowTypes.includes(workflow)) {
           this.warnings.push(`Unknown workflow type: ${workflow}`)
@@ -291,11 +346,11 @@ export class ManifestValidator {
     }
   }
 
-  private validatePermissions(manifest: any) {
-    if (!manifest.permissions) return
+  private validatePermissions(manifest: Record<string, unknown>) {
+    if (!manifest.permissions || !isRecord(manifest.permissions)) return
 
     // Validate database permissions
-    if (manifest.permissions.database) {
+    if (manifest.permissions.database && isRecord(manifest.permissions.database)) {
       const db = manifest.permissions.database
 
       if (db.read && !Array.isArray(db.read)) {
@@ -307,24 +362,25 @@ export class ManifestValidator {
       }
 
       // Check for overly broad permissions
-      if (db.read?.includes('*') || db.write?.includes('*')) {
+      if (isStringArray(db.read) && db.read.includes('*') || isStringArray(db.write) && db.write.includes('*')) {
         this.warnings.push('Using wildcard (*) database permissions is not recommended')
       }
     }
 
     // Validate HTTP permissions
-    if (manifest.permissions.http) {
+    if (manifest.permissions.http && isRecord(manifest.permissions.http)) {
       const http = manifest.permissions.http
 
       if (http.external && !http.allowedDomains) {
         this.warnings.push('External HTTP access without domain restrictions is risky')
       }
 
-      if (http.allowedDomains && http.blockedDomains) {
+      if (http.allowedDomains && isStringArray(http.allowedDomains) &&
+          http.blockedDomains && isStringArray(http.blockedDomains)) {
         // Check for conflicts
         const allowed = new Set(http.allowedDomains)
         const blocked = new Set(http.blockedDomains)
-        const conflicts = [...allowed].filter(d => blocked.has(d))
+        const conflicts = Array.from(allowed).filter(d => blocked.has(d))
 
         if (conflicts.length > 0) {
           this.errors.push(`Domain conflicts in HTTP permissions: ${conflicts.join(', ')}`)
@@ -333,38 +389,38 @@ export class ManifestValidator {
     }
 
     // Validate filesystem permissions
-    if (manifest.permissions.filesystem) {
+    if (manifest.permissions.filesystem && isRecord(manifest.permissions.filesystem)) {
       const fs = manifest.permissions.filesystem
 
-      if (fs.write?.includes('/')) {
+      if (isStringArray(fs.write) && fs.write.includes('/')) {
         this.errors.push('Root filesystem write access is not allowed')
       }
 
-      if (fs.read?.includes('~/.ssh') || fs.read?.includes('~/.aws')) {
+      if (isStringArray(fs.read) && (fs.read.includes('~/.ssh') || fs.read.includes('~/.aws'))) {
         this.warnings.push('Reading sensitive directories is discouraged')
       }
     }
 
     // Validate system permissions
-    if (manifest.permissions.system) {
+    if (manifest.permissions.system && isRecord(manifest.permissions.system)) {
       const sys = manifest.permissions.system
 
-      if (sys.exec?.includes('*')) {
+      if (isStringArray(sys.exec) && sys.exec.includes('*')) {
         this.errors.push('Wildcard command execution is not allowed')
       }
 
-      if (sys.env?.includes('*')) {
+      if (isStringArray(sys.env) && sys.env.includes('*')) {
         this.warnings.push('Reading all environment variables is discouraged')
       }
     }
   }
 
-  private validateDependencies(manifest: any) {
+  private validateDependencies(manifest: Record<string, unknown>) {
     // Check for version conflicts
     const allDeps = {
-      ...manifest.dependencies,
-      ...manifest.peerDependencies,
-      ...manifest.optionalDependencies
+      ...(isRecord(manifest.dependencies) ? manifest.dependencies : {}),
+      ...(isRecord(manifest.peerDependencies) ? manifest.peerDependencies : {}),
+      ...(isRecord(manifest.optionalDependencies) ? manifest.optionalDependencies : {})
     }
 
     for (const [pkg, version] of Object.entries(allDeps)) {
@@ -382,22 +438,26 @@ export class ManifestValidator {
     }
 
     // Check for circular dependencies
-    if (manifest.dependencies?.[manifest.name]) {
+    if (isRecord(manifest.dependencies) &&
+        typeof manifest.name === 'string' &&
+        manifest.dependencies[manifest.name]) {
       this.errors.push('Plugin cannot depend on itself')
     }
   }
 
-  private validateRoutes(manifest: any) {
-    if (!manifest.routes) return
+  private validateRoutes(manifest: Record<string, unknown>) {
+    if (!manifest.routes || !Array.isArray(manifest.routes)) return
 
     const validMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']
 
     for (const route of manifest.routes) {
-      if (!route.method || !validMethods.includes(route.method.toUpperCase())) {
+      if (!isRecord(route)) continue
+
+      if (!route.method || typeof route.method !== 'string' || !validMethods.includes(route.method.toUpperCase())) {
         this.errors.push(`Invalid HTTP method: ${route.method}`)
       }
 
-      if (!route.path || !route.path.startsWith('/')) {
+      if (!route.path || typeof route.path !== 'string' || !route.path.startsWith('/')) {
         this.errors.push(`Invalid route path: ${route.path}`)
       }
 
@@ -406,19 +466,21 @@ export class ManifestValidator {
       }
 
       // Check for path conflicts
-      if (route.path?.match(/^\/api\/(core|system|admin)/)) {
+      if (typeof route.path === 'string' && route.path.match(/^\/api\/(core|system|admin)/)) {
         this.errors.push(`Route ${route.path} conflicts with system routes`)
       }
     }
   }
 
-  private validateMigrations(manifest: any) {
-    if (!manifest.migrations) return
+  private validateMigrations(manifest: Record<string, unknown>) {
+    if (!manifest.migrations || !Array.isArray(manifest.migrations)) return
 
     const versions = new Set<string>()
 
     for (const migration of manifest.migrations) {
-      if (!migration.version) {
+      if (!isRecord(migration)) continue
+
+      if (!migration.version || typeof migration.version !== 'string') {
         this.errors.push('Migration missing version')
       }
 
@@ -430,61 +492,75 @@ export class ManifestValidator {
         this.warnings.push(`Migration ${migration.version} missing down script (rollback not possible)`)
       }
 
-      if (versions.has(migration.version)) {
+      if (typeof migration.version === 'string' && versions.has(migration.version)) {
         this.errors.push(`Duplicate migration version: ${migration.version}`)
       }
 
-      versions.add(migration.version)
+      if (typeof migration.version === 'string') {
+        versions.add(migration.version)
+      }
     }
 
     // Check version order
-    const sorted = [...versions].sort(semver.compare)
-    const original = [...versions]
+    const sorted = Array.from(versions).sort(semver.compare)
+    const original = Array.from(versions)
 
     if (JSON.stringify(sorted) !== JSON.stringify(original)) {
       this.warnings.push('Migrations are not in version order')
     }
   }
 
-  private normalizeManifest(manifest: any): PluginManifestV2 {
+  private normalizeManifest(manifest: Record<string, unknown>): PluginManifestV2 {
     return {
-      manifestVersion: manifest.manifestVersion || MANIFEST_VERSION,
-      name: manifest.name,
-      version: manifest.version,
-      displayName: manifest.displayName,
-      description: manifest.description,
+      manifestVersion: typeof manifest.manifestVersion === 'string' ? manifest.manifestVersion : MANIFEST_VERSION,
+      name: String(manifest.name),
+      version: String(manifest.version),
+      displayName: String(manifest.displayName),
+      description: String(manifest.description),
       author: typeof manifest.author === 'string'
         ? { name: manifest.author }
-        : manifest.author,
+        : isRecord(manifest.author) && typeof manifest.author.name === 'string'
+          ? {
+              name: manifest.author.name,
+              email: typeof manifest.author.email === 'string' ? manifest.author.email : undefined,
+              url: typeof manifest.author.url === 'string' ? manifest.author.url : undefined
+            }
+          : { name: 'Unknown' },
       engine: {
-        metasheet: manifest.engine?.metasheet || '*',
-        node: manifest.engine?.node,
-        npm: manifest.engine?.npm
+        metasheet: isRecord(manifest.engine) && typeof manifest.engine.metasheet === 'string'
+          ? manifest.engine.metasheet
+          : '*',
+        node: isRecord(manifest.engine) && typeof manifest.engine.node === 'string'
+          ? manifest.engine.node
+          : undefined,
+        npm: isRecord(manifest.engine) && typeof manifest.engine.npm === 'string'
+          ? manifest.engine.npm
+          : undefined
       },
-      main: manifest.main,
-      types: manifest.types,
-      bin: manifest.bin,
-      assets: manifest.assets,
-      dependencies: manifest.dependencies || {},
-      peerDependencies: manifest.peerDependencies || {},
-      optionalDependencies: manifest.optionalDependencies || {},
-      capabilities: manifest.capabilities || {},
-      permissions: manifest.permissions || {},
-      hooks: manifest.hooks,
-      routes: manifest.routes || [],
-      views: manifest.views || [],
-      workflowNodes: manifest.workflowNodes || [],
-      migrations: manifest.migrations || [],
-      configSchema: manifest.configSchema,
-      defaultConfig: manifest.defaultConfig || {},
-      repository: manifest.repository,
-      homepage: manifest.homepage,
-      bugs: manifest.bugs,
-      license: manifest.license,
-      keywords: manifest.keywords || [],
-      platforms: manifest.platforms,
-      cpu: manifest.cpu,
-      os: manifest.os
+      main: String(manifest.main),
+      types: typeof manifest.types === 'string' ? manifest.types : undefined,
+      bin: isRecord(manifest.bin) ? manifest.bin as Record<string, string> : undefined,
+      assets: isRecord(manifest.assets) ? manifest.assets as PluginManifestV2['assets'] : undefined,
+      dependencies: isRecord(manifest.dependencies) ? manifest.dependencies as Record<string, string> : {},
+      peerDependencies: isRecord(manifest.peerDependencies) ? manifest.peerDependencies as Record<string, string> : {},
+      optionalDependencies: isRecord(manifest.optionalDependencies) ? manifest.optionalDependencies as Record<string, string> : {},
+      capabilities: isRecord(manifest.capabilities) ? manifest.capabilities as PluginManifestV2['capabilities'] : {},
+      permissions: isRecord(manifest.permissions) ? manifest.permissions as PluginManifestV2['permissions'] : {},
+      hooks: isRecord(manifest.hooks) ? manifest.hooks as PluginManifestV2['hooks'] : undefined,
+      routes: Array.isArray(manifest.routes) ? manifest.routes as PluginManifestV2['routes'] : [],
+      views: Array.isArray(manifest.views) ? manifest.views as PluginManifestV2['views'] : [],
+      workflowNodes: Array.isArray(manifest.workflowNodes) ? manifest.workflowNodes as PluginManifestV2['workflowNodes'] : [],
+      migrations: Array.isArray(manifest.migrations) ? manifest.migrations as PluginManifestV2['migrations'] : [],
+      configSchema: isConfigSchema(manifest.configSchema) ? manifest.configSchema : undefined,
+      defaultConfig: isRecord(manifest.defaultConfig) ? manifest.defaultConfig : {},
+      repository: isRecord(manifest.repository) ? manifest.repository as PluginManifestV2['repository'] : undefined,
+      homepage: typeof manifest.homepage === 'string' ? manifest.homepage : undefined,
+      bugs: isRecord(manifest.bugs) ? manifest.bugs as PluginManifestV2['bugs'] : undefined,
+      license: typeof manifest.license === 'string' ? manifest.license : undefined,
+      keywords: isStringArray(manifest.keywords) ? manifest.keywords : [],
+      platforms: isStringArray(manifest.platforms) ? manifest.platforms : undefined,
+      cpu: isStringArray(manifest.cpu) ? manifest.cpu : undefined,
+      os: isStringArray(manifest.os) ? manifest.os : undefined
     }
   }
 
@@ -511,7 +587,7 @@ export class ManifestValidator {
     // Check for route conflicts
     const routes1 = new Set(plugin1.routes?.map(r => `${r.method}:${r.path}`))
     const routes2 = new Set(plugin2.routes?.map(r => `${r.method}:${r.path}`))
-    const routeConflicts = [...routes1].filter(r => routes2.has(r))
+    const routeConflicts = Array.from(routes1).filter(r => routes2.has(r))
 
     if (routeConflicts.length > 0) {
       conflicts.push(`Route conflicts: ${routeConflicts.join(', ')}`)

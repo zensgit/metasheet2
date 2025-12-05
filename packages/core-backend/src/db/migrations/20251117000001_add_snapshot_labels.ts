@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Migration: Add snapshot labeling and protection fields
  *
@@ -6,16 +5,14 @@
  * with appropriate indexes for query performance.
  */
 
-import { Kysely, sql } from 'kysely';
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely';
 
-export async function up(db: Kysely<any>): Promise<void> {
-  // Add new columns to snapshots table
-  await db.schema
-    .alterTable('snapshots')
-    .addColumn('tags', 'text[]', (col) => col.defaultTo(sql`'{}'`))
-    .addColumn('protection_level', 'text', (col) => col.defaultTo('normal'))
-    .addColumn('release_channel', 'text')
-    .execute();
+export async function up(db: Kysely<unknown>): Promise<void> {
+  // Add new columns to snapshots table using raw SQL for PostgreSQL array type
+  await sql`ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS tags text[] DEFAULT '{}'`.execute(db);
+  await sql`ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS protection_level text DEFAULT 'normal'`.execute(db);
+  await sql`ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS release_channel text`.execute(db);
 
   // Create GIN index for array operations on tags
   await sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_snapshots_tags ON snapshots USING GIN(tags)`.execute(
@@ -44,7 +41,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   console.log('✅ Added snapshot labeling columns and indexes');
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   // Drop constraints first
   await sql`ALTER TABLE snapshots DROP CONSTRAINT IF EXISTS chk_protection_level`.execute(
     db

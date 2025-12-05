@@ -42,6 +42,7 @@ export class CircuitBreaker extends EventEmitter {
   private requestWindow: RequestRecord[] = []
   private halfOpenRequests: number = 0
   private metrics: CircuitMetrics
+  private cleanupTimer: NodeJS.Timeout
 
   constructor(config: CircuitBreakerConfig = {}) {
     super()
@@ -67,7 +68,7 @@ export class CircuitBreaker extends EventEmitter {
     }
 
     // Clean up old records periodically
-    setInterval(() => this.cleanupWindow(), 1000)
+    this.cleanupTimer = setInterval(() => this.cleanupWindow(), 1000)
   }
 
   async execute<T>(fn: () => Promise<T>): Promise<T> {
@@ -315,6 +316,12 @@ export class CircuitBreaker extends EventEmitter {
 
   isHalfOpen(): boolean {
     return this.state === CircuitState.HALF_OPEN
+  }
+
+  destroy(): void {
+    clearInterval(this.cleanupTimer)
+    this.removeAllListeners()
+    this.emit('destroy')
   }
 }
 

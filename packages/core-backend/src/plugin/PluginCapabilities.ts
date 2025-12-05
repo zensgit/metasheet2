@@ -5,18 +5,14 @@
 
 import { EventEmitter } from 'eventemitter3'
 // Use value imports for runtime enums/constants; Phase A tolerates any typing looseness
-import {
-  PluginCapability,
-  PluginManifest,
-  PluginDependency,
-  CAPABILITY_PERMISSIONS
-} from '../types/plugin'
+import type { PluginManifest } from '../types/plugin'
+import { PluginCapability, CAPABILITY_PERMISSIONS } from '../types/plugin'
 import { Logger } from '../core/logger'
 
 /**
  * 能力依赖关系定义
  */
-export const CAPABILITY_DEPENDENCIES: Record<any, any[]> = {
+export const CAPABILITY_DEPENDENCIES: Record<PluginCapability, PluginCapability[]> = {
   [PluginCapability.VIEW_PROVIDER]: [PluginCapability.CUSTOM_COMPONENT],
   [PluginCapability.CUSTOM_COMPONENT]: [],
   [PluginCapability.WORKFLOW_NODE]: [PluginCapability.DATA_SOURCE],
@@ -38,13 +34,20 @@ export const CAPABILITY_DEPENDENCIES: Record<any, any[]> = {
   [PluginCapability.MENU_ITEM]: [PluginCapability.CUSTOM_COMPONENT],
   [PluginCapability.TOOLBAR_BUTTON]: [PluginCapability.CUSTOM_COMPONENT],
   [PluginCapability.CONTEXT_MENU]: [PluginCapability.CUSTOM_COMPONENT],
-  [PluginCapability.SETTINGS_PAGE]: [PluginCapability.CUSTOM_COMPONENT]
+  [PluginCapability.SETTINGS_PAGE]: [PluginCapability.CUSTOM_COMPONENT],
+  // Core capabilities
+  [PluginCapability.DATABASE]: [],
+  [PluginCapability.HTTP]: [],
+  [PluginCapability.WEBSOCKET]: [],
+  [PluginCapability.STORAGE]: [],
+  [PluginCapability.SCHEDULER]: [],
+  [PluginCapability.NOTIFICATION]: []
 }
 
 /**
  * 能力冲突定义（互斥的能力）
  */
-export const CAPABILITY_CONFLICTS: Record<any, any[]> = {
+export const CAPABILITY_CONFLICTS: Record<PluginCapability, PluginCapability[]> = {
   [PluginCapability.VIEW_PROVIDER]: [],
   [PluginCapability.CUSTOM_COMPONENT]: [],
   [PluginCapability.WORKFLOW_NODE]: [],
@@ -66,13 +69,20 @@ export const CAPABILITY_CONFLICTS: Record<any, any[]> = {
   [PluginCapability.MENU_ITEM]: [],
   [PluginCapability.TOOLBAR_BUTTON]: [],
   [PluginCapability.CONTEXT_MENU]: [],
-  [PluginCapability.SETTINGS_PAGE]: []
+  [PluginCapability.SETTINGS_PAGE]: [],
+  // Core capabilities
+  [PluginCapability.DATABASE]: [],
+  [PluginCapability.HTTP]: [],
+  [PluginCapability.WEBSOCKET]: [],
+  [PluginCapability.STORAGE]: [],
+  [PluginCapability.SCHEDULER]: [],
+  [PluginCapability.NOTIFICATION]: []
 }
 
 /**
  * 能力优先级定义（用于解决冲突时的选择）
  */
-export const CAPABILITY_PRIORITY: Record<any, number> = {
+export const CAPABILITY_PRIORITY: Record<PluginCapability, number> = {
   [PluginCapability.AUTH_PROVIDER]: 10,
   [PluginCapability.PERMISSION_PROVIDER]: 9,
   [PluginCapability.DATA_SOURCE]: 8,
@@ -94,13 +104,20 @@ export const CAPABILITY_PRIORITY: Record<any, number> = {
   [PluginCapability.MENU_ITEM]: 0,
   [PluginCapability.TOOLBAR_BUTTON]: 0,
   [PluginCapability.CONTEXT_MENU]: 0,
-  [PluginCapability.SETTINGS_PAGE]: 0
+  [PluginCapability.SETTINGS_PAGE]: 0,
+  // Core capabilities
+  [PluginCapability.DATABASE]: 5,
+  [PluginCapability.HTTP]: 5,
+  [PluginCapability.WEBSOCKET]: 4,
+  [PluginCapability.STORAGE]: 4,
+  [PluginCapability.SCHEDULER]: 3,
+  [PluginCapability.NOTIFICATION]: 3
 }
 
 /**
  * 能力描述
  */
-export const CAPABILITY_DESCRIPTIONS: Record<any, string> = {
+export const CAPABILITY_DESCRIPTIONS: Record<PluginCapability, string> = {
   [PluginCapability.VIEW_PROVIDER]: '提供自定义视图（如看板、甘特图等）',
   [PluginCapability.CUSTOM_COMPONENT]: '提供自定义UI组件',
   [PluginCapability.WORKFLOW_NODE]: '提供工作流节点',
@@ -122,7 +139,14 @@ export const CAPABILITY_DESCRIPTIONS: Record<any, string> = {
   [PluginCapability.MENU_ITEM]: '提供菜单项',
   [PluginCapability.TOOLBAR_BUTTON]: '提供工具栏按钮',
   [PluginCapability.CONTEXT_MENU]: '提供上下文菜单',
-  [PluginCapability.SETTINGS_PAGE]: '提供设置页面'
+  [PluginCapability.SETTINGS_PAGE]: '提供设置页面',
+  // Core capabilities
+  [PluginCapability.DATABASE]: '提供数据库访问能力',
+  [PluginCapability.HTTP]: '提供HTTP请求能力',
+  [PluginCapability.WEBSOCKET]: '提供WebSocket能力',
+  [PluginCapability.STORAGE]: '提供文件存储能力',
+  [PluginCapability.SCHEDULER]: '提供任务调度能力',
+  [PluginCapability.NOTIFICATION]: '提供通知能力'
 }
 
 /**
@@ -143,9 +167,9 @@ export interface CapabilityValidationResult {
 export interface CapabilityRegistration {
   pluginName: string
   capability: PluginCapability
-  implementation: any
+  implementation: unknown
   priority: number
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   registeredAt: Date
 }
 
@@ -229,8 +253,8 @@ export class PluginCapabilityManager extends EventEmitter {
   registerCapability(
     pluginName: string,
     capability: PluginCapability,
-    implementation: any,
-    metadata: Record<string, any> = {}
+    implementation: unknown,
+    metadata: Record<string, unknown> = {}
   ): void {
     const registration: CapabilityRegistration = {
       pluginName,
@@ -397,7 +421,7 @@ export class PluginCapabilityManager extends EventEmitter {
     const permissions: string[] = []
 
     for (const capability of capabilities) {
-      const capabilityPermissions = (CAPABILITY_PERMISSIONS as any)[capability] || []
+      const capabilityPermissions = CAPABILITY_PERMISSIONS[capability] || []
       permissions.push(...capabilityPermissions)
     }
 
@@ -556,7 +580,7 @@ export const CapabilityUtils = {
    * 获取能力所需的权限
    */
   getRequiredPermissions(capability: PluginCapability): string[] {
-    return (CAPABILITY_PERMISSIONS as any)[capability] || []
+    return CAPABILITY_PERMISSIONS[capability] || []
   },
 
   /**

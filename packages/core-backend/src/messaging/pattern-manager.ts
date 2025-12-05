@@ -3,10 +3,11 @@
  * Issue #28: High-performance pattern matching with prefix tree
  */
 
-import { PatternTrie, Subscription } from './pattern-trie'
+import type { Subscription } from './pattern-trie';
+import { PatternTrie } from './pattern-trie'
 import { EventEmitter } from 'events'
-import { Logger } from '../core/logger'
-import { coreMetrics, CoreMetrics } from '../integration/metrics/metrics'
+import type { Logger } from '../core/logger'
+import type { CoreMetrics } from '../integration/metrics/metrics'
 
 export interface PatternManagerConfig {
   enableMetrics?: boolean
@@ -21,6 +22,20 @@ export interface MatchResult {
   cacheHit: boolean
 }
 
+interface CacheEntry {
+  topic: string
+  matches: number
+  age: number
+}
+
+interface TrieStatsData {
+  totalNodes: number
+  totalSubscriptions: number
+  maxDepth: number
+  averageDepth: number
+  memoryUsage: number
+}
+
 export class PatternManager extends EventEmitter {
   private trie: PatternTrie
   private logger: Logger
@@ -28,6 +43,7 @@ export class PatternManager extends EventEmitter {
   private config: Required<PatternManagerConfig>
   private matchCache: Map<string, { result: Subscription[], timestamp: number }>
   private cleanupTimer?: NodeJS.Timeout
+  private metricsTimer?: NodeJS.Timeout
 
   constructor(
     logger: Logger,
@@ -57,14 +73,14 @@ export class PatternManager extends EventEmitter {
    */
   subscribe(
     pattern: string,
-    callback: (topic: string, message: any) => void,
-    metadata?: any
+    callback: (topic: string, message: unknown) => void,
+    metadata?: Record<string, unknown>
   ): string {
     const subscriptionId = this.generateSubscriptionId()
     const subscription: Subscription = {
       id: subscriptionId,
       pattern,
-      callback,
+      callback: callback as (topic: string, message: unknown) => void,
       createdAt: Date.now(),
       metadata
     }
@@ -155,7 +171,7 @@ export class PatternManager extends EventEmitter {
   /**
    * Publish message to matching subscribers
    */
-  async publish(topic: string, message: any): Promise<number> {
+  async publish(topic: string, message: unknown): Promise<number> {
     const matchResult = this.findMatches(topic)
     const { subscriptions } = matchResult
 
@@ -218,7 +234,7 @@ export class PatternManager extends EventEmitter {
    * Get pattern statistics
    */
   getStats(): {
-    trie: any
+    trie: TrieStatsData
     cache: { size: number, hitRate: number }
     performance: { averageMatchTime: number, averagePublishTime: number }
   } {
@@ -265,6 +281,9 @@ export class PatternManager extends EventEmitter {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer)
     }
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer)
+    }
 
     this.clear()
     this.logger.info('Pattern manager shutdown complete')
@@ -276,8 +295,12 @@ export class PatternManager extends EventEmitter {
    */
   debug(): {
     trie: string
-    cache: any
-    stats: any
+    cache: CacheEntry[]
+    stats: {
+      trie: TrieStatsData
+      cache: { size: number, hitRate: number }
+      performance: { averageMatchTime: number, averagePublishTime: number }
+    }
   } {
     return {
       trie: this.trie.debug(),
@@ -295,7 +318,7 @@ export class PatternManager extends EventEmitter {
    */
 
   private generateSubscriptionId(): string {
-    return `sub-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    return `sub-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
   }
 
   private getCacheKey(topic: string): string {
@@ -358,17 +381,21 @@ export class PatternManager extends EventEmitter {
     if (!this.config.enableMetrics || !this.metrics) return
 
     // Register custom metrics
-    this.on('subscribed', (data) => {
+    this.on('subscribed', (_data) => {
       this.metrics!.increment('pattern_subscriptions_total')
       this.metrics!.gauge('pattern_active_subscriptions', this.trie.getStats().totalSubscriptions)
     })
 
-    this.on('unsubscribed', (data) => {
+    this.on('unsubscribed', (_data) => {
       this.metrics!.increment('pattern_unsubscriptions_total')
       this.metrics!.gauge('pattern_active_subscriptions', this.trie.getStats().totalSubscriptions)
     })
 
-    this.on('published', (data) => {
+    this.on('published', (data: {
+      matchCount: number
+      publishTime: number
+      errorCount: number
+    }) => {
       this.metrics!.increment('pattern_messages_published_total')
       this.metrics!.histogram('pattern_match_count', data.matchCount)
       this.metrics!.histogram('pattern_publish_duration_ms', data.publishTime)
@@ -379,7 +406,7 @@ export class PatternManager extends EventEmitter {
     })
 
     // Periodic stats update
-    setInterval(() => {
+    this.metricsTimer = setInterval(() => {
       const stats = this.getStats()
       this.metrics!.gauge('pattern_trie_nodes', stats.trie.totalNodes)
       this.metrics!.gauge('pattern_trie_memory_bytes', stats.trie.memoryUsage)
@@ -388,7 +415,7 @@ export class PatternManager extends EventEmitter {
     }, 60000) // Every minute
   }
 
-  private recordMetric(event: string, data?: any): void {
+  private recordMetric(event: string, data?: Record<string, unknown>): void {
     if (!this.config.enableMetrics || !this.metrics) return
 
     // Convert event to metric name

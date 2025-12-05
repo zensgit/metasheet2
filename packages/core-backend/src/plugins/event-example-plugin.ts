@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Example Event Bus Plugin
  * 事件总线插件示例
@@ -7,7 +6,95 @@
  * 此插件演示如何使用事件总线系统进行插件间通信。
  */
 
-import { PluginLifecycle, PluginContext, PluginManifest } from '../types/plugin';
+import type { PluginLifecycle, PluginContext, PluginManifest } from '../types/plugin'
+import type { Request, Response } from 'express'
+
+// Event payload types
+interface SpreadsheetCreatedPayload {
+  spreadsheetId?: string
+  userId?: string
+  timestamp?: string
+  changes?: string[]
+}
+
+interface SpreadsheetUpdatedPayload {
+  spreadsheetId?: string
+  userId?: string
+  timestamp?: string
+  changes?: string[]
+}
+
+interface WorkflowPayload {
+  id?: string
+  workflowId?: string
+  status?: string
+  timestamp?: string
+}
+
+interface SystemMaintenancePayload {
+  reason?: string
+  scheduledTime?: string
+  duration?: number
+}
+
+interface UserEventPayload {
+  userId?: string
+  action?: string
+  timestamp?: string
+}
+
+interface DataPointPayload {
+  series?: string
+  value?: unknown
+  timestamp?: string
+}
+
+interface ProcessPayload {
+  processId?: string
+  data?: unknown
+  valid?: boolean
+  result?: string
+}
+
+interface TaskPayload {
+  taskId?: string
+  priority?: 'low' | 'normal' | 'high' | 'critical'
+  userId?: string
+}
+
+interface ActionRequestPayload {
+  actionId?: string
+  userRole?: 'user' | 'admin' | 'manager'
+  userId?: string
+}
+
+// Generic event structure
+interface PluginEvent<T = unknown> {
+  type: string
+  payload?: T
+  timestamp?: string
+}
+
+// Event statistics type
+interface EventStatistics {
+  eventsEmitted: number
+  eventsReceived: number
+  activeSubscriptions: number
+  uptime: number
+  lastActivity: string
+}
+
+// Bulk event request types
+interface BulkEventItem {
+  type: string
+  payload?: unknown
+}
+
+interface BulkEventResult {
+  type: string
+  status: 'emitted' | 'failed'
+  error?: string
+}
 
 export class EventExamplePlugin implements PluginLifecycle {
   public manifest: PluginManifest = {
@@ -24,8 +111,9 @@ export class EventExamplePlugin implements PluginLifecycle {
       // Event capabilities are declared through permissions
       commands: [
         {
-          name: 'trigger-event',
-          description: 'Trigger example events'
+          id: 'trigger-event',
+          title: 'Trigger example events',
+          name: 'trigger-event'
         }
       ]
     }
@@ -61,41 +149,48 @@ export class EventExamplePlugin implements PluginLifecycle {
     if (!this.context) return;
 
     // Subscribe to spreadsheet events
-    this.context.api.events.on('spreadsheet.created', async (event: any) => {
-      this.context!.logger.info('Spreadsheet created event received:', event);
+    this.context.api.events.on('spreadsheet.created', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<SpreadsheetCreatedPayload>;
+      this.context!.logger.info('Spreadsheet created event received:', { event: event.type, payload: event.payload });
 
       // React to spreadsheet creation
       await this.handleSpreadsheetCreated(event);
     });
 
-    this.context.api.events.on('spreadsheet.updated', async (event: any) => {
-      this.context!.logger.info('Spreadsheet updated event received:', event);
+    this.context.api.events.on('spreadsheet.updated', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<SpreadsheetUpdatedPayload>;
+      this.context!.logger.info('Spreadsheet updated event received:', { event: event.type, payload: event.payload });
 
       // Trigger calculation if needed
-      if (event.payload?.changes?.includes('formula')) {
+      if (event.payload?.changes?.includes('formula') && event.payload?.spreadsheetId) {
         await this.triggerCalculation(event.payload.spreadsheetId);
       }
     });
 
     // Subscribe to workflow events
-    this.context.api.events.on('workflow.started', async (event: any) => {
-      this.context!.logger.info('Workflow started:', event);
+    this.context.api.events.on('workflow.started', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<WorkflowPayload>;
+      this.context!.logger.info('Workflow started:', { event: event.type, payload: event.payload });
 
       // Track workflow execution
-      await this.trackWorkflowExecution(event.payload);
+      if (event.payload) {
+        await this.trackWorkflowExecution(event.payload);
+      }
     });
 
     // Subscribe to system events
-    this.context.api.events.on('system.maintenance', async (event: any) => {
-      this.context!.logger.warn('System maintenance event:', event);
+    this.context.api.events.on('system.maintenance', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<SystemMaintenancePayload>;
+      this.context!.logger.warn('System maintenance event:', { event: event.type, payload: event.payload });
 
       // Prepare for maintenance
       await this.prepareForMaintenance();
     });
 
     // Pattern-based subscription
-    this.context.api.events.on('user.*', async (event: any) => {
-      this.context!.logger.info(`User event received: ${event.type}`, event);
+    this.context.api.events.on('user.*', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<UserEventPayload>;
+      this.context!.logger.info(`User event received: ${event.type}`, { payload: event.payload });
     });
   }
 
@@ -103,9 +198,9 @@ export class EventExamplePlugin implements PluginLifecycle {
     if (!this.context) return;
 
     // Trigger event endpoint
-    this.context.api.http.addRoute('POST', '/api/plugins/event-example/trigger', async (req, res) => {
+    this.context.api.http.addRoute('POST', '/api/plugins/event-example/trigger', async (req: Request, res: Response) => {
       try {
-        const { eventType, payload } = req.body;
+        const { eventType, payload } = req.body as { eventType?: string; payload?: unknown };
 
         if (!eventType) {
           return res.status(400).json({
@@ -118,7 +213,7 @@ export class EventExamplePlugin implements PluginLifecycle {
         this.context!.api.events.emit(eventType, payload || {});
 
         // Log the event emission
-        this.context!.logger.info(`Event emitted: ${eventType}`, payload);
+        this.context!.logger.info(`Event emitted: ${eventType}`, { payload });
 
         res.json({
           ok: true,
@@ -128,17 +223,18 @@ export class EventExamplePlugin implements PluginLifecycle {
             timestamp: new Date().toISOString()
           }
         });
-      } catch (error: any) {
-        this.context!.logger.error('Failed to trigger event:', error);
+      } catch (error) {
+        const err = error as Error;
+        this.context!.logger.error('Failed to trigger event:', err);
         res.status(500).json({
           ok: false,
-          error: { code: 'TRIGGER_FAILED', message: error.message }
+          error: { code: 'TRIGGER_FAILED', message: err.message }
         });
       }
     });
 
     // Get event statistics
-    this.context.api.http.addRoute('GET', '/api/plugins/event-example/stats', async (req, res) => {
+    this.context.api.http.addRoute('GET', '/api/plugins/event-example/stats', async (_req: Request, res: Response) => {
       try {
         const stats = await this.getEventStatistics();
 
@@ -146,19 +242,20 @@ export class EventExamplePlugin implements PluginLifecycle {
           ok: true,
           data: stats
         });
-      } catch (error: any) {
-        this.context!.logger.error('Failed to get stats:', error);
+      } catch (error) {
+        const err = error as Error;
+        this.context!.logger.error('Failed to get stats:', err);
         res.status(500).json({
           ok: false,
-          error: { code: 'STATS_FAILED', message: error.message }
+          error: { code: 'STATS_FAILED', message: err.message }
         });
       }
     });
 
     // Bulk event emission
-    this.context.api.http.addRoute('POST', '/api/plugins/event-example/bulk', async (req, res) => {
+    this.context.api.http.addRoute('POST', '/api/plugins/event-example/bulk', async (req: Request, res: Response) => {
       try {
-        const { events } = req.body;
+        const { events } = req.body as { events?: unknown };
 
         if (!Array.isArray(events)) {
           return res.status(400).json({
@@ -167,13 +264,14 @@ export class EventExamplePlugin implements PluginLifecycle {
           });
         }
 
-        const results = [];
-        for (const event of events) {
+        const results: BulkEventResult[] = [];
+        for (const event of events as BulkEventItem[]) {
           try {
             this.context!.api.events.emit(event.type, event.payload);
             results.push({ type: event.type, status: 'emitted' });
-          } catch (error: any) {
-            results.push({ type: event.type, status: 'failed', error: error.message });
+          } catch (error) {
+            const err = error as Error;
+            results.push({ type: event.type, status: 'failed', error: err.message });
           }
         }
 
@@ -186,11 +284,12 @@ export class EventExamplePlugin implements PluginLifecycle {
             results
           }
         });
-      } catch (error: any) {
-        this.context!.logger.error('Bulk emission failed:', error);
+      } catch (error) {
+        const err = error as Error;
+        this.context!.logger.error('Bulk emission failed:', err);
         res.status(500).json({
           ok: false,
-          error: { code: 'BULK_FAILED', message: error.message }
+          error: { code: 'BULK_FAILED', message: err.message }
         });
       }
     });
@@ -211,12 +310,12 @@ export class EventExamplePlugin implements PluginLifecycle {
     // Emit usage statistics every 5 minutes
     setInterval(() => {
       if (this.context && this.status === 'active') {
-        this.emitUsageStatistics();
+        void this.emitUsageStatistics();
       }
     }, 300000);
   }
 
-  private async handleSpreadsheetCreated(event: any): Promise<void> {
+  private async handleSpreadsheetCreated(event: PluginEvent<SpreadsheetCreatedPayload>): Promise<void> {
     // Example: Auto-configure new spreadsheets
     const { spreadsheetId, userId } = event.payload || {};
 
@@ -269,10 +368,10 @@ export class EventExamplePlugin implements PluginLifecycle {
     }, 1000);
   }
 
-  private async trackWorkflowExecution(workflow: any): Promise<void> {
+  private async trackWorkflowExecution(workflow: WorkflowPayload): Promise<void> {
     // Store workflow execution data
     const executionData = {
-      workflowId: workflow.id,
+      workflowId: workflow.id || workflow.workflowId,
       startTime: new Date().toISOString(),
       trackedBy: this.manifest.name
     };
@@ -302,7 +401,7 @@ export class EventExamplePlugin implements PluginLifecycle {
     });
   }
 
-  private async getEventStatistics(): Promise<any> {
+  private async getEventStatistics(): Promise<EventStatistics> {
     // In a real implementation, this would query actual statistics
     return {
       eventsEmitted: Math.floor(Math.random() * 1000),
@@ -330,11 +429,12 @@ export class EventExamplePlugin implements PluginLifecycle {
    * 聚合多个事件并在满足条件时触发
    */
   private setupEventAggregation(): void {
-    const aggregationBuffer: Map<string, any[]> = new Map();
+    const aggregationBuffer: Map<string, DataPointPayload[]> = new Map();
     const aggregationThreshold = 10;
     const aggregationTimeout = 5000;
 
-    this.context?.api.events.on('data.point', (event: any) => {
+    this.context?.api.events.on('data.point', (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<DataPointPayload>;
       const key = event.payload?.series || 'default';
 
       if (!aggregationBuffer.has(key)) {
@@ -356,7 +456,9 @@ export class EventExamplePlugin implements PluginLifecycle {
       }
 
       const buffer = aggregationBuffer.get(key)!;
-      buffer.push(event.payload);
+      if (event.payload) {
+        buffer.push(event.payload);
+      }
 
       // Flush if threshold reached
       if (buffer.length >= aggregationThreshold) {
@@ -377,8 +479,9 @@ export class EventExamplePlugin implements PluginLifecycle {
    */
   private setupEventChaining(): void {
     // Start of chain
-    this.context?.api.events.on('process.start', async (event: any) => {
-      const { processId, data } = event.payload;
+    this.context?.api.events.on('process.start', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<ProcessPayload>;
+      const { processId, data } = event.payload || {};
 
       // Step 1: Validation
       this.context!.api.events.emit('process.validating', { processId, data });
@@ -394,8 +497,9 @@ export class EventExamplePlugin implements PluginLifecycle {
     });
 
     // Chain continuation
-    this.context?.api.events.on('process.validated', async (event: any) => {
-      if (!event.payload.valid) {
+    this.context?.api.events.on('process.validated', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<ProcessPayload>;
+      if (!event.payload?.valid) {
         this.context!.api.events.emit('process.failed', event.payload);
         return;
       }
@@ -413,7 +517,8 @@ export class EventExamplePlugin implements PluginLifecycle {
     });
 
     // End of chain
-    this.context?.api.events.on('process.processed', async (event: any) => {
+    this.context?.api.events.on('process.processed', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<ProcessPayload>;
       this.context!.api.events.emit('process.completed', {
         ...event.payload,
         completedAt: new Date().toISOString()
@@ -427,7 +532,8 @@ export class EventExamplePlugin implements PluginLifecycle {
    */
   private setupEventFiltering(): void {
     // Only process high-priority events
-    this.context?.api.events.on('task.created', async (event: any) => {
+    this.context?.api.events.on('task.created', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<TaskPayload>;
       const priority = event.payload?.priority || 'normal';
 
       if (priority === 'high' || priority === 'critical') {
@@ -436,7 +542,8 @@ export class EventExamplePlugin implements PluginLifecycle {
     });
 
     // Filter by user role
-    this.context?.api.events.on('action.requested', async (event: any) => {
+    this.context?.api.events.on('action.requested', async (...args: unknown[]) => {
+      const event = args[0] as PluginEvent<ActionRequestPayload>;
       const userRole = event.payload?.userRole;
 
       if (userRole === 'admin' || userRole === 'manager') {

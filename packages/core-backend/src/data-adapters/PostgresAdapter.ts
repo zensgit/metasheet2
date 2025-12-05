@@ -1,33 +1,84 @@
-// @ts-nocheck
-import { Pool, Client, QueryResult as PgQueryResult } from 'pg'
-import {
-  BaseDataAdapter,
-  DataSourceConfig,
+// Note: stream() uses batch fetch instead of true cursor-based streaming.
+// For large result sets requiring true streaming, consider pg-cursor or pg-query-stream.
+import type { Pool as PgPool, PoolClient, QueryResult as _PgQueryResult } from 'pg'
+import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
   TableInfo,
   ColumnInfo,
   IndexInfo,
-  ForeignKeyInfo
+  ForeignKeyInfo,
+  DbValue,
+  WhereValue
+} from './BaseAdapter';
+import {
+  BaseDataAdapter,
+  DataSourceConfig as _DataSourceConfig,
+  getStringConfig,
+  getNumberConfig
 } from './BaseAdapter'
+import type { Transaction } from './BaseAdapter'
+
+// Dynamic pg import
+let pg: typeof import('pg') | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  pg = require('pg')
+} catch {
+  // pg not installed
+}
+
+interface PgColumnRow {
+  column_name: string
+  data_type: string
+  is_nullable: string
+  column_default: string | null
+  character_maximum_length: number | null
+  numeric_precision: number | null
+  numeric_scale: number | null
+  comment: string | null
+}
+
+// ForeignKeyAction interface for reference (used in raw query results)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+interface _ForeignKeyAction {
+  update_rule: string
+  delete_rule: string
+}
+
+type FKActionType = 'CASCADE' | 'RESTRICT' | 'SET NULL' | 'NO ACTION'
+
+function mapFKAction(rule: string): FKActionType {
+  const normalized = rule.toUpperCase().replace(/ /g, ' ')
+  if (normalized === 'NO ACTION' || normalized === 'CASCADE' ||
+      normalized === 'RESTRICT' || normalized === 'SET NULL') {
+    return normalized as FKActionType
+  }
+  return 'NO ACTION'
+}
 
 export class PostgresAdapter extends BaseDataAdapter {
-  private pool: Pool | null = null
+  protected override pool: PgPool | null = null
 
   async connect(): Promise<void> {
     if (this.connected) {
       return
     }
 
+    if (!pg) {
+      throw new Error('pg package is not installed')
+    }
+
     try {
-      this.pool = new Pool({
-        host: this.config.connection.host,
-        port: this.config.connection.port || 5432,
-        database: this.config.connection.database,
-        user: this.config.credentials?.username,
-        password: this.config.credentials?.password,
-        ssl: this.config.connection.ssl,
+      const sslConfig = this.config.connection.ssl
+      this.pool = new pg.Pool({
+        host: getStringConfig(this.config.connection.host),
+        port: getNumberConfig(this.config.connection.port) || 5432,
+        database: getStringConfig(this.config.connection.database),
+        user: getStringConfig(this.config.credentials?.username),
+        password: getStringConfig(this.config.credentials?.password),
+        ssl: typeof sslConfig === 'boolean' ? sslConfig : (typeof sslConfig === 'object' ? sslConfig as Record<string, unknown> : undefined),
         max: this.config.poolConfig?.max || 20,
         min: this.config.poolConfig?.min || 2,
         idleTimeoutMillis: this.config.poolConfig?.idleTimeout || 10000,
@@ -77,7 +128,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     }
   }
 
-  async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
+  async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -86,7 +137,7 @@ export class PostgresAdapter extends BaseDataAdapter {
       const result = await this.pool.query(sql, params)
 
       return {
-        data: result.rows,
+        data: result.rows as T[],
         metadata: {
           totalCount: result.rowCount || 0,
           columns: result.fields?.map(field => ({
@@ -104,13 +155,13 @@ export class PostgresAdapter extends BaseDataAdapter {
     }
   }
 
-  async select<T = any>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
+  async select<T = Record<string, DbValue>>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
     const selectClause = options.select?.length
       ? options.select.map(col => this.sanitizeIdentifier(col)).join(', ')
       : '*'
 
     let sql = `SELECT ${selectClause} FROM ${this.sanitizeIdentifier(table)}`
-    let params: any[] = []
+    let params: DbValue[] = []
 
     // Add joins
     if (options.joins?.length) {
@@ -146,7 +197,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, params)
   }
 
-  async insert<T = any>(table: string, data: Record<string, any> | Record<string, any>[]): Promise<QueryResult<T>> {
+  async insert<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue> | Record<string, DbValue>[]): Promise<QueryResult<T>> {
     const records = Array.isArray(data) ? data : [data]
     if (records.length === 0) {
       return { data: [] }
@@ -155,7 +206,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     const columns = Object.keys(records[0])
     const sanitizedColumns = columns.map(col => this.sanitizeIdentifier(col))
 
-    const values: any[] = []
+    const values: DbValue[] = []
     const valuePlaceholders: string[] = []
     let paramIndex = 1
 
@@ -177,9 +228,9 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, values)
   }
 
-  async update<T = any>(table: string, data: Record<string, any>, where: Record<string, any>): Promise<QueryResult<T>> {
+  async update<T = Record<string, DbValue>>(table: string, data: Record<string, DbValue>, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
     const setClause: string[] = []
-    const values: any[] = []
+    const values: DbValue[] = []
     let paramIndex = 1
 
     for (const [key, value] of Object.entries(data)) {
@@ -190,7 +241,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     const whereClause = this.buildWhereClause(where)
 
     // Adjust parameter indices for where clause
-    const adjustedWhereClause = whereClause.sql.replace(/\$(\d+)/g, (match, p1) => {
+    const adjustedWhereClause = whereClause.sql.replace(/\$(\d+)/g, (_match, p1) => {
       return `$${parseInt(p1) + values.length}`
     })
 
@@ -204,7 +255,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, [...values, ...whereClause.params])
   }
 
-  async delete<T = any>(table: string, where: Record<string, any>): Promise<QueryResult<T>> {
+  async delete<T = Record<string, DbValue>>(table: string, where: Record<string, WhereValue>): Promise<QueryResult<T>> {
     const whereClause = this.buildWhereClause(where)
 
     const sql = `
@@ -342,8 +393,8 @@ export class PostgresAdapter extends BaseDataAdapter {
       column: row.column_name,
       referencedTable: row.referenced_table,
       referencedColumn: row.referenced_column,
-      onUpdate: row.update_rule as any,
-      onDelete: row.delete_rule as any
+      onUpdate: mapFKAction(row.update_rule),
+      onDelete: mapFKAction(row.delete_rule)
     }))
 
     return {
@@ -375,16 +426,7 @@ export class PostgresAdapter extends BaseDataAdapter {
       ORDER BY c.ordinal_position
     `
 
-    const result = await this.query<{
-      column_name: string
-      data_type: string
-      is_nullable: string
-      column_default: string | null
-      character_maximum_length: number | null
-      numeric_precision: number | null
-      numeric_scale: number | null
-      comment: string | null
-    }>(query, [table, schema])
+    const result = await this.query<PgColumnRow>(query, [table, schema])
 
     return result.data.map(row => ({
       name: row.column_name,
@@ -409,33 +451,35 @@ export class PostgresAdapter extends BaseDataAdapter {
     return result.data[0]?.exists || false
   }
 
-  async beginTransaction(): Promise<Client> {
+  async beginTransaction(): Promise<Transaction> {
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
 
     const client = await this.pool.connect()
     await client.query('BEGIN')
-    return client
+    return client as unknown as Transaction
   }
 
-  async commit(transaction: Client): Promise<void> {
+  async commit(transaction: Transaction): Promise<void> {
+    const client = transaction as unknown as PoolClient
     try {
-      await transaction.query('COMMIT')
+      await client.query('COMMIT')
     } finally {
-      transaction.release()
+      client.release()
     }
   }
 
-  async rollback(transaction: Client): Promise<void> {
+  async rollback(transaction: Transaction): Promise<void> {
+    const client = transaction as unknown as PoolClient
     try {
-      await transaction.query('ROLLBACK')
+      await client.query('ROLLBACK')
     } finally {
-      transaction.release()
+      client.release()
     }
   }
 
-  async inTransaction(transaction: Client, callback: () => Promise<any>): Promise<any> {
+  async inTransaction<R = unknown>(transaction: Transaction, callback: () => Promise<R>): Promise<R> {
     try {
       const result = await callback()
       await this.commit(transaction)
@@ -446,10 +490,10 @@ export class PostgresAdapter extends BaseDataAdapter {
     }
   }
 
-  async *stream<T = any>(
+  async *stream<T = Record<string, DbValue>>(
     sql: string,
-    params?: any[],
-    options?: { highWaterMark?: number; objectMode?: boolean }
+    params?: DbValue[],
+    _options?: { highWaterMark?: number; objectMode?: boolean }
   ): AsyncIterableIterator<T> {
     if (!this.pool) {
       throw new Error('Not connected to database')
@@ -458,9 +502,12 @@ export class PostgresAdapter extends BaseDataAdapter {
     const client = await this.pool.connect()
 
     try {
-      const query = client.query(sql, params)
+      // Execute query and yield results one by one
+      // Note: pg doesn't support true streaming in standard mode
+      // For true streaming, use pg-cursor or pg-query-stream
+      const result = await client.query(sql, params)
 
-      for await (const row of query) {
+      for (const row of result.rows) {
         yield row as T
       }
     } finally {
@@ -489,7 +536,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return typeMap[oid] || 'unknown'
   }
 
-  private formatColumnType(column: any): string {
+  private formatColumnType(column: PgColumnRow): string {
     let type = column.data_type
 
     if (column.character_maximum_length) {
@@ -505,4 +552,3 @@ export class PostgresAdapter extends BaseDataAdapter {
     return type
   }
 }
-// @ts-nocheck

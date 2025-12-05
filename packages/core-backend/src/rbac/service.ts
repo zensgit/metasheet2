@@ -1,5 +1,9 @@
 import { pool } from '../db/pg'
 import { metrics } from '../metrics/metrics'
+import { Logger } from '../core/logger'
+import { isDatabaseSchemaError } from '../utils/database-errors'
+
+const logger = new Logger('RBACService')
 
 const cache = new Map<string, { codes: string[]; exp: number }>()
 const TTL_MS = parseInt(process.env.RBAC_CACHE_TTL_MS || '60000', 10)
@@ -7,16 +11,6 @@ const TTL_MS = parseInt(process.env.RBAC_CACHE_TTL_MS || '60000', 10)
 // Graceful degradation for missing RBAC tables (Phase B)
 let rbacDegraded = false
 const allowDegradation = process.env.RBAC_OPTIONAL === '1'
-
-function isDatabaseSchemaError(error: any): boolean {
-  // PostgreSQL error code 42P01: relation does not exist
-  if (error?.code === '42P01') return true
-  if (error?.message && typeof error.message === 'string') {
-    const msg = error.message.toLowerCase()
-    return (msg.includes('relation') || msg.includes('table')) && msg.includes('does not exist')
-  }
-  return false
-}
 
 export async function isAdmin(userId: string): Promise<boolean> {
   if (!pool) return false
@@ -26,7 +20,7 @@ export async function isAdmin(userId: string): Promise<boolean> {
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {
-        console.warn('⚠️  RBAC service degraded - user_roles table not found')
+        logger.warn('RBAC service degraded - user_roles table not found')
         rbacDegraded = true
       }
       return false
@@ -54,7 +48,7 @@ export async function userHasPermission(userId: string, code: string): Promise<b
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {
-        console.warn('⚠️  RBAC service degraded - permission tables not found')
+        logger.warn('RBAC service degraded - permission tables not found')
         rbacDegraded = true
       }
       return false
@@ -82,15 +76,15 @@ export async function listUserPermissions(userId: string): Promise<string[]> {
        ) t`,
       [userId]
     )
-    const codes = rows.map(r => r.code as string)
+    const codes = rows.map((r: { code: string }) => r.code)
     cache.set(key, { codes, exp: now + TTL_MS })
     return codes
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {
-        console.warn('⚠️  RBAC service degraded - permission tables not found')
-        console.warn('⚠️  RBAC queries will return empty results')
-        console.warn('⚠️  Set RBAC_OPTIONAL=1 environment variable is active')
+        logger.warn('RBAC service degraded - permission tables not found')
+        logger.warn('RBAC queries will return empty results')
+        logger.warn('Set RBAC_OPTIONAL=1 environment variable is active')
         rbacDegraded = true
       }
       return []

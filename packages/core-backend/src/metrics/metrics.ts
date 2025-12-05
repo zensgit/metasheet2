@@ -111,6 +111,25 @@ const rpcTimeoutsTotal = new client.Counter({
   labelNames: [] as const
 })
 
+// Config reload metrics
+const configReloadTotal = new client.Counter({
+  name: 'metasheet_config_reload_total',
+  help: 'Total config reload operations',
+  labelNames: ['result', 'telemetry_restart'] as const
+})
+
+const configVersionGauge = new client.Gauge({
+  name: 'metasheet_config_version',
+  help: 'Current config version (monotonic counter)',
+  labelNames: [] as const
+})
+
+const configSamplingRate = new client.Gauge({
+  name: 'metasheet_config_sampling_rate',
+  help: 'Current telemetry sampling rate',
+  labelNames: [] as const
+})
+
 // Plugin reload metrics (Phase 8)
 const pluginReloadTotal = new client.Counter({
   name: 'metasheet_plugin_reload_total',
@@ -123,6 +142,12 @@ const pluginReloadDuration = new client.Histogram({
   help: 'Plugin reload duration in seconds',
   labelNames: ['plugin_name'] as const,
   buckets: [0.1, 0.5, 1, 2, 5, 10]
+})
+
+const pluginStatus = new client.Gauge({
+  name: 'metasheet_plugin_status',
+  help: 'Plugin status indicator (1=current status)',
+  labelNames: ['plugin_name', 'status'] as const
 })
 
 // Snapshot metrics (Phase 9)
@@ -287,6 +312,96 @@ const rbacCheckLatencySeconds = new client.Histogram({
   buckets: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
 })
 
+// View data metrics (view-service)
+const viewDataLatencySeconds = new client.Histogram({
+  name: 'metasheet_view_data_latency_seconds',
+  help: 'View data query latency in seconds',
+  labelNames: ['type', 'status'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+})
+
+const viewDataRequestsTotal = new client.Counter({
+  name: 'metasheet_view_data_requests_total',
+  help: 'Total view data requests',
+  labelNames: ['type', 'result'] as const
+})
+
+// Sprint 4: Advanced Messaging Metrics
+const dlqMessagesTotal = new client.Counter({
+  name: 'metasheet_dlq_messages_total',
+  help: 'Total messages sent to DLQ',
+  labelNames: ['topic'] as const
+})
+
+const delayedMessagesTotal = new client.Counter({
+  name: 'metasheet_delayed_messages_total',
+  help: 'Total delayed messages scheduled',
+  labelNames: ['topic'] as const
+})
+
+// BPMN Workflow Engine Metrics
+const bpmnProcessInstancesTotal = new client.Counter({
+  name: 'bpmn_process_instances_total',
+  help: 'Total BPMN process instances started',
+  labelNames: ['definition_key', 'result'] as const
+})
+
+const bpmnProcessInstancesActive = new client.Gauge({
+  name: 'bpmn_process_instances_active',
+  help: 'Current number of active BPMN process instances',
+  labelNames: [] as const
+})
+
+const bpmnActivityExecutionsTotal = new client.Counter({
+  name: 'bpmn_activity_executions_total',
+  help: 'Total BPMN activity executions',
+  labelNames: ['activity_type', 'result'] as const
+})
+
+const bpmnActivityDurationSeconds = new client.Histogram({
+  name: 'bpmn_activity_duration_seconds',
+  help: 'BPMN activity execution duration in seconds',
+  labelNames: ['activity_type'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60]
+})
+
+const bpmnProcessDurationSeconds = new client.Histogram({
+  name: 'bpmn_process_duration_seconds',
+  help: 'BPMN process instance duration in seconds',
+  labelNames: ['definition_key'] as const,
+  buckets: [1, 5, 10, 30, 60, 300, 600, 1800, 3600]
+})
+
+const bpmnTimerJobsTotal = new client.Counter({
+  name: 'bpmn_timer_jobs_total',
+  help: 'Total BPMN timer jobs processed',
+  labelNames: ['result'] as const
+})
+
+const bpmnSignalEventsTotal = new client.Counter({
+  name: 'bpmn_signal_events_total',
+  help: 'Total BPMN signal events processed',
+  labelNames: ['signal_name'] as const
+})
+
+const bpmnMessageEventsTotal = new client.Counter({
+  name: 'bpmn_message_events_total',
+  help: 'Total BPMN message events processed',
+  labelNames: ['message_name'] as const
+})
+
+const bpmnProcessErrorsTotal = new client.Counter({
+  name: 'bpmn_process_errors_total',
+  help: 'Total BPMN process errors',
+  labelNames: ['error_type'] as const
+})
+
+const bpmnStuckInstancesGauge = new client.Gauge({
+  name: 'bpmn_stuck_instances',
+  help: 'Number of potentially stuck BPMN process instances',
+  labelNames: [] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -304,8 +419,12 @@ registry.registerMetric(messagesRetriedTotal)
 registry.registerMetric(messagesExpiredTotal)
 registry.registerMetric(permissionDeniedTotal)
 registry.registerMetric(rpcTimeoutsTotal)
+registry.registerMetric(configReloadTotal)
+registry.registerMetric(configVersionGauge)
+registry.registerMetric(configSamplingRate)
 registry.registerMetric(pluginReloadTotal)
 registry.registerMetric(pluginReloadDuration)
+registry.registerMetric(pluginStatus)
 registry.registerMetric(snapshotCreateTotal)
 registry.registerMetric(snapshotRestoreTotal)
 registry.registerMetric(snapshotOperationDuration)
@@ -331,6 +450,20 @@ registry.registerMetric(redisRecoveryAttemptsTotal)
 registry.registerMetric(redisLastFailureTimestamp)
 registry.registerMetric(rbacPermissionChecksTotal)
 registry.registerMetric(rbacCheckLatencySeconds)
+registry.registerMetric(viewDataLatencySeconds)
+registry.registerMetric(viewDataRequestsTotal)
+registry.registerMetric(dlqMessagesTotal)
+registry.registerMetric(delayedMessagesTotal)
+registry.registerMetric(bpmnProcessInstancesTotal)
+registry.registerMetric(bpmnProcessInstancesActive)
+registry.registerMetric(bpmnActivityExecutionsTotal)
+registry.registerMetric(bpmnActivityDurationSeconds)
+registry.registerMetric(bpmnProcessDurationSeconds)
+registry.registerMetric(bpmnTimerJobsTotal)
+registry.registerMetric(bpmnSignalEventsTotal)
+registry.registerMetric(bpmnMessageEventsTotal)
+registry.registerMetric(bpmnProcessErrorsTotal)
+registry.registerMetric(bpmnStuckInstancesGauge)
 
 export function installMetrics(app: Application) {
   app.get('/metrics', async (_req, res) => {
@@ -342,19 +475,25 @@ export function installMetrics(app: Application) {
   })
 }
 
+interface ResponseWithMetrics extends Response {
+  __metricsStartNs?: bigint
+  __metricsTimer?: (labels: { route: string; method: string }) => (status: number) => void
+}
+
 export function requestMetricsMiddleware(req: Request, res: Response, next: NextFunction) {
   const end = httpHistogram.startTimer()
-  ;(res as any).__metricsStartNs = process.hrtime.bigint()
-  ;(res as any).__metricsTimer = (labels: { route: string; method: string }) => (status: number) => {
+  const metricsRes = res as ResponseWithMetrics
+  metricsRes.__metricsStartNs = process.hrtime.bigint()
+  metricsRes.__metricsTimer = (labels: { route: string; method: string }) => (status: number) => {
     end({ route: labels.route, method: labels.method, status: String(status) })
     try {
-      const start = (res as any).__metricsStartNs as bigint | undefined
+      const start = metricsRes.__metricsStartNs
       if (start) {
         const dur = Number((process.hrtime.bigint() - start)) / 1e9
         httpSummary.labels(labels.route, labels.method, String(status)).observe(dur)
       }
       httpRequestsTotal.labels(labels.method, String(status)).inc()
-    } catch {}
+    } catch { /* metrics recording failure - non-critical */ }
   }
   next()
 }
@@ -376,8 +515,12 @@ export const metrics = {
   messagesExpiredTotal,
   permissionDeniedTotal,
   rpcTimeoutsTotal,
+  configReloadTotal,
+  configVersionGauge,
+  configSamplingRate,
   pluginReloadTotal,
   pluginReloadDuration,
+  pluginStatus,
   snapshotCreateTotal,
   snapshotRestoreTotal,
   snapshotOperationDuration,
@@ -402,5 +545,20 @@ export const metrics = {
   redisRecoveryAttemptsTotal,
   redisLastFailureTimestamp,
   rbacPermissionChecksTotal,
-  rbacCheckLatencySeconds
+  rbacCheckLatencySeconds,
+  viewDataLatencySeconds,
+  viewDataRequestsTotal,
+  dlqMessagesTotal,
+  delayedMessagesTotal,
+  // BPMN Workflow metrics
+  bpmnProcessInstancesTotal,
+  bpmnProcessInstancesActive,
+  bpmnActivityExecutionsTotal,
+  bpmnActivityDurationSeconds,
+  bpmnProcessDurationSeconds,
+  bpmnTimerJobsTotal,
+  bpmnSignalEventsTotal,
+  bpmnMessageEventsTotal,
+  bpmnProcessErrorsTotal,
+  bpmnStuckInstancesGauge
 }

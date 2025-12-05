@@ -1,11 +1,12 @@
-// @ts-nocheck
-import { Application, Request, Response, NextFunction, Router } from 'express'
+import type { Application, Request, Response, NextFunction} from 'express';
+import { Router } from 'express'
 import { EventEmitter } from 'events'
 import * as crypto from 'crypto'
-import { RateLimiter, RateLimitConfig } from './RateLimiter'
+import type { RateLimitConfig } from './RateLimiter';
+import { RateLimiter } from './RateLimiter'
 import { CircuitBreaker } from './CircuitBreaker'
-import { authService } from '../auth/AuthService'
-import * as bcrypt from 'bcrypt'
+import { authService, type User } from '../auth/AuthService'
+import { Logger } from '../core/logger'
 
 export interface APIEndpoint {
   path: string
@@ -28,11 +29,23 @@ export interface APIEndpoint {
 
 export type AuthenticationType = 'jwt' | 'api-key' | 'oauth' | 'basic' | 'none'
 
+// Validation rule type definition
+export interface ValidationRule {
+  required?: boolean
+  type?: 'string' | 'number' | 'boolean' | 'array' | 'object'
+  pattern?: string
+  min?: number
+  max?: number
+  minLength?: number
+  maxLength?: number
+  enum?: unknown[]
+}
+
 export interface ValidationSchema {
-  query?: Record<string, any>
-  body?: Record<string, any>
-  params?: Record<string, any>
-  headers?: Record<string, any>
+  query?: Record<string, ValidationRule>
+  body?: Record<string, ValidationRule>
+  params?: Record<string, ValidationRule>
+  headers?: Record<string, ValidationRule>
 }
 
 export interface CacheConfig {
@@ -44,7 +57,7 @@ export interface CacheConfig {
 
 export interface TransformConfig {
   request?: (req: Request) => Request | Promise<Request>
-  response?: (data: any, req: Request) => any | Promise<any>
+  response?: (data: unknown, req: Request) => unknown | Promise<unknown>
 }
 
 export interface GatewayConfig {
@@ -85,6 +98,18 @@ export interface EndpointMetrics {
   lastAccess: Date
 }
 
+// Extended Request interface for custom properties
+export interface RequestWithExtensions extends Request {
+  requestId?: string
+  user?: User
+}
+
+// Cache entry type
+interface CacheEntry {
+  data: unknown
+  expires: Date
+}
+
 export class APIGateway extends EventEmitter {
   private app: Application
   private router: Router
@@ -92,9 +117,10 @@ export class APIGateway extends EventEmitter {
   private endpoints: Map<string, APIEndpoint> = new Map()
   private rateLimiters: Map<string, RateLimiter> = new Map()
   private circuitBreakers: Map<string, CircuitBreaker> = new Map()
-  private cache: Map<string, { data: any; expires: Date }> = new Map()
+  private cache: Map<string, CacheEntry> = new Map()
   private cleanupTimer: NodeJS.Timeout | null = null  // Store timer reference for cleanup
   private isDestroyed = false  // Track destruction state
+  private logger = new Logger('APIGateway')
   private metrics: APIMetrics = {
     totalRequests: 0,
     successfulRequests: 0,
@@ -205,7 +231,7 @@ export class APIGateway extends EventEmitter {
       const requestId = req.headers['x-request-id']?.toString() ||
                         crypto.randomBytes(16).toString('hex')
 
-      ;(req as any).requestId = requestId
+      ;(req as RequestWithExtensions).requestId = requestId
       res.setHeader('X-Request-ID', requestId)
 
       next()
@@ -215,7 +241,7 @@ export class APIGateway extends EventEmitter {
   private loggingMiddleware() {
     return (req: Request, res: Response, next: NextFunction) => {
       const start = Date.now()
-      const requestId = (req as any).requestId
+      const requestId = (req as RequestWithExtensions).requestId
 
       // Log request
       this.emit('request', {
@@ -229,8 +255,9 @@ export class APIGateway extends EventEmitter {
 
       // Intercept response
       const originalSend = res.send
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
       const gateway = this
-      res.send = function(this: Response, data: any) {
+      res.send = function(this: Response, data: unknown) {
         const duration = Date.now() - start
 
         // Log response
@@ -249,6 +276,7 @@ export class APIGateway extends EventEmitter {
   }
 
   private metricsMiddleware() {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const gateway = this
     return (req: Request, res: Response, next: NextFunction) => {
       const start = Date.now()
@@ -275,7 +303,7 @@ export class APIGateway extends EventEmitter {
 
       // Intercept response
       const originalSend = res.send
-      res.send = function(this: Response, data: any) {
+      res.send = function(this: Response, data: unknown) {
         const duration = Date.now() - start
 
         if (res.statusCode < 400) {
@@ -320,7 +348,7 @@ export class APIGateway extends EventEmitter {
     }
 
     // Build middleware chain
-    const middlewares: any[] = []
+    const middlewares: Array<(req: Request, res: Response, next: NextFunction) => void> = []
 
     // Authentication
     if (endpoint.authentication && endpoint.authentication !== 'none') {
@@ -353,7 +381,7 @@ export class APIGateway extends EventEmitter {
     middlewares.push(this.wrapHandler(handler, endpoint))
 
     // Register route
-    const method = endpoint.method.toLowerCase() as any
+    const method = endpoint.method.toLowerCase() as 'get' | 'post' | 'put' | 'delete' | 'patch'
     this.router[method](endpoint.path, ...middlewares)
 
     this.emit('endpointRegistered', endpoint)
@@ -363,7 +391,7 @@ export class APIGateway extends EventEmitter {
     return async (req: Request, res: Response, next: NextFunction) => {
       try {
         switch (type) {
-          case 'jwt':
+          case 'jwt': {
             // JWT validation using real AuthService
             const token = req.headers.authorization?.replace('Bearer ', '')
             if (!token) {
@@ -376,11 +404,12 @@ export class APIGateway extends EventEmitter {
             }
 
             // 将用户信息附加到请求对象
-            (req as any).user = user
+            (req as RequestWithExtensions).user = user
             next()
             break
+          }
 
-          case 'api-key':
+          case 'api-key': {
             const apiKey = req.headers['x-api-key'] as string
             if (!apiKey) {
               return res.status(401).json({ error: 'No API key provided' })
@@ -393,17 +422,20 @@ export class APIGateway extends EventEmitter {
             }
 
             // 为API Key创建系统用户
-            (req as any).user = {
+            (req as RequestWithExtensions).user = {
               id: 'api-key-user',
               email: 'api@metasheet.com',
               name: 'API Key User',
               role: 'api',
-              permissions: ['api:*']
+              permissions: ['api:*'],
+              created_at: new Date(),
+              updated_at: new Date()
             }
             next()
             break
+          }
 
-          case 'basic':
+          case 'basic': {
             const auth = req.headers.authorization
             if (!auth || !auth.startsWith('Basic ')) {
               return res.status(401).json({ error: 'No basic auth provided' })
@@ -423,12 +455,13 @@ export class APIGateway extends EventEmitter {
                 return res.status(401).json({ error: 'Invalid credentials' })
               }
 
-              (req as any).user = loginResult.user
+              (req as RequestWithExtensions).user = loginResult.user
               next()
             } catch (error) {
               return res.status(401).json({ error: 'Invalid basic auth encoding' })
             }
             break
+          }
 
           case 'oauth':
             // OAuth validation - 暂时返回错误，需要配置OAuth提供商
@@ -445,7 +478,7 @@ export class APIGateway extends EventEmitter {
             next()
         }
       } catch (error) {
-        console.error('Authentication middleware error:', error)
+        this.logger.error('Authentication middleware error', error instanceof Error ? error : undefined)
         return res.status(500).json({ error: 'Authentication service error' })
       }
     }
@@ -453,7 +486,7 @@ export class APIGateway extends EventEmitter {
 
   private createAuthzMiddleware(roles: string[]) {
     return (req: Request, res: Response, next: NextFunction) => {
-      const user = (req as any).user
+      const user = (req as RequestWithExtensions).user
 
       if (!user) {
         return res.status(401).json({ error: 'Not authenticated' })
@@ -521,59 +554,57 @@ export class APIGateway extends EventEmitter {
     }
   }
 
-  private validateObject(obj: any, schema: Record<string, any>): string[] {
+  private validateObject(obj: Record<string, unknown>, schema: Record<string, ValidationRule>): string[] {
     const errors: string[] = []
 
-    for (const [key, rules] of Object.entries(schema) as [string, any][]) {
+    for (const [key, rules] of Object.entries(schema)) {
       const value = obj[key]
 
-      if (typeof rules === 'object' && rules !== null) {
-        // Check required
-        if (rules.required && value === undefined) {
-          errors.push(`${key} is required`)
-          continue
-        }
+      // Check required
+      if (rules.required && value === undefined) {
+        errors.push(`${key} is required`)
+        continue
+      }
 
-        // Check type
-        if (rules.type && value !== undefined) {
-          const type = Array.isArray(value) ? 'array' : typeof value
-          if (type !== rules.type) {
-            errors.push(`${key} must be of type ${rules.type}`)
-          }
+      // Check type
+      if (rules.type && value !== undefined) {
+        const type = Array.isArray(value) ? 'array' : typeof value
+        if (type !== rules.type) {
+          errors.push(`${key} must be of type ${rules.type}`)
         }
+      }
 
-        // Check pattern
-        if (rules.pattern && typeof value === 'string') {
-          const regex = new RegExp(rules.pattern)
-          if (!regex.test(value)) {
-            errors.push(`${key} does not match pattern ${rules.pattern}`)
-          }
+      // Check pattern
+      if (rules.pattern && typeof value === 'string') {
+        const regex = new RegExp(rules.pattern)
+        if (!regex.test(value)) {
+          errors.push(`${key} does not match pattern ${rules.pattern}`)
         }
+      }
 
-        // Check min/max for numbers
-        if (typeof value === 'number') {
-          if (rules.min !== undefined && value < rules.min) {
-            errors.push(`${key} must be at least ${rules.min}`)
-          }
-          if (rules.max !== undefined && value > rules.max) {
-            errors.push(`${key} must be at most ${rules.max}`)
-          }
+      // Check min/max for numbers
+      if (typeof value === 'number') {
+        if (rules.min !== undefined && value < rules.min) {
+          errors.push(`${key} must be at least ${rules.min}`)
         }
+        if (rules.max !== undefined && value > rules.max) {
+          errors.push(`${key} must be at most ${rules.max}`)
+        }
+      }
 
-        // Check length for strings and arrays
-        if ((typeof value === 'string' || Array.isArray(value)) && value !== undefined) {
-          if (rules.minLength !== undefined && value.length < rules.minLength) {
-            errors.push(`${key} must have at least ${rules.minLength} characters/items`)
-          }
-          if (rules.maxLength !== undefined && value.length > rules.maxLength) {
-            errors.push(`${key} must have at most ${rules.maxLength} characters/items`)
-          }
+      // Check length for strings and arrays
+      if ((typeof value === 'string' || Array.isArray(value)) && value !== undefined) {
+        if (rules.minLength !== undefined && value.length < rules.minLength) {
+          errors.push(`${key} must have at least ${rules.minLength} characters/items`)
         }
+        if (rules.maxLength !== undefined && value.length > rules.maxLength) {
+          errors.push(`${key} must have at most ${rules.maxLength} characters/items`)
+        }
+      }
 
-        // Check enum
-        if (rules.enum && !rules.enum.includes(value)) {
-          errors.push(`${key} must be one of: ${rules.enum.join(', ')}`)
-        }
+      // Check enum
+      if (rules.enum && !rules.enum.includes(value)) {
+        errors.push(`${key} must be one of: ${rules.enum.join(', ')}`)
       }
     }
 
@@ -599,17 +630,19 @@ export class APIGateway extends EventEmitter {
       }
 
       // Store original send
-      const originalSend = res.json
-      res.json = function(data) {
+      const originalSend = res.json.bind(res)
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
+      const gateway = this
+      res.json = function(this: Response, data: unknown) {
         // Cache successful responses
         if (res.statusCode === 200) {
           const expires = new Date(Date.now() + cache.ttl * 1000)
-          this.cache.set(key, { data, expires })
+          gateway.cache.set(key, { data, expires })
         }
 
         res.setHeader('X-Cache', 'MISS')
-        return originalSend.call(this, data)
-      }.bind(this)
+        return originalSend(data)
+      }
 
       next()
     }
@@ -625,18 +658,20 @@ export class APIGateway extends EventEmitter {
         // Build upstream URL
         const url = new URL(endpoint.upstream)
         url.pathname = req.path
-        url.search = new URLSearchParams(req.query as any).toString()
+        url.search = new URLSearchParams(req.query as Record<string, string>).toString()
 
         // Forward request
+        const headers: Record<string, string> = {
+          host: url.host,
+          'x-forwarded-for': req.ip || '',
+          'x-forwarded-proto': req.protocol,
+          'x-forwarded-host': req.get('host') || '',
+          'content-type': req.get('content-type') || 'application/json'
+        }
+
         const response = await fetch(url.toString(), {
           method: req.method,
-          headers: {
-            ...req.headers,
-            host: url.host,
-            'x-forwarded-for': req.ip,
-            'x-forwarded-proto': req.protocol,
-            'x-forwarded-host': req.get('host') || ''
-          },
+          headers,
           body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body),
           signal: AbortSignal.timeout(endpoint.timeout || this.config.timeout)
         })
@@ -661,7 +696,7 @@ export class APIGateway extends EventEmitter {
       if (circuitBreaker) {
         try {
           await circuitBreaker.execute(async () => {
-            return new Promise((resolve, reject) => {
+            return new Promise<unknown>((resolve, reject) => {
               // Override send to capture response
               const originalSend = res.send
               res.send = function(data) {
@@ -677,7 +712,7 @@ export class APIGateway extends EventEmitter {
             })
           })
         } catch (error) {
-          if ((error as any).message === 'Circuit breaker is open') {
+          if ((error as Error).message === 'Circuit breaker is open') {
             return res.status(503).json({ error: 'Service temporarily unavailable' })
           }
           throw error
@@ -737,7 +772,7 @@ export class APIGateway extends EventEmitter {
     this.removeAllListeners()
 
     this.emit('destroyed')
-    console.info('[APIGateway] Gateway destroyed and resources cleaned up')
+    this.logger.info('Gateway destroyed and resources cleaned up')
   }
 
   // Public methods

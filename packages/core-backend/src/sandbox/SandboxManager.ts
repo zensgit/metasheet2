@@ -1,5 +1,6 @@
 import { EventEmitter } from 'eventemitter3'
-import { ScriptSandbox, SandboxOptions, ExecutionContext, ExecutionResult } from './ScriptSandbox'
+import type { SandboxOptions, ExecutionContext, ExecutionResult } from './ScriptSandbox';
+import { ScriptSandbox } from './ScriptSandbox'
 import { SecurityPolicy } from './SecurityPolicy'
 import crypto from 'crypto'
 
@@ -23,7 +24,7 @@ export interface ScriptTemplate {
     name: string
     type: string
     required?: boolean
-    default?: any
+    default?: unknown
     description?: string
   }>
   context?: ExecutionContext
@@ -33,7 +34,7 @@ export interface ScriptTemplate {
 export interface ExecutionRequest {
   script?: string
   templateId?: string
-  parameters?: Record<string, any>
+  parameters?: Record<string, unknown>
   context?: ExecutionContext
   language?: 'javascript' | 'typescript' | 'python'
   poolId?: string
@@ -296,12 +297,12 @@ export class SandboxManager extends EventEmitter {
     })
   }
 
-  private releaseSandbox(pool: SandboxPool, sandbox: ScriptSandbox): void {
+  private releaseSandbox(pool: SandboxPool, _sandbox: ScriptSandbox): void {
     pool.activeInstances--
     this.emit('sandbox:released', { poolId: pool.id })
   }
 
-  private prepareTemplateScript(template: ScriptTemplate, parameters: Record<string, any>): string {
+  private prepareTemplateScript(template: ScriptTemplate, parameters: Record<string, unknown>): string {
     let script = template.code
 
     // Replace parameter placeholders

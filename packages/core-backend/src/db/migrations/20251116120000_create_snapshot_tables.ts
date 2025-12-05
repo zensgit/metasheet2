@@ -8,10 +8,11 @@
  * This implements Phase 9 of the ROADMAP: Snapshot / Versioning MVP
  */
 
-import { Kysely, sql } from 'kysely'
+import type { Kysely} from 'kysely';
+import { sql } from 'kysely'
 import { checkTableExists } from './_patterns'
 
-export async function up(db: Kysely<any>): Promise<void> {
+export async function up(db: Kysely<unknown>): Promise<void> {
   // 1. Create snapshots table
   const snapshotsExists = await checkTableExists(db, 'snapshots')
 
@@ -211,7 +212,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   console.log('[Migration] Phase 9 Snapshot/Versioning tables created successfully')
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(db: Kysely<unknown>): Promise<void> {
   console.log('[Migration] Rolling back: dropping snapshot tables')
 
   await db.schema

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Unified Observability Manager
  * Integrates metrics, tracing, logging, and alerting into a single cohesive system
@@ -7,9 +6,10 @@
 import { EventEmitter } from 'eventemitter3'
 import { MetricsCollector } from './MetricsCollector'
 import { DistributedTracing } from './DistributedTracing'
-import { getTelemetry, TelemetryService } from '../services/TelemetryService'
+import type { TelemetryService } from '../services/TelemetryService';
+import { getTelemetry } from '../services/TelemetryService'
 import { Logger } from '../core/logger'
-import { Request, Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 import * as os from 'os'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -99,6 +99,58 @@ export interface HealthStatus {
   }
 }
 
+// Type for span objects from distributed tracing
+interface Span {
+  end: (status?: { code: number; message?: string }) => void
+  setAttribute: (key: string, value: string | number | boolean) => void
+  setStatus: (status: { code: number; message?: string }) => void
+  [key: string]: unknown
+}
+
+// Type for system metrics
+interface SystemMetrics {
+  system?: {
+    cpu?: number
+    memory?: {
+      used?: number
+      total?: number
+      percentage?: number
+    }
+  }
+  [key: string]: unknown
+}
+
+// Type for alert notification data
+interface AlertData {
+  name: string
+  severity: 'info' | 'warning' | 'error' | 'critical'
+  message: string
+  value: number
+  threshold: number
+  timestamp: Date
+  annotations?: Record<string, string>
+}
+
+// Type for performance summary
+interface PerformanceSummary {
+  uptime: number
+  requestCount: number
+  avgResponseTime: number
+  errorRate: number
+  errorCount: number
+  alerts: Array<{
+    name: string
+    severity: 'info' | 'warning' | 'error' | 'critical'
+    triggered: Date
+    count: number
+  }>
+}
+
+// Extended Request type with correlation ID
+interface RequestWithCorrelation extends Request {
+  correlationId?: string
+}
+
 export class ObservabilityManager extends EventEmitter {
   private config: ObservabilityConfig
   private metricsCollector?: MetricsCollector
@@ -113,7 +165,7 @@ export class ObservabilityManager extends EventEmitter {
     errorCount: number
     lastReset: Date
   }
-  private profilingInterval?: NodeJS.Timer
+  private profilingInterval?: ReturnType<typeof setInterval>
 
   constructor(config: ObservabilityConfig) {
     super()
@@ -307,28 +359,32 @@ export class ObservabilityManager extends EventEmitter {
    * Express middleware for observability
    */
   middleware() {
+    // Capture the ObservabilityManager instance for use in res.send override
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const manager = this
+
     return async (req: Request, res: Response, next: NextFunction) => {
       const startTime = Date.now()
-      const correlationId = (req.headers[this.config.logging?.correlationIdHeader || 'x-correlation-id'] || crypto.randomUUID()) as string
+      const correlationId = (req.headers[manager.config.logging?.correlationIdHeader || 'x-correlation-id'] || crypto.randomUUID()) as string
 
       // Add correlation ID to request
-      (req as any).correlationId = correlationId
+      (req as RequestWithCorrelation).correlationId = correlationId
 
       // Start trace span
-      let span: any
-      if (this.distributedTracing) {
-        span = this.distributedTracing.startSpan(`${req.method} ${req.path}`, {
+      let span: Span | undefined
+      if (manager.distributedTracing) {
+        span = manager.distributedTracing.startSpan(`${req.method} ${req.path}`, {
           attributes: {
             'http.method': req.method,
             'http.url': req.url,
             'http.target': req.path,
             'correlation.id': correlationId
           }
-        })
+        }) as Span | undefined
       }
 
       // Log request
-      this.logger.info('Request received', {
+      manager.logger.info('Request received', {
         method: req.method,
         path: req.path,
         correlationId,
@@ -338,39 +394,39 @@ export class ObservabilityManager extends EventEmitter {
 
       // Hook into response
       const originalSend = res.send
-      res.send = function(data: any) {
+      res.send = function(this: Response, data: unknown) {
         const responseTime = Date.now() - startTime
 
         // Update metrics
-        if (this.metricsCollector) {
-          this.metricsCollector.recordHttpRequest(
+        if (manager.metricsCollector) {
+          manager.metricsCollector.recordHttpRequest(
             req.method,
             req.route?.path || req.path,
             res.statusCode,
             responseTime,
             parseInt(req.get('content-length') || '0'),
-            Buffer.byteLength(data)
+            Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
           )
         }
 
         // Update performance metrics
-        this.performanceMetrics.requestCount++
-        this.performanceMetrics.totalResponseTime += responseTime
+        manager.performanceMetrics.requestCount++
+        manager.performanceMetrics.totalResponseTime += responseTime
 
         if (res.statusCode >= 400) {
-          this.performanceMetrics.errorCount++
+          manager.performanceMetrics.errorCount++
         }
 
         // End trace span
-        if (span && this.distributedTracing) {
-          this.distributedTracing.endSpan(span, {
+        if (span && manager.distributedTracing) {
+          manager.distributedTracing.endSpan(span, {
             code: res.statusCode < 400 ? 0 : 2,
             message: res.statusCode >= 400 ? `HTTP ${res.statusCode}` : undefined
           })
         }
 
         // Log response
-        this.logger.info('Request completed', {
+        manager.logger.info('Request completed', {
           method: req.method,
           path: req.path,
           statusCode: res.statusCode,
@@ -416,7 +472,7 @@ export class ObservabilityManager extends EventEmitter {
   /**
    * Evaluate alert condition
    */
-  private evaluateCondition(condition: string, metrics: any): number {
+  private evaluateCondition(condition: string, metrics: SystemMetrics): number {
     // Simple evaluation - in production use a proper expression evaluator
     switch (condition) {
       case 'error_rate':
@@ -430,7 +486,7 @@ export class ObservabilityManager extends EventEmitter {
       case 'cpu_usage':
         return metrics.system?.cpu || 0
       case 'memory_usage':
-        return metrics.system?.memory.percentage || 0
+        return metrics.system?.memory?.percentage || 0
       default:
         return 0
     }
@@ -448,7 +504,7 @@ export class ObservabilityManager extends EventEmitter {
 
     this.alerts.set(rule.name, alert)
 
-    const alertData = {
+    const alertData: AlertData = {
       name: rule.name,
       severity: rule.severity,
       message: rule.message.replace('{{value}}', value.toString()),
@@ -471,8 +527,8 @@ export class ObservabilityManager extends EventEmitter {
   /**
    * Send alert notifications
    */
-  private async sendAlertNotifications(alert: any): Promise<void> {
-    const notifications = []
+  private async sendAlertNotifications(alert: AlertData): Promise<void> {
+    const notifications: Promise<void>[] = []
 
     // Webhook notifications
     if (this.config.alerting?.webhooks) {
@@ -489,7 +545,7 @@ export class ObservabilityManager extends EventEmitter {
   /**
    * Send webhook notification
    */
-  private async sendWebhookNotification(webhook: string, alert: any): Promise<void> {
+  private async sendWebhookNotification(webhook: string, alert: AlertData): Promise<void> {
     try {
       await fetch(webhook, {
         method: 'POST',
@@ -515,12 +571,19 @@ export class ObservabilityManager extends EventEmitter {
     // CPU profile
     if (this.config.profiling.cpuProfile) {
       try {
-        const profiler = require('v8-profiler-next')
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const profiler = require('v8-profiler-next') as {
+          startProfiling: (name: string) => void
+          stopProfiling: () => {
+            export: (callback: (error: Error | null, result: string) => void) => void
+            delete: () => void
+          }
+        }
         profiler.startProfiling('CPU profile')
 
         setTimeout(() => {
           const profile = profiler.stopProfiling()
-          profile.export((error: any, result: string) => {
+          profile.export((error: Error | null, result: string) => {
             if (!error) {
               fs.promises.writeFile(
                 path.join(profilingDir, `cpu-profile-${timestamp}.cpuprofile`),
@@ -538,7 +601,10 @@ export class ObservabilityManager extends EventEmitter {
     // Heap snapshot
     if (this.config.profiling.heapSnapshot) {
       try {
-        const v8 = require('v8')
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        const v8 = require('v8') as {
+          writeHeapSnapshot: () => string | null
+        }
         const heapSnapshot = v8.writeHeapSnapshot()
         if (heapSnapshot) {
           await fs.promises.rename(
@@ -563,7 +629,7 @@ export class ObservabilityManager extends EventEmitter {
    * Get current health status
    */
   async getHealthStatus(): Promise<HealthStatus> {
-    const checks: any = {}
+    const checks: Record<string, boolean> = {}
 
     for (const [name, check] of this.healthChecks) {
       try {
@@ -574,8 +640,8 @@ export class ObservabilityManager extends EventEmitter {
     }
 
     const metrics = await this.getCurrentMetrics()
-    const allHealthy = Object.values(checks).every(v => v === true)
-    const someHealthy = Object.values(checks).some(v => v === true)
+    const allHealthy = Object.values(checks).every(v => v)
+    const someHealthy = Object.values(checks).some(v => v)
 
     return {
       status: allHealthy ? 'healthy' : someHealthy ? 'degraded' : 'unhealthy',
@@ -586,11 +652,11 @@ export class ObservabilityManager extends EventEmitter {
         queue: checks.queue || false,
         external: Object.fromEntries(
           Object.entries(checks).filter(([k]) => !['database', 'cache', 'queue'].includes(k))
-        )
+        ) as Record<string, boolean>
       },
       metrics: {
         cpu: metrics.system?.cpu || 0,
-        memory: metrics.system?.memory.percentage || 0,
+        memory: metrics.system?.memory?.percentage || 0,
         responseTime: this.performanceMetrics.requestCount > 0
           ? this.performanceMetrics.totalResponseTime / this.performanceMetrics.requestCount
           : 0,
@@ -604,9 +670,9 @@ export class ObservabilityManager extends EventEmitter {
   /**
    * Get current metrics
    */
-  async getCurrentMetrics(): Promise<any> {
+  async getCurrentMetrics(): Promise<SystemMetrics> {
     if (this.metricsCollector) {
-      return await this.metricsCollector.getMetricsAsJson()
+      return await this.metricsCollector.getMetricsAsJson() as SystemMetrics
     }
 
     return {
@@ -624,7 +690,7 @@ export class ObservabilityManager extends EventEmitter {
   /**
    * Get performance summary
    */
-  getPerformanceSummary(): any {
+  getPerformanceSummary(): PerformanceSummary {
     const uptime = Date.now() - this.performanceMetrics.lastReset.getTime()
     const avgResponseTime = this.performanceMetrics.requestCount > 0
       ? this.performanceMetrics.totalResponseTime / this.performanceMetrics.requestCount

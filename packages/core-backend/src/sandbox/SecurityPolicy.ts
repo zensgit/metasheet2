@@ -137,8 +137,8 @@ export class SecurityPolicy {
       /\.repeat\s*\(\s*\d{5,}\s*\)/, // String repeat more than 10k times
 
       // Regular expression DoS
-      /\(\?\<[!=].*\)/, // Lookbehind assertions
-      /\(\?\=[^)]*\+\)/, // Complex lookaheads
+      /\(\?<[!=].*\)/, // Lookbehind assertions
+      /\(\?=[^)]*\+\)/, // Complex lookaheads
 
       // Obfuscation attempts
       /String\s*\.\s*fromCharCode/,

@@ -1,5 +1,5 @@
-import { Pool, PoolClient } from 'pg';
-import { query, withTransaction, pool } from '../db/pg';
+import type { Pool } from 'pg';
+import { query, pool } from '../db/pg';
 
 export interface AuditLogData {
   eventType: string;
@@ -10,7 +10,7 @@ export interface AuditLogData {
   resourceName?: string;
   resourcePath?: string;
   action: string;
-  actionDetails?: Record<string, any>;
+  actionDetails?: Record<string, unknown>;
   userId?: number;
   userName?: string;
   userEmail?: string;
@@ -29,9 +29,9 @@ export interface AuditLogData {
   requestId?: string;
   requestMethod?: string;
   requestPath?: string;
-  requestQuery?: Record<string, any>;
-  requestBody?: Record<string, any>;
-  requestHeaders?: Record<string, any>;
+  requestQuery?: Record<string, unknown>;
+  requestBody?: Record<string, unknown>;
+  requestHeaders?: Record<string, unknown>;
   responseStatus?: number;
   responseTimeMs?: number;
   responseSizeBytes?: number;
@@ -51,8 +51,8 @@ export interface DataChangeData {
   recordId: string;
   operation: 'INSERT' | 'UPDATE' | 'DELETE';
   fieldName?: string;
-  oldValue?: any;
-  newValue?: any;
+  oldValue?: unknown;
+  newValue?: unknown;
   valueType?: string;
   changeReason?: string;
   changeApprovedBy?: number;
@@ -65,7 +65,7 @@ export interface SecurityEventData {
   authProvider?: string;
   mfaUsed?: boolean;
   riskScore?: number;
-  riskFactors?: Record<string, any>;
+  riskFactors?: Record<string, unknown>;
   actionTaken?: string;
   alertSent?: boolean;
   alertRecipients?: string[];
@@ -88,6 +88,88 @@ export interface ComplianceData {
   dataTransferCountry?: string;
   transferMechanism?: string;
 }
+
+export interface AuditLogQueryFilters {
+  eventType?: string;
+  eventCategory?: string;
+  resourceType?: string;
+  resourceId?: string;
+  userId?: number;
+  startDate?: Date;
+  endDate?: Date;
+  severity?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface UserActivitySummary {
+  total_actions: string;
+  active_days: string;
+  resource_types_accessed: string;
+  last_activity: Date | null;
+  total_sessions: string;
+  avg_response_time: string | null;
+}
+
+export interface SecurityEventSummary {
+  security_event_type: string;
+  threat_level: string | null;
+  count: string;
+  last_occurrence: Date;
+}
+
+/**
+ * Represents a row from the audit_logs table
+ */
+export interface AuditLogRow {
+  id: number;
+  event_type: string;
+  event_category: string;
+  event_severity: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  resource_name: string | null;
+  resource_path: string | null;
+  action: string;
+  action_details: Record<string, unknown> | null;
+  user_id: number | null;
+  user_name: string | null;
+  user_email: string | null;
+  user_roles: string[] | null;
+  impersonated_by: number | null;
+  session_id: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  device_id: string | null;
+  device_type: string | null;
+  geo_country: string | null;
+  geo_region: string | null;
+  geo_city: string | null;
+  geo_latitude: number | null;
+  geo_longitude: number | null;
+  request_id: string | null;
+  request_method: string | null;
+  request_path: string | null;
+  request_query: Record<string, unknown> | null;
+  request_body: Record<string, unknown> | null;
+  request_headers: Record<string, unknown> | null;
+  response_status: number | null;
+  response_time_ms: number | null;
+  response_size_bytes: number | null;
+  error_code: string | null;
+  error_message: string | null;
+  error_stack: string | null;
+  compliance_flags: string[] | null;
+  data_classification: string | null;
+  retention_period: number | null;
+  tags: string[] | null;
+  correlation_id: string | null;
+  parent_event_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+type QueryValue = string | number | boolean | Date | string[] | null | undefined;
 
 export class AuditRepository {
   constructor(private dbPool: Pool = pool!) {
@@ -122,7 +204,7 @@ export class AuditRepository {
       ) RETURNING id
     `;
 
-    const values = [
+    const values: QueryValue[] = [
       data.eventType,
       data.eventCategory,
       data.eventSeverity || 'INFO',
@@ -185,10 +267,10 @@ export class AuditRepository {
         audit_log_id, table_name, record_id, operation,
         field_name, old_value, new_value, value_type,
         change_reason, change_approved_by
-      ) VALUES 
+      ) VALUES
     `;
 
-    const values: any[] = [];
+    const values: QueryValue[] = [];
     const placeholders: string[] = [];
     let paramIndex = 1;
 
@@ -232,7 +314,7 @@ export class AuditRepository {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `;
 
-    const values = [
+    const values: QueryValue[] = [
       auditLogId,
       data.securityEventType,
       data.threatLevel,
@@ -270,7 +352,7 @@ export class AuditRepository {
       )
     `;
 
-    const values = [
+    const values: QueryValue[] = [
       auditLogId,
       data.regulation,
       data.requirement,
@@ -295,20 +377,9 @@ export class AuditRepository {
   /**
    * Query audit logs with filters
    */
-  async queryAuditLogs(filters: {
-    eventType?: string;
-    eventCategory?: string;
-    resourceType?: string;
-    resourceId?: string;
-    userId?: number;
-    startDate?: Date;
-    endDate?: Date;
-    severity?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<any[]> {
+  async queryAuditLogs(filters: AuditLogQueryFilters): Promise<AuditLogRow[]> {
     let sql = 'SELECT * FROM audit_logs WHERE 1=1';
-    const values: any[] = [];
+    const values: QueryValue[] = [];
     let paramIndex = 1;
 
     if (filters.eventType) {
@@ -363,7 +434,7 @@ export class AuditRepository {
       values.push(filters.offset);
     }
 
-    const result = await query(sql, values);
+    const result = await query<AuditLogRow>(sql, values);
     return result.rows;
   }
 
@@ -373,7 +444,7 @@ export class AuditRepository {
   async getUserActivitySummary(
     userId: number,
     days: number = 30
-  ): Promise<any> {
+  ): Promise<UserActivitySummary> {
     const sql = `
       SELECT
         COUNT(*) as total_actions,
@@ -387,14 +458,14 @@ export class AuditRepository {
         AND created_at > CURRENT_TIMESTAMP - INTERVAL '${days} days'
     `;
 
-    const result = await query(sql, [userId]);
+    const result = await query<UserActivitySummary>(sql, [userId]);
     return result.rows[0];
   }
 
   /**
    * Get security events summary
    */
-  async getSecurityEventsSummary(days: number = 7): Promise<any[]> {
+  async getSecurityEventsSummary(days: number = 7): Promise<SecurityEventSummary[]> {
     const sql = `
       SELECT
         se.security_event_type,
@@ -408,7 +479,7 @@ export class AuditRepository {
       ORDER BY count DESC
     `;
 
-    const result = await query(sql);
+    const result = await query<SecurityEventSummary>(sql);
     return result.rows;
   }
 

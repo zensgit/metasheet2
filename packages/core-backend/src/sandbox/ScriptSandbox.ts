@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { Worker, MessageChannel } from 'worker_threads'
 import { EventEmitter } from 'eventemitter3'
 import path from 'path'
@@ -17,16 +18,19 @@ export interface SandboxOptions {
   isolateContext?: boolean // Run in isolated context
 }
 
+// Type for user-defined functions that can be injected into the sandbox
+type SandboxFunction = (...args: unknown[]) => unknown
+
 export interface ExecutionContext {
-  globals?: Record<string, any> // Global variables available to script
-  modules?: Record<string, any> // Pre-loaded modules
-  functions?: Record<string, Function> // Helper functions
-  data?: any // Input data for the script
+  globals?: Record<string, unknown> // Global variables available to script
+  modules?: Record<string, unknown> // Pre-loaded modules
+  functions?: Record<string, SandboxFunction> // Helper functions
+  data?: unknown // Input data for the script
 }
 
 export interface ExecutionResult {
   success: boolean
-  output?: any
+  output?: unknown
   error?: Error | string
   logs: Array<{ level: string; message: string; timestamp: Date }>
   metrics: {
@@ -35,6 +39,35 @@ export interface ExecutionResult {
     cpuTime?: number // in milliseconds
   }
   warnings?: string[]
+}
+
+// Worker message types
+interface WorkerLogMessage {
+  type: 'log'
+  level: string
+  message: string
+  timestamp: string | Date
+}
+
+interface WorkerResultMessage {
+  type: 'result'
+  output: unknown
+  memoryUsed?: number
+  cpuTime?: number
+  warnings?: string[]
+}
+
+interface WorkerErrorMessage {
+  type: 'error'
+  error: string
+  memoryUsed?: number
+}
+
+type WorkerMessage = WorkerLogMessage | WorkerResultMessage | WorkerErrorMessage
+
+// TypeScript diagnostic type
+interface TypeScriptDiagnostic {
+  messageText: string | { messageText: string }
 }
 
 export class ScriptSandbox extends EventEmitter {
@@ -135,14 +168,13 @@ export class ScriptSandbox extends EventEmitter {
   private async executeJavaScript(
     script: string,
     context: ExecutionContext,
-    executionId: string
+    _executionId: string
   ): Promise<ExecutionResult> {
     const startTime = Date.now()
     const logs: Array<{ level: string; message: string; timestamp: Date }> = []
 
     return new Promise((resolve) => {
-      // Create worker for isolation
-      const workerPath = path.join(__dirname, 'workers', 'javascript.worker.js')
+      // Create worker for isolation using inline code
       const worker = new Worker(this.getWorkerCode(), {
         eval: true,
         resourceLimits: {
@@ -171,7 +203,7 @@ export class ScriptSandbox extends EventEmitter {
       }, this.options.timeout)
 
       // Handle worker messages
-      worker.on('message', (message: any) => {
+      worker.on('message', (message: WorkerMessage) => {
         if (message.type === 'log') {
           logs.push({
             level: message.level,
@@ -269,6 +301,7 @@ export class ScriptSandbox extends EventEmitter {
   ): Promise<ExecutionResult> {
     // Python execution would require spawning a Python subprocess
     // This is a simplified implementation
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     const { spawn } = require('child_process')
     const startTime = Date.now()
     const logs: Array<{ level: string; message: string; timestamp: Date }> = []
@@ -300,7 +333,7 @@ export class ScriptSandbox extends EventEmitter {
 
             if (code === 0) {
               try {
-                const output = JSON.parse(stdout)
+                const output = JSON.parse(stdout) as { result: unknown; logs?: Array<{ level: string; message: string; timestamp: Date }> }
                 resolve({
                   success: true,
                   output: output.result,
@@ -563,28 +596,36 @@ except Exception as e:
   ): Promise<{ valid: boolean; errors?: string[] }> {
     try {
       switch (language) {
-        case 'javascript':
+        case 'javascript': {
           // Use a parser to validate syntax
+          // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
           const acorn = require('acorn')
           acorn.parse(script, { ecmaVersion: 2020 })
           return { valid: true }
+        }
 
-        case 'typescript':
+        case 'typescript': {
           // Would require TypeScript compiler
+          // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
           const ts = require('typescript')
           const result = ts.transpileModule(script, {
             compilerOptions: { module: ts.ModuleKind.CommonJS }
-          })
+          }) as { diagnostics?: TypeScriptDiagnostic[] }
           if (result.diagnostics && result.diagnostics.length > 0) {
             return {
               valid: false,
-              errors: result.diagnostics.map((d: any) => d.messageText)
+              errors: result.diagnostics.map((d: TypeScriptDiagnostic) => {
+                const messageText = d.messageText
+                return typeof messageText === 'string' ? messageText : messageText.messageText
+              })
             }
           }
           return { valid: true }
+        }
 
-        case 'python':
+        case 'python': {
           // Use Python's ast module via subprocess
+          // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
           const { spawn } = require('child_process')
           return new Promise((resolve) => {
             const pythonProcess = spawn('python3', [
@@ -607,6 +648,7 @@ except Exception as e:
               resolve({ valid: false, errors: ['Failed to validate Python script'] })
             })
           })
+        }
 
         default:
           return { valid: false, errors: [`Unsupported language: ${language}`] }

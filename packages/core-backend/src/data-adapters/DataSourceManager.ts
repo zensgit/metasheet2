@@ -1,5 +1,5 @@
 import { EventEmitter } from 'eventemitter3'
-import { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult } from './BaseAdapter'
+import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereValue } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
@@ -110,10 +110,10 @@ export class DataSourceManager extends EventEmitter {
   }
 
   // Query routing methods
-  async query<T = any>(
+  async query<T = Record<string, DbValue>>(
     dataSourceId: string,
     sql: string,
-    params?: any[]
+    params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
 
@@ -124,7 +124,7 @@ export class DataSourceManager extends EventEmitter {
     return adapter.query<T>(sql, params)
   }
 
-  async select<T = any>(
+  async select<T = Record<string, DbValue>>(
     dataSourceId: string,
     table: string,
     options?: QueryOptions
@@ -138,10 +138,10 @@ export class DataSourceManager extends EventEmitter {
     return adapter.select<T>(table, options)
   }
 
-  async insert<T = any>(
+  async insert<T = Record<string, DbValue>>(
     dataSourceId: string,
     table: string,
-    data: Record<string, any> | Record<string, any>[]
+    data: Record<string, DbValue> | Record<string, DbValue>[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
 
@@ -152,11 +152,11 @@ export class DataSourceManager extends EventEmitter {
     return adapter.insert<T>(table, data)
   }
 
-  async update<T = any>(
+  async update<T = Record<string, DbValue>>(
     dataSourceId: string,
     table: string,
-    data: Record<string, any>,
-    where: Record<string, any>
+    data: Record<string, DbValue>,
+    where: Record<string, WhereValue>
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
 
@@ -167,10 +167,10 @@ export class DataSourceManager extends EventEmitter {
     return adapter.update<T>(table, data, where)
   }
 
-  async delete<T = any>(
+  async delete<T = Record<string, DbValue>>(
     dataSourceId: string,
     table: string,
-    where: Record<string, any>
+    where: Record<string, WhereValue>
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
 
@@ -188,9 +188,9 @@ export class DataSourceManager extends EventEmitter {
     targetId: string,
     targetTable: string,
     options?: {
-      where?: Record<string, any>
+      where?: Record<string, WhereValue>
       batchSize?: number
-      transform?: (row: any) => any
+      transform?: (row: Record<string, DbValue>) => Record<string, DbValue>
     }
   ): Promise<{ totalRows: number; duration: number }> {
     const startTime = Date.now()
@@ -208,6 +208,7 @@ export class DataSourceManager extends EventEmitter {
     let offset = 0
     let totalRows = 0
 
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       const result = await sourceAdapter.select(sourceTable, {
         where: options?.where,
@@ -241,16 +242,16 @@ export class DataSourceManager extends EventEmitter {
   }
 
   // Federation query (simple JOIN across databases)
-  async federatedQuery<T = any>(
+  async federatedQuery<T = Record<string, DbValue>>(
     queries: Array<{
       dataSourceId: string
       sql: string
-      params?: any[]
+      params?: DbValue[]
       alias: string
     }>,
-    joinLogic?: (results: Map<string, any[]>) => T[]
+    joinLogic?: (results: Map<string, Record<string, DbValue>[]>) => T[]
   ): Promise<T[]> {
-    const results = new Map<string, any[]>()
+    const results = new Map<string, Record<string, DbValue>[]>()
 
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
@@ -342,7 +343,7 @@ export class DataSourceManager extends EventEmitter {
   async disconnectAll(): Promise<void> {
     const promises: Promise<void>[] = []
 
-    for (const [id, adapter] of this.adapters) {
+    for (const [_id, adapter] of this.adapters) {
       if (adapter.isConnected()) {
         promises.push(adapter.disconnect())
       }
