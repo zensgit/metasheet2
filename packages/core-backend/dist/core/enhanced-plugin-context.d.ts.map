@@ -1,1 +1,0 @@
-{"version":3,"file":"enhanced-plugin-context.d.ts","sourceRoot":"","sources":["../../src/core/enhanced-plugin-context.ts"],"names":[],"mappings":"AAAA;;;GAGG;AAGH,OAAO,KAAK,EACV,aAAa,EACb,cAAc,EAEd,OAAO,EAGP,cAAc,EAEf,MAAM,iBAAiB,CAAA;AAgBxB;;GAEG;AACH,wBAAgB,2BAA2B,CACzC,QAAQ,EAAE,cAAc,EACxB,OAAO,EAAE,OAAO,EAChB,gBAAgB,CAAC,EAAE,OAAO,CAAC,cAAc,CAAC,GACzC,aAAa,CAqDf"}

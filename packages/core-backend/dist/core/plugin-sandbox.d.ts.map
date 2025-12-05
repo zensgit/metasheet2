@@ -1,1 +1,0 @@
-{"version":3,"file":"plugin-sandbox.d.ts","sourceRoot":"","sources":["../../src/core/plugin-sandbox.ts"],"names":[],"mappings":"AAGA,MAAM,WAAW,cAAc;IAC7B,IAAI,CAAC,CAAC,SAAS,MAAM,EAAE,MAAM,EAAE,CAAC,EAAE,UAAU,EAAE,MAAM,GAAG,CAAC,CAAA;CACzD;AAED,qBAAa,WAAY,YAAW,cAAc;IAChD,IAAI,CAAC,CAAC,SAAS,MAAM,EAAE,MAAM,EAAE,CAAC,GAAG,CAAC;CACrC;AAED,wBAAgB,aAAa,IAAI,cAAc,CAK9C"}
