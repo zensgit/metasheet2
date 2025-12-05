@@ -10,7 +10,7 @@
 7. Permission Denial Metrics – DONE
 8. Plugin Reload & Hot Swap – DONE
 9. Snapshot / Versioning MVP – DONE
-10. Advanced Messaging (delay, DLQ, backoff) – PLANNED
+10. Advanced Messaging (delay, DLQ, backoff) – DONE
     - 10.1 Delay scheduling core (Redis ZSET implementation)
     - 10.2 Dead Letter Queue database tables and service
     - 10.3 Backoff strategy calculator (exponential, fibonacci, etc.)
@@ -204,39 +204,39 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 - [x] Phase 5 生产观察基线 (2h local baseline complete; prod rerun scheduled) ✅ Day 5
 - [x] Phase 5 指标扩展 (p50/p95/p99, error_rate, cpu/mem, request_rate) ✅ Day 6
 
-### Sprint 2: 产品能力增强 (5-7 天)
-- [ ] Snapshot 标签系统 (stable, canary, critical)
-- [ ] 保护规则引擎
-- [ ] 插件健康监控仪表板
-- [ ] SLO + Error Budget 管理
+### Sprint 2: 产品能力增强 (5-7 天) ✅ 已完成
+- [x] Snapshot 标签系统 (stable, canary, critical) → `SnapshotService.ts` (tags, protection_level, release_channel)
+- [x] 保护规则引擎 → `ProtectionRuleService.ts` (645 行，条件匹配 + 效果执行)
+- [x] 插件健康监控 → `PluginHealthService.ts` (状态追踪 + EventBus 集成)
+- [x] SLO + Error Budget 管理 → `SLOService.ts` (405 行，告警 + 可视化)
 
 ### Sprint 3: 变更管理体系 (10-15 天)
-- [ ] ChangeManagementService 核心实现
-- [ ] 变更请求审批流程
-- [ ] Schema 快照服务
-- [ ] 自动变更摘要生成
-- [ ] 一键回滚到稳定版本
+- [x] ChangeManagementService 核心实现
+- [x] 变更请求审批流程
+- [x] Schema 快照服务
+- [x] 自动变更摘要生成
+- [x] 一键回滚到稳定版本
 
 **🎯 Sprint 3 MVP 定义** (最小可用版本):
-- 简单 CR 表 (change_requests)
-- 状态流转: draft → approved → deployed
-- 与 Snapshot 打通的一键回滚
-- 3 条关键指标 (created, deployed, rollbacks)
-- Feature Flag 控制 (enableChangeManagement)
+- 简单 CR 表 (change_requests) ✅
+- 状态流转: draft → approved → deployed ✅
+- 与 Snapshot 打通的一键回滚 ✅
+- 3 条关键指标 (created, deployed, rollbacks) ✅
+- Feature Flag 控制 (enableChangeManagement) ✅
 
 ### Sprint 4: Phase 10/11 核心实现
-- [ ] 延迟投递 (内存/Redis)
-- [ ] DLQ + 简单重试
-- [ ] 可配置退避策略
-- [ ] 性能基准测试
-- [ ] 模式索引优化
+- [x] 延迟投递 (内存/Redis)
+- [x] DLQ + 简单重试
+- [x] 可配置退避策略
+- [x] 性能基准测试
+- [x] 模式索引优化
 
 **🎯 Sprint 4 MVP 定义** (最小可用版本):
-- delayFor + delayUntil 基本语义 (内存实现)
-- 简单 DLQ (DB 持久化，无 UI)
-- 固定间隔重试 (1s, 2s, 4s)
-- 3 条指标 (delayed, dlq, retries)
-- 性能基准测试脚本 (无优化实现)
+- delayFor + delayUntil 基本语义 (内存实现) ✅
+- 简单 DLQ (DB 持久化，无 UI) ✅
+- 固定间隔重试 (1s, 2s, 4s) ✅
+- 3 条指标 (delayed, dlq, retries) ✅
+- 性能基准测试脚本 (无优化实现) ✅
 
 ## Near-Term Planned (Legacy)
 - Plugin hot swap during reload (cache module state)
@@ -286,8 +286,8 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 | shardDistribution | Data balance (Phase 11) | Planned |
 | changeRequestsCreatedTotal | 变更管理 (Sprint 3) | Planned |
 | changeDeploymentsTotal | 部署跟踪 (Sprint 3) | Planned |
-| protectionRuleBlocksTotal | 保护规则 (Sprint 2) | Planned |
-| pluginHealthGauge | 插件健康 (Sprint 2) | Planned |
+| protectionRuleBlocksTotal | 保护规则 (Sprint 2) | ✅ Done |
+| pluginHealthGauge | 插件健康 (Sprint 2) | ✅ Done |
 | dangerousOperationsTotal | 安全护栏 (Sprint 1) | ✅ Done |
 | plugin_reload_total / failures | Ops insight | ✅ Done |
 | snapshot_create_total / restore_total | Versioning adoption | ✅ Done |
