@@ -1,26 +1,96 @@
-// @ts-nocheck
 /**
  * Data Materialization Service with CDC Support
  * Handles data synchronization between external sources and local tables
  */
 
 import { EventEmitter } from 'events'
-import { CronJob } from 'cron'
-import { db, transaction } from '../db/kysely'
-import type { ExternalTablesTable, DataSourcesTable } from '../db/types'
-import { DataSourceAdapter } from '../data-adapters/BaseAdapter'
-// Soft dependency adapters; defer to runtime wiring in Phase B
-// @ts-ignore
-import { PostgresAdapter } from '../data-adapters/PostgresAdapter'
-// @ts-ignore
-import { MySQLAdapter } from '../data-adapters/MySQLAdapter'
-// @ts-ignore
-import { MongoDBAdapter } from '../data-adapters/MongoDBAdapter'
-// @ts-ignore
-import { HTTPAdapter } from '../data-adapters/HTTPAdapter'
+import { db } from '../db/kysely'
+import { sql } from 'kysely'
+import { Logger } from '../core/logger'
+// Note: Selectable and ExternalTablesTable types are available for future use
+// import type { Selectable } from 'kysely'
+// import type { ExternalTablesTable } from '../db/types'
 
-// Sync mode types
-export type SyncMode = 'FULL' | 'INCREMENTAL' | 'CDC' | 'UPSERT'
+// CronJob type for optional dependency
+interface CronJobLike {
+  start(): void
+  stop(): void
+}
+
+// Dynamic import for optional cron dependency
+let CronJob: (new (pattern: string, callback: () => void) => CronJobLike) | null = null
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  const cron = require('cron')
+  CronJob = cron.CronJob
+} catch {
+  // cron not installed - scheduled syncs will be disabled
+}
+
+// Type for adapter configuration
+interface AdapterConfig {
+  host?: string
+  port?: number
+  database?: string
+  username?: string
+  password?: string
+  url?: string
+  [key: string]: unknown
+}
+
+// Type for query where clauses
+interface QueryWhereClause {
+  [field: string]: unknown | { $gt: Date | string | number } | { $lt: Date | string | number }
+}
+
+// Adapter interface for CDC support
+interface DataSourceAdapter {
+  getChanges?(options: { table: string; schema?: string; since?: Date }): Promise<ChangeEvent[]>
+  subscribeToCDC?(options: { table: string; schema?: string; callback: (change: ChangeEvent) => Promise<void> }): Promise<{ unsubscribe: () => Promise<void> }>
+  query(options: { table: string; schema?: string; where?: QueryWhereClause; orderBy?: string }): Promise<Record<string, unknown>[]>
+  connect(): Promise<void>
+  disconnect(): Promise<void>
+}
+
+// Dynamic adapter imports - soft dependencies
+let PostgresAdapter: (new (config: AdapterConfig) => DataSourceAdapter) | null = null
+let MySQLAdapter: (new (config: AdapterConfig) => DataSourceAdapter) | null = null
+let MongoDBAdapter: (new (config: AdapterConfig) => DataSourceAdapter) | null = null
+let HTTPAdapter: (new (config: AdapterConfig) => DataSourceAdapter) | null = null
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  PostgresAdapter = require('../data-adapters/PostgresAdapter').PostgresAdapter
+} catch { /* optional */ }
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  MySQLAdapter = require('../data-adapters/MySQLAdapter').MySQLAdapter
+} catch { /* optional */ }
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  MongoDBAdapter = require('../data-adapters/MongoDBAdapter').MongoDBAdapter
+} catch { /* optional */ }
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  HTTPAdapter = require('../data-adapters/HTTPAdapter').HTTPAdapter
+} catch { /* optional */ }
+
+// Sync mode types - application-level sync modes
+export type SyncMode = 'FULL' | 'INCREMENTAL' | 'CDC' | 'UPSERT' | 'LAZY' | 'EAGER' | 'SCHEDULED' | 'REALTIME'
+
+// Database sync mode - stored in sync_config JSON field
+type DbSyncMode = 'LAZY' | 'EAGER' | 'SCHEDULED' | 'REALTIME'
+
+// Sync config structure as stored in database JSON field
+interface SyncConfigJson {
+  schema?: string
+  primaryKey?: string
+  mode?: DbSyncMode
+  interval?: number
+  fieldMappings?: Record<string, string>
+  transformRules?: TransformRule[]
+  [key: string]: unknown
+}
 
 // CDC event types
 export type CDCEvent = 'INSERT' | 'UPDATE' | 'DELETE'
@@ -54,20 +124,47 @@ export interface MaterializationConfig {
   mergeFields?: string[]
 }
 
+// Transform config types for different rule types
+interface RenameConfig {
+  newName: string
+}
+
+interface CastConfig {
+  type: 'string' | 'number' | 'boolean' | 'date' | 'json'
+}
+
+interface FormulaConfig {
+  formula: string
+}
+
+interface LookupConfig {
+  table: string
+  key: string
+  value: string
+}
+
+interface AggregateConfig {
+  function: 'SUM' | 'AVG' | 'MIN' | 'MAX' | 'COUNT' | 'CONCAT'
+  fields: string[]
+}
+
+// Union type for all transform configs
+type TransformConfig = RenameConfig | CastConfig | FormulaConfig | LookupConfig | AggregateConfig
+
 // Transform rule for data transformation
 export interface TransformRule {
   field: string
   type: 'RENAME' | 'CAST' | 'FORMULA' | 'LOOKUP' | 'AGGREGATE'
-  config: any
+  config: TransformConfig
 }
 
 // CDC change event
 export interface ChangeEvent {
   type: CDCEvent
   table: string
-  primaryKey: any
-  before?: Record<string, any>
-  after?: Record<string, any>
+  primaryKey: unknown
+  before?: Record<string, unknown>
+  after?: Record<string, unknown>
   timestamp: Date
 }
 
@@ -83,14 +180,36 @@ export interface SyncResult {
   nextSync?: Date
 }
 
+// CDC Listener interface
+interface CDCListener {
+  unsubscribe: () => Promise<void>
+}
+
+// Extended external table config with parsed JSON fields
+// These fields are stored in sync_config JSON but code expects them at top level
+interface MaterializationDbConfig {
+  id: string
+  data_source_id: string
+  table_id: string | null
+  external_table: string
+  external_schema: string | null
+  external_primary_key: string | null
+  sync_mode: DbSyncMode
+  sync_interval: number | null
+  field_mappings: Record<string, string>
+  transform_rules: TransformRule[]
+  last_sync: Date | null
+}
+
 /**
  * Data Materialization Service
  */
 export class DataMaterializationService extends EventEmitter {
   private adapters: Map<string, DataSourceAdapter> = new Map()
-  private syncJobs: Map<string, CronJob> = new Map()
-  private cdcListeners: Map<string, any> = new Map()
+  private syncJobs: Map<string, CronJobLike> = new Map()
+  private cdcListeners: Map<string, CDCListener> = new Map()
   private syncInProgress: Set<string> = new Set()
+  private logger = new Logger('DataMaterializationService')
 
   constructor() {
     super()
@@ -109,16 +228,21 @@ export class DataMaterializationService extends EventEmitter {
         .execute()
 
       for (const config of configs) {
-        if (config.sync_mode === 'SCHEDULED' && config.sync_interval) {
-          this.scheduleSync(config.id, config.sync_interval)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const syncConfig = (config.sync_config || {}) as any
+        const syncMode = syncConfig.mode as DbSyncMode | undefined
+        const syncInterval = syncConfig.interval as number | undefined
+
+        if (syncMode === 'SCHEDULED' && syncInterval) {
+          this.scheduleSync(config.id, syncInterval)
         }
 
-        if (config.sync_mode === 'REALTIME') {
+        if (syncMode === 'REALTIME') {
           await this.setupCDC(config.id)
         }
       }
     } catch (error) {
-      console.error('Failed to initialize materialization service:', error)
+      this.logger.error('Failed to initialize materialization service', error instanceof Error ? error : undefined)
     }
   }
 
@@ -141,24 +265,32 @@ export class DataMaterializationService extends EventEmitter {
       throw new Error(`Data source ${config.sourceId} not found`)
     }
 
+    // Determine database sync mode from config
+    const dbSyncMode: DbSyncMode = config.syncMode === 'CDC' ? 'REALTIME' :
+                                    config.syncInterval ? 'SCHEDULED' : 'LAZY'
+
     // Create external table record
+    // sync_config JSON contains: mode, interval, field_mappings, transform_rules, etc.
+    const syncConfig = {
+      mode: dbSyncMode,
+      interval: config.syncInterval ?? null,
+      schema: config.sourceSchema ?? null,
+      primaryKey: config.primaryKey ?? null,
+      fieldMappings: config.fieldMappings,
+      transformRules: config.transformRules || []
+    }
+
     await db
       .insertInto('external_tables')
       .values({
         id,
-        table_id: config.targetTableId,
         data_source_id: config.sourceId,
-        external_schema: config.sourceSchema,
-        external_table: config.sourceTable,
-        external_primary_key: config.primaryKey,
-        sync_mode: config.syncMode === 'CDC' ? 'REALTIME' :
-                   config.syncInterval ? 'SCHEDULED' : 'LAZY',
-        sync_interval: config.syncInterval,
-        field_mappings: config.fieldMappings,
-        transform_rules: config.transformRules || [],
-        cache_ttl: 300,
-        max_cache_size: 10485760
-      })
+        external_name: config.sourceTable,
+        local_table_id: config.targetTableId,
+        schema_definition: JSON.stringify({}),
+        sync_config: JSON.stringify(syncConfig)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any)
       .execute()
 
     // Setup sync based on mode
@@ -212,44 +344,32 @@ export class DataMaterializationService extends EventEmitter {
       // Get adapter
       const adapter = await this.getAdapter(config.data_source_id)
 
-      // Determine sync mode
-      const syncMode = options?.fullSync ? 'FULL' :
-                       config.sync_mode === 'REALTIME' ? 'CDC' :
-                       config.sync_mode
-
+      // Determine sync mode - map database sync mode to application sync mode
       let result: SyncResult
 
-      switch (syncMode) {
-        case 'FULL':
-          result = await this.performFullSync(config, adapter)
-          break
-        case 'INCREMENTAL':
-          result = await this.performIncrementalSync(config, adapter, options?.fromTimestamp)
-          break
-        case 'CDC':
-          result = await this.performCDCSync(config, adapter)
-          break
-        case 'UPSERT':
-          result = await this.performUpsertSync(config, adapter)
-          break
-        default:
-          result = await this.performLazySync(config, adapter)
+      if (options?.fullSync) {
+        result = await this.performFullSync(config, adapter)
+      } else if (config.sync_mode === 'REALTIME') {
+        result = await this.performCDCSync(config, adapter)
+      } else if (config.sync_mode === 'SCHEDULED') {
+        result = await this.performIncrementalSync(config, adapter, options?.fromTimestamp)
+      } else if (config.sync_mode === 'LAZY' || config.sync_mode === 'EAGER') {
+        result = await this.performLazySync(config, adapter)
+      } else {
+        // Fallback for any other sync mode
+        result = await this.performLazySync(config, adapter)
       }
 
       // Update sync metadata
+      // Use the columns that exist in the schema: last_sync_at, updated_at
+      const now = new Date().toISOString()
       await db!
         .updateTable('external_tables')
         .set({
-          last_sync: new Date(),
-          next_sync: config.sync_interval
-            ? new Date(Date.now() + config.sync_interval * 1000)
-            : null,
-          total_rows: result.recordsProcessed,
-          sync_duration_ms: Date.now() - startTime,
-          error_count: result.errors.length,
-          last_error: result.errors[0] || null,
-          updated_at: new Date()
-        })
+          last_sync_at: now,
+          updated_at: now
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any)
         .where('id', '=', materializationId)
         .execute()
 
@@ -260,16 +380,17 @@ export class DataMaterializationService extends EventEmitter {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
 
-      // Update error state
+      // Update error state - only update the columns that exist
       await db!
         .updateTable('external_tables')
         .set({
-          last_error: errorMessage,
-          error_count: db!.raw('error_count + 1'),
-          updated_at: new Date()
-        })
+          updated_at: new Date().toISOString()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any)
         .where('id', '=', materializationId)
         .execute()
+      // Note: error tracking fields (last_error, error_count) not in current schema
+      this.logger.error(`Sync error for ${materializationId}: ${errorMessage}`)
 
       this.emit('materialization:error', materializationId, error)
 
@@ -291,7 +412,7 @@ export class DataMaterializationService extends EventEmitter {
    * Perform full sync
    */
   private async performFullSync(
-    config: any,
+    config: MaterializationDbConfig,
     adapter: DataSourceAdapter
   ): Promise<SyncResult> {
     const result: SyncResult = {
@@ -307,20 +428,19 @@ export class DataMaterializationService extends EventEmitter {
     try {
       // Clear existing data
       if (config.table_id) {
-        await db!
-          .deleteFrom('cells')
-          .where('sheet_id', 'in',
-            db!.selectFrom('sheets')
-              .select('id')
-              .where('spreadsheet_id', '=', config.table_id)
+        // Use raw SQL for subquery due to Kysely type constraints
+        await sql`
+          DELETE FROM cells
+          WHERE sheet_id IN (
+            SELECT id FROM sheets WHERE spreadsheet_id = ${config.table_id}
           )
-          .execute()
+        `.execute(db!)
       }
 
       // Fetch all data from source
       const sourceData = await adapter.query({
         table: config.external_table,
-        schema: config.external_schema
+        schema: config.external_schema ?? undefined
       })
 
       // Transform and insert data
@@ -348,7 +468,7 @@ export class DataMaterializationService extends EventEmitter {
    * Perform incremental sync
    */
   private async performIncrementalSync(
-    config: any,
+    config: MaterializationDbConfig,
     adapter: DataSourceAdapter,
     fromTimestamp?: Date
   ): Promise<SyncResult> {
@@ -363,16 +483,16 @@ export class DataMaterializationService extends EventEmitter {
     }
 
     try {
-      const lastSync = fromTimestamp || config.last_sync || new Date(0)
+      const lastSync = fromTimestamp || (config.last_sync ? new Date(config.last_sync as unknown as Date) : new Date(0))
 
       // Fetch changed data
       const sourceData = await adapter.query({
         table: config.external_table,
-        schema: config.external_schema,
+        schema: config.external_schema ?? undefined,
         where: {
-          [config.cdc_column || 'updated_at']: { $gt: lastSync }
+          [config.external_primary_key || 'updated_at']: { $gt: lastSync }
         },
-        orderBy: config.cdc_column || 'updated_at'
+        orderBy: config.external_primary_key || 'updated_at'
       })
 
       // Process changes
@@ -383,17 +503,20 @@ export class DataMaterializationService extends EventEmitter {
           config.transform_rules
         )
 
+        const pkField = config.external_primary_key || 'id'
+        const pkValue = record[pkField]
+
         const exists = await this.recordExists(
           config.table_id,
-          config.external_primary_key,
-          record[config.external_primary_key]
+          pkField,
+          pkValue
         )
 
         if (exists) {
           await this.updateRecord(
             config.table_id,
-            config.external_primary_key,
-            record[config.external_primary_key],
+            pkField,
+            pkValue,
             transformed
           )
           result.recordsUpdated++
@@ -417,7 +540,7 @@ export class DataMaterializationService extends EventEmitter {
    * Perform CDC sync
    */
   private async performCDCSync(
-    config: any,
+    config: MaterializationDbConfig,
     adapter: DataSourceAdapter
   ): Promise<SyncResult> {
     const result: SyncResult = {
@@ -434,8 +557,8 @@ export class DataMaterializationService extends EventEmitter {
       // Get change events from adapter
       const changes = await adapter.getChanges?.({
         table: config.external_table,
-        schema: config.external_schema,
-        since: config.last_sync
+        schema: config.external_schema ?? undefined,
+        since: config.last_sync ? new Date(config.last_sync as unknown as Date) : undefined
       })
 
       if (!changes) {
@@ -468,7 +591,7 @@ export class DataMaterializationService extends EventEmitter {
               )
               await this.updateRecord(
                 config.table_id,
-                config.external_primary_key,
+                config.external_primary_key || 'id',
                 change.primaryKey,
                 transformed
               )
@@ -479,7 +602,7 @@ export class DataMaterializationService extends EventEmitter {
           case 'DELETE':
             await this.deleteRecord(
               config.table_id,
-              config.external_primary_key,
+              config.external_primary_key || 'id',
               change.primaryKey
             )
             result.recordsDeleted++
@@ -501,7 +624,7 @@ export class DataMaterializationService extends EventEmitter {
    * Perform upsert sync
    */
   private async performUpsertSync(
-    config: any,
+    config: MaterializationDbConfig,
     adapter: DataSourceAdapter
   ): Promise<SyncResult> {
     const result: SyncResult = {
@@ -518,12 +641,14 @@ export class DataMaterializationService extends EventEmitter {
       // Fetch all source data
       const sourceData = await adapter.query({
         table: config.external_table,
-        schema: config.external_schema
+        schema: config.external_schema ?? undefined
       })
+
+      const pkField = config.external_primary_key || 'id'
 
       // Build source key set
       const sourceKeys = new Set(
-        sourceData.map(r => r[config.external_primary_key])
+        sourceData.map(r => r[pkField])
       )
 
       // Process upserts
@@ -536,15 +661,15 @@ export class DataMaterializationService extends EventEmitter {
 
         const exists = await this.recordExists(
           config.table_id,
-          config.external_primary_key,
-          record[config.external_primary_key]
+          pkField,
+          record[pkField]
         )
 
         if (exists) {
           await this.updateRecord(
             config.table_id,
-            config.external_primary_key,
-            record[config.external_primary_key],
+            pkField,
+            record[pkField],
             transformed
           )
           result.recordsUpdated++
@@ -559,14 +684,14 @@ export class DataMaterializationService extends EventEmitter {
       // Delete records not in source
       const targetKeys = await this.getTargetKeys(
         config.table_id,
-        config.external_primary_key
+        pkField
       )
 
       for (const key of targetKeys) {
         if (!sourceKeys.has(key)) {
           await this.deleteRecord(
             config.table_id,
-            config.external_primary_key,
+            pkField,
             key
           )
           result.recordsDeleted++
@@ -585,8 +710,8 @@ export class DataMaterializationService extends EventEmitter {
    * Perform lazy sync (on-demand)
    */
   private async performLazySync(
-    config: any,
-    adapter: DataSourceAdapter
+    _config: MaterializationDbConfig,
+    _adapter: DataSourceAdapter
   ): Promise<SyncResult> {
     // Lazy sync doesn't actually sync, just marks for sync
     return {
@@ -612,7 +737,7 @@ export class DataMaterializationService extends EventEmitter {
     if (adapter.subscribeToCDC) {
       const listener = await adapter.subscribeToCDC({
         table: config.external_table,
-        schema: config.external_schema,
+        schema: config.external_schema ?? undefined,
         callback: async (change: ChangeEvent) => {
           await this.handleCDCEvent(materializationId, change)
         }
@@ -632,6 +757,8 @@ export class DataMaterializationService extends EventEmitter {
   ) {
     const config = await this.loadMaterializationConfig(materializationId)
     if (!config) return
+
+    const pkField = config.external_primary_key || 'id'
 
     switch (change.type) {
       case 'INSERT':
@@ -654,7 +781,7 @@ export class DataMaterializationService extends EventEmitter {
           )
           await this.updateRecord(
             config.table_id,
-            config.external_primary_key,
+            pkField,
             change.primaryKey,
             transformed
           )
@@ -664,7 +791,7 @@ export class DataMaterializationService extends EventEmitter {
       case 'DELETE':
         await this.deleteRecord(
           config.table_id,
-          config.external_primary_key,
+          pkField,
           change.primaryKey
         )
         break
@@ -677,6 +804,11 @@ export class DataMaterializationService extends EventEmitter {
    * Schedule periodic sync
    */
   private scheduleSync(materializationId: string, intervalSeconds: number) {
+    if (!CronJob) {
+      this.logger.warn('cron package not installed - scheduled syncs disabled')
+      return
+    }
+
     // Convert seconds to cron pattern
     const cronPattern = intervalSeconds < 60
       ? `*/${intervalSeconds} * * * * *` // Every N seconds
@@ -710,19 +842,26 @@ export class DataMaterializationService extends EventEmitter {
       throw new Error(`Data source ${dataSourceId} not found`)
     }
 
+    // config field contains connection settings (parsed from JSON by Kysely)
+    const connectionConfig = dataSource.config as AdapterConfig
+
     // Create adapter based on type
     switch (dataSource.type) {
       case 'POSTGRES':
-        adapter = new PostgresAdapter(dataSource.connection_config as any)
+        if (!PostgresAdapter) throw new Error('PostgresAdapter not installed')
+        adapter = new PostgresAdapter(connectionConfig)
         break
       case 'MYSQL':
-        adapter = new MySQLAdapter(dataSource.connection_config as any)
+        if (!MySQLAdapter) throw new Error('MySQLAdapter not installed')
+        adapter = new MySQLAdapter(connectionConfig)
         break
       case 'MONGODB':
-        adapter = new MongoDBAdapter(dataSource.connection_config as any)
+        if (!MongoDBAdapter) throw new Error('MongoDBAdapter not installed')
+        adapter = new MongoDBAdapter(connectionConfig)
         break
       case 'HTTP':
-        adapter = new HTTPAdapter(dataSource.connection_config as any)
+        if (!HTTPAdapter) throw new Error('HTTPAdapter not installed')
+        adapter = new HTTPAdapter(connectionConfig)
         break
       default:
         throw new Error(`Unsupported data source type: ${dataSource.type}`)
@@ -736,23 +875,44 @@ export class DataMaterializationService extends EventEmitter {
   /**
    * Load materialization configuration
    */
-  private async loadMaterializationConfig(id: string): Promise<any> {
-    return await db!
+  private async loadMaterializationConfig(id: string): Promise<MaterializationDbConfig | undefined> {
+    const config = await db!
       .selectFrom('external_tables')
       .selectAll()
       .where('id', '=', id)
       .executeTakeFirst()
+
+    if (!config) return undefined
+
+    // Parse sync_config JSON which contains all the materialization settings
+    const syncConfig: SyncConfigJson = typeof config.sync_config === 'string'
+      ? JSON.parse(config.sync_config) as SyncConfigJson
+      : (config.sync_config || {}) as SyncConfigJson
+
+    return {
+      id: config.id,
+      data_source_id: config.data_source_id,
+      table_id: config.local_table_id,
+      external_table: config.external_name,
+      external_schema: syncConfig.schema || null,
+      external_primary_key: syncConfig.primaryKey || null,
+      sync_mode: syncConfig.mode || 'LAZY',
+      sync_interval: syncConfig.interval || null,
+      field_mappings: syncConfig.fieldMappings || {},
+      transform_rules: syncConfig.transformRules || [],
+      last_sync: config.last_sync_at ? new Date(config.last_sync_at as unknown as string) : null
+    }
   }
 
   /**
    * Transform record based on rules
    */
   private async transformRecord(
-    record: Record<string, any>,
+    record: Record<string, unknown>,
     fieldMappings: Record<string, string>,
     rules?: TransformRule[]
-  ): Promise<Record<string, any>> {
-    let transformed: Record<string, any> = {}
+  ): Promise<Record<string, unknown>> {
+    let transformed: Record<string, unknown> = {}
 
     // Apply field mappings
     for (const [source, target] of Object.entries(fieldMappings)) {
@@ -773,39 +933,49 @@ export class DataMaterializationService extends EventEmitter {
    * Apply a transform rule
    */
   private async applyTransformRule(
-    record: Record<string, any>,
+    record: Record<string, unknown>,
     rule: TransformRule
-  ): Promise<Record<string, any>> {
+  ): Promise<Record<string, unknown>> {
     switch (rule.type) {
-      case 'RENAME':
-        record[rule.config.newName] = record[rule.field]
+      case 'RENAME': {
+        const config = rule.config as RenameConfig
+        record[config.newName] = record[rule.field]
         delete record[rule.field]
         break
+      }
 
-      case 'CAST':
-        record[rule.field] = this.castValue(record[rule.field], rule.config.type)
+      case 'CAST': {
+        const config = rule.config as CastConfig
+        record[rule.field] = this.castValue(record[rule.field], config.type)
         break
+      }
 
-      case 'FORMULA':
-        record[rule.field] = await this.evaluateFormula(record, rule.config.formula)
+      case 'FORMULA': {
+        const config = rule.config as FormulaConfig
+        record[rule.field] = await this.evaluateFormula(record, config.formula)
         break
+      }
 
-      case 'LOOKUP':
+      case 'LOOKUP': {
+        const config = rule.config as LookupConfig
         record[rule.field] = await this.lookupValue(
           record[rule.field],
-          rule.config.table,
-          rule.config.key,
-          rule.config.value
+          config.table,
+          config.key,
+          config.value
         )
         break
+      }
 
-      case 'AGGREGATE':
+      case 'AGGREGATE': {
+        const config = rule.config as AggregateConfig
         record[rule.field] = await this.aggregateValue(
           record,
-          rule.config.function,
-          rule.config.fields
+          config.function,
+          config.fields
         )
         break
+      }
     }
 
     return record
@@ -815,21 +985,22 @@ export class DataMaterializationService extends EventEmitter {
    * Helper methods for data operations
    */
   private async recordExists(
-    tableId: string,
+    tableId: string | null,
     keyField: string,
-    keyValue: any
+    keyValue: unknown
   ): Promise<boolean> {
-    if (!db) {
-      console.error('[DataMaterialization] Database not available')
+    if (!db || !tableId) {
+      this.logger.error('Database not available')
       return false
     }
 
     try {
       // Query the materialized table for the key
+      // local_table_id is the column name in the schema
       const result = await db
-        .selectFrom('external_tables' as any)
+        .selectFrom('external_tables')
         .select('id')
-        .where('table_id', '=', tableId)
+        .where('local_table_id', '=', tableId)
         .executeTakeFirst()
 
       if (!result) {
@@ -837,27 +1008,27 @@ export class DataMaterializationService extends EventEmitter {
       }
 
       // Check if record with key exists in the target table
+      // Use raw SQL for dynamic table names as Kysely requires static types
       const tableName = `materialized_${tableId.replace(/-/g, '_')}`
-      const exists = await db
-        .selectFrom(tableName as any)
-        .select('id')
-        .where(keyField, '=', keyValue)
-        .limit(1)
-        .executeTakeFirst()
+      const exists = await sql`
+        SELECT id FROM ${sql.table(tableName)}
+        WHERE ${sql.ref(keyField)} = ${keyValue}
+        LIMIT 1
+      `.execute(db!)
 
-      return !!exists
+      return exists.rows.length > 0
     } catch (error) {
-      console.error(`[DataMaterialization] Error checking record existence: ${error}`)
+      this.logger.error(`Error checking record existence: ${error}`)
       return false
     }
   }
 
   private async insertRecord(
-    tableId: string,
-    record: Record<string, any>
+    tableId: string | null,
+    record: Record<string, unknown>
   ): Promise<void> {
-    if (!db) {
-      console.error('[DataMaterialization] Database not available')
+    if (!db || !tableId) {
+      this.logger.error('Database not available')
       return
     }
 
@@ -868,30 +1039,31 @@ export class DataMaterializationService extends EventEmitter {
       const recordWithMeta = {
         ...record,
         _created_at: new Date(),
-        _updated_at: new Date(),
+        _updated_at: new Date().toISOString(),
         _sync_version: 1
       }
 
+      // Type assertion needed for dynamic table name
       await db
-        .insertInto(tableName as any)
-        .values(recordWithMeta)
+        .insertInto(tableName as never)
+        .values(recordWithMeta as never)
         .execute()
 
-      console.log(`[DataMaterialization] Inserted record into ${tableName}`)
+      this.logger.info(`Inserted record into ${tableName}`)
     } catch (error) {
-      console.error(`[DataMaterialization] Error inserting record: ${error}`)
+      this.logger.error(`Error inserting record: ${error}`)
       throw error
     }
   }
 
   private async updateRecord(
-    tableId: string,
+    tableId: string | null,
     keyField: string,
-    keyValue: any,
-    record: Record<string, any>
+    keyValue: unknown,
+    record: Record<string, unknown>
   ): Promise<void> {
-    if (!db) {
-      console.error('[DataMaterialization] Database not available')
+    if (!db || !tableId) {
+      this.logger.error('Database not available')
       return
     }
 
@@ -901,90 +1073,93 @@ export class DataMaterializationService extends EventEmitter {
       // Add metadata fields
       const recordWithMeta = {
         ...record,
-        _updated_at: new Date()
+        _updated_at: new Date().toISOString()
       }
 
+      // Type assertion needed for dynamic table name and SQL template
       // Increment sync version
       await db
-        .updateTable(tableName as any)
+        .updateTable(tableName as never)
         .set({
           ...recordWithMeta,
-          _sync_version: db.fn('COALESCE', ['_sync_version', 0]).add(1)
-        } as any)
-        .where(keyField, '=', keyValue)
+          _sync_version: sql`COALESCE(_sync_version, 0) + 1`
+        } as never)
+        .where(keyField as never, '=' as never, keyValue as never)
         .execute()
 
-      console.log(`[DataMaterialization] Updated record in ${tableName} where ${keyField}=${keyValue}`)
+      this.logger.info(`Updated record in ${tableName} where ${keyField}=${keyValue}`)
     } catch (error) {
-      console.error(`[DataMaterialization] Error updating record: ${error}`)
+      this.logger.error(`Error updating record: ${error}`)
       throw error
     }
   }
 
   private async deleteRecord(
-    tableId: string,
+    tableId: string | null,
     keyField: string,
-    keyValue: any
+    keyValue: unknown
   ): Promise<void> {
-    if (!db) {
-      console.error('[DataMaterialization] Database not available')
+    if (!db || !tableId) {
+      this.logger.error('Database not available')
       return
     }
 
     try {
       const tableName = `materialized_${tableId.replace(/-/g, '_')}`
 
+      // Type assertion needed for dynamic table name
       await db
-        .deleteFrom(tableName as any)
-        .where(keyField, '=', keyValue)
+        .deleteFrom(tableName as never)
+        .where(keyField as never, '=' as never, keyValue as never)
         .execute()
 
-      console.log(`[DataMaterialization] Deleted record from ${tableName} where ${keyField}=${keyValue}`)
+      this.logger.info(`Deleted record from ${tableName} where ${keyField}=${keyValue}`)
     } catch (error) {
-      console.error(`[DataMaterialization] Error deleting record: ${error}`)
+      this.logger.error(`Error deleting record: ${error}`)
       throw error
     }
   }
 
   private async getTargetKeys(
-    tableId: string,
+    tableId: string | null,
     keyField: string
-  ): Promise<any[]> {
-    if (!db) {
-      console.error('[DataMaterialization] Database not available')
+  ): Promise<unknown[]> {
+    if (!db || !tableId) {
+      this.logger.error('Database not available')
       return []
     }
 
     try {
       const tableName = `materialized_${tableId.replace(/-/g, '_')}`
 
+      // Type assertion needed for dynamic table name
       const result = await db
-        .selectFrom(tableName as any)
-        .select(keyField)
+        .selectFrom(tableName as never)
+        .select(keyField as never)
         .execute()
 
-      return result.map((row: any) => row[keyField])
+      return result.map((row: Record<string, unknown>) => row[keyField])
     } catch (error) {
-      console.error(`[DataMaterialization] Error getting target keys: ${error}`)
+      this.logger.error(`Error getting target keys: ${error}`)
       return []
     }
   }
 
-  private castValue(value: any, type: string): any {
+  private castValue(value: unknown, type: 'string' | 'number' | 'boolean' | 'date' | 'json'): unknown {
     switch (type) {
       case 'string': return String(value)
       case 'number': return Number(value)
       case 'boolean': return Boolean(value)
-      case 'date': return new Date(value)
-      case 'json': return JSON.parse(value)
+      case 'date': return new Date(value as string | number | Date)
+      case 'json': return JSON.parse(value as string)
       default: return value
     }
   }
 
   private async evaluateFormula(
-    record: Record<string, any>,
+    record: Record<string, unknown>,
     formula: string
-  ): Promise<any> {
+  ): Promise<unknown> {
     // Safe formula evaluation - NO eval() to prevent code injection
     // Supports: field references, basic math, string concatenation
     try {
@@ -1013,7 +1188,7 @@ export class DataMaterializationService extends EventEmitter {
 
       // Simple field reference: {{fieldName}}
       const fieldRefPattern = /\{\{(\w+)\}\}/g
-      let result = sanitized.replace(fieldRefPattern, (_, field) => {
+      const result = sanitized.replace(fieldRefPattern, (_, field) => {
         const value = record[field]
         return value !== undefined ? String(value) : ''
       })
@@ -1080,33 +1255,34 @@ export class DataMaterializationService extends EventEmitter {
       // Return as-is if it's just a value
       return result
     } catch (error) {
-      console.error('[DataMaterialization] Formula evaluation error:', error)
+      this.logger.error('Formula evaluation error', error instanceof Error ? error : undefined)
       return null
     }
   }
 
   private async lookupValue(
-    key: any,
+    key: unknown,
     table: string,
     keyField: string,
     valueField: string
-  ): Promise<any> {
+  ): Promise<unknown> {
+    // Type assertion needed for dynamic table name
     // Lookup value from another table
     const result = await db!
-      .selectFrom(table as any)
-      .select(valueField)
-      .where(keyField, '=', key)
+      .selectFrom(table as never)
+      .select(valueField as never)
+      .where(keyField as never, '=' as never, key as never)
       .executeTakeFirst()
 
-    return result?.[valueField]
+    return result?.[valueField as keyof typeof result]
   }
 
   private async aggregateValue(
-    record: Record<string, any>,
-    func: string,
+    record: Record<string, unknown>,
+    func: 'SUM' | 'AVG' | 'MIN' | 'MAX' | 'COUNT' | 'CONCAT',
     fields: string[]
-  ): Promise<any> {
-    const values = fields.map(f => record[f]).filter(v => v !== undefined)
+  ): Promise<unknown> {
+    const values = fields.map(f => record[f]).filter(v => v !== undefined) as number[]
 
     switch (func) {
       case 'SUM': return values.reduce((a, b) => a + b, 0)

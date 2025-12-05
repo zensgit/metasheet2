@@ -6,11 +6,13 @@
  */
 
 import { db } from '../db/db'
-import { sql } from 'kysely'
+import { sql, type OnConflictBuilder } from 'kysely'
 import { Logger } from '../core/logger'
 import { metrics } from '../metrics/metrics'
 import { auditLog } from '../audit/audit'
 import crypto from 'crypto'
+import type { Database } from '../db/types'
+import { protectionRuleService } from './ProtectionRuleService'
 
 export interface SnapshotCreateOptions {
   viewId: string
@@ -18,7 +20,7 @@ export interface SnapshotCreateOptions {
   description?: string
   createdBy: string
   snapshotType?: 'manual' | 'auto' | 'pre_migration'
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
   expiresAt?: Date
 }
 
@@ -37,7 +39,7 @@ export interface Snapshot {
   version: number
   created_by: string
   snapshot_type: string
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   is_locked: boolean
   parent_snapshot_id?: string
   created_at: Date
@@ -53,7 +55,42 @@ export interface SnapshotItem {
   snapshot_id: string
   item_type: string
   item_id: string
-  data: any
+  data: unknown
+  checksum?: string
+  created_at: Date
+}
+
+// Database result types
+interface VersionResult {
+  version: number
+  id?: string
+}
+
+interface CountResult {
+  count: string | number
+}
+
+interface DateResult {
+  created_at: Date
+}
+
+interface TypeStatsResult {
+  snapshot_type: string
+  count: string | number
+}
+
+interface ProtectionLevelResult {
+  id: string
+  view_id: string
+  protection_level: 'normal' | 'protected' | 'critical' | null
+}
+
+interface DbSnapshotItem {
+  id: string
+  snapshot_id: string
+  item_type: string
+  item_id: string
+  data: string
   checksum?: string
   created_at: Date
 }
@@ -75,11 +112,11 @@ export class SnapshotService {
       try {
         const end = (label: 'create' | 'restore', startMs: number) => {
           const duration = (Date.now() - startMs) / 1000
-          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch {}
+          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch { /* metrics unavailable */ }
           return duration
         }
         return (label: 'create' | 'restore') => end(label, startTime)
-      } catch {
+      } catch { /* timer setup failure - use fallback */
         return (_label: 'create' | 'restore') => (Date.now() - startTime) / 1000
       }
     })()
@@ -93,18 +130,21 @@ export class SnapshotService {
     try {
       // Get current version for this view
       const lastSnapshot = await db
-        .selectFrom('snapshots' as any)
+        .selectFrom('snapshots')
         .select('version')
         .where('view_id', '=', options.viewId)
         .orderBy('version', 'desc')
         .limit(1)
-        .executeTakeFirst()
+        .executeTakeFirst() as VersionResult | undefined
 
-      const newVersion = lastSnapshot ? (lastSnapshot as any).version + 1 : 1
+      const newVersion = lastSnapshot ? lastSnapshot.version + 1 : 1
 
       // Create snapshot record
+      // NullableTimestamp expects string | undefined for insert, convert Date to ISO string
+      const expiresAtValue = options.expiresAt ? options.expiresAt.toISOString() : undefined
+
       const snapshot = await db
-        .insertInto('snapshots' as any)
+        .insertInto('snapshots')
         .values({
           view_id: options.viewId,
           name: options.name,
@@ -114,8 +154,11 @@ export class SnapshotService {
           snapshot_type: options.snapshotType || 'manual',
           metadata: JSON.stringify(options.metadata || {}),
           is_locked: false,
-          parent_snapshot_id: lastSnapshot ? (lastSnapshot as any).id : null,
-          expires_at: options.expiresAt || null
+          parent_snapshot_id: lastSnapshot?.id || null,
+          expires_at: expiresAtValue,
+          tags: [],
+          protection_level: 'normal',
+          release_channel: null
         })
         .returningAll()
         .executeTakeFirstOrThrow()
@@ -125,7 +168,7 @@ export class SnapshotService {
 
       // Record metrics
       const duration = stopTimer('create')
-      try { metrics.snapshotCreateTotal.labels('success').inc() } catch {}
+      try { metrics.snapshotCreateTotal.labels('success').inc() } catch { /* metrics unavailable */ }
 
       // Audit log
       await auditLog({
@@ -147,8 +190,8 @@ export class SnapshotService {
       return snapshot as Snapshot
     } catch (error) {
       const err = error as Error
-      const duration = stopTimer('create')
-      try { metrics.snapshotCreateTotal.labels('failure').inc() } catch {}
+      stopTimer('create')
+      try { metrics.snapshotCreateTotal.labels('failure').inc() } catch { /* metrics unavailable */ }
 
       this.logger.error('Failed to create snapshot', err)
       throw err
@@ -167,7 +210,7 @@ export class SnapshotService {
 
     // Capture view metadata
     const view = await db
-      .selectFrom('views' as any)
+      .selectFrom('views')
       .selectAll()
       .where('id', '=', viewId)
       .executeTakeFirst()
@@ -179,27 +222,27 @@ export class SnapshotService {
 
     // Capture view states
     const viewStates = await db
-      .selectFrom('view_states' as any)
+      .selectFrom('view_states')
       .selectAll()
       .where('view_id', '=', viewId)
       .execute()
 
     for (const state of viewStates) {
-      await this.saveSnapshotItem(snapshotId, 'view_state', (state as any).id, state)
+      await this.saveSnapshotItem(snapshotId, 'view_state', state.id, state)
       itemsCreated++
     }
 
     // Capture table rows (if applicable)
     try {
       const tableRows = await db
-        .selectFrom('table_rows' as any)
+        .selectFrom('table_rows')
         .selectAll()
-        .where('view_id', '=', viewId)
+        .where('table_id', '=', viewId)
         .limit(10000) // Safety limit
         .execute()
 
       for (const row of tableRows) {
-        await this.saveSnapshotItem(snapshotId, 'table_row', (row as any).id, row)
+        await this.saveSnapshotItem(snapshotId, 'table_row', row.id, row)
         itemsCreated++
       }
     } catch {
@@ -216,7 +259,7 @@ export class SnapshotService {
     snapshotId: string,
     itemType: string,
     itemId: string,
-    data: any
+    data: unknown
   ): Promise<void> {
     if (!db) {
       throw new Error('Database not available')
@@ -226,7 +269,7 @@ export class SnapshotService {
     const checksum = crypto.createHash('sha256').update(dataString).digest('hex')
 
     await db
-      .insertInto('snapshot_items' as any)
+      .insertInto('snapshot_items')
       .values({
         snapshot_id: snapshotId,
         item_type: itemType,
@@ -250,11 +293,11 @@ export class SnapshotService {
       try {
         const end = (label: 'create' | 'restore', startMs: number) => {
           const duration = (Date.now() - startMs) / 1000
-          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch {}
+          try { metrics.snapshotOperationDuration.labels(label).observe(duration) } catch { /* metrics unavailable */ }
           return duration
         }
         return (label: 'create' | 'restore') => end(label, startTime)
-      } catch {
+      } catch { /* timer setup failure - use fallback */
         return (_label: 'create' | 'restore') => (Date.now() - startTime) / 1000
       }
     })()
@@ -268,7 +311,7 @@ export class SnapshotService {
     try {
       // Get snapshot info
       const snapshot = await db
-        .selectFrom('snapshots' as any)
+        .selectFrom('snapshots')
         .selectAll()
         .where('id', '=', options.snapshotId)
         .executeTakeFirst()
@@ -277,13 +320,31 @@ export class SnapshotService {
         throw new Error(`Snapshot not found: ${options.snapshotId}`)
       }
 
-      if ((snapshot as any).is_locked) {
+      if (snapshot.is_locked) {
         throw new Error('Snapshot is locked and cannot be restored')
+      }
+
+      // Check protection rules
+      const protectionResult = await protectionRuleService.evaluateRules({
+        entity_type: 'snapshot',
+        entity_id: options.snapshotId,
+        operation: 'restore',
+        properties: {
+          ...snapshot,
+          tags: snapshot.tags || [],
+          protection_level: snapshot.protection_level || 'normal',
+          release_channel: snapshot.release_channel
+        },
+        user_id: options.restoredBy
+      })
+
+      if (protectionResult.matched && protectionResult.effects?.action === 'block') {
+        throw new Error(`Snapshot restore blocked by rule: ${protectionResult.rule_name}`)
       }
 
       // Get snapshot items
       let itemsQuery = db
-        .selectFrom('snapshot_items' as any)
+        .selectFrom('snapshot_items')
         .selectAll()
         .where('snapshot_id', '=', options.snapshotId)
 
@@ -291,18 +352,18 @@ export class SnapshotService {
         itemsQuery = itemsQuery.where('item_type', 'in', options.itemTypes)
       }
 
-      const items = await itemsQuery.execute()
+      const items = await itemsQuery.execute() as DbSnapshotItem[]
 
       let itemsRestored = 0
 
       // Restore items by type
       for (const item of items) {
         try {
-          const data = JSON.parse((item as any).data)
-          await this.restoreItem((item as any).item_type, (item as any).item_id, data)
+          const data = JSON.parse(item.data) as Record<string, unknown>
+          await this.restoreItem(item.item_type, item.item_id, data)
           itemsRestored++
         } catch (err) {
-          this.logger.warn(`Failed to restore item ${(item as any).id}`, err as Error)
+          this.logger.warn(`Failed to restore item ${item.id}`, err as Error)
         }
       }
 
@@ -310,20 +371,21 @@ export class SnapshotService {
 
       // Log restore operation
       await db
-        .insertInto('snapshot_restore_log' as any)
+        .insertInto('snapshot_restore_log')
         .values({
           snapshot_id: options.snapshotId,
-          view_id: (snapshot as any).view_id,
+          view_id: snapshot.view_id,
           restored_by: options.restoredBy,
           restore_type: options.restoreType || 'full',
           items_restored: itemsRestored,
           status: 'success',
+          error_message: null,
           metadata: JSON.stringify({ duration })
         })
         .execute()
 
       // Record metrics
-      try { metrics.snapshotRestoreTotal.labels('success').inc() } catch {}
+      try { metrics.snapshotRestoreTotal.labels('success').inc() } catch { /* metrics unavailable */ }
 
       // Audit log
       await auditLog({
@@ -333,7 +395,7 @@ export class SnapshotService {
         resourceType: 'snapshot',
         resourceId: options.snapshotId,
         meta: {
-          viewId: (snapshot as any).view_id,
+          viewId: snapshot.view_id,
           itemsRestored,
           duration
         }
@@ -348,14 +410,14 @@ export class SnapshotService {
       }
     } catch (error) {
       const err = error as Error
-      const duration = stopTimer('restore')
-      try { metrics.snapshotRestoreTotal.labels('failure').inc() } catch {}
+      stopTimer('restore')
+      try { metrics.snapshotRestoreTotal.labels('failure').inc() } catch { /* metrics unavailable */ }
 
       // Log failure
       if (db) {
         try {
           await db
-            .insertInto('snapshot_restore_log' as any)
+            .insertInto('snapshot_restore_log')
             .values({
               snapshot_id: options.snapshotId,
               view_id: 'unknown',
@@ -367,7 +429,7 @@ export class SnapshotService {
               metadata: JSON.stringify({})
             })
             .execute()
-        } catch {}
+        } catch { /* restore log failure - non-critical */ }
       }
 
       this.logger.error('Failed to restore snapshot', err)
@@ -378,33 +440,38 @@ export class SnapshotService {
   /**
    * Restore a single item
    */
-  private async restoreItem(itemType: string, itemId: string, data: any): Promise<void> {
+  private async restoreItem(itemType: string, itemId: string, data: Record<string, unknown>): Promise<void> {
     if (!db) {
       throw new Error('Database not available')
     }
 
+    // Cast data to any for dynamic restore operations - the data was originally
+    // captured from these tables so it should be compatible
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const insertData = data as any
+
     switch (itemType) {
       case 'view':
         await db
-          .updateTable('views' as any)
-          .set(data)
+          .updateTable('views')
+          .set(insertData)
           .where('id', '=', itemId)
           .execute()
         break
 
       case 'view_state':
         await db
-          .insertInto('view_states' as any)
-          .values(data)
-          .onConflict((oc: any) => oc.column('id').doUpdateSet(data))
+          .insertInto('view_states')
+          .values(insertData)
+          .onConflict((oc: OnConflictBuilder<Database, 'view_states'>) => oc.column('id').doUpdateSet(insertData))
           .execute()
         break
 
       case 'table_row':
         await db
-          .insertInto('table_rows' as any)
-          .values(data)
-          .onConflict((oc: any) => oc.column('id').doUpdateSet(data))
+          .insertInto('table_rows')
+          .values(insertData)
+          .onConflict((oc: OnConflictBuilder<Database, 'table_rows'>) => oc.column('id').doUpdateSet(insertData))
           .execute()
         break
 
@@ -422,7 +489,7 @@ export class SnapshotService {
     }
 
     const snapshots = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .selectAll()
       .where('view_id', '=', viewId)
       .orderBy('version', 'desc')
@@ -440,12 +507,46 @@ export class SnapshotService {
     }
 
     const snapshot = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .selectAll()
       .where('id', '=', snapshotId)
       .executeTakeFirst()
 
     return (snapshot as Snapshot) || null
+  }
+
+  /**
+   * Get all items for a snapshot
+   */
+  async getSnapshotItems(snapshotId: string): Promise<Array<SnapshotItem & { view_id?: string }>> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    const items = await db
+      .selectFrom('snapshot_items')
+      .selectAll()
+      .where('snapshot_id', '=', snapshotId)
+      .execute() as DbSnapshotItem[]
+
+    return items.map(item => ({
+      id: item.id,
+      snapshot_id: item.snapshot_id,
+      item_type: item.item_type,
+      item_id: item.item_id,
+      data: JSON.parse(item.data) as unknown,
+      checksum: item.checksum,
+      created_at: item.created_at,
+      // Extract view_id from data if present (for view and view_state items)
+      view_id: (() => {
+        try {
+          const parsed = JSON.parse(item.data) as Record<string, unknown>
+          return (parsed.view_id as string) || (parsed.id as string) || undefined
+        } catch {
+          return undefined
+        }
+      })()
+    }))
   }
 
   /**
@@ -465,15 +566,33 @@ export class SnapshotService {
       throw new Error('Cannot delete locked snapshot')
     }
 
+    // Check protection rules
+    const protectionResult = await protectionRuleService.evaluateRules({
+      entity_type: 'snapshot',
+      entity_id: snapshotId,
+      operation: 'delete',
+      properties: {
+        ...snapshot,
+        tags: snapshot.tags || [],
+        protection_level: snapshot.protection_level || 'normal',
+        release_channel: snapshot.release_channel
+      },
+      user_id: deletedBy
+    })
+
+    if (protectionResult.matched && protectionResult.effects?.action === 'block') {
+      throw new Error(`Snapshot deletion blocked by rule: ${protectionResult.rule_name}`)
+    }
+
     // Delete items first
     await db
-      .deleteFrom('snapshot_items' as any)
+      .deleteFrom('snapshot_items')
       .where('snapshot_id', '=', snapshotId)
       .execute()
 
     // Delete snapshot
     await db
-      .deleteFrom('snapshots' as any)
+      .deleteFrom('snapshots')
       .where('id', '=', snapshotId)
       .execute()
 
@@ -503,7 +622,7 @@ export class SnapshotService {
     }
 
     await db
-      .updateTable('snapshots' as any)
+      .updateTable('snapshots')
       .set({ is_locked: locked })
       .where('id', '=', snapshotId)
       .execute()
@@ -535,15 +654,15 @@ export class SnapshotService {
 
     // Find expired snapshots (not locked, not protected/critical)
     const expiredSnapshots = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select(['id', 'view_id', 'protection_level'])
       .where('expires_at', '<', now)
       .where('is_locked', '=', false)
-      .execute()
+      .execute() as ProtectionLevelResult[]
 
     // Filter out protected and critical snapshots
     const deletableSnapshots = expiredSnapshots.filter(
-      (s: any) => s.protection_level !== 'protected' && s.protection_level !== 'critical'
+      (s) => s.protection_level !== 'protected' && s.protection_level !== 'critical'
     )
     const skippedCount = expiredSnapshots.length - deletableSnapshots.length
 
@@ -556,7 +675,7 @@ export class SnapshotService {
       this.logger.info(`Found ${expiredSnapshots.length} expired snapshots, all protected - skipping`)
       try {
         metrics.snapshotProtectedSkippedTotal.inc(skippedCount)
-      } catch {}
+      } catch { /* metrics unavailable */ }
       return { deleted: 0, freed: 0, skipped: skippedCount }
     }
 
@@ -565,23 +684,23 @@ export class SnapshotService {
     for (const snapshot of deletableSnapshots) {
       // Count items before deletion
       const itemCount = await db
-        .selectFrom('snapshot_items' as any)
+        .selectFrom('snapshot_items')
         .select(db.fn.count('id').as('count'))
-        .where('snapshot_id', '=', (snapshot as any).id)
-        .executeTakeFirst()
+        .where('snapshot_id', '=', snapshot.id)
+        .executeTakeFirst() as CountResult | undefined
 
-      totalItemsFreed += Number((itemCount as any)?.count || 0)
+      totalItemsFreed += Number(itemCount?.count || 0)
 
       // Delete items
       await db
-        .deleteFrom('snapshot_items' as any)
-        .where('snapshot_id', '=', (snapshot as any).id)
+        .deleteFrom('snapshot_items')
+        .where('snapshot_id', '=', snapshot.id)
         .execute()
 
       // Delete snapshot
       await db
-        .deleteFrom('snapshots' as any)
-        .where('id', '=', (snapshot as any).id)
+        .deleteFrom('snapshots')
+        .where('id', '=', snapshot.id)
         .execute()
     }
 
@@ -590,7 +709,7 @@ export class SnapshotService {
       if (skippedCount > 0) {
         metrics.snapshotProtectedSkippedTotal.inc(skippedCount)
       }
-    } catch {}
+    } catch { /* metrics unavailable */ }
 
     this.logger.info(
       `Cleanup completed: ${deletableSnapshots.length} snapshots deleted, ${totalItemsFreed} items freed, ${skippedCount} protected snapshots skipped`
@@ -621,28 +740,28 @@ export class SnapshotService {
 
     // Get items from both snapshots
     const items1 = await db
-      .selectFrom('snapshot_items' as any)
+      .selectFrom('snapshot_items')
       .selectAll()
       .where('snapshot_id', '=', snapshotId1)
-      .execute()
+      .execute() as DbSnapshotItem[]
 
     const items2 = await db
-      .selectFrom('snapshot_items' as any)
+      .selectFrom('snapshot_items')
       .selectAll()
       .where('snapshot_id', '=', snapshotId2)
-      .execute()
+      .execute() as DbSnapshotItem[]
 
     // Create maps for comparison
-    const map1 = new Map<string, any>()
-    const map2 = new Map<string, any>()
+    const map1 = new Map<string, DbSnapshotItem>()
+    const map2 = new Map<string, DbSnapshotItem>()
 
     for (const item of items1) {
-      const key = `${(item as any).item_type}:${(item as any).item_id}`
+      const key = `${item.item_type}:${item.item_id}`
       map1.set(key, item)
     }
 
     for (const item of items2) {
-      const key = `${(item as any).item_type}:${(item as any).item_id}`
+      const key = `${item.item_type}:${item.item_id}`
       map2.set(key, item)
     }
 
@@ -654,13 +773,13 @@ export class SnapshotService {
     // Find added and modified items (in snapshot2 but not in snapshot1, or changed)
     for (const [key, item2] of map2.entries()) {
       if (!map1.has(key)) {
-        added.push(item2 as SnapshotItem)
+        added.push(this.parseSnapshotItem(item2))
       } else {
-        const item1 = map1.get(key)
-        if ((item1 as any).checksum !== (item2 as any).checksum) {
+        const item1 = map1.get(key)!
+        if (item1.checksum !== item2.checksum) {
           modified.push({
-            before: item1 as SnapshotItem,
-            after: item2 as SnapshotItem
+            before: this.parseSnapshotItem(item1),
+            after: this.parseSnapshotItem(item2)
           })
         } else {
           unchanged++
@@ -671,7 +790,7 @@ export class SnapshotService {
     // Find removed items (in snapshot1 but not in snapshot2)
     for (const [key, item1] of map1.entries()) {
       if (!map2.has(key)) {
-        removed.push(item1 as SnapshotItem)
+        removed.push(this.parseSnapshotItem(item1))
       }
     }
 
@@ -680,6 +799,21 @@ export class SnapshotService {
     )
 
     return { added, removed, modified, unchanged }
+  }
+
+  /**
+   * Parse database snapshot item to SnapshotItem
+   */
+  private parseSnapshotItem(dbItem: DbSnapshotItem): SnapshotItem {
+    return {
+      id: dbItem.id,
+      snapshot_id: dbItem.snapshot_id,
+      item_type: dbItem.item_type,
+      item_id: dbItem.item_id,
+      data: JSON.parse(dbItem.data) as unknown,
+      checksum: dbItem.checksum,
+      created_at: dbItem.created_at
+    }
   }
 
   /**
@@ -699,59 +833,59 @@ export class SnapshotService {
     }
 
     const totalSnapshots = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select(db.fn.count('id').as('count'))
-      .executeTakeFirst()
+      .executeTakeFirst() as CountResult | undefined
 
     const totalItems = await db
-      .selectFrom('snapshot_items' as any)
+      .selectFrom('snapshot_items')
       .select(db.fn.count('id').as('count'))
-      .executeTakeFirst()
+      .executeTakeFirst() as CountResult | undefined
 
     const oldest = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select('created_at')
       .orderBy('created_at', 'asc')
       .limit(1)
-      .executeTakeFirst()
+      .executeTakeFirst() as DateResult | undefined
 
     const newest = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select('created_at')
       .orderBy('created_at', 'desc')
       .limit(1)
-      .executeTakeFirst()
+      .executeTakeFirst() as DateResult | undefined
 
     const expiredCount = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select(db.fn.count('id').as('count'))
       .where('expires_at', '<', new Date())
-      .executeTakeFirst()
+      .executeTakeFirst() as CountResult | undefined
 
     const lockedCount = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select(db.fn.count('id').as('count'))
       .where('is_locked', '=', true)
-      .executeTakeFirst()
+      .executeTakeFirst() as CountResult | undefined
 
     const typeStats = await db
-      .selectFrom('snapshots' as any)
+      .selectFrom('snapshots')
       .select(['snapshot_type', db.fn.count('id').as('count')])
       .groupBy('snapshot_type')
-      .execute()
+      .execute() as TypeStatsResult[]
 
     const byType: Record<string, number> = {}
     for (const stat of typeStats) {
-      byType[(stat as any).snapshot_type] = Number((stat as any).count)
+      byType[stat.snapshot_type] = Number(stat.count)
     }
 
     return {
-      totalSnapshots: Number((totalSnapshots as any)?.count || 0),
-      totalItems: Number((totalItems as any)?.count || 0),
-      oldestSnapshot: (oldest as any)?.created_at || null,
-      newestSnapshot: (newest as any)?.created_at || null,
-      expiredCount: Number((expiredCount as any)?.count || 0),
-      lockedCount: Number((lockedCount as any)?.count || 0),
+      totalSnapshots: Number(totalSnapshots?.count || 0),
+      totalItems: Number(totalItems?.count || 0),
+      oldestSnapshot: oldest?.created_at || null,
+      newestSnapshot: newest?.created_at || null,
+      expiredCount: Number(expiredCount?.count || 0),
+      lockedCount: Number(lockedCount?.count || 0),
       byType
     }
   }
@@ -785,7 +919,7 @@ export class SnapshotService {
       // Update snapshot
       await db
         .updateTable('snapshots')
-        .set({ tags: mergedTags as any })
+        .set({ tags: mergedTags })
         .where('id', '=', snapshotId)
         .execute()
 
@@ -804,7 +938,7 @@ export class SnapshotService {
         for (const tag of tags) {
           metrics.snapshotTagsTotal.labels(tag).inc()
         }
-      } catch {}
+      } catch { /* metrics unavailable */ }
 
       this.logger.info(`Tags added to snapshot ${snapshotId}`)
       return true
@@ -839,7 +973,7 @@ export class SnapshotService {
       // Update snapshot
       await db
         .updateTable('snapshots')
-        .set({ tags: filteredTags as any })
+        .set({ tags: filteredTags })
         .where('id', '=', snapshotId)
         .execute()
 
@@ -895,7 +1029,7 @@ export class SnapshotService {
       // Record metrics
       try {
         metrics.snapshotProtectionLevel.labels(level).set(1)
-      } catch {}
+      } catch { /* metrics unavailable */ }
 
       this.logger.info(`Protection level set for snapshot ${snapshotId}: ${level}`)
       return true
@@ -941,7 +1075,7 @@ export class SnapshotService {
         if (channel) {
           metrics.snapshotReleaseChannel.labels(channel).set(1)
         }
-      } catch {}
+      } catch { /* metrics unavailable */ }
 
       this.logger.info(`Release channel set for snapshot ${snapshotId}: ${channel}`)
       return true
@@ -962,10 +1096,13 @@ export class SnapshotService {
     try {
       // Use PostgreSQL ANY overlap (&&) for at least one matching tag.
       // Build ARRAY[...] literal safely.
+      // Cast sql expression to SqlBool for where clause compatibility
+      const arrayLiteral = 'ARRAY[' + tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',') + ']'
       const snapshots = await db
         .selectFrom('snapshots')
         .selectAll()
-        .where(sql`tags && ${sql.raw('ARRAY[' + tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',') + ']')}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .where(sql`tags && ${sql.raw(arrayLiteral)}` as any)
         .orderBy('created_at', 'desc')
         .execute()
 

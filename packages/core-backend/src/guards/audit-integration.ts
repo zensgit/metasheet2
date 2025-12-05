@@ -8,7 +8,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { pool } from '../db/pg';
 import { isAdmin } from '../rbac/service';
 import { Logger } from '../core/logger';
-import { OperationType } from './types';
+import type { OperationType } from './types';
 import * as metrics from './safety-metrics';
 
 const logger = new Logger('SafetyGuardAudit');
@@ -23,6 +23,25 @@ interface AuditEntry {
   details?: Record<string, unknown>;
   safetyToken?: string;
   timestamp: Date;
+}
+
+interface RequestWithUser extends Request {
+  user?: {
+    id?: string;
+    email?: string;
+  };
+}
+
+interface SafetyContext {
+  checkResult?: {
+    assessment?: {
+      riskLevel?: string;
+    };
+  };
+}
+
+interface RequestWithSafety extends RequestWithUser {
+  safetyContext?: SafetyContext;
 }
 
 /**
@@ -93,8 +112,7 @@ export function requireAdminRole() {
     res: Response,
     next: NextFunction
   ): Promise<void> => {
-    const user = (req as Request & { user?: { id?: string; email?: string } })
-      .user;
+    const user = (req as RequestWithUser).user;
 
     if (!user?.id) {
       logger.warn('Admin access denied: no user in request', {
@@ -185,17 +203,17 @@ export function auditSafetyOperation(operationType: OperationType) {
     res: Response,
     next: NextFunction
   ): Promise<void> => {
-    const user = (req as Request & { user?: { id?: string; email?: string } })
-      .user;
-    const safetyContext = (req as any).safetyContext;
+    const reqWithUser = req as RequestWithSafety;
+    const user = reqWithUser.user;
+    const safetyContext = reqWithUser.safetyContext;
 
     // Capture original JSON response
     const originalJson = res.json.bind(res);
-    res.json = (body: any) => {
+    res.json = (body: unknown) => {
       // Log after response is sent
       setImmediate(async () => {
         try {
-          const action =
+          const action: 'blocked' | 'executed' | 'denied' =
             res.statusCode >= 200 && res.statusCode < 300
               ? 'executed'
               : res.statusCode === 403

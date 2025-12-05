@@ -1,8 +1,10 @@
-import { Request, Response, Router } from 'express'
+import type { Request, Response} from 'express';
+import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
 import { pool } from '../db/pg'
 import { z } from 'zod'
+import { parsePagination } from '../util/response'
 
 // 简易内存表
 const sheets = new Map<string, { id: string; name: string; deleted?: boolean }>()
@@ -11,9 +13,7 @@ export function spreadsheetsRouter(): Router {
   const r = Router()
 
   r.get('/api/spreadsheets', rbacGuard('spreadsheets', 'read'), async (req: Request, res: Response) => {
-    const page = Math.max(parseInt((req.query.page as string) || '1', 10), 1)
-    const pageSize = Math.min(Math.max(parseInt((req.query.pageSize as string) || '50', 10), 1), 200)
-    const offset = (page - 1) * pageSize
+    const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
     if (pool) {
       const count = await pool.query('SELECT COUNT(*)::int AS c FROM spreadsheets WHERE deleted_at IS NULL')
       const total = count.rows[0]?.c || 0
@@ -32,52 +32,74 @@ export function spreadsheetsRouter(): Router {
     if (!parse.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parse.error.message } })
     const id = parse.data.id || `sheet_${Date.now()}`
     const name = parse.data.name
-    const ownerId = parse.data.ownerId || (req as any).user?.id
+    const ownerId = parse.data.ownerId || req.user?.id
     if (pool) {
       await pool.query('INSERT INTO spreadsheets(id, name, owner_id) VALUES ($1,$2,$3) ON CONFLICT (id) DO NOTHING', [id, name, ownerId])
-      await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'create', resourceType: 'spreadsheet', resourceId: id, meta: { name, ownerId } })
+      await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'create', resourceType: 'spreadsheet', resourceId: id, meta: { name, ownerId } })
       const { rows } = await pool.query('SELECT id, name, owner_id, created_at, updated_at FROM spreadsheets WHERE id=$1', [id])
       return res.json({ ok: true, data: rows[0] })
     }
     const sheet = { id, name }
     sheets.set(id, sheet)
-    await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'create', resourceType: 'spreadsheet', resourceId: id, meta: { name } })
+    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'create', resourceType: 'spreadsheet', resourceId: id, meta: { name } })
     return res.json({ ok: true, data: sheet })
   })
 
   r.put('/api/spreadsheets/:id', rbacGuard('spreadsheets', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
+
     if (pool) {
       const { rows } = await pool.query('SELECT id, name, owner_id FROM spreadsheets WHERE id=$1 AND deleted_at IS NULL', [id])
       if (!rows.length) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
-      const before = rows[0]
-      const name = (req.body?.name as string) ?? before.name
+
+      interface DbRow {
+        id: string;
+        name: string;
+        owner_id: string;
+      }
+      const before = rows[0] as DbRow
+      const name = (req.body?.name as string | undefined) ?? before.name
+
       await pool.query('UPDATE spreadsheets SET name=$1, updated_at=now() WHERE id=$2', [name, id])
-      await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'update', resourceType: 'spreadsheet', resourceId: id, meta: { before, after: { id, name, owner_id: before.owner_id } } })
+      await auditLog({
+        actorId: req.user?.id?.toString(),
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'spreadsheet',
+        resourceId: id,
+        meta: { before, after: { id, name, owner_id: before.owner_id } }
+      })
       return res.json({ ok: true, data: { id, name, owner_id: before.owner_id } })
     }
+
     const before = sheets.get(id)
     if (!before) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
-    const next = { ...before, ...req.body }
+
+    // Safely merge request body with validation
+    const bodyName = typeof req.body?.name === 'string' ? req.body.name : undefined
+    const next = { ...before, ...(bodyName ? { name: bodyName } : {}) }
+
     sheets.set(id, next)
-    await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'update', resourceType: 'spreadsheet', resourceId: id, meta: { before, after: next } })
+    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'update', resourceType: 'spreadsheet', resourceId: id, meta: { before, after: next } })
     return res.json({ ok: true, data: next })
   })
 
   r.delete('/api/spreadsheets/:id', rbacGuard('spreadsheets', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
+
     if (pool) {
       const { rows } = await pool.query('SELECT id, name FROM spreadsheets WHERE id=$1 AND deleted_at IS NULL', [id])
       if (!rows.length) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
-      const before = rows[0]
+      const before = rows[0] as { id: string; name: string }
       await pool.query('UPDATE spreadsheets SET deleted_at=now() WHERE id=$1', [id])
-      await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'delete', resourceType: 'spreadsheet', resourceId: id, meta: { before } })
+      await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'spreadsheet', resourceId: id, meta: { before } })
       return res.json({ ok: true, data: { id } })
     }
+
     const before = sheets.get(id)
     if (!before) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
     sheets.set(id, { ...before, deleted: true })
-    await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'delete', resourceType: 'spreadsheet', resourceId: id, meta: { before } })
+    await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'spreadsheet', resourceId: id, meta: { before } })
     return res.json({ ok: true, data: { id } })
   })
 

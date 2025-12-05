@@ -319,7 +319,7 @@ export class SafetyGuard {
     if (context.details?.entityType && context.details?.entityId) {
       try {
         const ruleResult = await protectionRuleService.evaluateRules({
-          entity_type: context.details.entityType as any,
+          entity_type: context.details.entityType as 'plugin' | 'snapshot' | 'schema' | 'workflow',
           entity_id: context.details.entityId as string,
           operation: context.operation,
           properties: context.details,

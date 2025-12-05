@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 调度服务实现
  * 支持 Cron 表达式调度和延迟任务，提供插件隔离
@@ -29,11 +28,11 @@ interface CronExpression {
  * 支持标准的 5 字段格式：分 时 日 月 周
  */
 class SimpleCronExpression implements CronExpression {
-  private minute: number[]
-  private hour: number[]
-  private dayOfMonth: number[]
-  private month: number[]
-  private dayOfWeek: number[]
+  private minute: number[] = []
+  private hour: number[] = []
+  private dayOfMonth: number[] = []
+  private month: number[] = []
+  private dayOfWeek: number[] = []
   private timezone: string
   private currentDate: Date
 
@@ -154,7 +153,8 @@ class JobScheduler extends EventEmitter {
   }
 
   addJob(job: ScheduledJob): void {
-    this.jobs.set(job.name, job)
+    const jobName = job.name || job.id || ''
+    this.jobs.set(jobName, job)
 
     if (job.cronExpression) {
       this.scheduleCronJob(job)
@@ -162,7 +162,7 @@ class JobScheduler extends EventEmitter {
       this.scheduleDelayedJob(job)
     }
 
-    this.logger.debug(`Scheduled job: ${job.name}`)
+    this.logger.debug(`Scheduled job: ${jobName}`)
   }
 
   removeJob(name: string): void {
@@ -229,7 +229,7 @@ class JobScheduler extends EventEmitter {
     if (!job.cronExpression || job.isPaused) return
 
     try {
-      const expression = new SimpleCronExpression(job.cronExpression, job.options.timezone)
+      const expression = new SimpleCronExpression(job.cronExpression, job.options?.timezone)
       const nextRun = expression.next()
 
       if (!nextRun) {
@@ -238,10 +238,11 @@ class JobScheduler extends EventEmitter {
       }
 
       job.nextRun = nextRun
-      const delay = nextRun.getTime() - Date.now()
+      const delayMs = nextRun.getTime() - Date.now()
+      const jobName = job.name || job.id || ''
 
       // 清理旧的定时器
-      const oldCronJob = this.cronJobs.get(job.name)
+      const oldCronJob = this.cronJobs.get(jobName)
       if (oldCronJob) {
         clearTimeout(oldCronJob.timeout)
       }
@@ -250,11 +251,11 @@ class JobScheduler extends EventEmitter {
         await this.executeJob(job)
         // 执行完成后重新调度下一次
         this.scheduleCronJob(job)
-      }, delay)
+      }, delayMs)
 
-      this.cronJobs.set(job.name, { expression, timeout })
+      this.cronJobs.set(jobName, { expression, timeout })
 
-      this.logger.debug(`Cron job ${job.name} scheduled for ${nextRun.toISOString()}`)
+      this.logger.debug(`Cron job ${jobName} scheduled for ${nextRun.toISOString()}`)
     } catch (error) {
       this.logger.error(`Failed to schedule cron job ${job.name}`, error as Error)
       this.emit('job:error', job, error)
@@ -263,39 +264,42 @@ class JobScheduler extends EventEmitter {
 
   private scheduleDelayedJob(job: ScheduledJob): void {
     if (!job.delay || job.isPaused) return
+    const jobName = job.name || job.id || ''
 
     const timeout = setTimeout(async () => {
       await this.executeJob(job)
-      this.removeJob(job.name) // 延迟任务只执行一次
+      this.removeJob(jobName) // 延迟任务只执行一次
     }, job.delay)
 
-    this.timers.set(job.name, timeout)
+    this.timers.set(jobName, timeout)
     job.nextRun = new Date(Date.now() + job.delay)
 
-    this.logger.debug(`Delayed job ${job.name} scheduled for ${job.nextRun.toISOString()}`)
+    this.logger.debug(`Delayed job ${jobName} scheduled for ${job.nextRun.toISOString()}`)
   }
 
   private async executeJob(job: ScheduledJob): Promise<void> {
     if (job.isPaused || job.isRunning) return
+    if (!job.handler) return
+    const jobName = job.name || job.id || ''
 
     job.isRunning = true
     job.lastRun = new Date()
     job.runCount++
 
     this.emit('job:running', job)
-    this.logger.debug(`Executing job: ${job.name}`)
+    this.logger.debug(`Executing job: ${jobName}`)
 
     try {
-      const result = await job.handler(job.options.context)
+      const result = await job.handler(job.options?.context)
 
       job.isRunning = false
       this.emit('job:completed', job, result)
-      this.logger.debug(`Job completed: ${job.name}`)
+      this.logger.debug(`Job completed: ${jobName}`)
 
     } catch (error) {
       job.isRunning = false
       this.emit('job:failed', job, error)
-      this.logger.error(`Job failed: ${job.name}`, error as Error)
+      this.logger.error(`Job failed: ${jobName}`, error as Error)
     }
   }
 
@@ -359,16 +363,16 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
 
       // 检查启动日期
       if (options.startDate && options.startDate > new Date()) {
-        const delay = options.startDate.getTime() - Date.now()
+        const delayMs = options.startDate.getTime() - Date.now()
         setTimeout(() => {
           this.scheduler.addJob(job)
           this.emit('scheduled', job)
-        }, delay)
+        }, delayMs)
       } else if (options.runOnInit) {
         // 立即执行一次
         setImmediate(async () => {
           try {
-            await job.handler(options.context)
+            if (job.handler) await job.handler(options.context)
           } catch (error) {
             this.logger.error(`Initial run failed for job ${name}`, error as Error)
           }
@@ -417,7 +421,7 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
 
     try {
       // 验证新的 cron 表达式
-      const testExpression = new SimpleCronExpression(cronExpression, job.options.timezone)
+      const testExpression = new SimpleCronExpression(cronExpression, job.options?.timezone)
       if (!testExpression.hasNext()) {
         throw new Error('Invalid cron expression: no future execution times')
       }
@@ -479,11 +483,11 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
     await this.scheduler.triggerJob(name)
   }
 
-  on(event: ScheduleEventType, handler: (job: ScheduledJob, result?: any, error?: Error) => void): void {
+  onScheduleEvent(event: ScheduleEventType, handler: (job: ScheduledJob, result?: unknown, error?: Error) => void): void {
     super.on(event, handler)
   }
 
-  off(event: ScheduleEventType, handler?: Function): void {
+  offScheduleEvent(event: ScheduleEventType, handler?: (...args: unknown[]) => void): void {
     if (handler) {
       super.off(event, handler)
     } else {
@@ -509,9 +513,10 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
       return handler(context)
     }
 
+    const contextObj = (options.context && typeof options.context === 'object') ? options.context as Record<string, unknown> : {}
     const job = await this.schedule(fullJobName, cronExpression, wrappedHandler, {
       ...options,
-      context: { ...options.context, pluginName }
+      context: { ...contextObj, pluginName }
     })
 
     // 记录插件与任务的关系
@@ -540,9 +545,10 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
       return handler(context)
     }
 
+    const delayContextObj = (options.context && typeof options.context === 'object') ? options.context as Record<string, unknown> : {}
     const job = await this.delay(fullJobName, delay, wrappedHandler, {
       ...options,
-      context: { ...options.context, pluginName }
+      context: { ...delayContextObj, pluginName }
     })
 
     // 记录插件与任务的关系
@@ -608,4 +614,3 @@ export class SchedulerServiceImpl extends EventEmitter implements SchedulerServi
 }
 
 export { SimpleCronExpression, JobScheduler }
-// @ts-nocheck

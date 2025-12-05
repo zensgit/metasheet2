@@ -2,15 +2,13 @@
  * 验证服务实现
  * 基于 Zod 提供强大的数据验证和转换功能
  */
-
-// @ts-nocheck
 import { z } from 'zod'
 import { EventEmitter } from 'eventemitter3'
 import type {
   ValidationService,
   ValidationSchema,
   ValidationResult,
-  ValidationError,
+  ValidationError as _ValidationError,
   CustomValidator,
   DataTransformer,
   StringSchema,
@@ -26,8 +24,16 @@ import { Logger } from '../core/logger'
 /**
  * Zod Schema 包装器
  */
-class ZodSchemaWrapper<T = any> implements ValidationSchema<T> {
-  constructor(private zodSchema: z.ZodSchema<T>) {}
+class ZodSchemaWrapper<T = unknown> implements ValidationSchema<T> {
+  protected _zodSchema: z.ZodSchema<T>
+
+  constructor(zodSchema: z.ZodSchema<T>) {
+    this._zodSchema = zodSchema
+  }
+
+  get zodSchema(): z.ZodSchema<T> {
+    return this._zodSchema
+  }
 
   parse(data: unknown): T {
     return this.zodSchema.parse(data)
@@ -44,15 +50,15 @@ class ZodSchemaWrapper<T = any> implements ValidationSchema<T> {
           path: err.path.map(String),
           message: err.message,
           code: err.code,
-          expected: (err as any).expected,
-          received: (err as any).received
+          expected: String((err as unknown as Record<string, unknown>).expected ?? ''),
+          received: String((err as unknown as Record<string, unknown>).received ?? '')
         }))
       }
     }
   }
 
   transform<U>(transformer: (value: T) => U): ValidationSchema<U> {
-    return new ZodSchemaWrapper(this.zodSchema.transform(transformer))
+    return new ZodSchemaWrapper(this.zodSchema.transform(transformer) as unknown as z.ZodSchema<U>)
   }
 
   optional(): ValidationSchema<T | undefined> {
@@ -64,7 +70,9 @@ class ZodSchemaWrapper<T = any> implements ValidationSchema<T> {
   }
 
   default(value: T): ValidationSchema<T> {
-    return new ZodSchemaWrapper(this.zodSchema.default(value))
+    // Zod's default() has complex typing, use type assertion for compatibility
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new ZodSchemaWrapper(this.zodSchema.default(value as any) as unknown as z.ZodSchema<T>)
   }
 }
 
@@ -148,27 +156,44 @@ class BooleanSchemaImpl extends ZodSchemaWrapper<boolean> implements BooleanSche
 }
 
 /**
+ * Zod 对象形状类型
+ */
+type ZodRawShape = Record<string, z.ZodTypeAny>
+
+/**
  * 对象 Schema 实现
  */
 class ObjectSchemaImpl<T> extends ZodSchemaWrapper<T> implements ObjectSchema<T> {
-  constructor(private baseSchema: z.ZodObject<any> = z.object({})) {
-    super(baseSchema)
+  constructor(private baseSchema: z.ZodObject<ZodRawShape> = z.object({})) {
+    super(baseSchema as unknown as z.ZodSchema<T>)
   }
 
   shape<S>(shape: { [K in keyof S]: ValidationSchema<S[K]> }): ObjectSchema<S> {
-    const zodShape: any = {}
+    const zodShape: ZodRawShape = {}
     for (const [key, schema] of Object.entries(shape)) {
-      zodShape[key] = (schema as ZodSchemaWrapper).zodSchema || schema
+      zodShape[key] = (schema as ZodSchemaWrapper).zodSchema || (schema as z.ZodTypeAny)
     }
     return new ObjectSchemaImpl(z.object(zodShape))
   }
 
   pick<K extends keyof T>(keys: K[]): ObjectSchema<Pick<T, K>> {
-    return new ObjectSchemaImpl(this.baseSchema.pick(Object.fromEntries(keys.map(k => [k, true]))))
+    // Convert keys array to object with proper typing for Zod
+    const pickObject = {} as Record<string, true>
+    keys.forEach(k => {
+      pickObject[k as string] = true
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new ObjectSchemaImpl(this.baseSchema.pick(pickObject as any))
   }
 
   omit<K extends keyof T>(keys: K[]): ObjectSchema<Omit<T, K>> {
-    return new ObjectSchemaImpl(this.baseSchema.omit(Object.fromEntries(keys.map(k => [k, true]))))
+    // Convert keys array to object with proper typing for Zod
+    const omitObject = {} as Record<string, true>
+    keys.forEach(k => {
+      omitObject[k as string] = true
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new ObjectSchemaImpl(this.baseSchema.omit(omitObject as any))
   }
 
   partial(): ObjectSchema<Partial<T>> {
@@ -188,12 +213,12 @@ class ObjectSchemaImpl<T> extends ZodSchemaWrapper<T> implements ObjectSchema<T>
  * 数组 Schema 实现
  */
 class ArraySchemaImpl<T> extends ZodSchemaWrapper<T[]> implements ArraySchema<T> {
-  constructor(private baseSchema: z.ZodArray<any> = z.array(z.unknown())) {
-    super(baseSchema)
+  constructor(private baseSchema: z.ZodArray<z.ZodTypeAny> = z.array(z.unknown())) {
+    super(baseSchema as unknown as z.ZodSchema<T[]>)
   }
 
   element<U>(schema: ValidationSchema<U>): ArraySchema<U> {
-    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || schema
+    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || (schema as z.ZodTypeAny)
     return new ArraySchemaImpl(z.array(zodSchema))
   }
 
@@ -210,7 +235,7 @@ class ArraySchemaImpl<T> extends ZodSchemaWrapper<T[]> implements ArraySchema<T>
   }
 
   nonempty(): ArraySchema<T> {
-    return new ArraySchemaImpl(this.baseSchema.nonempty())
+    return new ArraySchemaImpl(this.baseSchema.nonempty() as unknown as z.ZodArray<z.ZodTypeAny>)
   }
 }
 
@@ -218,12 +243,12 @@ class ArraySchemaImpl<T> extends ZodSchemaWrapper<T[]> implements ArraySchema<T>
  * 联合 Schema 实现
  */
 class UnionSchemaImpl<T> extends ZodSchemaWrapper<T> implements UnionSchema<T> {
-  constructor(private baseSchema: z.ZodUnion<any>) {
-    super(baseSchema)
+  constructor(private baseSchema: z.ZodUnion<[z.ZodTypeAny, ...z.ZodTypeAny[]]>) {
+    super(baseSchema as unknown as z.ZodSchema<T>)
   }
 
   or<U>(schema: ValidationSchema<U>): UnionSchema<T | U> {
-    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || schema
+    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || (schema as z.ZodTypeAny)
     return new UnionSchemaImpl(z.union([this.baseSchema, zodSchema]))
   }
 }
@@ -233,8 +258,8 @@ class UnionSchemaImpl<T> extends ZodSchemaWrapper<T> implements UnionSchema<T> {
  */
 class OptionalSchemaImpl<T> extends ZodSchemaWrapper<T | undefined> implements OptionalSchema<T> {
   constructor(schema: ValidationSchema<T>) {
-    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || schema
-    super(zodSchema.optional())
+    const zodSchema = (schema as ZodSchemaWrapper).zodSchema || (schema as z.ZodTypeAny)
+    super(zodSchema.optional() as z.ZodSchema<T | undefined>)
   }
 }
 
@@ -242,7 +267,7 @@ class OptionalSchemaImpl<T> extends ZodSchemaWrapper<T | undefined> implements O
  * 验证服务实现
  */
 export class ValidationServiceImpl extends EventEmitter implements ValidationService {
-  private schemas = new Map<string, ValidationSchema<any>>()
+  private schemas = new Map<string, ValidationSchema<unknown>>()
   private validators = new Map<string, CustomValidator>()
   private logger: Logger
 
@@ -293,7 +318,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
   }
 
   registerSchema<T>(name: string, schema: ValidationSchema<T>): void {
-    this.schemas.set(name, schema)
+    this.schemas.set(name, schema as ValidationSchema<unknown>)
     this.emit('schema:registered', { name, schema })
   }
 
@@ -354,7 +379,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
 
   union<T>(): UnionSchema<T> {
     // 创建一个基础的联合类型，需要调用 or() 来添加选项
-    return new UnionSchemaImpl<T>(z.union([z.never(), z.never()]) as any)
+    return new UnionSchemaImpl<T>(z.union([z.never(), z.never()]))
   }
 
   optional<T>(schema: ValidationSchema<T>): OptionalSchema<T> {
@@ -392,18 +417,20 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
   /**
    * 创建 JSON Schema（任意对象）
    */
-  json(): ValidationSchema<any> {
-    return new ZodSchemaWrapper(z.any())
+  json(): ValidationSchema<Record<string, unknown>> {
+    return new ZodSchemaWrapper(z.record(z.unknown()))
   }
 
   /**
    * 创建递归 Schema
    */
   lazy<T>(fn: () => ValidationSchema<T>): ValidationSchema<T> {
-    return new ZodSchemaWrapper(z.lazy(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new ZodSchemaWrapper<T>(z.lazy(() => {
       const schema = fn()
-      return (schema as ZodSchemaWrapper).zodSchema || schema
-    }))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return ((schema as any).zodSchema || (schema as z.ZodTypeAny)) as z.ZodSchema<T>
+    }) as z.ZodSchema<T>)
   }
 
   /**
@@ -414,7 +441,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
       email: this.string().email(),
       url: this.string().url(),
       uuid: this.string().uuid(),
-      phoneNumber: this.string().regex(/^\+?[\d\s\-\(\)]+$/),
+      phoneNumber: this.string().regex(/^\+?[\d\s\-()]+$/),
       positiveInteger: this.number().int().positive(),
       percentage: this.number().min(0).max(100),
       timestamp: this.number().positive(),
@@ -446,14 +473,14 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
 
   private setupCommonValidators(): void {
     // 中国手机号验证
-    this.addValidator('chinesePhone', (value: any) => {
+    this.addValidator('chinesePhone', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       if (!/^1[3-9]\d{9}$/.test(value)) return '请输入有效的中国手机号'
       return true
     })
 
     // 中国身份证号验证
-    this.addValidator('chineseIdCard', (value: any) => {
+    this.addValidator('chineseIdCard', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       if (!/^[1-9]\d{5}(19|20)\d{2}((0[1-9])|(1[0-2]))(([0-2][1-9])|10|20|30|31)\d{3}[0-9Xx]$/.test(value)) {
         return '请输入有效的身份证号'
@@ -462,7 +489,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
     })
 
     // 强密码验证
-    this.addValidator('strongPassword', (value: any) => {
+    this.addValidator('strongPassword', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       if (value.length < 8) return '密码至少8位'
       if (!/[a-z]/.test(value)) return '密码必须包含小写字母'
@@ -473,7 +500,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
     })
 
     // JSON 字符串验证
-    this.addValidator('jsonString', (value: any) => {
+    this.addValidator('jsonString', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       try {
         JSON.parse(value)
@@ -484,7 +511,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
     })
 
     // 颜色值验证
-    this.addValidator('color', (value: any) => {
+    this.addValidator('color', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       if (!/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(value)) {
         return '请输入有效的颜色值 (如: #FF0000)'
@@ -493,7 +520,7 @@ export class ValidationServiceImpl extends EventEmitter implements ValidationSer
     })
 
     // Base64 验证
-    this.addValidator('base64', (value: any) => {
+    this.addValidator('base64', (value: unknown) => {
       if (typeof value !== 'string') return '必须是字符串'
       try {
         Buffer.from(value, 'base64').toString('base64') === value

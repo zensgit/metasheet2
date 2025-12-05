@@ -3,8 +3,12 @@
  * 提供登录、注册、token刷新等认证服务
  */
 
-import { Router, Request, Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express';
+import { Router } from 'express'
 import { authService } from '../auth/AuthService'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('AuthRouter')
 
 export const authRouter = Router()
 
@@ -58,7 +62,7 @@ function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; r
   if (entry.count > maxAttempts) {
     entry.blocked = true
     entry.blockExpires = now + BLOCK_DURATION_MS
-    console.warn(`[RateLimit] Blocking ${key} for ${BLOCK_DURATION_MS / 1000}s after ${entry.count} attempts`)
+    logger.warn(`Blocking ${key} for ${BLOCK_DURATION_MS / 1000}s after ${entry.count} attempts`)
     return { allowed: false, retryAfter: Math.ceil(BLOCK_DURATION_MS / 1000) }
   }
 
@@ -77,7 +81,7 @@ const loginRateLimiter = (req: Request, res: Response, next: NextFunction) => {
 
   const result = checkRateLimit(key, MAX_LOGIN_ATTEMPTS)
   if (!result.allowed) {
-    console.warn(`[Auth] Rate limit exceeded for login: ${ip} / ${email}`)
+    logger.warn(`Rate limit exceeded for login: ${ip} / ${email}`)
     return res.status(429).json({
       success: false,
       error: 'Too many login attempts. Please try again later.',
@@ -94,7 +98,7 @@ const registerRateLimiter = (req: Request, res: Response, next: NextFunction) =>
 
   const result = checkRateLimit(key, MAX_REGISTER_PER_IP)
   if (!result.allowed) {
-    console.warn(`[Auth] Rate limit exceeded for registration: ${ip}`)
+    logger.warn(`Rate limit exceeded for registration: ${ip}`)
     return res.status(429).json({
       success: false,
       error: 'Too many registration attempts. Please try again later.',
@@ -176,7 +180,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
     const result = await authService.login(cleanEmail, password)
 
     if (!result) {
-      console.warn(`[Auth] Failed login attempt for ${cleanEmail} from ${ip}`)
+      logger.warn(`Failed login attempt for ${cleanEmail} from ${ip}`)
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password'
@@ -185,7 +189,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
 
     // Success - reset rate limit
     resetRateLimit(`login:${ip}:${cleanEmail}`)
-    console.info(`[Auth] Successful login for ${cleanEmail} from ${ip}`)
+    logger.info(`Successful login for ${cleanEmail} from ${ip}`)
 
     // 返回用户信息和token
     res.json({
@@ -196,7 +200,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
       }
     })
   } catch (error) {
-    console.error('Login error:', error)
+    logger.error('Login error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -257,7 +261,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     const user = await authService.register(cleanEmail, password, cleanName)
 
     if (!user) {
-      console.warn(`[Auth] Registration attempt with existing email: ${cleanEmail} from ${ip}`)
+      logger.warn(`Registration attempt with existing email: ${cleanEmail} from ${ip}`)
       return res.status(409).json({
         success: false,
         error: 'User with this email already exists'
@@ -266,7 +270,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
 
     // 注册成功，自动生成token
     const token = authService.createToken(user)
-    console.info(`[Auth] Successful registration for ${cleanEmail} from ${ip}`)
+    logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 
     res.status(201).json({
       success: true,
@@ -276,7 +280,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
       }
     })
   } catch (error) {
-    console.error('Registration error:', error)
+    logger.error('Registration error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -315,7 +319,7 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
       }
     })
   } catch (error) {
-    console.error('Token refresh error:', error)
+    logger.error('Token refresh error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -353,7 +357,7 @@ authRouter.get('/verify', async (req: Request, res: Response) => {
       data: { user }
     })
   } catch (error) {
-    console.error('Token verification error:', error)
+    logger.error('Token verification error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -390,7 +394,7 @@ authRouter.get('/me', async (req: Request, res: Response) => {
       data: { user }
     })
   } catch (error) {
-    console.error('Get user info error:', error)
+    logger.error('Get user info error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'

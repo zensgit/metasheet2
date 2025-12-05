@@ -1,72 +1,85 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import request from 'supertest'
-import express, { Request, Response, NextFunction } from 'express'
+import type { Request, Response, NextFunction } from 'express'
 
 describe('Unsafe admin route in production', () => {
-  let app: express.Express
+  let mockRequest: Partial<Request>
+  let mockResponse: Partial<Response>
+  let responseJson: any
+  let responseStatus: number
+
+  // Production guard middleware
+  const productionGuard = (req: Request, res: Response, next: NextFunction) => {
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_UNSAFE_ADMIN !== 'true') {
+      if (req.path.includes('reload-unsafe')) {
+        responseStatus = 403
+        responseJson = { error: 'Unsafe admin routes disabled in production' }
+        return res.status(403).json({ error: 'Unsafe admin routes disabled in production' })
+      }
+    }
+    next()
+  }
 
   beforeEach(() => {
     // Set production environment
     process.env.NODE_ENV = 'production'
     process.env.ALLOW_UNSAFE_ADMIN = 'false'
 
-    app = express()
-    app.use(express.json())
+    responseJson = undefined
+    responseStatus = 200
 
-    // Production guard middleware - blocks unsafe routes when ALLOW_UNSAFE_ADMIN !== 'true'
-    const productionGuard = (req: Request, res: Response, next: NextFunction) => {
-      if (process.env.NODE_ENV === 'production' && process.env.ALLOW_UNSAFE_ADMIN !== 'true') {
-        if (req.path.includes('reload-unsafe')) {
-          return res.status(403).json({ error: 'Unsafe admin routes disabled in production' })
-        }
-      }
-      next()
+    mockResponse = {
+      json: vi.fn((data) => {
+        responseJson = data
+        return mockResponse as Response
+      }),
+      status: vi.fn((code) => {
+        responseStatus = code
+        return mockResponse as Response
+      })
+    }
+  })
+
+  it('should reject /api/admin/plugins/:id/reload-unsafe in production', () => {
+    mockRequest = {
+      path: '/api/admin/plugins/example-plugin/reload-unsafe',
+      headers: { authorization: 'Bearer test' },
+      body: {}
     }
 
-    app.use(productionGuard)
+    const next = vi.fn()
+    productionGuard(mockRequest as Request, mockResponse as Response, next)
 
-    // Mock admin route that would exist in production
-    app.post('/api/admin/plugins/:id/reload-unsafe', (req, res) => {
-      res.status(200).json({ ok: true, message: 'Plugin reloaded' })
-    })
+    expect(responseStatus).toBe(403)
+    expect(responseJson.error).toContain('Unsafe admin routes disabled')
+    expect(next).not.toHaveBeenCalled()
   })
 
-  it('should reject /api/admin/plugins/:id/reload-unsafe in production', async () => {
-    const res = await request(app)
-      .post('/api/admin/plugins/example-plugin/reload-unsafe')
-      .set('Authorization', 'Bearer test')
-      .send({})
-
-    expect(res.status).toBe(403)
-    expect(res.body.error).toContain('Unsafe admin routes disabled')
-  })
-
-  it('should allow unsafe routes when ALLOW_UNSAFE_ADMIN=true', async () => {
+  it('should allow unsafe routes when ALLOW_UNSAFE_ADMIN=true', () => {
     process.env.ALLOW_UNSAFE_ADMIN = 'true'
 
-    // Recreate app with new env
-    app = express()
-    app.use(express.json())
-
-    const productionGuard = (req: Request, res: Response, next: NextFunction) => {
-      if (process.env.NODE_ENV === 'production' && process.env.ALLOW_UNSAFE_ADMIN !== 'true') {
-        if (req.path.includes('reload-unsafe')) {
-          return res.status(403).json({ error: 'Unsafe admin routes disabled in production' })
-        }
-      }
-      next()
+    mockRequest = {
+      path: '/api/admin/plugins/example-plugin/reload-unsafe',
+      headers: { authorization: 'Bearer test' },
+      body: {}
     }
 
-    app.use(productionGuard)
-    app.post('/api/admin/plugins/:id/reload-unsafe', (req, res) => {
-      res.status(200).json({ ok: true, message: 'Plugin reloaded' })
-    })
+    const next = vi.fn()
+    productionGuard(mockRequest as Request, mockResponse as Response, next)
 
-    const res = await request(app)
-      .post('/api/admin/plugins/example-plugin/reload-unsafe')
-      .set('Authorization', 'Bearer test')
-      .send({})
+    // Should call next() to allow the request through
+    expect(next).toHaveBeenCalled()
+  })
 
-    expect(res.status).toBe(200)
+  it('should allow non-unsafe routes in production', () => {
+    mockRequest = {
+      path: '/api/admin/plugins/example-plugin/status',
+      headers: { authorization: 'Bearer test' },
+      body: {}
+    }
+
+    const next = vi.fn()
+    productionGuard(mockRequest as Request, mockResponse as Response, next)
+
+    expect(next).toHaveBeenCalled()
   })
 })

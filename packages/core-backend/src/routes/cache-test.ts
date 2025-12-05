@@ -93,10 +93,10 @@ router.post('/simulate', async (req, res) => {
       metricsUrl: '/metrics/prom',
       statusUrl: '/internal/cache',
     });
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({
       success: false,
-      error: error.message,
+      error: (error as Error).message,
     });
   }
 });
@@ -154,10 +154,10 @@ router.post('/warm', async (req, res) => {
       actualHits: hits,
       hitRate: ((hits / (count * keys.length)) * 100).toFixed(2) + '%'
     });
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({
       success: false,
-      error: error.message,
+      error: (error as Error).message,
     });
   }
 });

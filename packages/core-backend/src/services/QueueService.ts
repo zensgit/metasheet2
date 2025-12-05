@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 队列服务实现
  * 支持 Bull/BullMQ 和内存队列，提供完整的任务队列管理
@@ -20,14 +19,14 @@ import { Logger } from '../core/logger'
  * 队列提供者接口
  */
 interface QueueProvider {
-  add<T = any>(queueName: string, jobName: string, data: T, options?: JobOptions): Promise<Job<T>>
-  addBulk<T = any>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]>
-  process<T = any>(queueName: string, jobName: string, processor: JobProcessor<T>): void
+  add<T = unknown>(queueName: string, jobName: string, data: T, options?: JobOptions): Promise<Job<T>>
+  addBulk<T = unknown>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]>
+  process<T = unknown>(queueName: string, jobName: string, processor: JobProcessor<T>): void
   pause(queueName: string): Promise<void>
   resume(queueName: string): Promise<void>
   empty(queueName: string): Promise<void>
   clean(queueName: string, grace: number, status: JobStatus): Promise<Job[]>
-  getJob<T = any>(queueName: string, jobId: string): Promise<Job<T> | null>
+  getJob<T = unknown>(queueName: string, jobId: string): Promise<Job<T> | null>
   removeJob(queueName: string, jobId: string): Promise<void>
   retryJob(queueName: string, jobId: string): Promise<void>
   getQueueStatus(queueName: string): Promise<QueueStatus>
@@ -35,8 +34,8 @@ interface QueueProvider {
   getActive(queueName: string): Promise<Job[]>
   getCompleted(queueName: string): Promise<Job[]>
   getFailed(queueName: string): Promise<Job[]>
-  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: any) => void): void
-  off(queueName: string, event: QueueEventType, handler?: Function): void
+  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: unknown) => void): void
+  off(queueName: string, event: QueueEventType, handler?: (...args: unknown[]) => void): void
 }
 
 /**
@@ -57,17 +56,17 @@ class MemoryQueueProvider implements QueueProvider {
     return this.queues.get(queueName)!
   }
 
-  async add<T = any>(queueName: string, jobName: string, data: T, options: JobOptions = {}): Promise<Job<T>> {
+  async add<T = unknown>(queueName: string, jobName: string, data: T, options: JobOptions = {}): Promise<Job<T>> {
     const queue = this.getQueue(queueName)
     return queue.add(jobName, data, options)
   }
 
-  async addBulk<T = any>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
+  async addBulk<T = unknown>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
     const queue = this.getQueue(queueName)
     return Promise.all(jobs.map(job => queue.add(job.name, job.data, job.options)))
   }
 
-  process<T = any>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
+  process<T = unknown>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
     const queue = this.getQueue(queueName)
     queue.process(jobName, processor)
   }
@@ -92,7 +91,7 @@ class MemoryQueueProvider implements QueueProvider {
     return queue.clean(grace, status)
   }
 
-  async getJob<T = any>(queueName: string, jobId: string): Promise<Job<T> | null> {
+  async getJob<T = unknown>(queueName: string, jobId: string): Promise<Job<T> | null> {
     const queue = this.getQueue(queueName)
     return queue.getJob(jobId)
   }
@@ -133,12 +132,12 @@ class MemoryQueueProvider implements QueueProvider {
   }
 
   // Relaxed typing for Phase A compatibility
-  on(queueName: string, event: any, handler: (job: Job, result?: any) => void): void {
+  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: unknown) => void): void {
     const queue = this.getQueue(queueName)
     queue.on(event, handler)
   }
 
-  off(queueName: string, event: any, handler?: Function): void {
+  off(queueName: string, event: QueueEventType, handler?: (...args: unknown[]) => void): void {
     const queue = this.getQueue(queueName)
     queue.off(event, handler)
   }
@@ -154,11 +153,12 @@ class MemoryQueue extends EventEmitter {
   private completed: Job[] = []
   private failed: Job[] = []
   private delayed: Job[] = []
-  private processors = new Map<string, JobProcessor<any>>()
+  private processors = new Map<string, JobProcessor<unknown>>()
   private paused = false
   private processing = false
   private nextJobId = 1
   private logger: Logger
+  private delayedTimer: NodeJS.Timeout
 
   constructor(name: string) {
     super()
@@ -169,10 +169,10 @@ class MemoryQueue extends EventEmitter {
     setImmediate(() => this.processNext())
 
     // 处理延迟任务
-    setInterval(() => this.processDelayed(), 1000)
+    this.delayedTimer = setInterval(() => this.processDelayed(), 1000)
   }
 
-  add<T = any>(jobName: string, data: T, options: JobOptions = {}): Job<T> {
+  add<T = unknown>(jobName: string, data: T, options: JobOptions = {}): Job<T> {
     const job: Job<T> = {
       id: (this.nextJobId++).toString(),
       name: jobName,
@@ -196,8 +196,8 @@ class MemoryQueue extends EventEmitter {
     return job
   }
 
-  process<T = any>(jobName: string, processor: JobProcessor<T>): void {
-    this.processors.set(jobName, processor)
+  process<T = unknown>(jobName: string, processor: JobProcessor<T>): void {
+    this.processors.set(jobName, processor as JobProcessor<unknown>)
     this.processNext()
   }
 
@@ -273,7 +273,7 @@ class MemoryQueue extends EventEmitter {
     return cleanedJobs
   }
 
-  getJob<T = any>(jobId: string): Job<T> | null {
+  getJob<T = unknown>(jobId: string): Job<T> | null {
     const allJobs = [...this.waiting, ...this.active, ...this.completed, ...this.failed, ...this.delayed]
     return allJobs.find(job => job.id === jobId) as Job<T> || null
   }
@@ -393,11 +393,11 @@ class MemoryQueue extends EventEmitter {
 
         job.failedReason = (error as Error).message
         job.finishedOn = Date.now()
-        job.attemptsMade++
+        job.attemptsMade = (job.attemptsMade || 0) + 1
 
         // 检查是否需要重试
-        const maxAttempts = job.options.attempts || 1
-        if (job.attemptsMade < maxAttempts) {
+        const maxAttempts = job.options?.attempts || 1
+        if ((job.attemptsMade || 0) < maxAttempts) {
           // 计算退避延迟
           const backoff = this.calculateBackoff(job)
           if (backoff > 0) {
@@ -422,10 +422,10 @@ class MemoryQueue extends EventEmitter {
     }
   }
 
-  private async processJob(job: Job, processor: JobProcessor): Promise<any> {
+  private async processJob(job: Job, processor: JobProcessor): Promise<unknown> {
     // 设置超时
     let timeoutId: NodeJS.Timeout | null = null
-    const timeout = job.options.timeout
+    const timeout = job.options?.timeout
 
     const processPromise = processor(job)
 
@@ -449,15 +449,17 @@ class MemoryQueue extends EventEmitter {
   }
 
   private calculateBackoff(job: Job): number {
-    const backoff = job.options.backoff
+    const backoff = job.options?.backoff
     if (!backoff) return 0
+
+    const attemptsMade = job.attemptsMade || 0
 
     if (typeof backoff === 'string') {
       switch (backoff) {
         case 'fixed':
           return 1000 // 默认1秒
         case 'exponential':
-          return Math.pow(2, job.attemptsMade) * 1000
+          return Math.pow(2, attemptsMade) * 1000
         default:
           return 0
       }
@@ -469,7 +471,7 @@ class MemoryQueue extends EventEmitter {
         case 'fixed':
           return delay
         case 'exponential':
-          return Math.pow(2, job.attemptsMade) * delay
+          return Math.pow(2, attemptsMade) * delay
         default:
           return delay
       }
@@ -503,24 +505,85 @@ class MemoryQueue extends EventEmitter {
       this.processNext()
     }
   }
+
+  /**
+   * 销毁队列，清理所有资源
+   */
+  destroy(): void {
+    clearInterval(this.delayedTimer)
+    this.waiting.length = 0
+    this.active.length = 0
+    this.completed.length = 0
+    this.failed.length = 0
+    this.delayed.length = 0
+    this.processors.clear()
+    this.removeAllListeners()
+  }
 }
+
+/**
+ * Bull 作业接口
+ */
+interface BullJob {
+  id: string | number
+  name: string
+  data: unknown
+  opts?: JobOptions
+  progress?: number
+  returnValue?: unknown
+  failedReason?: string
+  timestamp?: number
+  processedOn?: number
+  finishedOn?: number
+  attemptsMade?: number
+  remove(): Promise<void>
+  retry(): Promise<void>
+}
+
+/**
+ * Bull 队列接口
+ */
+interface BullQueue {
+  add(name: string, data: unknown, options?: Record<string, unknown>): Promise<BullJob>
+  addBulk(jobs: Array<{ name: string; data: unknown; opts?: Record<string, unknown> }>): Promise<BullJob[]>
+  process(name: string, processor: (job: BullJob) => Promise<unknown>): void
+  pause(): Promise<void>
+  resume(): Promise<void>
+  empty(): Promise<void>
+  clean(grace: number, status: string): Promise<BullJob[]>
+  getJob(id: string): Promise<BullJob | null>
+  getWaiting(): Promise<BullJob[]>
+  getActive(): Promise<BullJob[]>
+  getCompleted(): Promise<BullJob[]>
+  getFailed(): Promise<BullJob[]>
+  getDelayed(): Promise<BullJob[]>
+  isPaused(): Promise<boolean>
+  on(event: string, handler: (job: BullJob, result?: unknown) => void): void
+  off(event: string, handler?: (...args: unknown[]) => void): void
+  removeAllListeners(event: string): void
+}
+
+/**
+ * Bull 构造器类型
+ */
+type BullConstructor = new (name: string, options: Record<string, unknown>) => BullQueue
 
 /**
  * Bull/BullMQ 队列提供者
  */
 class BullQueueProvider implements QueueProvider {
-  private queues = new Map<string, any>()
-  private Bull: any
-  private redisConnection: any
+  private queues = new Map<string, BullQueue>()
+  private Bull: BullConstructor
+  private redisConnection: Record<string, unknown> | undefined
   private logger: Logger
 
-  constructor(Bull: any, redisConnection?: any) {
+  constructor(Bull: BullConstructor, redisConnection?: Record<string, unknown>) {
     this.Bull = Bull
     this.redisConnection = redisConnection
     this.logger = new Logger('BullQueueProvider')
   }
 
-  private getQueue(queueName: string): any {
+  private getQueue(queueName: string): BullQueue {
     if (!this.queues.has(queueName)) {
       const queue = new this.Bull(queueName, {
         redis: this.redisConnection,
@@ -531,21 +594,21 @@ class BullQueueProvider implements QueueProvider {
       })
       this.queues.set(queueName, queue)
     }
-    return this.queues.get(queueName)
+    return this.queues.get(queueName)!
   }
 
-  async add<T = any>(queueName: string, jobName: string, data: T, options: JobOptions = {}): Promise<Job<T>> {
+  async add<T = unknown>(queueName: string, jobName: string, data: T, options: JobOptions = {}): Promise<Job<T>> {
     try {
       const queue = this.getQueue(queueName)
       const bullJob = await queue.add(jobName, data, this.convertOptions(options))
-      return this.convertBullJobToJob(bullJob)
+      return this.convertBullJobToJob(bullJob) as Job<T>
     } catch (error) {
       this.logger.error(`Failed to add job to queue ${queueName}`, error as Error)
       throw error
     }
   }
 
-  async addBulk<T = any>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
+  async addBulk<T = unknown>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
     try {
       const queue = this.getQueue(queueName)
       const bullJobs = await queue.addBulk(
@@ -555,17 +618,17 @@ class BullQueueProvider implements QueueProvider {
           opts: this.convertOptions(job.options || {})
         }))
       )
-      return bullJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+      return bullJobs.map((bullJob) => this.convertBullJobToJob(bullJob) as Job<T>)
     } catch (error) {
       this.logger.error(`Failed to add bulk jobs to queue ${queueName}`, error as Error)
       throw error
     }
   }
 
-  process<T = any>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
+  process<T = unknown>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
     const queue = this.getQueue(queueName)
-    queue.process(jobName, async (bullJob: any) => {
-      const job = this.convertBullJobToJob(bullJob)
+    queue.process(jobName, async (bullJob: BullJob) => {
+      const job = this.convertBullJobToJob(bullJob) as Job<T>
       return await processor(job)
     })
   }
@@ -588,13 +651,13 @@ class BullQueueProvider implements QueueProvider {
   async clean(queueName: string, grace: number, status: JobStatus): Promise<Job[]> {
     const queue = this.getQueue(queueName)
     const cleanedJobs = await queue.clean(grace * 1000, status)
-    return cleanedJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+    return cleanedJobs.map((bullJob) => this.convertBullJobToJob(bullJob))
   }
 
-  async getJob<T = any>(queueName: string, jobId: string): Promise<Job<T> | null> {
+  async getJob<T = unknown>(queueName: string, jobId: string): Promise<Job<T> | null> {
     const queue = this.getQueue(queueName)
     const bullJob = await queue.getJob(jobId)
-    return bullJob ? this.convertBullJobToJob(bullJob) : null
+    return bullJob ? this.convertBullJobToJob(bullJob) as Job<T> : null
   }
 
   async removeJob(queueName: string, jobId: string): Promise<void> {
@@ -634,36 +697,36 @@ class BullQueueProvider implements QueueProvider {
   async getWaiting(queueName: string): Promise<Job[]> {
     const queue = this.getQueue(queueName)
     const bullJobs = await queue.getWaiting()
-    return bullJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+    return bullJobs.map((bullJob) => this.convertBullJobToJob(bullJob))
   }
 
   async getActive(queueName: string): Promise<Job[]> {
     const queue = this.getQueue(queueName)
     const bullJobs = await queue.getActive()
-    return bullJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+    return bullJobs.map((bullJob) => this.convertBullJobToJob(bullJob))
   }
 
   async getCompleted(queueName: string): Promise<Job[]> {
     const queue = this.getQueue(queueName)
     const bullJobs = await queue.getCompleted()
-    return bullJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+    return bullJobs.map((bullJob) => this.convertBullJobToJob(bullJob))
   }
 
   async getFailed(queueName: string): Promise<Job[]> {
     const queue = this.getQueue(queueName)
     const bullJobs = await queue.getFailed()
-    return bullJobs.map((bullJob: any) => this.convertBullJobToJob(bullJob))
+    return bullJobs.map((bullJob) => this.convertBullJobToJob(bullJob))
   }
 
-  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: any) => void): void {
+  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: unknown) => void): void {
     const queue = this.getQueue(queueName)
-    queue.on(event, (bullJob: any, result?: any) => {
+    queue.on(event, (bullJob: BullJob, result?: unknown) => {
       const job = this.convertBullJobToJob(bullJob)
       handler(job, result)
     })
   }
 
-  off(queueName: string, event: QueueEventType, handler?: Function): void {
+  off(queueName: string, event: QueueEventType, handler?: (...args: unknown[]) => void): void {
     const queue = this.getQueue(queueName)
     if (handler) {
       queue.off(event, handler)
@@ -672,8 +735,8 @@ class BullQueueProvider implements QueueProvider {
     }
   }
 
-  private convertOptions(options: JobOptions): any {
-    const bullOptions: any = {}
+  private convertOptions(options: JobOptions): Record<string, unknown> {
+    const bullOptions: Record<string, unknown> = {}
 
     if (options.delay) bullOptions.delay = options.delay
     if (options.priority) bullOptions.priority = options.priority
@@ -687,7 +750,7 @@ class BullQueueProvider implements QueueProvider {
     return bullOptions
   }
 
-  private convertBullJobToJob(bullJob: any): Job {
+  private convertBullJobToJob(bullJob: BullJob): Job {
     return {
       id: bullJob.id.toString(),
       name: bullJob.name,
@@ -696,7 +759,7 @@ class BullQueueProvider implements QueueProvider {
       progress: bullJob.progress || 0,
       returnValue: bullJob.returnValue,
       failedReason: bullJob.failedReason,
-      timestamp: bullJob.timestamp,
+      timestamp: bullJob.timestamp || 0,
       processedOn: bullJob.processedOn,
       finishedOn: bullJob.finishedOn,
       attemptsMade: bullJob.attemptsMade || 0
@@ -725,7 +788,7 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
     this.setupGlobalListeners()
   }
 
-  async add<T = any>(queueName: string, jobName: string, data: T, options?: JobOptions): Promise<Job<T>> {
+  async add<T = unknown>(queueName: string, jobName: string, data: T, options?: JobOptions): Promise<Job<T>> {
     try {
       this.metrics.totalJobs++
       const job = await this.provider.add(queueName, jobName, data, options)
@@ -738,7 +801,7 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
     }
   }
 
-  process<T = any>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
+  process<T = unknown>(queueName: string, jobName: string, processor: JobProcessor<T>): void {
     try {
       // 包装处理器以添加监控和错误处理
       const wrappedProcessor: JobProcessor<T> = async (job: Job<T>) => {
@@ -762,7 +825,7 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
     }
   }
 
-  async addBulk<T = any>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
+  async addBulk<T = unknown>(queueName: string, jobs: Array<{name: string, data: T, options?: JobOptions}>): Promise<Job<T>[]> {
     try {
       this.metrics.totalJobs += jobs.length
       const addedJobs = await this.provider.addBulk(queueName, jobs)
@@ -816,7 +879,7 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
     }
   }
 
-  async getJob<T = any>(queueName: string, jobId: string): Promise<Job<T> | null> {
+  async getJob<T = unknown>(queueName: string, jobId: string): Promise<Job<T> | null> {
     return this.provider.getJob(queueName, jobId)
   }
 
@@ -860,11 +923,11 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
     return this.provider.getFailed(queueName)
   }
 
-  on(queueName: string, event: QueueEventType, handler: (job: Job, result?: any) => void): void {
+  onQueueEvent(queueName: string, event: QueueEventType, handler: (job: Job, result?: unknown) => void): void {
     this.provider.on(queueName, event, handler)
   }
 
-  off(queueName: string, event: QueueEventType, handler?: Function): void {
+  offQueueEvent(queueName: string, event: QueueEventType, handler?: (...args: unknown[]) => void): void {
     this.provider.off(queueName, event, handler)
   }
 
@@ -897,7 +960,7 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
   /**
    * 创建 Bull 队列服务
    */
-  static createBullService(Bull: any, redisConnection?: any): QueueServiceImpl {
+  static createBullService(Bull: BullConstructor, redisConnection?: Record<string, unknown>): QueueServiceImpl {
     return new QueueServiceImpl(new BullQueueProvider(Bull, redisConnection))
   }
 
@@ -910,4 +973,3 @@ export class QueueServiceImpl extends EventEmitter implements QueueService {
 }
 
 export { MemoryQueueProvider, BullQueueProvider }
-// @ts-nocheck

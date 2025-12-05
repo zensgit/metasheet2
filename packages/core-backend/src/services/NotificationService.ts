@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 通知服务实现
  * 支持多渠道通知发送，模板管理，订阅管理
@@ -11,6 +10,7 @@ import type {
   NotificationResult,
   NotificationRecipient,
   NotificationChannel,
+  NotificationChannelConfig,
   NotificationTemplate,
   NotificationHistory,
   NotificationHistoryOptions,
@@ -20,21 +20,50 @@ import type {
 import { Logger } from '../core/logger'
 
 /**
+ * Email notification payload
+ */
+interface EmailPayload {
+  to: string
+  subject: string
+  content: string
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Webhook notification payload
+ */
+interface WebhookPayload {
+  subject: string
+  content: string
+  data?: unknown
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Feishu message payload
+ */
+interface FeishuMessagePayload {
+  title: string
+  content: string
+  data?: unknown
+}
+
+/**
  * 邮件通知渠道
  */
 export class EmailNotificationChannel implements NotificationChannel {
   name = 'email'
   type = 'email' as const
-  config: any
+  config: NotificationChannelConfig
   private logger: Logger
 
-  constructor(config: any) {
+  constructor(config: NotificationChannelConfig) {
     this.config = config
     this.logger = new Logger('EmailChannel')
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
-    const id = `email_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const id = `email_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
     try {
       // 这里应该集成实际的邮件服务(如 SendGrid, SES, SMTP)
@@ -71,12 +100,7 @@ export class EmailNotificationChannel implements NotificationChannel {
     }
   }
 
-  private async sendEmail(params: {
-    to: string
-    subject: string
-    content: string
-    metadata?: any
-  }): Promise<void> {
+  private async sendEmail(params: EmailPayload): Promise<void> {
     // 实际邮件发送实现
     this.logger.info(`Sending email to ${params.to}: ${params.subject}`)
 
@@ -91,16 +115,16 @@ export class EmailNotificationChannel implements NotificationChannel {
 export class WebhookNotificationChannel implements NotificationChannel {
   name = 'webhook'
   type = 'webhook' as const
-  config: any
+  config: NotificationChannelConfig
   private logger: Logger
 
-  constructor(config: any) {
+  constructor(config: NotificationChannelConfig) {
     this.config = config
     this.logger = new Logger('WebhookChannel')
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
-    const id = `webhook_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const id = `webhook_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
     try {
       const webhookRecipients = recipients.filter(r => r.type === 'webhook')
@@ -136,7 +160,7 @@ export class WebhookNotificationChannel implements NotificationChannel {
     }
   }
 
-  private async sendWebhook(url: string, payload: any): Promise<void> {
+  private async sendWebhook(url: string, payload: WebhookPayload): Promise<void> {
     // 实际 HTTP 请求实现
     this.logger.info(`Sending webhook to ${url}`)
 
@@ -167,16 +191,16 @@ export class WebhookNotificationChannel implements NotificationChannel {
 export class FeishuNotificationChannel implements NotificationChannel {
   name = 'feishu'
   type = 'feishu' as const
-  config: any
+  config: NotificationChannelConfig
   private logger: Logger
 
-  constructor(config: any) {
+  constructor(config: NotificationChannelConfig) {
     this.config = config
     this.logger = new Logger('FeishuChannel')
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
-    const id = `feishu_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
     try {
       // 集成飞书 API
@@ -212,7 +236,7 @@ export class FeishuNotificationChannel implements NotificationChannel {
     }
   }
 
-  private async sendFeishuMessage(userId: string, message: any): Promise<void> {
+  private async sendFeishuMessage(userId: string, _message: FeishuMessagePayload): Promise<void> {
     // 实际飞书消息发送实现
     this.logger.info(`Sending feishu message to user ${userId}`)
 
@@ -243,15 +267,16 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
 
   async send(notification: Notification): Promise<NotificationResult> {
     try {
-      const channel = this.channels.get(notification.channel)
+      const channelName = notification.channel || 'email'
+      const channel = this.channels.get(channelName)
       if (!channel) {
-        throw new Error(`Unknown notification channel: ${notification.channel}`)
+        throw new Error(`Unknown notification channel: ${channelName}`)
       }
 
       // 过滤收件人的通知偏好
       const filteredRecipients = await this.filterRecipientsByPreferences(
         notification.recipients,
-        notification.channel
+        channelName
       )
 
       if (filteredRecipients.length === 0) {
@@ -336,7 +361,7 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
   async sendTemplate(
     templateName: string,
     recipients: NotificationRecipient[],
-    data: any
+    data: Record<string, unknown>
   ): Promise<NotificationResult> {
     const template = this.templates.get(templateName)
     if (!template) {
@@ -385,24 +410,24 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
 
     if (options.userId) {
       filtered = filtered.filter(h =>
-        h.notification.recipients.some(r => r.id === options.userId)
+        h.notification && h.notification.recipients.some(r => r.id === options.userId)
       )
     }
 
     if (options.channel) {
-      filtered = filtered.filter(h => h.notification.channel === options.channel)
+      filtered = filtered.filter(h => h.notification && h.notification.channel === options.channel)
     }
 
     if (options.status) {
-      filtered = filtered.filter(h => h.result.status === options.status)
+      filtered = filtered.filter(h => h.result && h.result.status === options.status)
     }
 
     if (options.dateFrom) {
-      filtered = filtered.filter(h => h.createdAt >= options.dateFrom!)
+      filtered = filtered.filter(h => h.createdAt && h.createdAt >= options.dateFrom!)
     }
 
     if (options.dateTo) {
-      filtered = filtered.filter(h => h.createdAt <= options.dateTo!)
+      filtered = filtered.filter(h => h.createdAt && h.createdAt <= options.dateTo!)
     }
 
     // 分页
@@ -410,7 +435,7 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
     const limit = options.limit || 100
 
     return filtered
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0))
       .slice(offset, offset + limit)
   }
 
@@ -467,12 +492,12 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
         const subscriptions = await this.getSubscriptions(recipient.id)
         const subscription = subscriptions.find(s => s.channel === channel)
 
-        if (subscription && !subscription.preferences.enabled) {
+        if (subscription && subscription.preferences && !subscription.preferences.enabled) {
           continue // 跳过已禁用通知的用户
         }
 
         // 检查静默时间
-        if (subscription?.preferences.quiet_hours) {
+        if (subscription?.preferences?.quiet_hours) {
           const now = new Date()
           const quietHours = subscription.preferences.quiet_hours
 
@@ -507,14 +532,15 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
     notification: Notification,
     recipients: NotificationRecipient[]
   ): Promise<NotificationResult> {
-    const id = `scheduled_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const id = `scheduled_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
     // 这里应该集成到调度服务中
     const delay = notification.scheduledAt!.getTime() - Date.now()
 
     setTimeout(async () => {
       try {
-        const channel = this.channels.get(notification.channel)
+        const channelName = notification.channel || 'email'
+        const channel = this.channels.get(channelName)
         if (channel) {
           const result = await channel.sender(notification, recipients)
           this.emit('notification:scheduled:sent', { notification, result })
@@ -543,10 +569,11 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
     return result
   }
 
-  private renderTemplate(template: string, data: any): string {
+  private renderTemplate(template: string, data: Record<string, unknown>): string {
     // 简单的模板渲染实现
     return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-      return data[key] || match
+      const value = data[key]
+      return value !== undefined && value !== null ? String(value) : match
     })
   }
 
@@ -585,7 +612,7 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
    */
   cleanHistory(beforeDate: Date): void {
     const originalSize = this.history.length
-    this.history = this.history.filter(h => h.createdAt >= beforeDate)
+    this.history = this.history.filter(h => h.createdAt && h.createdAt >= beforeDate)
     const cleaned = originalSize - this.history.length
 
     if (cleaned > 0) {
@@ -595,3 +622,4 @@ export class NotificationServiceImpl extends EventEmitter implements Notificatio
 }
 
 // Re-export removed in Phase A to avoid duplicate export conflicts under isolatedModules
+export const notificationService = new NotificationServiceImpl()

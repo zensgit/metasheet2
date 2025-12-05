@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 存储服务实现
  * 支持本地文件系统、AWS S3、阿里云OSS等多种存储后端
@@ -7,7 +6,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as crypto from 'crypto'
-import { Readable } from 'stream'
+import type { Readable } from 'stream'
 import { EventEmitter } from 'eventemitter3'
 import type {
   StorageService,
@@ -20,6 +19,94 @@ import type {
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+
+/**
+ * AWS S3 Client interface for type safety
+ */
+interface S3Client {
+  upload(params: S3UploadParams): { promise(): Promise<S3UploadResult> }
+  getObject(params: S3GetObjectParams): { promise(): Promise<S3GetObjectResult> }
+  deleteObject(params: S3DeleteParams): { promise(): Promise<unknown> }
+  headObject(params: S3HeadObjectParams): { promise(): Promise<S3HeadObjectResult> }
+  getSignedUrl(operation: string, params: Record<string, unknown>): Promise<string> | string
+  listObjectsV2(params: S3ListParams): { promise(): Promise<S3ListResult> }
+  deleteObjects(params: S3DeleteMultipleParams): { promise(): Promise<unknown> }
+}
+
+interface S3UploadParams {
+  Bucket: string
+  Key: string
+  Body: Buffer
+  ContentType?: string
+  Metadata?: Record<string, string>
+  TagSet?: Array<{ Key: string; Value: string }>
+}
+
+interface S3UploadResult {
+  Location: string
+  Bucket: string
+  Key: string
+  ETag?: string
+}
+
+interface S3GetObjectParams {
+  Bucket: string
+  Key: string
+}
+
+interface S3GetObjectResult {
+  Body: Buffer
+  ContentType?: string
+  ContentLength?: number
+}
+
+interface S3DeleteParams {
+  Bucket: string
+  Key: string
+}
+
+interface S3HeadObjectParams {
+  Bucket: string
+  Key: string
+}
+
+interface S3HeadObjectResult {
+  ContentLength: number
+  ContentType: string
+  LastModified: string | Date
+  Metadata?: Record<string, string>
+}
+
+interface S3ListParams {
+  Bucket: string
+  MaxKeys?: number
+  Prefix?: string
+  ContinuationToken?: string
+}
+
+interface S3ListObject {
+  Key: string
+  Size: number
+  LastModified: string | Date
+  ETag?: string
+}
+
+interface S3ListResult {
+  Contents: S3ListObject[]
+  IsTruncated?: boolean
+  NextContinuationToken?: string
+}
+
+interface S3DeleteMultipleParams {
+  Bucket: string
+  Delete: {
+    Objects: Array<{ Key: string }>
+  }
+}
+
+interface S3Error extends Error {
+  code?: string
+}
 
 /**
  * 存储提供者接口
@@ -221,7 +308,7 @@ class LocalStorageProvider implements StorageProvider {
       throw new Error('File not found')
     }
 
-    let url = fileInfo.url
+    let url = fileInfo.url || `${this.baseUrl}/files/${fileId}`
 
     if (options) {
       const params = new URLSearchParams()
@@ -242,15 +329,18 @@ class LocalStorageProvider implements StorageProvider {
     const uploadPath = `/upload/${fileId}`
 
     // 对于本地存储，我们返回一个上传端点
+    const fields: Record<string, string> = {
+      filename: options.filename,
+      maxSize: options.maxSize?.toString() || '',
+      expiresAt: (Date.now() + (options.expiresIn || 3600) * 1000).toString()
+    }
+    if (options.contentType) {
+      fields.contentType = options.contentType
+    }
     return {
       uploadUrl: `${this.baseUrl}${uploadPath}`,
       fileId,
-      fields: {
-        filename: options.filename,
-        contentType: options.contentType,
-        maxSize: options.maxSize?.toString() || '',
-        expiresAt: (Date.now() + (options.expiresIn || 3600) * 1000).toString()
-      }
+      fields
     }
   }
 
@@ -280,12 +370,15 @@ class LocalStorageProvider implements StorageProvider {
       const sortBy = options.sortBy
       const sortOrder = options.sortOrder || 'asc'
       files.sort((a, b) => {
-        let aValue: any = a[sortBy]
-        let bValue: any = b[sortBy]
+        const aRaw = a[sortBy]
+        const bRaw = b[sortBy]
+        let aValue: string | number | Date = aRaw ?? ''
+        let bValue: string | number | Date = bRaw ?? ''
 
+        // Convert Date objects to timestamps for comparison
         if (sortBy === 'createdAt' || sortBy === 'updatedAt') {
-          aValue = aValue.getTime()
-          bValue = bValue.getTime()
+          aValue = (aValue as Date).getTime()
+          bValue = (bValue as Date).getTime()
         }
 
         const comparison = aValue < bValue ? -1 : aValue > bValue ? 1 : 0
@@ -316,10 +409,14 @@ class LocalStorageProvider implements StorageProvider {
       if (recursive) {
         await fs.rm(fullPath, { recursive: true, force: true })
         // 从索引中移除相关文件
+        const entriesToDelete: string[] = []
         for (const [fileId, fileInfo] of this.fileIndex.entries()) {
           if (fileInfo.path.startsWith(dirPath)) {
-            this.fileIndex.delete(fileId)
+            entriesToDelete.push(fileId)
           }
+        }
+        for (const fileId of entriesToDelete) {
+          this.fileIndex.delete(fileId)
         }
       } else {
         await fs.rmdir(fullPath)
@@ -389,12 +486,12 @@ class LocalStorageProvider implements StorageProvider {
  * AWS S3 存储提供者（示例实现）
  */
 class S3StorageProvider implements StorageProvider {
-  private s3Client: any
+  private s3Client: S3Client
   private bucket: string
   private region: string
   private logger: Logger
 
-  constructor(s3Client: any, bucket: string, region: string) {
+  constructor(s3Client: S3Client, bucket: string, region: string) {
     this.s3Client = s3Client
     this.bucket = bucket
     this.region = region
@@ -416,12 +513,12 @@ class S3StorageProvider implements StorageProvider {
         body = Buffer.concat(chunks)
       }
 
-      const uploadParams = {
+      const uploadParams: S3UploadParams = {
         Bucket: this.bucket,
         Key: key,
         Body: body,
         ContentType: options.contentType || this.getContentType(key),
-        Metadata: options.metadata || {},
+        Metadata: options.metadata as Record<string, string> | undefined,
         TagSet: Object.entries(options.tags || {}).map(([Key, Value]) => ({ Key, Value }))
       }
 
@@ -449,7 +546,7 @@ class S3StorageProvider implements StorageProvider {
 
   async download(fileId: string): Promise<Buffer> {
     try {
-      const params = {
+      const params: S3GetObjectParams = {
         Bucket: this.bucket,
         Key: fileId
       }
@@ -464,7 +561,7 @@ class S3StorageProvider implements StorageProvider {
 
   async delete(fileId: string): Promise<void> {
     try {
-      const params = {
+      const params: S3DeleteParams = {
         Bucket: this.bucket,
         Key: fileId
       }
@@ -478,15 +575,16 @@ class S3StorageProvider implements StorageProvider {
 
   async exists(fileId: string): Promise<boolean> {
     try {
-      const params = {
+      const params: S3HeadObjectParams = {
         Bucket: this.bucket,
         Key: fileId
       }
 
       await this.s3Client.headObject(params).promise()
       return true
-    } catch (error: any) {
-      if (error.code === 'NotFound') {
+    } catch (error) {
+      const s3Error = error as S3Error
+      if (s3Error.code === 'NotFound') {
         return false
       }
       throw error
@@ -495,7 +593,7 @@ class S3StorageProvider implements StorageProvider {
 
   async getFileInfo(fileId: string): Promise<StorageFile | null> {
     try {
-      const params = {
+      const params: S3HeadObjectParams = {
         Bucket: this.bucket,
         Key: fileId
       }
@@ -514,8 +612,9 @@ class S3StorageProvider implements StorageProvider {
         createdAt: new Date(result.LastModified),
         updatedAt: new Date(result.LastModified)
       }
-    } catch (error: any) {
-      if (error.code === 'NotFound') {
+    } catch (error) {
+      const s3Error = error as S3Error
+      if (s3Error.code === 'NotFound') {
         return null
       }
       throw error
@@ -529,36 +628,44 @@ class S3StorageProvider implements StorageProvider {
       Expires: options?.expiresIn || 3600
     }
 
-    return this.s3Client.getSignedUrl('getObject', params)
+    const result = this.s3Client.getSignedUrl('getObject', params)
+    return typeof result === 'string' ? result : await result
   }
 
   async getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload> {
     const key = options.filename
-    const params = {
+    const params: Record<string, unknown> = {
       Bucket: this.bucket,
       Key: key,
-      ContentType: options.contentType,
       Expires: options.expiresIn || 3600
     }
 
-    if (options.maxSize) {
-      params['ContentLengthRange'] = [0, options.maxSize]
+    if (options.contentType) {
+      params.ContentType = options.contentType
     }
 
-    const uploadUrl = await this.s3Client.getSignedUrl('putObject', params)
+    if (options.maxSize) {
+      params.ContentLengthRange = [0, options.maxSize]
+    }
+
+    const uploadUrlResult = this.s3Client.getSignedUrl('putObject', params)
+    const uploadUrl = typeof uploadUrlResult === 'string' ? uploadUrlResult : await uploadUrlResult
+
+    const fields: Record<string, string> = {}
+    if (options.contentType) {
+      fields['Content-Type'] = options.contentType
+    }
 
     return {
       uploadUrl,
       fileId: key,
-      fields: {
-        'Content-Type': options.contentType
-      }
+      fields
     }
   }
 
   async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
     try {
-      const params: any = {
+      const params: S3ListParams = {
         Bucket: this.bucket,
         MaxKeys: options?.limit || 1000
       }
@@ -574,7 +681,7 @@ class S3StorageProvider implements StorageProvider {
 
       const result = await this.s3Client.listObjectsV2(params).promise()
 
-      const files: StorageFile[] = result.Contents.map((obj: any) => ({
+      const files: StorageFile[] = result.Contents.map((obj: S3ListObject) => ({
         id: obj.Key,
         filename: path.basename(obj.Key),
         size: obj.Size,
@@ -599,10 +706,10 @@ class S3StorageProvider implements StorageProvider {
     const key = dirPath.endsWith('/') ? dirPath : `${dirPath}/`
 
     try {
-      const params = {
+      const params: S3UploadParams = {
         Bucket: this.bucket,
         Key: key,
-        Body: '',
+        Body: Buffer.from(''),
         ContentType: 'application/x-directory'
       }
 
@@ -622,7 +729,7 @@ class S3StorageProvider implements StorageProvider {
 
     try {
       // List all objects with the prefix
-      const listParams = {
+      const listParams: S3ListParams = {
         Bucket: this.bucket,
         Prefix: dirPath.endsWith('/') ? dirPath : `${dirPath}/`
       }
@@ -632,10 +739,10 @@ class S3StorageProvider implements StorageProvider {
       if (objects.Contents.length === 0) return
 
       // Delete all objects
-      const deleteParams = {
+      const deleteParams: S3DeleteMultipleParams = {
         Bucket: this.bucket,
         Delete: {
-          Objects: objects.Contents.map((obj: any) => ({ Key: obj.Key }))
+          Objects: objects.Contents.map((obj: S3ListObject) => ({ Key: obj.Key }))
         }
       }
 
@@ -837,7 +944,7 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
   /**
    * 创建 S3 存储服务
    */
-  static createS3Service(s3Client: any, bucket: string, region: string): StorageServiceImpl {
+  static createS3Service(s3Client: S3Client, bucket: string, region: string): StorageServiceImpl {
     return new StorageServiceImpl(new S3StorageProvider(s3Client, bucket, region))
   }
 }

@@ -5,8 +5,16 @@
 
 import { Router, type Router as RouterType } from 'express'
 import PermissionMetricsMiddleware from '../middleware/permission-metrics-middleware'
+import type { AuthenticatedRequest } from '../middleware/permission-metrics-middleware'
 
 const router: RouterType = Router()
+
+// Type for test results in the demo endpoint
+interface TestResult {
+  test: string
+  status?: number
+  error?: boolean
+}
 
 // Apply timing middleware to all routes
 router.use(PermissionMetricsMiddleware.startTimer)
@@ -26,8 +34,9 @@ router.get(
   '/api/user/profile',
   PermissionMetricsMiddleware.validateToken,
   (req, res) => {
+    const authenticatedReq = req as AuthenticatedRequest
     res.json({
-      user: (req as any).user,
+      user: authenticatedReq.user,
       message: 'Profile retrieved successfully'
     })
   }
@@ -101,8 +110,9 @@ router.delete(
   PermissionMetricsMiddleware.checkPermission('spreadsheet:delete'),
   (req, res) => {
     // Only admins and owners can delete
-    const user = (req as any).user
-    if (user.role !== 'admin') {
+    const authenticatedReq = req as AuthenticatedRequest
+    const user = authenticatedReq.user
+    if (user?.role !== 'admin') {
       return res.status(403).json({
         error: 'Only admins can delete spreadsheets',
         reason: 'not_owner'
@@ -156,7 +166,7 @@ router.get('/metrics', PermissionMetricsMiddleware.metricsEndpoint)
  * Demo endpoints to trigger various failures
  */
 router.get('/demo/trigger-failures', async (req, res) => {
-  const results: any[] = []
+  const results: TestResult[] = []
 
   // Trigger no token failure
   await fetch('http://localhost:8900/api/admin/users')

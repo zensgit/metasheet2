@@ -12,6 +12,12 @@ import { Logger } from '../core/logger';
 const router = Router();
 const logger = new Logger('SnapshotLabelsRoutes');
 
+// Type for protection levels
+type ProtectionLevel = 'normal' | 'protected' | 'critical';
+
+// Type for release channels
+type ReleaseChannel = 'stable' | 'canary' | 'beta' | 'experimental';
+
 /**
  * PUT /api/snapshots/:id/tags
  * Add or remove tags from a snapshot
@@ -139,7 +145,7 @@ router.get('/', async (req, res) => {
           error: 'Invalid protection level'
         });
       }
-      snapshots = await snapshotService.getByProtectionLevel(protection_level as any);
+      snapshots = await snapshotService.getByProtectionLevel(protection_level as ProtectionLevel);
     } else if (release_channel) {
       // Query by release channel
       if (!['stable', 'canary', 'beta', 'experimental'].includes(release_channel as string)) {
@@ -148,7 +154,7 @@ router.get('/', async (req, res) => {
           error: 'Invalid release channel'
         });
       }
-      snapshots = await snapshotService.getByReleaseChannel(release_channel as any);
+      snapshots = await snapshotService.getByReleaseChannel(release_channel as ReleaseChannel);
     } else {
       return res.status(400).json({
         success: false,

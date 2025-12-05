@@ -1,4 +1,5 @@
-import { Request, Response, Router } from 'express'
+import type { Request, Response} from 'express';
+import { Router } from 'express'
 import { pool } from '../db/pg'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
@@ -34,8 +35,8 @@ export function auditLogsRouter(): Router {
     const maxExport = Math.min(parseInt(q.limit || '10000', 10), 100000)
 
     const where: string[] = []
-    const params: any[] = []
-    const push = (cond: string, val: any) => { params.push(val); where.push(cond.replace('$n', `$${params.length}`)) }
+    const params: unknown[] = []
+    const push = (cond: string, val: unknown) => { params.push(val); where.push(cond.replace('$n', `$${params.length}`)) }
 
     if (q.actorId) push('actor_id = $n', q.actorId)
     if (q.resourceType) push('resource_type = $n', q.resourceType)

@@ -1,5 +1,7 @@
-import { Request, Response, Router } from 'express'
+import type { Request, Response} from 'express';
+import { Router } from 'express'
 import { pool } from '../db/pg'
+import { parsePagination } from '../util/response'
 
 export function approvalHistoryRouter(): Router {
   const r = Router()
@@ -7,9 +9,7 @@ export function approvalHistoryRouter(): Router {
   r.get('/api/approvals/:id/history', async (req: Request, res: Response) => {
     const id = req.params.id
     if (pool) {
-      const page = Math.max(parseInt((req.query.page as string) || '1', 10), 1)
-      const pageSize = Math.min(Math.max(parseInt((req.query.pageSize as string) || '50', 10), 1), 200)
-      const offset = (page - 1) * pageSize
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
       const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id])
       const total = countRes.rows[0]?.c || 0
       const { rows } = await pool.query(

@@ -1,98 +1,92 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import request from 'supertest'
-import express, { Request, Response, NextFunction } from 'express'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type { Request, Response, NextFunction } from 'express'
 
 describe('Production Guards', () => {
-  let app: express.Express
+  let mockRequest: Partial<Request>
+  let mockResponse: Partial<Response>
+  let responseJson: any
+  let responseStatus: number
+
+  // Fallback test guard middleware
+  const fallbackTestGuard = (req: Request, res: Response, next: NextFunction) => {
+    if (process.env.NODE_ENV === 'production' && process.env.ENABLE_FALLBACK_TEST !== 'true') {
+      if (req.path.includes('/internal/test/fallback')) {
+        return res.status(404).json({ error: 'Not found' })
+      }
+    }
+    next()
+  }
 
   beforeEach(() => {
     process.env.NODE_ENV = 'production'
     process.env.ALLOW_UNSAFE_ADMIN = 'false'
     process.env.ENABLE_FALLBACK_TEST = 'false'
 
-    app = express()
-    app.use(express.json())
+    responseJson = undefined
+    responseStatus = 200
 
-    // Production guard middleware for fallback test routes
-    const fallbackTestGuard = (req: Request, res: Response, next: NextFunction) => {
-      if (process.env.NODE_ENV === 'production' && process.env.ENABLE_FALLBACK_TEST !== 'true') {
-        if (req.path.includes('/internal/test/fallback')) {
-          return res.status(404).json({ error: 'Not found' })
-        }
-      }
-      next()
+    mockResponse = {
+      json: vi.fn((data) => {
+        responseJson = data
+        return mockResponse as Response
+      }),
+      status: vi.fn((code) => {
+        responseStatus = code
+        return mockResponse as Response
+      })
+    }
+  })
+
+  it('hides fallback test route in production when disabled', () => {
+    mockRequest = {
+      path: '/internal/test/fallback',
+      body: { mode: 'http_error' }
     }
 
-    app.use(fallbackTestGuard)
+    const next = vi.fn()
+    fallbackTestGuard(mockRequest as Request, mockResponse as Response, next)
 
-    // Mock fallback test route
-    app.post('/internal/test/fallback', (req, res) => {
-      res.status(200).json({ ok: true, mode: req.body.mode })
-    })
+    expect(responseStatus).toBe(404)
+    expect(next).not.toHaveBeenCalled()
   })
 
-  it('hides fallback test route in production when disabled', async () => {
-    const res = await request(app)
-      .post('/internal/test/fallback')
-      .send({ mode: 'http_error' })
-
-    expect(res.status).toBe(404)
-  })
-
-  it('allows fallback test route when ENABLE_FALLBACK_TEST=true', async () => {
+  it('allows fallback test route when ENABLE_FALLBACK_TEST=true', () => {
     process.env.ENABLE_FALLBACK_TEST = 'true'
 
-    // Recreate app with new env
-    app = express()
-    app.use(express.json())
-
-    const fallbackTestGuard = (req: Request, res: Response, next: NextFunction) => {
-      if (process.env.NODE_ENV === 'production' && process.env.ENABLE_FALLBACK_TEST !== 'true') {
-        if (req.path.includes('/internal/test/fallback')) {
-          return res.status(404).json({ error: 'Not found' })
-        }
-      }
-      next()
+    mockRequest = {
+      path: '/internal/test/fallback',
+      body: { mode: 'http_error' }
     }
 
-    app.use(fallbackTestGuard)
-    app.post('/internal/test/fallback', (req, res) => {
-      res.status(200).json({ ok: true, mode: req.body.mode })
-    })
+    const next = vi.fn()
+    fallbackTestGuard(mockRequest as Request, mockResponse as Response, next)
 
-    const res = await request(app)
-      .post('/internal/test/fallback')
-      .send({ mode: 'http_error' })
-
-    expect(res.status).toBe(200)
-    expect(res.body.mode).toBe('http_error')
+    expect(next).toHaveBeenCalled()
   })
 
-  it('allows fallback test route in non-production environments', async () => {
+  it('allows fallback test route in non-production environments', () => {
     process.env.NODE_ENV = 'development'
 
-    // Recreate app with new env
-    app = express()
-    app.use(express.json())
-
-    const fallbackTestGuard = (req: Request, res: Response, next: NextFunction) => {
-      if (process.env.NODE_ENV === 'production' && process.env.ENABLE_FALLBACK_TEST !== 'true') {
-        if (req.path.includes('/internal/test/fallback')) {
-          return res.status(404).json({ error: 'Not found' })
-        }
-      }
-      next()
+    mockRequest = {
+      path: '/internal/test/fallback',
+      body: { mode: 'http_error' }
     }
 
-    app.use(fallbackTestGuard)
-    app.post('/internal/test/fallback', (req, res) => {
-      res.status(200).json({ ok: true, mode: req.body.mode })
-    })
+    const next = vi.fn()
+    fallbackTestGuard(mockRequest as Request, mockResponse as Response, next)
 
-    const res = await request(app)
-      .post('/internal/test/fallback')
-      .send({ mode: 'http_error' })
+    expect(next).toHaveBeenCalled()
+  })
 
-    expect(res.status).toBe(200)
+  it('allows other routes in production', () => {
+    mockRequest = {
+      path: '/api/some-other-route',
+      body: {}
+    }
+
+    const next = vi.fn()
+    fallbackTestGuard(mockRequest as Request, mockResponse as Response, next)
+
+    expect(next).toHaveBeenCalled()
   })
 })

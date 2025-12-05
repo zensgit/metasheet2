@@ -1,7 +1,17 @@
-import { Request, Response, Router } from 'express'
+import type { Request, Response} from 'express';
+import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
 import { pool } from '../db/pg'
+
+// Use the global Express.Request type which already includes user property
+type AuthenticatedRequest = Request
+
+// Database row type for permission query results
+interface PermissionRow {
+  perm_code: string;
+  [key: string]: unknown;
+}
 
 // 简易内存：sheetId -> userId -> perms
 const sheetPerms = new Map<string, Map<string, Set<string>>>()
@@ -25,7 +35,7 @@ export function spreadsheetPermissionsRouter(): Router {
     return res.json({ ok: true, data: { items } })
   })
 
-  r.post('/api/spreadsheets/:id/permissions/grant', rbacGuard('spreadsheet-permissions', 'write'), async (req: Request, res: Response) => {
+  r.post('/api/spreadsheets/:id/permissions/grant', rbacGuard('spreadsheet-permissions', 'write'), async (req: AuthenticatedRequest, res: Response) => {
     const userId = req.body?.userId
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
@@ -38,17 +48,17 @@ export function spreadsheetPermissionsRouter(): Router {
       map.set(userId, set)
       sheetPerms.set(req.params.id, map)
     }
-    await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'grant', resourceType: 'spreadsheet-permission', resourceId: `${req.params.id}:${userId}:${perm}` })
+    await auditLog({ actorId: req.user?.id != null ? String(req.user.id) : undefined, actorType: 'user', action: 'grant', resourceType: 'spreadsheet-permission', resourceId: `${req.params.id}:${userId}:${perm}` })
     if (pool) {
-      const { rows } = await pool.query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id=$1 AND user_id=$2', [req.params.id, userId])
-      return res.json({ ok: true, data: { userId, permissions: rows.map(r => r.perm_code) } })
+      const { rows } = await pool.query<PermissionRow>('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id=$1 AND user_id=$2', [req.params.id, userId])
+      return res.json({ ok: true, data: { userId, permissions: rows.map((r: PermissionRow) => r.perm_code) } })
     } else {
       const set = (sheetPerms.get(req.params.id) as Map<string, Set<string>>).get(userId) as Set<string>
       return res.json({ ok: true, data: { userId, permissions: Array.from(set) } })
     }
   })
 
-  r.post('/api/spreadsheets/:id/permissions/revoke', rbacGuard('spreadsheet-permissions', 'write'), async (req: Request, res: Response) => {
+  r.post('/api/spreadsheets/:id/permissions/revoke', rbacGuard('spreadsheet-permissions', 'write'), async (req: AuthenticatedRequest, res: Response) => {
     const userId = req.body?.userId
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
@@ -61,10 +71,10 @@ export function spreadsheetPermissionsRouter(): Router {
       map.set(userId, set)
       sheetPerms.set(req.params.id, map)
     }
-    await auditLog({ actorId: (req as any).user?.id, actorType: 'user', action: 'revoke', resourceType: 'spreadsheet-permission', resourceId: `${req.params.id}:${userId}:${perm}` })
+    await auditLog({ actorId: req.user?.id != null ? String(req.user.id) : undefined, actorType: 'user', action: 'revoke', resourceType: 'spreadsheet-permission', resourceId: `${req.params.id}:${userId}:${perm}` })
     if (pool) {
-      const { rows } = await pool.query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id=$1 AND user_id=$2', [req.params.id, userId])
-      return res.json({ ok: true, data: { userId, permissions: rows.map(r => r.perm_code) } })
+      const { rows } = await pool.query<PermissionRow>('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id=$1 AND user_id=$2', [req.params.id, userId])
+      return res.json({ ok: true, data: { userId, permissions: rows.map((r: PermissionRow) => r.perm_code) } })
     } else {
       const set = (sheetPerms.get(req.params.id) as Map<string, Set<string>>).get(userId) as Set<string>
       return res.json({ ok: true, data: { userId, permissions: Array.from(set) } })

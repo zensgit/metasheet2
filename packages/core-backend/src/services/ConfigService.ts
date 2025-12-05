@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Configuration Management Service
  * Provides a unified interface for application configuration with multiple sources
@@ -7,17 +6,52 @@
 import { Logger } from '../core/logger'
 import * as fs from 'fs'
 import * as path from 'path'
-import * as yaml from 'js-yaml'
 import { db } from '../db/db'
+import { toISOString, toDateValue } from '../db/type-helpers'
+
+// js-yaml is optional - try to load dynamically
+let yaml: { load(content: string): unknown } | null = null
+try {
+  yaml = require('js-yaml')
+} catch {
+  // js-yaml not available, will only support JSON configs
+}
 
 const logger = new Logger('ConfigService')
+
+// Type definitions for configuration values
+export type ConfigValue = string | number | boolean | null | ConfigValue[] | { [key: string]: ConfigValue }
+
+// Helper to convert unknown error to string for logging
+function errorToString(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+// Type guard to check if a value is a valid JSON object
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// Type guard to validate ConfigValue
+function isConfigValue(value: unknown): value is ConfigValue {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return true
+  }
+  if (Array.isArray(value)) {
+    return value.every(isConfigValue)
+  }
+  if (isJsonObject(value)) {
+    return Object.values(value).every(isConfigValue)
+  }
+  return false
+}
 
 export interface ConfigSource {
   name: string
   priority: number
-  get(key: string): Promise<any>
-  set?(key: string, value: any): Promise<void>
-  getAll?(): Promise<Record<string, any>>
+  get(key: string): Promise<ConfigValue | undefined>
+  set?(key: string, value: ConfigValue): Promise<void>
+  getAll?(): Promise<Record<string, ConfigValue>>
 }
 
 /**
@@ -27,7 +61,7 @@ export class EnvConfigSource implements ConfigSource {
   name = 'environment'
   priority = 100 // Highest priority
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<ConfigValue | undefined> {
     const envKey = this.toEnvKey(key)
     const value = process.env[envKey]
 
@@ -35,7 +69,8 @@ export class EnvConfigSource implements ConfigSource {
 
     // Try to parse JSON values
     try {
-      return JSON.parse(value)
+      const parsed = JSON.parse(value)
+      return isConfigValue(parsed) ? parsed : value
     } catch {
       return value
     }
@@ -46,16 +81,19 @@ export class EnvConfigSource implements ConfigSource {
     return key.toUpperCase().replace(/\./g, '_')
   }
 
-  async getAll(): Promise<Record<string, any>> {
-    const config: Record<string, any> = {}
+  async getAll(): Promise<Record<string, ConfigValue>> {
+    const config: Record<string, ConfigValue> = {}
 
     for (const [key, value] of Object.entries(process.env)) {
       if (key.startsWith('METASHEET_')) {
         const configKey = this.fromEnvKey(key)
-        try {
-          config[configKey] = JSON.parse(value as string)
-        } catch {
-          config[configKey] = value
+        if (value !== undefined) {
+          try {
+            const parsed = JSON.parse(value)
+            config[configKey] = isConfigValue(parsed) ? parsed : value
+          } catch {
+            config[configKey] = value
+          }
         }
       }
     }
@@ -77,17 +115,17 @@ export class EnvConfigSource implements ConfigSource {
 export class FileConfigSource implements ConfigSource {
   name = 'file'
   priority = 50
-  private config: Record<string, any> = {}
+  private config: Record<string, ConfigValue> = {}
   private loaded = false
 
   constructor(private filePath: string) {}
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<ConfigValue | undefined> {
     await this.loadConfig()
     return this.getNestedValue(this.config, key)
   }
 
-  async getAll(): Promise<Record<string, any>> {
+  async getAll(): Promise<Record<string, ConfigValue>> {
     await this.loadConfig()
     return { ...this.config }
   }
@@ -105,24 +143,53 @@ export class FileConfigSource implements ConfigSource {
       const content = fs.readFileSync(this.filePath, 'utf8')
       const ext = path.extname(this.filePath)
 
+      let parsed: unknown
       if (ext === '.yaml' || ext === '.yml') {
-        this.config = yaml.load(content) as Record<string, any>
+        if (!yaml) {
+          throw new Error('YAML config files require js-yaml package to be installed')
+        }
+        parsed = yaml.load(content)
       } else if (ext === '.json') {
-        this.config = JSON.parse(content)
+        parsed = JSON.parse(content)
       } else {
         throw new Error(`Unsupported config file format: ${ext}`)
+      }
+
+      // Validate and assign the parsed config
+      if (isJsonObject(parsed)) {
+        const validatedConfig: Record<string, ConfigValue> = {}
+        for (const [key, value] of Object.entries(parsed)) {
+          if (isConfigValue(value)) {
+            validatedConfig[key] = value
+          }
+        }
+        this.config = validatedConfig
       }
 
       this.loaded = true
       logger.info(`Loaded config from ${this.filePath}`)
     } catch (error) {
-      logger.error(`Failed to load config file: ${error}`)
+      logger.warn(`Failed to load config file: ${errorToString(error)}`)
       this.loaded = true
     }
   }
 
-  private getNestedValue(obj: any, key: string): any {
-    return key.split('.').reduce((curr, part) => curr?.[part], obj)
+  private getNestedValue(obj: Record<string, ConfigValue>, key: string): ConfigValue | undefined {
+    const parts = key.split('.')
+    let current: ConfigValue | undefined = obj
+
+    for (const part of parts) {
+      if (current === undefined || current === null) {
+        return undefined
+      }
+      if (typeof current === 'object' && !Array.isArray(current) && part in current) {
+        current = current[part]
+      } else {
+        return undefined
+      }
+    }
+
+    return current
   }
 }
 
@@ -132,10 +199,10 @@ export class FileConfigSource implements ConfigSource {
 export class DatabaseConfigSource implements ConfigSource {
   name = 'database'
   priority = 30
-  private cache: Map<string, { value: any; timestamp: number }> = new Map()
+  private cache: Map<string, { value: ConfigValue; timestamp: number }> = new Map()
   private cacheTTL = 60000 // 1 minute
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<ConfigValue | undefined> {
     // Check cache
     const cached = this.cache.get(key)
     if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
@@ -153,7 +220,7 @@ export class DatabaseConfigSource implements ConfigSource {
 
       if (!result) return undefined
 
-      let value = result.value
+      let value: string = result.value
 
       // Decrypt if needed
       if (result.is_encrypted) {
@@ -161,17 +228,23 @@ export class DatabaseConfigSource implements ConfigSource {
         value = await secretManager.decryptValue(value)
       }
 
-      // Cache the value
-      this.cache.set(key, { value, timestamp: Date.now() })
+      // Parse the JSON value
+      const parsed: unknown = JSON.parse(value)
+      const configValue = isConfigValue(parsed) ? parsed : undefined
 
-      return value
+      if (configValue !== undefined) {
+        // Cache the value
+        this.cache.set(key, { value: configValue, timestamp: Date.now() })
+      }
+
+      return configValue
     } catch (error) {
-      logger.error(`Failed to get config from database: ${error}`)
+      logger.warn(`Failed to get config from database: ${errorToString(error)}`)
       return undefined
     }
   }
 
-  async set(key: string, value: any): Promise<void> {
+  async set(key: string, value: ConfigValue): Promise<void> {
     if (!db) throw new Error('Database not available')
 
     const jsonValue = JSON.stringify(value)
@@ -181,12 +254,15 @@ export class DatabaseConfigSource implements ConfigSource {
       .values({
         key,
         value: jsonValue,
-        updated_at: new Date()
+        is_encrypted: false,
+        updated_at: toISOString(new Date())
       })
-      .onConflict((oc) =>
+      // Kysely's onConflict has complex inferred types that are correctly handled
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .onConflict((oc: any) =>
         oc.column('key').doUpdateSet({
           value: jsonValue,
-          updated_at: new Date()
+          updated_at: toDateValue(new Date())
         })
       )
       .execute()
@@ -195,7 +271,7 @@ export class DatabaseConfigSource implements ConfigSource {
     this.cache.delete(key)
   }
 
-  async getAll(): Promise<Record<string, any>> {
+  async getAll(): Promise<Record<string, ConfigValue>> {
     if (!db) return {}
 
     try {
@@ -204,22 +280,30 @@ export class DatabaseConfigSource implements ConfigSource {
         .select(['key', 'value', 'is_encrypted'])
         .execute()
 
-      const config: Record<string, any> = {}
+      const config: Record<string, ConfigValue> = {}
       const secretManager = new SecretManager()
 
       for (const row of rows) {
-        let value = row.value
+        let value: string = row.value
 
         if (row.is_encrypted) {
           value = await secretManager.decryptValue(value)
         }
 
-        config[row.key] = value
+        try {
+          const parsed: unknown = JSON.parse(value)
+          if (isConfigValue(parsed)) {
+            config[row.key] = parsed
+          }
+        } catch {
+          // If parsing fails, skip this config entry
+          logger.warn(`Failed to parse config value for key: ${row.key}`)
+        }
       }
 
       return config
     } catch (error) {
-      logger.error(`Failed to get all configs from database: ${error}`)
+      logger.warn(`Failed to get all configs from database: ${errorToString(error)}`)
       return {}
     }
   }
@@ -232,7 +316,7 @@ export class DefaultConfigSource implements ConfigSource {
   name = 'default'
   priority = 0 // Lowest priority
 
-  private defaults: Record<string, any> = {
+  private defaults: Record<string, ConfigValue> = {
     'app.port': 8900,
     'app.host': '0.0.0.0',
     'app.env': 'development',
@@ -261,16 +345,30 @@ export class DefaultConfigSource implements ConfigSource {
     'gallery.imageCacheTTL': 3600
   }
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<ConfigValue | undefined> {
     return this.getNestedValue(this.defaults, key)
   }
 
-  async getAll(): Promise<Record<string, any>> {
+  async getAll(): Promise<Record<string, ConfigValue>> {
     return { ...this.defaults }
   }
 
-  private getNestedValue(obj: any, key: string): any {
-    return key.split('.').reduce((curr, part) => curr?.[part], obj)
+  private getNestedValue(obj: Record<string, ConfigValue>, key: string): ConfigValue | undefined {
+    const parts = key.split('.')
+    let current: ConfigValue | undefined = obj
+
+    for (const part of parts) {
+      if (current === undefined || current === null) {
+        return undefined
+      }
+      if (typeof current === 'object' && !Array.isArray(current) && part in current) {
+        current = current[part]
+      } else {
+        return undefined
+      }
+    }
+
+    return current
   }
 }
 
@@ -313,7 +411,7 @@ export class SecretManager {
 
       return combined.toString('base64')
     } catch (error) {
-      logger.error(`Encryption failed: ${error}`)
+      logger.warn(`Encryption failed: ${errorToString(error)}`)
       throw new Error('Failed to encrypt value')
     }
   }
@@ -331,17 +429,17 @@ export class SecretManager {
       const decipher = this.crypto.createDecipheriv(this.algorithm, key, iv)
       decipher.setAuthTag(authTag)
 
-      let decrypted = decipher.update(encrypted, null, 'utf8')
+      let decrypted = decipher.update(encrypted, undefined, 'utf8')
       decrypted += decipher.final('utf8')
 
       return decrypted
     } catch (error) {
-      logger.error(`Decryption failed: ${error}`)
+      logger.warn(`Decryption failed: ${errorToString(error)}`)
       throw new Error('Failed to decrypt value')
     }
   }
 
-  async decryptValue(value: any): Promise<any> {
+  async decryptValue(value: string): Promise<string> {
     if (typeof value === 'string' && value.startsWith('enc:')) {
       return await this.decrypt(value.substring(4))
     }
@@ -377,12 +475,12 @@ export class SecretManager {
         // Update database
         await db
           .updateTable('system_configs')
-          .set({ value: encrypted, updated_at: new Date() })
+          .set({ value: encrypted, updated_at: toDateValue(new Date()) })
           .where('id', '=', config.id)
           .execute()
 
       } catch (error) {
-        logger.error(`Failed to rotate key for config ${config.key}: ${error}`)
+        logger.warn(`Failed to rotate key for config ${config.key}: ${errorToString(error)}`)
         process.env.ENCRYPTION_KEY = originalKey
         throw error
       }
@@ -417,7 +515,7 @@ export class ConfigService {
     return ConfigService.instance
   }
 
-  async get<T = any>(key: string, defaultValue?: T): Promise<T> {
+  async get<T extends ConfigValue = ConfigValue>(key: string, defaultValue?: T): Promise<T | undefined> {
     for (const source of this.sources) {
       const value = await source.get(key)
       if (value !== undefined) {
@@ -431,10 +529,10 @@ export class ConfigService {
     }
 
     logger.warn(`Config key '${key}' not found in any source`)
-    return undefined as any
+    return undefined
   }
 
-  async set(key: string, value: any, sourceName: string = 'database'): Promise<void> {
+  async set(key: string, value: ConfigValue, sourceName: string = 'database'): Promise<void> {
     const source = this.sources.find(s => s.name === sourceName)
 
     if (!source || !source.set) {
@@ -445,8 +543,8 @@ export class ConfigService {
     logger.info(`Config '${key}' saved to ${sourceName}`)
   }
 
-  async getAll(): Promise<Record<string, any>> {
-    const allConfigs: Record<string, any> = {}
+  async getAll(): Promise<Record<string, ConfigValue>> {
+    const allConfigs: Record<string, ConfigValue> = {}
 
     // Merge configs from all sources (reverse order for priority)
     for (const source of [...this.sources].reverse()) {
@@ -492,7 +590,7 @@ export class ConfigService {
 
     // Validate configuration values
     const port = await this.get<number>('app.port')
-    if (port && (port < 1 || port > 65535)) {
+    if (port !== undefined && typeof port === 'number' && (port < 1 || port > 65535)) {
       errors.push(`Invalid port number: ${port}`)
     }
 

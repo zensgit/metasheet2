@@ -11,6 +11,9 @@
  */
 
 import { db } from '../db/db'
+import { sql } from 'kysely'
+import type { ProtectionRulesTable } from '../db/types'
+import type { Selectable } from 'kysely'
 import { Logger } from '../core/logger'
 import { metrics } from '../metrics/metrics'
 import crypto from 'crypto'
@@ -18,6 +21,9 @@ import crypto from 'crypto'
 // ============================================
 // TYPE DEFINITIONS
 // ============================================
+
+// Type for database row from protection_rules table
+type ProtectionRuleRow = Selectable<ProtectionRulesTable>
 
 export interface ProtectionRule {
   id: string
@@ -45,7 +51,7 @@ export interface RuleConditions {
 export interface RuleCondition {
   field: string
   operator: 'eq' | 'ne' | 'contains' | 'not_contains' | 'in' | 'not_in' | 'gt' | 'lt' | 'gte' | 'lte' | 'exists' | 'not_exists'
-  value?: any
+  value?: unknown
 }
 
 export interface RuleEffects {
@@ -54,14 +60,14 @@ export interface RuleEffects {
   message?: string
   require_typed_confirmation?: boolean
   confirmation_text?: string
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 export interface RuleEvaluationContext {
   entity_type: 'snapshot' | 'plugin' | 'schema' | 'workflow'
   entity_id: string
   operation: string
-  properties: Record<string, any>
+  properties: Record<string, unknown>
   user_id?: string
 }
 
@@ -93,6 +99,29 @@ export interface UpdateRuleOptions {
   is_active?: boolean
 }
 
+// Type guard to check if value is a JSON string
+function isJsonString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
+// Type guard for RuleConditions
+function isRuleConditions(value: unknown): value is RuleConditions {
+  return typeof value === 'object' && value !== null
+}
+
+// Type guard for RuleEffects
+function isRuleEffects(value: unknown): value is RuleEffects {
+  return typeof value === 'object' && value !== null && 'action' in value
+}
+
+// Helper to parse JSON if needed
+function parseJsonField<T>(value: unknown): T {
+  if (isJsonString(value)) {
+    return JSON.parse(value) as T
+  }
+  return value as T
+}
+
 // ============================================
 // SERVICE IMPLEMENTATION
 // ============================================
@@ -116,17 +145,17 @@ export class ProtectionRuleService {
 
     try {
       // Avoid double JSON stringify: if client accidentally sends stringified JSON, parse first
-      const normalizedConditions = typeof (options as any).conditions === 'string'
-        ? JSON.parse((options as any).conditions)
+      const normalizedConditions = isJsonString(options.conditions)
+        ? JSON.parse(options.conditions)
         : options.conditions
-      const normalizedEffects = typeof (options as any).effects === 'string'
-        ? JSON.parse((options as any).effects)
+      const normalizedEffects = isJsonString(options.effects)
+        ? JSON.parse(options.effects)
         : options.effects
 
-      if (typeof normalizedConditions !== 'object' || normalizedConditions === null) {
+      if (!isRuleConditions(normalizedConditions)) {
         throw new Error('conditions must be a JSON object')
       }
-      if (typeof normalizedEffects !== 'object' || normalizedEffects === null) {
+      if (!isRuleEffects(normalizedEffects)) {
         throw new Error('effects must be a JSON object')
       }
 
@@ -137,8 +166,8 @@ export class ProtectionRuleService {
           rule_name: options.rule_name,
           description: options.description || null,
           target_type: options.target_type,
-          conditions: normalizedConditions as any,
-          effects: normalizedEffects as any,
+          conditions: JSON.stringify(normalizedConditions),
+          effects: JSON.stringify(normalizedEffects),
           priority: options.priority || 100,
           is_active: options.is_active !== undefined ? options.is_active : true,
           version: 1,
@@ -151,18 +180,16 @@ export class ProtectionRuleService {
       this.logger.info(`Protection rule created: ${rule.id}`)
 
       // conditions/effects now stored as JSONB; if driver returns object keep as-is
-      const rawConditions = rule.conditions as any
-      const rawEffects = rule.effects as any
-      const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
-      const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
+      const parsedConditions = parseJsonField<RuleConditions>(rule.conditions)
+      const parsedEffects = parseJsonField<RuleEffects>(rule.effects)
 
       return {
         ...rule,
         conditions: parsedConditions,
         effects: parsedEffects,
-        created_at: new Date(rule.created_at as any),
-        updated_at: new Date(rule.updated_at as any),
-        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+        created_at: new Date(rule.created_at),
+        updated_at: new Date(rule.updated_at),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at) : undefined
       } as ProtectionRule
     } catch (error) {
       this.logger.error('Failed to create protection rule', error as Error)
@@ -187,24 +214,36 @@ export class ProtectionRuleService {
         throw new Error(`Rule not found: ${ruleId}`)
       }
 
-      const updateData: any = {
+      // Type for database update payload - conditions/effects are JSON strings for insert/update
+      type UpdateData = {
+        updated_at: Date
+        rule_name?: string
+        description?: string | undefined
+        conditions?: string  // JSONColumnType expects string for insert/update
+        version?: number
+        effects?: string     // JSONColumnType expects string for insert/update
+        priority?: number
+        is_active?: boolean
+      }
+
+      const updateData: UpdateData = {
         updated_at: new Date()
       }
 
       if (options.rule_name !== undefined) updateData.rule_name = options.rule_name
       if (options.description !== undefined) updateData.description = options.description
       if (options.conditions !== undefined) {
-        const normalizedConditions = typeof (options as any).conditions === 'string'
-          ? JSON.parse((options as any).conditions)
+        const normalizedConditions = isJsonString(options.conditions)
+          ? JSON.parse(options.conditions)
           : options.conditions
-        updateData.conditions = normalizedConditions as any
+        updateData.conditions = JSON.stringify(normalizedConditions)
         updateData.version = currentRule.version + 1
       }
       if (options.effects !== undefined) {
-        const normalizedEffects = typeof (options as any).effects === 'string'
-          ? JSON.parse((options as any).effects)
+        const normalizedEffects = isJsonString(options.effects)
+          ? JSON.parse(options.effects)
           : options.effects
-        updateData.effects = normalizedEffects as any
+        updateData.effects = JSON.stringify(normalizedEffects)
       }
       if (options.priority !== undefined) updateData.priority = options.priority
       if (options.is_active !== undefined) updateData.is_active = options.is_active
@@ -218,17 +257,16 @@ export class ProtectionRuleService {
 
       this.logger.info(`Protection rule updated: ${rule.id}`)
 
-      const rawConditions = rule.conditions as any
-      const rawEffects = rule.effects as any
-      const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
-      const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
+      const parsedConditions = parseJsonField<RuleConditions>(rule.conditions)
+      const parsedEffects = parseJsonField<RuleEffects>(rule.effects)
+
       return {
         ...rule,
         conditions: parsedConditions,
         effects: parsedEffects,
-        created_at: new Date(rule.created_at as any),
-        updated_at: new Date(rule.updated_at as any),
-        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+        created_at: new Date(rule.created_at),
+        updated_at: new Date(rule.updated_at),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at) : undefined
       } as ProtectionRule
     } catch (error) {
       this.logger.error('Failed to update protection rule', error as Error)
@@ -278,13 +316,17 @@ export class ProtectionRuleService {
         return null
       }
 
+      // Parse JSON fields - they may be returned as strings or objects depending on driver
+      const parsedConditions = parseJsonField<RuleConditions>(rule.conditions)
+      const parsedEffects = parseJsonField<RuleEffects>(rule.effects)
+
       return {
         ...rule,
-        conditions: JSON.parse(rule.conditions as string),
-        effects: JSON.parse(rule.effects as string),
-        created_at: new Date(rule.created_at as any),
-        updated_at: new Date(rule.updated_at as any),
-        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+        conditions: parsedConditions,
+        effects: parsedEffects,
+        created_at: new Date(rule.created_at),
+        updated_at: new Date(rule.updated_at),
+        last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at) : undefined
       } as ProtectionRule
     } catch (error) {
       this.logger.error('Failed to get protection rule', error as Error)
@@ -311,7 +353,7 @@ export class ProtectionRuleService {
         .orderBy('created_at', 'desc')
 
       if (options?.target_type) {
-        query = query.where('target_type', '=', options.target_type as any)
+        query = query.where('target_type', '=', options.target_type as 'snapshot' | 'plugin' | 'schema' | 'workflow')
       }
 
       if (options?.is_active !== undefined) {
@@ -320,18 +362,24 @@ export class ProtectionRuleService {
 
       const rules = await query.execute()
 
-      return rules.map((rule: any) => {
-        const rawConditions = rule.conditions as any
-        const rawEffects = rule.effects as any
-        const parsedConditions = typeof rawConditions === 'string' ? JSON.parse(rawConditions) : rawConditions
-        const parsedEffects = typeof rawEffects === 'string' ? JSON.parse(rawEffects) : rawEffects
+      return rules.map((rule: ProtectionRuleRow) => {
+        const parsedConditions = parseJsonField<RuleConditions>(rule.conditions)
+        const parsedEffects = parseJsonField<RuleEffects>(rule.effects)
+
+        // Convert Timestamp (from Kysely) to Date - Timestamp is Date at runtime
+        const createdAt = rule.created_at instanceof Date ? rule.created_at : new Date(String(rule.created_at))
+        const updatedAt = rule.updated_at instanceof Date ? rule.updated_at : new Date(String(rule.updated_at))
+        const lastEvaluatedAt = rule.last_evaluated_at
+          ? (rule.last_evaluated_at instanceof Date ? rule.last_evaluated_at : new Date(String(rule.last_evaluated_at)))
+          : undefined
+
         return {
           ...rule,
           conditions: parsedConditions,
           effects: parsedEffects,
-          created_at: new Date(rule.created_at as any),
-          updated_at: new Date(rule.updated_at as any),
-          last_evaluated_at: rule.last_evaluated_at ? new Date(rule.last_evaluated_at as any) : undefined
+          created_at: createdAt,
+          updated_at: updatedAt,
+          last_evaluated_at: lastEvaluatedAt
         }
       }) as ProtectionRule[]
     } catch (error) {
@@ -393,7 +441,7 @@ export class ProtectionRuleService {
                 .labels(rule.rule_name, context.operation)
                 .inc()
             }
-          } catch {}
+          } catch { /* metrics unavailable */ }
 
           this.logger.info(
             `Rule matched: ${rule.rule_name} (${rule.id}) for ${context.entity_type} ${context.entity_id}, action: ${rule.effects.action}`
@@ -427,7 +475,7 @@ export class ProtectionRuleService {
   /**
    * Evaluate rule conditions against entity properties
    */
-  private evaluateConditions(conditions: RuleConditions, properties: Record<string, any>): boolean {
+  private evaluateConditions(conditions: RuleConditions, properties: Record<string, unknown>): boolean {
     // Handle composite conditions
     if (conditions.all) {
       return conditions.all.every(condition => this.evaluateCondition(condition, properties))
@@ -447,7 +495,7 @@ export class ProtectionRuleService {
   /**
    * Evaluate a single condition
    */
-  private evaluateCondition(condition: RuleCondition, properties: Record<string, any>): boolean {
+  private evaluateCondition(condition: RuleCondition, properties: Record<string, unknown>): boolean {
     const fieldValue = properties[condition.field]
 
     switch (condition.operator) {
@@ -462,7 +510,7 @@ export class ProtectionRuleService {
           return fieldValue.includes(condition.value)
         }
         if (typeof fieldValue === 'string') {
-          return fieldValue.includes(condition.value)
+          return fieldValue.includes(condition.value as string)
         }
         return false
 
@@ -471,7 +519,7 @@ export class ProtectionRuleService {
           return !fieldValue.includes(condition.value)
         }
         if (typeof fieldValue === 'string') {
-          return !fieldValue.includes(condition.value)
+          return !fieldValue.includes(condition.value as string)
         }
         return true
 
@@ -488,16 +536,28 @@ export class ProtectionRuleService {
         return !condition.value.includes(fieldValue)
 
       case 'gt':
-        return fieldValue > condition.value
+        if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+          return fieldValue > condition.value
+        }
+        return false
 
       case 'lt':
-        return fieldValue < condition.value
+        if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+          return fieldValue < condition.value
+        }
+        return false
 
       case 'gte':
-        return fieldValue >= condition.value
+        if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+          return fieldValue >= condition.value
+        }
+        return false
 
       case 'lte':
-        return fieldValue <= condition.value
+        if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+          return fieldValue <= condition.value
+        }
+        return false
 
       case 'exists':
         return fieldValue !== undefined && fieldValue !== null
@@ -529,6 +589,12 @@ export class ProtectionRuleService {
     }
 
     try {
+      // For JSONColumnType, insert expects string. For null, we still need to pass the value
+      // but the type system expects string. Use type assertion for null case.
+      const effectAppliedValue = data.effect_applied
+        ? JSON.stringify(data.effect_applied)
+        : (null as unknown as string)
+
       await db
         .insertInto('rule_execution_log')
         .values({
@@ -539,7 +605,7 @@ export class ProtectionRuleService {
           entity_id: data.entity_id,
           operation: data.operation,
           matched: data.matched,
-          effect_applied: data.effect_applied ? JSON.stringify(data.effect_applied) : null,
+          effect_applied: effectAppliedValue,
           execution_time_ms: data.execution_time_ms
         })
         .execute()
@@ -562,7 +628,8 @@ export class ProtectionRuleService {
         .updateTable('protection_rules')
         .set({
           last_evaluated_at: new Date(),
-          evaluation_count: db.fn('evaluation_count', ['+', 1]) as any
+          // Use sql template for incrementing the evaluation count
+          evaluation_count: sql`evaluation_count + 1`
         })
         .where('id', '=', ruleId)
         .execute()

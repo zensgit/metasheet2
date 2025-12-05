@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * SafetyGuard Express Middleware
  *
@@ -7,15 +6,16 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { getSafetyGuard } from './SafetyGuard';
-import { OperationType, type OperationContext } from './types';
+import type { OperationType} from './types';
+import { type OperationContext } from './types';
 
-declare module 'express-serve-static-core' {
-  interface Request {
-    safetyContext?: {
-      operation: OperationType;
-      checkResult?: ReturnType<typeof getSafetyGuard>['checkOperation'];
-    };
-  }
+// Extend Express Request type
+interface SafetyRequest extends Request {
+  safetyContext?: {
+    operation: OperationType;
+    checkResult?: unknown;
+  };
+  user?: { id?: string; email?: string };
 }
 
 export interface SafetyMiddlewareOptions {
@@ -37,13 +37,12 @@ export interface SafetyMiddlewareOptions {
 export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const safetyGuard = getSafetyGuard();
+    const safetyReq = req as SafetyRequest;
 
     // Extract initiator from request
     const initiator =
-      (req as Request & { user?: { id?: string; email?: string } }).user
-        ?.id ||
-      (req as Request & { user?: { id?: string; email?: string } }).user
-        ?.email ||
+      safetyReq.user?.id ||
+      safetyReq.user?.email ||
       req.ip ||
       'unknown';
 
@@ -62,7 +61,7 @@ export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
     const result = await safetyGuard.checkOperation(context);
 
     // Store in request for downstream handlers
-    req.safetyContext = {
+    safetyReq.safetyContext = {
       operation: options.operation,
       checkResult: result
     };

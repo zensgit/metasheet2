@@ -3,7 +3,8 @@
  * Phase 9: Snapshot / Versioning MVP
  */
 
-import { Router, Request, Response } from 'express'
+import type { Request, Response } from 'express';
+import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { snapshotService } from '../services/SnapshotService'
 
@@ -56,7 +57,7 @@ export function snapshotsRouter(): Router {
 
   // Create a new snapshot
   r.post('/api/snapshots', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
-    const userId = (req as any).user?.id || 'system'
+    const userId = req.user?.id?.toString() || 'system'
     const { view_id, name, description, snapshot_type, metadata, expires_at } = req.body
 
     if (!view_id || !name) {
@@ -90,7 +91,7 @@ export function snapshotsRouter(): Router {
   // Restore a snapshot
   r.post('/api/snapshots/:id/restore', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
     const snapshotId = req.params.id
-    const userId = (req as any).user?.id || 'system'
+    const userId = req.user?.id?.toString() || 'system'
     const { restore_type, item_types } = req.body
 
     try {
@@ -114,7 +115,7 @@ export function snapshotsRouter(): Router {
   // Delete a snapshot
   r.delete('/api/snapshots/:id', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
     const snapshotId = req.params.id
-    const userId = (req as any).user?.id || 'system'
+    const userId = req.user?.id?.toString() || 'system'
 
     try {
       await snapshotService.deleteSnapshot(snapshotId, userId)
@@ -143,7 +144,7 @@ export function snapshotsRouter(): Router {
   // Lock/unlock a snapshot
   r.patch('/api/snapshots/:id/lock', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
     const snapshotId = req.params.id
-    const userId = (req as any).user?.id || 'system'
+    const userId = req.user?.id?.toString() || 'system'
     const { locked } = req.body
 
     if (typeof locked !== 'boolean') {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 安全服务实现
  * 提供插件安全功能，包括权限验证、沙箱、加密、审计等
@@ -15,7 +14,8 @@ import type {
   AuditLogOptions,
   ThreatScanResult,
   RateLimitResult,
-  ResourceUsage
+  ResourceUsage,
+  PluginPermission
 } from '../types/plugin'
 import { Logger } from '../core/logger'
 import { PERMISSION_WHITELIST } from '../types/plugin'
@@ -27,7 +27,7 @@ class PluginSandboxImpl implements PluginSandbox {
   pluginName: string
   allowedAPIs: string[]
   resourceLimits: ResourceLimits
-  environment: Record<string, any>
+  environment: Record<string, unknown>
   private context: vm.Context
   private logger: Logger
 
@@ -35,7 +35,7 @@ class PluginSandboxImpl implements PluginSandbox {
     pluginName: string,
     allowedAPIs: string[],
     resourceLimits: ResourceLimits = {},
-    environment: Record<string, any> = {}
+    environment: Record<string, unknown> = {}
   ) {
     this.pluginName = pluginName
     this.allowedAPIs = allowedAPIs
@@ -51,22 +51,22 @@ class PluginSandboxImpl implements PluginSandbox {
     const sandbox = {
       // 基础全局对象
       console: {
-        log: (...args: any[]) => this.logger.info('Plugin log:', ...args),
-        error: (...args: any[]) => this.logger.error('Plugin error:', ...args),
-        warn: (...args: any[]) => this.logger.warn('Plugin warn:', ...args),
-        info: (...args: any[]) => this.logger.info('Plugin info:', ...args),
-        debug: (...args: any[]) => this.logger.debug('Plugin debug:', ...args)
+        log: (...args: unknown[]) => this.logger.info('Plugin log:', { args }),
+        error: (...args: unknown[]) => this.logger.error('Plugin error:', args[0] instanceof Error ? args[0] : new Error(String(args[0]))),
+        warn: (...args: unknown[]) => this.logger.warn('Plugin warn:', { args }),
+        info: (...args: unknown[]) => this.logger.info('Plugin info:', { args }),
+        debug: (...args: unknown[]) => this.logger.debug('Plugin debug:', { args })
       },
 
       // 安全的全局函数
-      setTimeout: (callback: Function, delay: number) => {
+      setTimeout: (callback: () => void, delay: number) => {
         if (delay < 0 || delay > 300000) { // 最大5分钟
           throw new Error('Invalid timeout delay')
         }
         return setTimeout(callback, delay)
       },
 
-      setInterval: (callback: Function, delay: number) => {
+      setInterval: (callback: () => void, delay: number) => {
         if (delay < 100 || delay > 60000) { // 最小100ms，最大1分钟
           throw new Error('Invalid interval delay')
         }
@@ -121,7 +121,7 @@ class PluginSandboxImpl implements PluginSandbox {
     return context
   }
 
-  async execute<T>(code: string, context?: any): Promise<T> {
+  async execute<T>(code: string, context?: Record<string, unknown>): Promise<T> {
     try {
       // 检查代码威胁
       const threatScan = await this.scanCode(code)
@@ -232,15 +232,20 @@ class PluginSandboxImpl implements PluginSandbox {
 }
 
 /**
+ * 速率限制器内部状态
+ */
+interface RateLimitState {
+  count: number
+  resetTime: number
+  windowMs: number
+  maxRequests: number
+}
+
+/**
  * 速率限制器
  */
 class RateLimiter {
-  private limits = new Map<string, {
-    count: number
-    resetTime: number
-    windowMs: number
-    maxRequests: number
-  }>()
+  private limits = new Map<string, RateLimitState>()
 
   check(
     key: string,
@@ -291,6 +296,13 @@ class RateLimiter {
       }
     }
   }
+
+  /**
+   * 获取速率限制器大小（用于统计）
+   */
+  getSize(): number {
+    return this.limits.size
+  }
 }
 
 /**
@@ -303,6 +315,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
   private resourceUsage = new Map<string, ResourceUsage[]>()
   private logger: Logger
   private encryptionKey: Buffer
+  private cleanupTimer: NodeJS.Timeout
 
   constructor(encryptionKey?: string) {
     super()
@@ -314,7 +327,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       randomBytes(32)
 
     // 定期清理
-    setInterval(() => {
+    this.cleanupTimer = setInterval(() => {
       this.cleanup()
     }, 300000) // 每5分钟清理一次
   }
@@ -322,10 +335,10 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
   async checkPermission(pluginName: string, permission: string): Promise<boolean> {
     try {
       // 检查权限是否在白名单中
-      const allowed = PERMISSION_WHITELIST.includes(permission as any)
+      const allowed = PERMISSION_WHITELIST.includes(permission as PluginPermission)
 
       await this.audit({
-        id: `perm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        id: `perm_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
         pluginName,
         event: 'permission_check',
         resource: permission,
@@ -388,7 +401,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       const allowed = sandbox.allowedAPIs.some(api => apiPath.startsWith(api))
 
       await this.audit({
-        id: `api_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        id: `api_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
         pluginName,
         event: 'api_access',
         resource: apiPath,
@@ -512,11 +525,11 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
     }
 
     if (options.dateFrom) {
-      filtered = filtered.filter(e => e.timestamp >= options.dateFrom!)
+      filtered = filtered.filter(e => e.timestamp && e.timestamp >= options.dateFrom!)
     }
 
     if (options.dateTo) {
-      filtered = filtered.filter(e => e.timestamp <= options.dateTo!)
+      filtered = filtered.filter(e => e.timestamp && e.timestamp <= options.dateTo!)
     }
 
     // 分页
@@ -532,7 +545,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       const result = await (sandbox as PluginSandboxImpl)['scanCode'](code)
 
       await this.audit({
-        id: `scan_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        id: `scan_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
         pluginName,
         event: 'threat_scan',
         timestamp: new Date(),
@@ -577,9 +590,9 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       this.resourceUsage.set(pluginName, pluginUsage)
 
       // 检查是否超出限制
-      if (usage.current > usage.limit) {
+      if (usage.current !== undefined && usage.limit !== undefined && usage.current > usage.limit) {
         await this.audit({
-          id: `resource_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          id: `resource_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
           pluginName,
           event: 'resource_limit_exceeded',
           resource,
@@ -610,7 +623,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000) // 24小时前
 
       for (const [pluginName, usage] of this.resourceUsage.entries()) {
-        const filtered = usage.filter(u => u.timestamp >= cutoff)
+        const filtered = usage.filter(u => u.timestamp && u.timestamp >= cutoff)
         if (filtered.length !== usage.length) {
           this.resourceUsage.set(pluginName, filtered)
         }
@@ -619,7 +632,7 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
       // 清理审计日志（保留最近7天）
       const auditCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
       const originalSize = this.auditLog.length
-      this.auditLog = this.auditLog.filter(log => log.timestamp >= auditCutoff)
+      this.auditLog = this.auditLog.filter(log => log.timestamp && log.timestamp >= auditCutoff)
 
       const cleaned = originalSize - this.auditLog.length
       if (cleaned > 0) {
@@ -646,10 +659,20 @@ export class SecurityServiceImpl extends EventEmitter implements SecurityService
         (total, usage) => total + usage.length,
         0
       ),
-      rateLimits: (this.rateLimiter as any).limits.size
+      rateLimits: this.rateLimiter.getSize()
     }
+  }
+
+  /**
+   * 销毁服务，清理所有资源
+   */
+  destroy(): void {
+    clearInterval(this.cleanupTimer)
+    this.sandboxes.clear()
+    this.auditLog = []
+    this.resourceUsage.clear()
+    this.removeAllListeners()
   }
 }
 
 export { PluginSandboxImpl, RateLimiter }
-// @ts-nocheck

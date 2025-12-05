@@ -1,10 +1,11 @@
-// @ts-nocheck
 /**
  * WebSocket 服务实现
  * 提供实时通信功能，支持房间管理、权限控制等
  */
 
 import { EventEmitter } from 'eventemitter3'
+import type { Server as SocketIOServer } from 'socket.io'
+import type { Socket as SocketIOSocket } from 'socket.io'
 import type {
   WebSocketService,
   BroadcastOptions,
@@ -24,7 +25,7 @@ export class SocketInfoImpl implements SocketInfo {
   connected: boolean = true
   connectedAt: Date = new Date()
   lastSeen: Date = new Date()
-  metadata: Record<string, any> = {}
+  metadata: Record<string, unknown> = {}
 
   constructor(id: string, userId?: string) {
     this.id = id
@@ -45,12 +46,12 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
   private userSockets = new Map<string, Set<string>>() // user ID -> socket IDs
   private middlewares: SocketMiddleware[] = []
   private logger: Logger
-  private ioInstance: any // Socket.IO instance
+  private ioInstance: SocketIOServer | null = null
 
-  constructor(ioInstance?: any) {
+  constructor(ioInstance?: SocketIOServer) {
     super()
     this.logger = new Logger('WebSocketService')
-    this.ioInstance = ioInstance
+    this.ioInstance = ioInstance || null
 
     // 如果提供了 Socket.IO 实例，设置事件监听
     if (ioInstance) {
@@ -61,8 +62,8 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
   /**
    * 设置 Socket.IO 监听器
    */
-  private setupSocketIOListeners(io: any): void {
-    io.on('connection', (socket: any) => {
+  private setupSocketIOListeners(io: SocketIOServer): void {
+    io.on('connection', (socket: SocketIOSocket) => {
       const socketInfo = new SocketInfoImpl(socket.id)
       this.sockets.set(socket.id, socketInfo)
 
@@ -85,7 +86,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
       })
 
       // 监听自定义事件
-      socket.onAny((event: string, ...args: any[]) => {
+      socket.onAny((event: string, ...args: unknown[]) => {
         socketInfo.updateLastSeen()
         this.emit('message', event, socketInfo, ...args)
       })
@@ -153,10 +154,11 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     this.logger.debug(`Socket disconnected: ${socket.id}, reason: ${reason}`)
   }
 
-  broadcast(event: string, data: any, options: BroadcastOptions = {}): void {
+  broadcast(event: string, data: unknown, options: BroadcastOptions = {}): void {
     try {
       if (this.ioInstance) {
-        let emitter = this.ioInstance
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let emitter: any = this.ioInstance
 
         if (options.except && options.except.length > 0) {
           // 排除指定的socket
@@ -188,7 +190,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     }
   }
 
-  async sendTo(targetId: string, event: string, data: any, options: SendOptions = {}): Promise<boolean> {
+  async sendTo(targetId: string, event: string, data: unknown, options: SendOptions = {}): Promise<boolean> {
     try {
       // 尝试按用户ID发送
       const userSockets = this.userSockets.get(targetId)
@@ -215,19 +217,20 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     }
   }
 
-  async sendToMany(targetIds: string[], event: string, data: any, options: SendOptions = {}): Promise<boolean[]> {
+  async sendToMany(targetIds: string[], event: string, data: unknown, options: SendOptions = {}): Promise<boolean[]> {
     const results = await Promise.all(
       targetIds.map(id => this.sendTo(id, event, data, options))
     )
     return results
   }
 
-  private async sendToSocket(socketId: string, event: string, data: any, options: SendOptions = {}): Promise<boolean> {
+  private async sendToSocket(socketId: string, event: string, data: unknown, options: SendOptions = {}): Promise<boolean> {
     try {
       if (this.ioInstance) {
         const socket = this.ioInstance.sockets.sockets.get(socketId)
         if (socket && socket.connected) {
-          let emitter = socket
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let emitter: any = socket
 
           // 设置发送选项
           if (options.timeout) emitter = emitter.timeout(options.timeout)
@@ -333,7 +336,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     await Promise.all(socketIds.map(id => this.leave(id, room)))
   }
 
-  broadcastToRoom(room: string, event: string, data: any, options: BroadcastOptions = {}): void {
+  broadcastToRoom(room: string, event: string, data: unknown, options: BroadcastOptions = {}): void {
     try {
       const roomSockets = this.rooms.get(room)
       if (!roomSockets || roomSockets.size === 0) {
@@ -342,7 +345,8 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
       }
 
       if (this.ioInstance) {
-        let emitter = this.ioInstance.to(room)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let emitter: any = this.ioInstance.to(room)
 
         if (options.except && options.except.length > 0) {
           for (const socketId of options.except) {
@@ -406,8 +410,8 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     this.on('disconnection', handler)
   }
 
-  onMessage(event: string, handler: (socket: SocketInfo, data: any) => void): void {
-    this.on('message', (eventName: string, socket: SocketInfo, ...args: any[]) => {
+  onMessage(event: string, handler: (socket: SocketInfo, data: unknown) => void): void {
+    this.on('message', (eventName: string, socket: SocketInfo, ...args: unknown[]) => {
       if (eventName === event) {
         handler(socket, args[0])
       }
@@ -454,7 +458,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     }
   }
 
-  async authorize(socketId: string, resource: string, action: string): Promise<boolean> {
+  async authorize(socketId: string, _resource: string, _action: string): Promise<boolean> {
     try {
       const socket = this.sockets.get(socketId)
       if (!socket || !socket.userId) {
@@ -463,7 +467,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
 
       // 这里应该集成实际的授权逻辑
       // 简化实现：已认证用户有基本权限
-      return socket.metadata.authenticated === true
+      return !!socket.metadata.authenticated
     } catch (error) {
       this.logger.error(`Authorization failed for socket ${socketId}`, error as Error)
       return false
@@ -511,7 +515,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
     const disconnectedCount = this.sockets.size
 
     // 清理断开的连接
-    for (const [socketId, socket] of this.sockets.entries()) {
+    for (const [_socketId, socket] of this.sockets.entries()) {
       if (!socket.connected) {
         this.handleDisconnection(socket, 'cleanup')
       }
@@ -563,7 +567,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
   /**
    * 设置Socket.IO实例
    */
-  setIOInstance(ioInstance: any): void {
+  setIOInstance(ioInstance: SocketIOServer): void {
     this.ioInstance = ioInstance
     this.setupSocketIOListeners(ioInstance)
   }
@@ -575,7 +579,7 @@ export class WebSocketServiceImpl extends EventEmitter implements WebSocketServi
 export function createAuthMiddleware(verifyToken: (token: string) => Promise<string | null>): SocketMiddleware {
   return async (socket: SocketInfo, next: (err?: Error) => void) => {
     try {
-      const token = socket.metadata.token
+      const token = socket.metadata.token as string | undefined
       if (!token) {
         return next(new Error('No authentication token provided'))
       }

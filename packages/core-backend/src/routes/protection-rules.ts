@@ -32,6 +32,21 @@ router.use((req, res, next) => {
   return next();
 });
 
+// Define types for query options
+interface ListRulesOptions {
+  target_type?: string;
+  is_active?: boolean;
+}
+
+// Type guard for database errors with code property
+interface DatabaseError extends Error {
+  code?: string;
+}
+
+function isDatabaseError(error: unknown): error is DatabaseError {
+  return error instanceof Error && 'code' in error;
+}
+
 /**
  * GET /api/admin/safety/rules
  * List all protection rules
@@ -40,7 +55,7 @@ router.get('/', async (req, res) => {
   try {
     const { target_type, is_active } = req.query;
 
-    const options: any = {};
+    const options: ListRulesOptions = {};
     if (target_type) options.target_type = target_type as string;
     if (is_active !== undefined) options.is_active = is_active === 'true';
 
@@ -122,8 +137,8 @@ router.post('/', async (req, res) => {
     }
 
     // Normalize if client sent stringified JSON
-    let normalizedConditions: any = conditions
-    let normalizedEffects: any = effects
+    let normalizedConditions: unknown = conditions
+    let normalizedEffects: unknown = effects
     try {
       if (typeof normalizedConditions === 'string') normalizedConditions = JSON.parse(normalizedConditions)
       if (typeof normalizedEffects === 'string') normalizedEffects = JSON.parse(normalizedEffects)
@@ -131,10 +146,18 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success:false, error:'conditions/effects string not valid JSON' })
     }
 
-    if (!['allow', 'block', 'elevate_risk', 'require_approval'].includes(normalizedEffects.action)) {
+    if (typeof normalizedEffects === 'object' && normalizedEffects !== null && 'action' in normalizedEffects) {
+      const effectsObj = normalizedEffects as Record<string, unknown>;
+      if (!['allow', 'block', 'elevate_risk', 'require_approval'].includes(effectsObj.action as string)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid effects.action. Must be: allow, block, elevate_risk, or require_approval'
+        });
+      }
+    } else {
       return res.status(400).json({
         success: false,
-        error: 'Invalid effects.action. Must be: allow, block, elevate_risk, or require_approval'
+        error: 'Invalid effects format'
       });
     }
 
@@ -151,9 +174,9 @@ router.post('/', async (req, res) => {
     const rule = await protectionRuleService.createRule({
       rule_name,
       description,
-      target_type,
-      conditions: normalizedConditions,
-      effects: normalizedEffects,
+      target_type: target_type as 'snapshot' | 'plugin' | 'schema' | 'workflow',
+      conditions: normalizedConditions as Record<string, unknown>,
+      effects: normalizedEffects as { action: 'allow' | 'block' | 'elevate_risk' | 'require_approval'; [key: string]: unknown },
       priority,
       is_active,
       created_by: userId
@@ -165,8 +188,7 @@ router.post('/', async (req, res) => {
       message: 'Protection rule created successfully'
     });
   } catch (error) {
-    const err: any = error;
-    if (err?.code === '23505') { // unique_violation
+    if (isDatabaseError(error) && error.code === '23505') { // unique_violation
       return res.status(409).json({ success: false, error: 'Rule name already exists', error_code: 'RULE_DUPLICATE' });
     }
     logger.error('Failed to create protection rule', error as Error);

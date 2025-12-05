@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * 缓存服务实现
  * 支持 Redis 和内存缓存，提供完整的缓存操作
@@ -12,15 +11,55 @@ import type {
 import { Logger } from '../core/logger'
 
 /**
+ * Redis客户端接口 - 定义我们需要的Redis方法
+ */
+interface RedisClient {
+  get(key: string): Promise<string | null>
+  set(...args: unknown[]): Promise<string | null>
+  setex(key: string, seconds: number, value: string): Promise<string>
+  del(...keys: string[]): Promise<number>
+  exists(key: string): Promise<number>
+  mget(...keys: string[]): Promise<(string | null)[]>
+  incrby(key: string, value: number): Promise<number>
+  expire(key: string, seconds: number): Promise<number>
+  ttl(key: string): Promise<number>
+  dbsize(): Promise<number>
+  flushdb(): Promise<string>
+  keys(pattern: string): Promise<string[]>
+  sadd(key: string, ...members: string[]): Promise<number>
+  smembers(key: string): Promise<string[]>
+  pipeline(): RedisPipeline
+}
+
+/**
+ * Redis Pipeline接口
+ */
+interface RedisPipeline {
+  setex(key: string, seconds: number, value: string): RedisPipeline
+  set(key: string, value: string): RedisPipeline
+  sadd(key: string, ...members: string[]): RedisPipeline
+  exec(): Promise<unknown[]>
+}
+
+/**
+ * 缓存项接口
+ */
+interface CacheItem<T = unknown> {
+  value: T
+  expiresAt?: number
+  tags?: string[]
+}
+
+/**
  * 缓存提供者接口
  */
 interface CacheProvider {
-  get(key: string): Promise<any>
-  set(key: string, value: any, options?: CacheSetOptions): Promise<void>
+  get<T = unknown>(key: string): Promise<T | null>
+  set<T = unknown>(key: string, value: T, options?: CacheSetOptions): Promise<void>
   delete(key: string): Promise<void>
   exists(key: string): Promise<boolean>
-  mget(keys: string[]): Promise<(any | null)[]>
-  mset(pairs: Array<{key: string, value: any, options?: CacheSetOptions}>): Promise<void>
+  mget<T = unknown>(keys: string[]): Promise<(T | null)[]>
+  mset<T = unknown>(pairs: Array<{key: string, value: T, options?: CacheSetOptions}>): Promise<void>
   mdel(keys: string[]): Promise<void>
   increment(key: string, value?: number): Promise<number>
   expire(key: string, seconds: number): Promise<void>
@@ -34,24 +73,21 @@ interface CacheProvider {
  * 内存缓存提供者
  */
 class MemoryCacheProvider implements CacheProvider {
-  private cache = new Map<string, {
-    value: any
-    expiresAt?: number
-    tags?: string[]
-  }>()
+  private cache = new Map<string, CacheItem>()
   private tagIndex = new Map<string, Set<string>>()
   private logger: Logger
+  private cleanupTimer: NodeJS.Timeout
 
   constructor() {
     this.logger = new Logger('MemoryCacheProvider')
 
     // 定期清理过期缓存
-    setInterval(() => {
+    this.cleanupTimer = setInterval(() => {
       this.cleanExpired()
     }, 60000) // 每分钟清理一次
   }
 
-  async get(key: string): Promise<any> {
+  async get<T = unknown>(key: string): Promise<T | null> {
     const item = this.cache.get(key)
     if (!item) return null
 
@@ -60,10 +96,10 @@ class MemoryCacheProvider implements CacheProvider {
       return null
     }
 
-    return item.value
+    return item.value as T
   }
 
-  async set(key: string, value: any, options: CacheSetOptions = {}): Promise<void> {
+  async set<T = unknown>(key: string, value: T, options: CacheSetOptions = {}): Promise<void> {
     const { ttl, tags, nx, xx } = options
 
     if (nx && this.cache.has(key)) {
@@ -74,7 +110,7 @@ class MemoryCacheProvider implements CacheProvider {
       return // 只有存在时才设置
     }
 
-    const item: any = { value }
+    const item: CacheItem<T> = { value }
 
     if (ttl && ttl > 0) {
       item.expiresAt = Date.now() + (ttl * 1000)
@@ -124,11 +160,11 @@ class MemoryCacheProvider implements CacheProvider {
     return true
   }
 
-  async mget(keys: string[]): Promise<(any | null)[]> {
-    return Promise.all(keys.map(key => this.get(key)))
+  async mget<T = unknown>(keys: string[]): Promise<(T | null)[]> {
+    return Promise.all(keys.map(key => this.get<T>(key)))
   }
 
-  async mset(pairs: Array<{key: string, value: any, options?: CacheSetOptions}>): Promise<void> {
+  async mset<T = unknown>(pairs: Array<{key: string, value: T, options?: CacheSetOptions}>): Promise<void> {
     await Promise.all(pairs.map(({ key, value, options }) =>
       this.set(key, value, options)
     ))
@@ -139,7 +175,7 @@ class MemoryCacheProvider implements CacheProvider {
   }
 
   async increment(key: string, value: number = 1): Promise<number> {
-    const current = await this.get(key) || 0
+    const current = await this.get<number>(key) || 0
     const newValue = Number(current) + value
     await this.set(key, newValue)
     return newValue
@@ -183,6 +219,13 @@ class MemoryCacheProvider implements CacheProvider {
     await this.mdel(keysToDelete)
   }
 
+  /**
+   * 获取标签索引 - 用于内部访问
+   */
+  getTagIndex(): Map<string, Set<string>> {
+    return this.tagIndex
+  }
+
   private cleanExpired(): void {
     const now = Date.now()
     const expiredKeys: string[] = []
@@ -201,36 +244,42 @@ class MemoryCacheProvider implements CacheProvider {
       this.logger.debug(`Cleaned ${expiredKeys.length} expired cache entries`)
     }
   }
+
+  destroy(): void {
+    clearInterval(this.cleanupTimer)
+    this.cache.clear()
+    this.tagIndex.clear()
+  }
 }
 
 /**
  * Redis 缓存提供者
  */
 class RedisCacheProvider implements CacheProvider {
-  private redis: any
+  private redis: RedisClient
   private logger: Logger
 
-  constructor(redisClient: any) {
+  constructor(redisClient: RedisClient) {
     this.redis = redisClient
     this.logger = new Logger('RedisCacheProvider')
   }
 
-  async get(key: string): Promise<any> {
+  async get<T = unknown>(key: string): Promise<T | null> {
     try {
       const value = await this.redis.get(key)
-      return value ? JSON.parse(value) : null
+      return value ? JSON.parse(value) as T : null
     } catch (error) {
       this.logger.error(`Failed to get cache key ${key}`, error as Error)
       return null
     }
   }
 
-  async set(key: string, value: any, options: CacheSetOptions = {}): Promise<void> {
+  async set<T = unknown>(key: string, value: T, options: CacheSetOptions = {}): Promise<void> {
     try {
       const { ttl, nx, xx } = options
       const serialized = JSON.stringify(value)
 
-      const args: any[] = [key, serialized]
+      const args: unknown[] = [key, serialized]
 
       if (ttl && ttl > 0) {
         args.push('EX', ttl)
@@ -276,13 +325,13 @@ class RedisCacheProvider implements CacheProvider {
     }
   }
 
-  async mget(keys: string[]): Promise<(any | null)[]> {
+  async mget<T = unknown>(keys: string[]): Promise<(T | null)[]> {
     try {
       if (keys.length === 0) return []
 
       const values = await this.redis.mget(...keys)
       return values.map((value: string | null) =>
-        value ? JSON.parse(value) : null
+        value ? JSON.parse(value) as T : null
       )
     } catch (error) {
       this.logger.error(`Failed to mget cache keys`, error as Error)
@@ -290,7 +339,7 @@ class RedisCacheProvider implements CacheProvider {
     }
   }
 
-  async mset(pairs: Array<{key: string, value: any, options?: CacheSetOptions}>): Promise<void> {
+  async mset<T = unknown>(pairs: Array<{key: string, value: T, options?: CacheSetOptions}>): Promise<void> {
     try {
       // 使用管道提升性能
       const pipeline = this.redis.pipeline()
@@ -385,6 +434,13 @@ class RedisCacheProvider implements CacheProvider {
       throw error
     }
   }
+
+  /**
+   * 获取Redis客户端 - 用于内部访问
+   */
+  getRedisClient(): RedisClient {
+    return this.redis
+  }
 }
 
 /**
@@ -405,10 +461,10 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
     this.logger = new Logger('CacheService')
   }
 
-  async get<T = any>(key: string): Promise<T | null> {
+  async get<T = unknown>(key: string): Promise<T | null> {
     try {
       this.metrics.operations++
-      const value = await this.provider.get(key)
+      const value = await this.provider.get<T>(key)
 
       if (value !== null) {
         this.metrics.hits++
@@ -426,7 +482,7 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
     }
   }
 
-  async set<T = any>(key: string, value: T, options?: CacheSetOptions): Promise<void> {
+  async set<T = unknown>(key: string, value: T, options?: CacheSetOptions): Promise<void> {
     try {
       this.metrics.operations++
       await this.provider.set(key, value, options)
@@ -459,10 +515,10 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
     }
   }
 
-  async mget<T = any>(keys: string[]): Promise<(T | null)[]> {
+  async mget<T = unknown>(keys: string[]): Promise<(T | null)[]> {
     try {
       this.metrics.operations++
-      const values = await this.provider.mget(keys)
+      const values = await this.provider.mget<T>(keys)
 
       // 统计命中率
       values.forEach((value, index) => {
@@ -483,7 +539,7 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
     }
   }
 
-  async mset<T = any>(pairs: Array<{key: string, value: T, options?: CacheSetOptions}>): Promise<void> {
+  async mset<T = unknown>(pairs: Array<{key: string, value: T, options?: CacheSetOptions}>): Promise<void> {
     try {
       this.metrics.operations++
       await this.provider.mset(pairs)
@@ -513,20 +569,18 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
 
       // 对于内存缓存，通过标签索引查找
       if (this.provider instanceof MemoryCacheProvider) {
-        const tagIndex = (this.provider as any).tagIndex as Map<string, Set<string>>
+        const tagIndex = this.provider.getTagIndex()
         const keys = tagIndex.get(tag)
         if (keys && keys.size > 0) {
           await this.mdel(Array.from(keys))
         }
-      } else {
+      } else if (this.provider instanceof RedisCacheProvider) {
         // 对于 Redis，通过集合获取标签相关的键
-        const redis = (this.provider as any).redis
-        if (redis) {
-          const keys = await redis.smembers(`tag:${tag}`)
-          if (keys.length > 0) {
-            await this.mdel(keys)
-            await redis.del(`tag:${tag}`)
-          }
+        const redis = this.provider.getRedisClient()
+        const keys = await redis.smembers(`tag:${tag}`)
+        if (keys.length > 0) {
+          await this.mdel(keys)
+          await redis.del(`tag:${tag}`)
         }
       }
     } catch (error) {
@@ -621,7 +675,7 @@ export class CacheServiceImpl extends EventEmitter implements CacheService {
   /**
    * 创建 Redis 缓存服务
    */
-  static createRedisService(redisClient: any): CacheServiceImpl {
+  static createRedisService(redisClient: RedisClient): CacheServiceImpl {
     return new CacheServiceImpl(new RedisCacheProvider(redisClient))
   }
 

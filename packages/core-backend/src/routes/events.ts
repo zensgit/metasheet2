@@ -3,341 +3,340 @@
  * 事件总线REST API端点
  */
 
-import { Router, Request, Response } from 'express';
-import { EventBusService } from '../core/EventBusService';
-import { z } from 'zod';
+import type { Request, Response } from 'express';
+import { Router } from 'express'
+import { eventBus } from '../core/EventBusService'
+import { z } from 'zod'
+import { db } from '../db/db'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('EventsRouter')
 
 // Validation schemas
 const EmitEventSchema = z.object({
   eventName: z.string().min(1).max(100),
   payload: z.any(),
   options: z.object({
-    priority: z.enum(['low', 'normal', 'high', 'critical']).optional(),
-    deliveryMode: z.enum(['at-most-once', 'at-least-once', 'exactly-once']).optional(),
-    targetPlugins: z.array(z.string()).optional(),
-    metadata: z.record(z.any()).optional(),
-    scheduleAt: z.string().datetime().optional(),
-    expireAt: z.string().datetime().optional()
+    source_id: z.string().optional(),
+    source_type: z.string().optional(),
+    correlation_id: z.string().optional(),
+    causation_id: z.string().optional(),
+    metadata: z.record(z.any()).optional()
   }).optional()
-});
+})
 
 const SubscribeEventSchema = z.object({
   subscriberId: z.string().min(1),
   eventPattern: z.string().min(1),
+  webhookUrl: z.string().url(),
   options: z.object({
-    filter: z.string().optional(),
-    priority: z.number().min(1).max(100).optional(),
-    maxRetries: z.number().min(0).max(10).optional()
+    subscriber_type: z.string().optional(),
+    filter: z.record(z.any()).optional(),
+    priority: z.number().min(0).max(100).optional(),
+    transform: z.string().optional(),
+    timeout_ms: z.number().min(1000).max(60000).optional()
   }).optional()
-});
+})
 
 const ReplayEventsSchema = z.object({
   criteria: z.object({
-    eventPattern: z.string().optional(),
-    fromTimestamp: z.string().datetime().optional(),
-    toTimestamp: z.string().datetime().optional(),
-    eventIds: z.array(z.string()).optional(),
-    status: z.enum(['pending', 'delivered', 'failed', 'expired']).optional()
+    event_pattern: z.string().optional(),
+    event_ids: z.array(z.string()).optional(),
+    time_range: z.object({
+      start: z.string().datetime(),
+      end: z.string().datetime()
+    }).optional(),
+    subscription_ids: z.array(z.string()).optional()
   }),
   reason: z.string().min(1)
-});
+})
 
 const QueryEventsSchema = z.object({
   eventName: z.string().optional(),
-  status: z.enum(['pending', 'delivered', 'failed', 'expired']).optional(),
+  status: z.enum(['pending', 'processed', 'archived']).optional(),
   fromTime: z.string().datetime().optional(),
   toTime: z.string().datetime().optional(),
   subscriberId: z.string().optional(),
-  limit: z.number().min(1).max(1000).default(100),
-  offset: z.number().min(0).default(0)
-});
+  limit: z.coerce.number().min(1).max(1000).default(100),
+  offset: z.coerce.number().min(0).default(0)
+})
+
+const MetricsQuerySchema = z.object({
+  eventName: z.string().optional(),
+  fromTime: z.string().datetime().optional(),
+  toTime: z.string().datetime().optional()
+})
 
 export function eventsRouter(): Router {
-  const router = Router();
-  let eventBus: EventBusService | null = null;
-
-  // Initialize event bus service
-  const getEventBus = async (): Promise<EventBusService> => {
-    if (!eventBus) {
-      const { pool } = await import('../db/pg');
-      eventBus = new EventBusService(pool);
-      await eventBus.initialize();
-    }
-    return eventBus;
-  };
+  const router = Router()
 
   // POST /api/events/emit - Emit an event
   router.post('/api/events/emit', async (req: Request, res: Response) => {
     try {
-      const validated = EmitEventSchema.parse(req.body);
-      const service = await getEventBus();
+      const validated = EmitEventSchema.parse(req.body)
 
-      const eventId = await service.emit(
+      const eventId = await eventBus.publish(
         validated.eventName,
         validated.payload,
         validated.options
-      );
+      )
 
       res.json({
         ok: true,
         data: { eventId, status: 'emitted' }
-      });
-    } catch (error: any) {
+      })
+    } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({
+        res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', details: error.errors }
-        });
+        })
+        return
       }
 
-      console.error('Failed to emit event:', error);
+      logger.error('Failed to emit event', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'EMIT_FAILED', message: error.message }
-      });
+        error: { code: 'EMIT_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
   // POST /api/events/subscribe - Subscribe to events
   router.post('/api/events/subscribe', async (req: Request, res: Response) => {
     try {
-      const validated = SubscribeEventSchema.parse(req.body);
-      const service = await getEventBus();
+      const validated = SubscribeEventSchema.parse(req.body)
 
-      // For REST API subscriptions, we store the webhook URL as the handler
-      const webhookUrl = req.body.webhookUrl;
-      if (!webhookUrl) {
-        return res.status(400).json({
-          ok: false,
-          error: { code: 'WEBHOOK_REQUIRED', message: 'webhookUrl is required for REST subscriptions' }
-        });
-      }
-
-      const subscriptionId = await service.subscribe(
+      const subscriptionId = await eventBus.subscribe(
         validated.subscriberId,
         validated.eventPattern,
-        async (event: any) => {
+        async (event, _context) => {
           // Webhook handler - will be called by the event bus
           try {
-            const response = await fetch(webhookUrl, {
+            const response = await fetch(validated.webhookUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(event)
-            });
-            return response.ok;
-          } catch (error) {
-            console.error('Webhook delivery failed:', error);
-            return false;
+            })
+            return response.ok
+          } catch (err) {
+            logger.error('Webhook delivery failed', err instanceof Error ? err : undefined)
+            return false
           }
         },
         validated.options
-      );
+      )
 
       res.json({
         ok: true,
         data: { subscriptionId, status: 'subscribed' }
-      });
-    } catch (error: any) {
+      })
+    } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({
+        res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', details: error.errors }
-        });
+        })
+        return
       }
 
-      console.error('Failed to subscribe:', error);
+      logger.error('Failed to subscribe', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'SUBSCRIBE_FAILED', message: error.message }
-      });
+        error: { code: 'SUBSCRIBE_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
   // DELETE /api/events/subscribe/:subscriptionId - Unsubscribe
   router.delete('/api/events/subscribe/:subscriptionId', async (req: Request, res: Response) => {
     try {
-      const { subscriptionId } = req.params;
-      const service = await getEventBus();
+      const { subscriptionId } = req.params
 
-      await service.unsubscribe(subscriptionId);
+      await eventBus.unsubscribe(subscriptionId)
 
       res.json({
         ok: true,
         data: { subscriptionId, status: 'unsubscribed' }
-      });
-    } catch (error: any) {
-      console.error('Failed to unsubscribe:', error);
+      })
+    } catch (error) {
+      logger.error('Failed to unsubscribe', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'UNSUBSCRIBE_FAILED', message: error.message }
-      });
+        error: { code: 'UNSUBSCRIBE_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
   // POST /api/events/replay - Replay events
   router.post('/api/events/replay', async (req: Request, res: Response) => {
     try {
-      const validated = ReplayEventsSchema.parse(req.body);
-      const service = await getEventBus();
+      const validated = ReplayEventsSchema.parse(req.body)
 
-      const replayId = await service.replayEvents(
-        validated.criteria,
-        validated.reason
-      );
+      // Convert time_range strings to Date objects if provided
+      const criteria: {
+        event_ids?: string[]
+        event_pattern?: string
+        time_range?: { start: Date; end: Date }
+        subscription_ids?: string[]
+      } = {
+        event_ids: validated.criteria.event_ids,
+        event_pattern: validated.criteria.event_pattern,
+        subscription_ids: validated.criteria.subscription_ids
+      }
+
+      if (validated.criteria.time_range) {
+        criteria.time_range = {
+          start: new Date(validated.criteria.time_range.start),
+          end: new Date(validated.criteria.time_range.end)
+        }
+      }
+
+      const replayId = await eventBus.replayEvents(criteria, validated.reason)
 
       res.json({
         ok: true,
         data: { replayId, status: 'replaying' }
-      });
-    } catch (error: any) {
+      })
+    } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({
+        res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', details: error.errors }
-        });
+        })
+        return
       }
 
-      console.error('Failed to replay events:', error);
+      logger.error('Failed to replay events', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'REPLAY_FAILED', message: error.message }
-      });
+        error: { code: 'REPLAY_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
   // GET /api/events - Query events
   router.get('/api/events', async (req: Request, res: Response) => {
     try {
-      const validated = QueryEventsSchema.parse(req.query);
-      const service = await getEventBus();
+      const validated = QueryEventsSchema.parse(req.query)
 
-      const { pool } = await import('../db/pg');
-
-      // Build query
-      let sql = `
-        SELECT
-          e.id AS event_id,
-          e.event_name,
-          e.payload,
-          e.status,
-          e.priority,
-          e.created_at,
-          e.delivered_at,
-          e.error_message,
-          COUNT(ed.id) AS delivery_count
-        FROM event_store e
-        LEFT JOIN event_deliveries ed ON e.id = ed.event_id
-        WHERE 1=1
-      `;
-
-      const params: any[] = [];
-      let paramIndex = 1;
+      // Build query using Kysely
+      let query = db
+        .selectFrom('event_store')
+        .select([
+          'event_id',
+          'event_name',
+          'payload',
+          'status',
+          'source_id',
+          'source_type',
+          'occurred_at',
+          'received_at',
+          'processed_at'
+        ])
 
       if (validated.eventName) {
-        sql += ` AND e.event_name LIKE $${paramIndex++}`;
-        params.push(`%${validated.eventName}%`);
+        query = query.where('event_name', 'like', `%${validated.eventName}%`)
       }
 
       if (validated.status) {
-        sql += ` AND e.status = $${paramIndex++}`;
-        params.push(validated.status);
+        query = query.where('status', '=', validated.status)
       }
 
       if (validated.fromTime) {
-        sql += ` AND e.created_at >= $${paramIndex++}`;
-        params.push(validated.fromTime);
+        query = query.where('occurred_at', '>=', new Date(validated.fromTime))
       }
 
       if (validated.toTime) {
-        sql += ` AND e.created_at <= $${paramIndex++}`;
-        params.push(validated.toTime);
+        query = query.where('occurred_at', '<=', new Date(validated.toTime))
       }
 
-      if (validated.subscriberId) {
-        sql += ` AND ed.subscriber_id = $${paramIndex++}`;
-        params.push(validated.subscriberId);
-      }
-
-      sql += ` GROUP BY e.id ORDER BY e.created_at DESC`;
-      sql += ` LIMIT $${paramIndex++} OFFSET $${paramIndex}`;
-      params.push(validated.limit, validated.offset);
-
-      const result = await pool.query(sql, params);
+      const events = await query
+        .orderBy('occurred_at', 'desc')
+        .limit(validated.limit)
+        .offset(validated.offset)
+        .execute()
 
       res.json({
         ok: true,
         data: {
-          events: result.rows,
-          total: result.rowCount,
+          events,
           limit: validated.limit,
           offset: validated.offset
         }
-      });
-    } catch (error: any) {
+      })
+    } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({
+        res.status(400).json({
           ok: false,
           error: { code: 'VALIDATION_ERROR', details: error.errors }
-        });
+        })
+        return
       }
 
-      console.error('Failed to query events:', error);
+      logger.error('Failed to query events', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'QUERY_FAILED', message: error.message }
-      });
+        error: { code: 'QUERY_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
-  // GET /api/events/stats - Get event statistics
+  // GET /api/events/stats - Get event statistics/metrics
   router.get('/api/events/stats', async (req: Request, res: Response) => {
     try {
-      const service = await getEventBus();
-      const stats = await service.getStats();
+      const validated = MetricsQuerySchema.parse(req.query)
+
+      const timeRange = validated.fromTime && validated.toTime
+        ? { start: new Date(validated.fromTime), end: new Date(validated.toTime) }
+        : undefined
+
+      const metrics = await eventBus.getMetrics(validated.eventName, timeRange)
 
       res.json({
         ok: true,
-        data: stats
-      });
-    } catch (error: any) {
-      console.error('Failed to get stats:', error);
+        data: metrics
+      })
+    } catch (error) {
+      logger.error('Failed to get stats', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'STATS_FAILED', message: error.message }
-      });
+        error: { code: 'STATS_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
   // GET /api/events/types - Get registered event types
   router.get('/api/events/types', async (req: Request, res: Response) => {
     try {
-      const { pool } = await import('../db/pg');
-
-      const result = await pool.query(`
-        SELECT
-          name,
-          category,
-          schema,
-          description,
-          created_by,
-          is_active
-        FROM event_types
-        WHERE is_active = true
-        ORDER BY category, name
-      `);
+      const result = await db
+        .selectFrom('event_types')
+        .select([
+          'event_name',
+          'category',
+          'payload_schema',
+          'is_async',
+          'is_persistent',
+          'max_retries',
+          'ttl_seconds'
+        ])
+        .where('is_active', '=', true)
+        .orderBy('category')
+        .orderBy('event_name')
+        .execute()
 
       res.json({
         ok: true,
-        data: result.rows
-      });
-    } catch (error: any) {
-      console.error('Failed to get event types:', error);
+        data: result
+      })
+    } catch (error) {
+      logger.error('Failed to get event types', error instanceof Error ? error : undefined)
       res.status(500).json({
         ok: false,
-        error: { code: 'TYPES_FAILED', message: error.message }
-      });
+        error: { code: 'TYPES_FAILED', message: error instanceof Error ? error.message : 'Unknown error' }
+      })
     }
-  });
+  })
 
-  return router;
+  return router
 }
