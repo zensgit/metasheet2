@@ -1,16 +1,71 @@
-// @ts-nocheck
 /**
  * Workflow Designer API Routes
  * Visual workflow editor REST endpoints
  */
 
-import { Router, Request, Response } from 'express'
+import type { Request, Response } from 'express';
+import { Router } from 'express'
 import { WorkflowDesigner } from '../workflow/WorkflowDesigner'
 import { authenticate } from '../middleware/auth'
 import { validate } from '../middleware/validation'
-import { body, param, query } from 'express-validator'
 import { Logger } from '../core/logger'
 import { db } from '../db/db'
+import { loadValidators } from '../types/validator'
+import type { ExpressionBuilder, OnConflictBuilder } from '../types/kysely'
+
+// Typed wrapper for workflow designer tables not in main Database interface
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const dbAny = db as any
+
+// Load validators (express-validator or no-op fallbacks)
+const { body, param, query } = loadValidators()
+
+// Type definitions for database records
+interface WorkflowNodeLibrary {
+  id: string;
+  node_type: string;
+  display_name: string;
+  category: string;
+  description: string | null;
+  properties_schema: string | null;
+  default_properties: string | null;
+  validation_rules: string | null;
+  visual_config: string | null;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string;
+  template_definition: string | null;
+  required_variables: string | null;
+  optional_variables: string | null;
+  tags: string | null;
+  is_public: boolean;
+  is_featured: boolean;
+  usage_count: number;
+  created_by: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface WorkflowExecutionHistory {
+  id: string;
+  designer_workflow_id: string;
+  execution_type: string;
+  triggered_by: string;
+  trigger_context: string | null;
+  status: string;
+  start_time: Date;
+  end_time: Date | null;
+  result_data: string | null;
+  error_data: string | null;
+}
+
 
 const router = Router()
 const logger = new Logger('WorkflowDesignerAPI')
@@ -25,7 +80,7 @@ router.get('/node-types', authenticate, async (req: Request, res: Response) => {
     const nodeTypes = designer.getNodeTypes()
 
     // Also get from database for custom node types
-    const customTypes = await db
+    const customTypes = await dbAny
       .selectFrom('workflow_node_library')
       .selectAll()
       .where('is_active', '=', true)
@@ -35,17 +90,17 @@ router.get('/node-types', authenticate, async (req: Request, res: Response) => {
       success: true,
       data: {
         builtin: nodeTypes,
-        custom: customTypes.map(type => ({
+        custom: customTypes.map((type: WorkflowNodeLibrary) => ({
           ...type,
-          properties_schema: type.properties_schema ? JSON.parse(type.properties_schema as string) : {},
-          default_properties: type.default_properties ? JSON.parse(type.default_properties as string) : {},
-          validation_rules: type.validation_rules ? JSON.parse(type.validation_rules as string) : {},
-          visual_config: type.visual_config ? JSON.parse(type.visual_config as string) : {}
+          properties_schema: type.properties_schema ? JSON.parse(type.properties_schema) : {},
+          default_properties: type.default_properties ? JSON.parse(type.default_properties) : {},
+          validation_rules: type.validation_rules ? JSON.parse(type.validation_rules) : {},
+          visual_config: type.visual_config ? JSON.parse(type.visual_config) : {}
         }))
       }
     })
-  } catch (error) {
-    logger.error('Failed to get node types:', error)
+  } catch (error: unknown) {
+    logger.error('Failed to get node types:', error as Error)
     res.status(500).json({
       success: false,
       error: 'Failed to get node types'
@@ -67,35 +122,35 @@ router.get(
     try {
       const { category, featured } = req.query
 
-      let query = db
+      let queryBuilder = dbAny
         .selectFrom('workflow_templates')
         .selectAll()
         .where('is_public', '=', true)
 
       if (category) {
-        query = query.where('category', '=', category as string)
+        queryBuilder = queryBuilder.where('category', '=', category as string)
       }
 
       if (featured === 'true') {
-        query = query.where('is_featured', '=', true)
+        queryBuilder = queryBuilder.where('is_featured', '=', true)
       }
 
-      const templates = await query
+      const templates = await queryBuilder
         .orderBy('usage_count', 'desc')
         .execute()
 
       res.json({
         success: true,
-        data: templates.map(template => ({
+        data: templates.map((template: WorkflowTemplate) => ({
           ...template,
-          template_definition: template.template_definition ? JSON.parse(template.template_definition as string) : {},
-          required_variables: template.required_variables ? JSON.parse(template.required_variables as string) : [],
-          optional_variables: template.optional_variables ? JSON.parse(template.optional_variables as string) : [],
-          tags: template.tags ? JSON.parse(template.tags as string) : []
+          template_definition: template.template_definition ? JSON.parse(template.template_definition) : {},
+          required_variables: template.required_variables ? JSON.parse(template.required_variables) : [],
+          optional_variables: template.optional_variables ? JSON.parse(template.optional_variables) : [],
+          tags: template.tags ? JSON.parse(template.tags) : []
         }))
       })
-    } catch (error) {
-      logger.error('Failed to get templates:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to get templates:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to get templates'
@@ -121,7 +176,7 @@ router.post(
   validate,
   async (req: Request, res: Response) => {
     try {
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
       const workflowDefinition = req.body
 
       // Validate workflow structure
@@ -137,7 +192,7 @@ router.post(
       const workflowId = await designer.saveWorkflow(workflowDefinition)
 
       // Log creation
-      await db
+      await dbAny
         .insertInto('workflow_analytics')
         .values({
           workflow_id: workflowId,
@@ -158,8 +213,8 @@ router.post(
           message: 'Workflow created successfully'
         }
       })
-    } catch (error) {
-      logger.error('Failed to create workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to create workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to create workflow'
@@ -182,9 +237,9 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const { category, status, search } = req.query
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
-      let query = db
+      let queryBuilder = dbAny
         .selectFrom('workflow_designer_definitions')
         .leftJoin('workflow_collaboration', 'workflow_designer_definitions.id', 'workflow_collaboration.workflow_id')
         .select([
@@ -197,7 +252,7 @@ router.get(
           'workflow_designer_definitions.updated_at',
           'workflow_collaboration.role'
         ])
-        .where((eb) =>
+        .where((eb: ExpressionBuilder) =>
           eb.or([
             eb('workflow_designer_definitions.created_by', '=', userId),
             eb('workflow_collaboration.user_id', '=', userId)
@@ -205,15 +260,15 @@ router.get(
         )
 
       if (category) {
-        query = query.where('workflow_designer_definitions.category', '=', category as string)
+        queryBuilder = queryBuilder.where('workflow_designer_definitions.category', '=', category as string)
       }
 
       if (status) {
-        query = query.where('workflow_designer_definitions.status', '=', status as string)
+        queryBuilder = queryBuilder.where('workflow_designer_definitions.status', '=', status as string)
       }
 
       if (search) {
-        query = query.where((eb) =>
+        queryBuilder = queryBuilder.where((eb: ExpressionBuilder) =>
           eb.or([
             eb('workflow_designer_definitions.name', 'ilike', `%${search}%`),
             eb('workflow_designer_definitions.description', 'ilike', `%${search}%`)
@@ -221,7 +276,7 @@ router.get(
         )
       }
 
-      const workflows = await query
+      const workflows = await queryBuilder
         .orderBy('workflow_designer_definitions.updated_at', 'desc')
         .execute()
 
@@ -229,8 +284,8 @@ router.get(
         success: true,
         data: workflows
       })
-    } catch (error) {
-      logger.error('Failed to list workflows:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to list workflows:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to list workflows'
@@ -251,7 +306,7 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       const workflow = await designer.loadWorkflow(id)
       if (!workflow) {
@@ -262,14 +317,14 @@ router.get(
       }
 
       // Check access permissions
-      const collaboration = await db
+      const collaboration = await dbAny
         .selectFrom('workflow_collaboration')
         .selectAll()
         .where('workflow_id', '=', id)
         .where('user_id', '=', userId)
         .executeTakeFirst()
 
-      const workflowInfo = await db
+      const workflowInfo = await dbAny
         .selectFrom('workflow_designer_definitions')
         .selectAll()
         .where('id', '=', id)
@@ -283,7 +338,7 @@ router.get(
       }
 
       // Log access
-      await db
+      await dbAny
         .insertInto('workflow_analytics')
         .values({
           workflow_id: id,
@@ -306,8 +361,8 @@ router.get(
           }
         }
       })
-    } catch (error) {
-      logger.error('Failed to get workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to get workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to get workflow'
@@ -333,18 +388,18 @@ router.put(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
       const updates = req.body
 
       // Check permissions
-      const collaboration = await db
+      const collaboration = await dbAny
         .selectFrom('workflow_collaboration')
         .selectAll()
         .where('workflow_id', '=', id)
         .where('user_id', '=', userId)
         .executeTakeFirst()
 
-      const workflow = await db
+      const workflow = await dbAny
         .selectFrom('workflow_designer_definitions')
         .selectAll()
         .where('id', '=', id)
@@ -385,7 +440,7 @@ router.put(
       await designer.saveWorkflow(updatedDefinition)
 
       // Log update
-      await db
+      await dbAny
         .insertInto('workflow_analytics')
         .values({
           workflow_id: id,
@@ -402,8 +457,8 @@ router.put(
         success: true,
         data: { message: 'Workflow updated successfully' }
       })
-    } catch (error) {
-      logger.error('Failed to update workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to update workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to update workflow'
@@ -439,8 +494,8 @@ router.post(
         success: true,
         data: validation
       })
-    } catch (error) {
-      logger.error('Failed to validate workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to validate workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to validate workflow'
@@ -461,17 +516,17 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       // Check deployment permissions
-      const collaboration = await db
+      const collaboration = await dbAny
         .selectFrom('workflow_collaboration')
         .selectAll()
         .where('workflow_id', '=', id)
         .where('user_id', '=', userId)
         .executeTakeFirst()
 
-      const workflow = await db
+      const workflow = await dbAny
         .selectFrom('workflow_designer_definitions')
         .selectAll()
         .where('id', '=', id)
@@ -487,7 +542,7 @@ router.post(
       const deploymentId = await designer.deployWorkflow(id)
 
       // Update workflow status
-      await db
+      await dbAny
         .updateTable('workflow_designer_definitions')
         .set({
           status: 'published',
@@ -497,7 +552,7 @@ router.post(
         .execute()
 
       // Log deployment
-      await db
+      await dbAny
         .insertInto('workflow_analytics')
         .values({
           workflow_id: id,
@@ -514,8 +569,8 @@ router.post(
           message: 'Workflow deployed successfully'
         }
       })
-    } catch (error) {
-      logger.error('Failed to deploy workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to deploy workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to deploy workflow'
@@ -538,7 +593,7 @@ router.post(
     try {
       const { id } = req.params
       const { variables = {} } = req.body
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       const workflow = await designer.loadWorkflow(id)
       if (!workflow) {
@@ -549,7 +604,7 @@ router.post(
       }
 
       // Create test execution record
-      const executionId = await db
+      const executionId = await dbAny
         .insertInto('workflow_execution_history')
         .values({
           designer_workflow_id: id,
@@ -564,15 +619,19 @@ router.post(
       // Here you would integrate with actual workflow engine for test execution
       // For now, we'll simulate a successful test
       setTimeout(async () => {
-        await db
-          .updateTable('workflow_execution_history')
-          .set({
-            status: 'completed',
-            end_time: new Date(),
-            result_data: JSON.stringify({ test: 'successful', nodes_executed: workflow.nodes.length })
-          })
-          .where('id', '=', executionId.id)
-          .execute()
+        try {
+          await dbAny
+            .updateTable('workflow_execution_history')
+            .set({
+              status: 'completed',
+              end_time: new Date(),
+              result_data: JSON.stringify({ test: 'successful', nodes_executed: workflow.nodes.length })
+            })
+            .where('id', '=', executionId.id)
+            .execute()
+        } catch (err) {
+          logger.error('Failed to update workflow execution status:', err as Error)
+        }
       }, 1000)
 
       res.json({
@@ -582,8 +641,8 @@ router.post(
           message: 'Test execution started'
         }
       })
-    } catch (error) {
-      logger.error('Failed to test workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to test workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to test workflow'
@@ -607,7 +666,7 @@ router.get(
       const { id } = req.params
       const limit = parseInt(req.query.limit as string) || 50
 
-      const executions = await db
+      const executions = await dbAny
         .selectFrom('workflow_execution_history')
         .selectAll()
         .where('designer_workflow_id', '=', id)
@@ -617,14 +676,14 @@ router.get(
 
       res.json({
         success: true,
-        data: executions.map(execution => ({
+        data: executions.map((execution: WorkflowExecutionHistory) => ({
           ...execution,
-          trigger_context: execution.trigger_context ? JSON.parse(execution.trigger_context as string) : {},
-          result_data: execution.result_data ? JSON.parse(execution.result_data as string) : null
+          trigger_context: execution.trigger_context ? JSON.parse(execution.trigger_context) : {},
+          result_data: execution.result_data ? JSON.parse(execution.result_data) : null
         }))
       })
-    } catch (error) {
-      logger.error('Failed to get execution history:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to get execution history:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to get execution history'
@@ -648,18 +707,22 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params
-      const { userId: targetUserId, role, permissions } = req.body
-      const currentUserId = (req as any).user?.id
+      const { userId: targetUserId, role, permissions } = req.body as {
+        userId: string;
+        role: string;
+        permissions?: { canEdit?: boolean; canDeploy?: boolean; canShare?: boolean }
+      }
+      const currentUserId = req.user?.id?.toString()
 
       // Check if user is owner or has sharing permissions
-      const workflow = await db
+      const workflow = await dbAny
         .selectFrom('workflow_designer_definitions')
         .selectAll()
         .where('id', '=', id)
         .executeTakeFirst()
 
       if (!workflow || workflow.created_by !== currentUserId) {
-        const collaboration = await db
+        const collaboration = await dbAny
           .selectFrom('workflow_collaboration')
           .selectAll()
           .where('workflow_id', '=', id)
@@ -675,7 +738,7 @@ router.post(
       }
 
       // Create or update collaboration record
-      await db
+      await dbAny
         .insertInto('workflow_collaboration')
         .values({
           workflow_id: id,
@@ -688,7 +751,7 @@ router.post(
           shared_by: currentUserId,
           shared_at: new Date()
         })
-        .onConflict((oc) => oc.columns(['workflow_id', 'user_id']).doUpdateSet({
+        .onConflict((oc: OnConflictBuilder) => oc.columns(['workflow_id', 'user_id']).doUpdateSet({
           role,
           can_edit: role === 'editor' || permissions?.canEdit || false,
           can_deploy: permissions?.canDeploy || false,
@@ -699,7 +762,7 @@ router.post(
         .execute()
 
       // Log sharing
-      await db
+      await dbAny
         .insertInto('workflow_analytics')
         .values({
           workflow_id: id,
@@ -714,8 +777,8 @@ router.post(
         success: true,
         data: { message: 'Workflow shared successfully' }
       })
-    } catch (error) {
-      logger.error('Failed to share workflow:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to share workflow:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to share workflow'

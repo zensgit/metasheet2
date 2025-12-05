@@ -1,31 +1,84 @@
-// @ts-nocheck
 /**
  * Workflow API Routes
  * RESTful endpoints for BPMN workflow management
  */
 
-import { Router, Request, Response } from 'express'
+import type { Request, Response } from 'express';
+import { Router } from 'express'
 import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine'
 import { authenticate } from '../middleware/auth'
 import { validate } from '../middleware/validation'
-import { body, param, query } from 'express-validator'
 import { Logger } from '../core/logger'
-import multer from 'multer'
+import { loadValidators } from '../types/validator'
+import { loadMulter, createUploadMiddleware, createOptionalUpload } from '../types/multer'
+import type { RequestWithFile } from '../types/multer'
+
+// Load validators (express-validator or no-op fallbacks)
+const { body, param, query } = loadValidators()
+
+// Load multer (optional dependency)
+const multer = loadMulter()
+const upload = createUploadMiddleware(multer)
+const optionalUpload = createOptionalUpload(upload, 'bpmnFile')
 
 const router = Router()
 const logger = new Logger('WorkflowAPI')
 const workflowEngine = new BPMNWorkflowEngine()
 
-// File upload for BPMN XML
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
-})
-
 // Initialize engine
 workflowEngine.initialize().catch(error => {
   logger.error('Failed to initialize Workflow Engine:', error)
 })
+
+// Type definitions for database rows
+interface ProcessDefinition {
+  id: string;
+  key: string;
+  name: string;
+  version: number;
+  category?: string;
+  diagram_json?: string | null;
+  tenant_id?: string | null;
+  [key: string]: unknown;
+}
+
+interface ProcessInstance {
+  id: string;
+  process_definition_key: string;
+  business_key?: string;
+  state: string;
+  variables?: string;
+  start_time: Date;
+  tenant_id?: string | null;
+  [key: string]: unknown;
+}
+
+interface UserTask {
+  id: string;
+  process_instance_id: string;
+  assignee?: string;
+  candidate_users?: string;
+  candidate_groups?: string;
+  state: string;
+  variables?: string;
+  form_data?: string;
+  created_at: Date;
+  [key: string]: unknown;
+}
+
+interface AuditLogEntry {
+  id: string;
+  process_instance_id?: string;
+  task_id?: string;
+  user_id?: string;
+  timestamp: Date;
+  old_value?: string;
+  new_value?: string;
+  [key: string]: unknown;
+}
+
+// Import shared Kysely types
+import type { ExpressionBuilder } from '../types/kysely'
 
 /**
  * POST /api/workflow/deploy
@@ -34,7 +87,7 @@ workflowEngine.initialize().catch(error => {
 router.post(
   '/deploy',
   authenticate,
-  upload.single('bpmnFile'),
+  optionalUpload,
   body('key').optional().isString(),
   body('name').isString().notEmpty(),
   body('category').optional().isString(),
@@ -42,13 +95,14 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       let bpmnXml: string
-      
-      if (req.file) {
+      const reqWithFile = req as RequestWithFile
+
+      if (reqWithFile.file) {
         // BPMN file uploaded
-        bpmnXml = req.file.buffer.toString('utf-8')
+        bpmnXml = reqWithFile.file.buffer.toString('utf-8')
       } else if (req.body.bpmnXml) {
         // BPMN XML in body
-        bpmnXml = req.body.bpmnXml
+        bpmnXml = req.body.bpmnXml as string
       } else {
         return res.status(400).json({
           success: false,
@@ -57,12 +111,12 @@ router.post(
       }
 
       const definitionId = await workflowEngine.deployProcess({
-        key: req.body.key,
-        name: req.body.name,
-        description: req.body.description,
-        category: req.body.category,
+        key: (req.body.key as string | undefined) ?? '',
+        name: req.body.name as string,
+        description: req.body.description as string | undefined,
+        category: req.body.category as string | undefined,
         bpmnXml,
-        tenantId: (req as any).user?.tenantId
+        tenantId: req.user?.tenantId?.toString()
       })
 
       res.status(201).json({
@@ -72,8 +126,8 @@ router.post(
           message: 'Process deployed successfully'
         }
       })
-    } catch (error) {
-      logger.error('Failed to deploy process:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to deploy process:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to deploy process'
@@ -94,9 +148,10 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { category, latest } = req.query
-      const tenantId = (req as any).user?.tenantId
+      const tenantId = req.user?.tenantId?.toString()
 
       let query = db
         .selectFrom('bpmn_process_definitions')
@@ -115,17 +170,17 @@ router.get(
           .orderBy('version', 'desc')
       }
 
-      const definitions = await query.execute()
+      const definitions = await query.execute() as ProcessDefinition[]
 
       res.json({
         success: true,
-        data: definitions.map(def => ({
+        data: definitions.map((def) => ({
           ...def,
-          diagram_json: def.diagram_json ? JSON.parse(def.diagram_json as string) : null
+          diagram_json: def.diagram_json ? JSON.parse(def.diagram_json) : null
         }))
       })
-    } catch (error) {
-      logger.error('Failed to list definitions:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to list definitions:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to list process definitions'
@@ -149,13 +204,13 @@ router.post(
     try {
       const { key } = req.params
       const { businessKey, variables = {} } = req.body
-      const userId = (req as any).user?.id
-      const tenantId = (req as any).user?.tenantId
+      const userId = req.user?.id?.toString()
+      const tenantId = req.user?.tenantId?.toString()
 
       const instanceId = await workflowEngine.startProcess(
         key,
-        { ...variables, _startUserId: userId },
-        businessKey,
+        { ...(variables as Record<string, unknown>), _startUserId: userId },
+        businessKey as string | undefined,
         tenantId
       )
 
@@ -166,8 +221,8 @@ router.post(
           message: 'Process started successfully'
         }
       })
-    } catch (error) {
-      logger.error('Failed to start process:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to start process:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to start process'
@@ -189,9 +244,10 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { state, processKey, businessKey } = req.query
-      const tenantId = (req as any).user?.tenantId
+      const tenantId = req.user?.tenantId?.toString()
 
       let query = db
         .selectFrom('bpmn_process_instances')
@@ -213,17 +269,17 @@ router.get(
       const instances = await query
         .orderBy('start_time', 'desc')
         .limit(100)
-        .execute()
+        .execute() as ProcessInstance[]
 
       res.json({
         success: true,
-        data: instances.map(inst => ({
+        data: instances.map((inst) => ({
           ...inst,
-          variables: inst.variables ? JSON.parse(inst.variables as string) : {}
+          variables: inst.variables ? JSON.parse(inst.variables) : {}
         }))
       })
-    } catch (error) {
-      logger.error('Failed to list instances:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to list instances:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to list process instances'
@@ -243,6 +299,7 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { instanceId } = req.params
 
@@ -250,7 +307,7 @@ router.get(
         .selectFrom('bpmn_process_instances')
         .selectAll()
         .where('id', '=', instanceId)
-        .executeTakeFirst()
+        .executeTakeFirst() as ProcessInstance | undefined
 
       if (!instance) {
         return res.status(404).json({
@@ -265,29 +322,34 @@ router.get(
         .selectAll()
         .where('process_instance_id', '=', instanceId)
         .orderBy('start_time', 'asc')
-        .execute()
+        .execute() as Array<Record<string, unknown>>
 
       // Get variables
+      interface Variable {
+        json_value?: string;
+        [key: string]: unknown;
+      }
+
       const variables = await db
         .selectFrom('bpmn_variables')
         .selectAll()
         .where('process_instance_id', '=', instanceId)
-        .execute()
+        .execute() as Variable[]
 
       res.json({
         success: true,
         data: {
           ...instance,
-          variables: instance.variables ? JSON.parse(instance.variables as string) : {},
+          variables: instance.variables ? JSON.parse(instance.variables) : {},
           activities,
-          variableList: variables.map(v => ({
+          variableList: variables.map((v) => ({
             ...v,
-            json_value: v.json_value ? JSON.parse(v.json_value as string) : null
+            json_value: v.json_value ? JSON.parse(v.json_value) : null
           }))
         }
       })
-    } catch (error) {
-      logger.error('Failed to get instance:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to get instance:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to get process instance'
@@ -311,9 +373,10 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { assignee, candidateUser, candidateGroup, processInstanceId, state } = req.query
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       let query = db
         .selectFrom('bpmn_user_tasks')
@@ -321,10 +384,10 @@ router.get(
 
       // Default to user's tasks if no filter
       if (!assignee && !candidateUser && !candidateGroup && !processInstanceId) {
-        query = query.where((eb: any) =>
+        query = query.where((eb: ExpressionBuilder) =>
           eb.or([
             eb('assignee', '=', userId),
-            eb('candidate_users', '@>', [userId])
+            eb('candidate_users', '@>', JSON.stringify([userId]))
           ])
         )
       }
@@ -355,18 +418,18 @@ router.get(
       const tasks = await query
         .orderBy('created_at', 'desc')
         .limit(100)
-        .execute()
+        .execute() as UserTask[]
 
       res.json({
         success: true,
-        data: tasks.map(task => ({
+        data: tasks.map((task) => ({
           ...task,
-          variables: task.variables ? JSON.parse(task.variables as string) : {},
-          form_data: task.form_data ? JSON.parse(task.form_data as string) : null
+          variables: task.variables ? JSON.parse(task.variables) : {},
+          form_data: task.form_data ? JSON.parse(task.form_data) : null
         }))
       })
-    } catch (error) {
-      logger.error('Failed to list tasks:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to list tasks:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to list tasks'
@@ -386,15 +449,21 @@ router.post(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { taskId } = req.params
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
+
+      interface TaskClaim {
+        state: string;
+        assignee?: string;
+      }
 
       const task = await db
         .selectFrom('bpmn_user_tasks')
         .select(['state', 'assignee'])
         .where('id', '=', taskId)
-        .executeTakeFirst()
+        .executeTakeFirst() as TaskClaim | undefined
 
       if (!task) {
         return res.status(404).json({
@@ -424,8 +493,8 @@ router.post(
         success: true,
         message: 'Task claimed successfully'
       })
-    } catch (error) {
-      logger.error('Failed to claim task:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to claim task:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to claim task'
@@ -449,11 +518,12 @@ router.post(
     try {
       const { taskId } = req.params
       const { variables = {}, formData } = req.body
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       // Store form data if provided
       if (formData) {
-        const { db } = require('../db/db')
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const { db } = require('../db/db')
         await db
           .updateTable('bpmn_user_tasks')
           .set({
@@ -464,14 +534,14 @@ router.post(
       }
 
       // Complete task
-      await workflowEngine.completeUserTask(taskId, variables, userId)
+      await workflowEngine.completeUserTask(taskId, variables as Record<string, unknown>, userId)
 
       res.json({
         success: true,
         message: 'Task completed successfully'
       })
-    } catch (error) {
-      logger.error('Failed to complete task:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to complete task:', error as Error)
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to complete task'
@@ -495,14 +565,18 @@ router.post(
     try {
       const { messageName, correlationKey, variables } = req.body
 
-      await workflowEngine.sendMessage(messageName, correlationKey, variables)
+      await workflowEngine.sendMessage(
+        messageName as string,
+        correlationKey as string | undefined,
+        variables as Record<string, unknown> | undefined
+      )
 
       res.json({
         success: true,
         message: 'Message sent successfully'
       })
-    } catch (error) {
-      logger.error('Failed to send message:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to send message:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to send message'
@@ -525,14 +599,17 @@ router.post(
     try {
       const { signalName, variables } = req.body
 
-      await workflowEngine.broadcastSignal(signalName, variables)
+      await workflowEngine.broadcastSignal(
+        signalName as string,
+        variables as Record<string, unknown> | undefined
+      )
 
       res.json({
         success: true,
         message: 'Signal broadcast successfully'
       })
-    } catch (error) {
-      logger.error('Failed to broadcast signal:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to broadcast signal:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to broadcast signal'
@@ -553,6 +630,7 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { state = 'OPEN', processInstanceId } = req.query
 
@@ -568,14 +646,14 @@ router.get(
       const incidents = await query
         .orderBy('created_at', 'desc')
         .limit(100)
-        .execute()
+        .execute() as Array<Record<string, unknown>>
 
       res.json({
         success: true,
         data: incidents
       })
-    } catch (error) {
-      logger.error('Failed to list incidents:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to list incidents:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to list incidents'
@@ -595,9 +673,10 @@ router.post(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { incidentId } = req.params
-      const userId = (req as any).user?.id
+      const userId = req.user?.id?.toString()
 
       await db
         .updateTable('bpmn_incidents')
@@ -613,8 +692,8 @@ router.post(
         success: true,
         message: 'Incident resolved successfully'
       })
-    } catch (error) {
-      logger.error('Failed to resolve incident:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to resolve incident:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to resolve incident'
@@ -638,6 +717,7 @@ router.get(
   validate,
   async (req: Request, res: Response) => {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
       const { db } = require('../db/db')
       const { processInstanceId, taskId, userId, from, to } = req.query
 
@@ -668,18 +748,18 @@ router.get(
       const logs = await query
         .orderBy('timestamp', 'desc')
         .limit(500)
-        .execute()
+        .execute() as AuditLogEntry[]
 
       res.json({
         success: true,
-        data: logs.map(log => ({
+        data: logs.map((log) => ({
           ...log,
-          old_value: log.old_value ? JSON.parse(log.old_value as string) : null,
-          new_value: log.new_value ? JSON.parse(log.new_value as string) : null
+          old_value: log.old_value ? JSON.parse(log.old_value) : null,
+          new_value: log.new_value ? JSON.parse(log.new_value) : null
         }))
       })
-    } catch (error) {
-      logger.error('Failed to get audit log:', error)
+    } catch (error: unknown) {
+      logger.error('Failed to get audit log:', error as Error)
       res.status(500).json({
         success: false,
         error: 'Failed to get audit log'
