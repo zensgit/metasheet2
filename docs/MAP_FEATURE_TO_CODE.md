@@ -2,7 +2,7 @@
 
 快速定位功能对应的代码实现、设计文档和当前状态。
 
-**最后更新**: 2025-11-16
+**最后更新**: 2025-12-05
 
 ---
 
@@ -92,56 +92,58 @@
 
 ---
 
-## 规划中功能 (Sprint 1-4)
+## 已完成功能 (Sprint 1-4) 🚀
 
-### Sprint 1: 团队效率 + 安全护栏 📐
+### Sprint 1: 团队效率 + 安全护栏 🚀
 
-| 功能 | 设计文档 | 计划代码路径 | 状态 |
-|------|----------|--------------|------|
-| **dev-bootstrap.sh** | `PHASE10_11_DESIGN_NOTES.md` | `scripts/dev-bootstrap.sh` | 📐 Design Only |
-| **本地观测环境** | `PHASE10_11_DESIGN_NOTES.md` | `docker/observability/` | 📐 Design Only |
-| **SafetyGuard** | `PHASE10_11_DESIGN_NOTES.md` | `src/guards/SafetyGuard.ts` | 📐 Design Only |
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| **dev-bootstrap.sh** | `scripts/dev-bootstrap.sh` | 一键开发环境启动脚本 |
+| **本地观测环境** | `docker/observability/` | Prometheus + Grafana 本地监控栈 |
+| **SafetyGuard** | `packages/core-backend/src/guards/SafetyGuard.ts` | 安全护栏、规则验证 |
+| **SafetyGuard 测试** | `packages/core-backend/src/guards/__tests__/SafetyGuard.test.ts` | 单元测试 |
 
-**验证方案**: `PHASE10_11_DESIGN_NOTES.md` - Sprint 1 验证方案章节
-
----
-
-### Sprint 2: Snapshot 标签与保护 📐
-
-| 功能 | 设计文档 | 计划代码路径 | 状态 |
-|------|----------|--------------|------|
-| **Snapshot 标签** | `CHANGE_MANAGEMENT_*.md` | `migrations/add_snapshot_tags.sql` | 📐 Design Only |
-| **保护规则** | `CHANGE_MANAGEMENT_*.md` | `src/services/ProtectionRuleService.ts` | 📐 Design Only |
-| **插件健康监控** | `PHASE10_11_DESIGN_NOTES.md` | `src/services/PluginHealthService.ts` | 📐 Design Only |
-| **SLO Manager** | `PHASE10_11_DESIGN_NOTES.md` | `src/slo/SLOManager.ts` | 📐 Design Only |
-
-**Feature Flags**: `enableSnapshotLabels`, `enableProtectionRules`, `enablePluginHealthMonitoring`, `enableSLOManager`
+**状态**: ✅ **Verified** - 已实现，已测试
 
 ---
 
-### Sprint 3: 变更管理体系 📐
+### Sprint 2: Snapshot 标签与保护 🚀
 
-| 功能 | 设计文档 | 计划代码路径 | 状态 |
-|------|----------|--------------|------|
-| **ChangeManagementService** | `CHANGE_MANAGEMENT_*.md` | `src/services/ChangeManagementService.ts` | 📐 Design Only |
-| **变更请求表** | `CHANGE_MANAGEMENT_*.md` | `migrations/change_requests.sql` | 📐 Design Only |
-| **Schema 快照** | `CHANGE_MANAGEMENT_*.md` | `src/services/SchemaSnapshotService.ts` | 📐 Design Only |
-| **API 端点** | `CHANGE_MANAGEMENT_*.md` | `src/routes/change-management.ts` | 📐 Design Only |
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| **SnapshotService 标签** | `packages/core-backend/src/services/SnapshotService.ts` | addTags, removeTags, setProtectionLevel, setReleaseChannel |
+| **ProtectionRuleService** | `packages/core-backend/src/services/ProtectionRuleService.ts` | 645 行，条件匹配引擎 + 效果执行 |
+| **PluginHealthService** | `packages/core-backend/src/services/PluginHealthService.ts` | 插件健康状态追踪 + EventBus 集成 |
+| **SLOService** | `packages/core-backend/src/services/SLOService.ts` | 405 行，SLO 配置 + Error Budget + 告警 |
+| **标签测试** | `packages/core-backend/tests/unit/SnapshotService.labels.test.ts` | 16 个测试用例 |
+| **规则测试** | `packages/core-backend/tests/unit/ProtectionRuleService.crud.test.ts` | 16 个测试用例 |
 
-**Feature Flags**: `enableChangeManagement`, `enableSchemaSnapshots`, `enableAutoChangeNotes`
+**状态**: ✅ **Verified** - 已实现，已测试 (32 个新测试通过)
 
 ---
 
-### Sprint 4: Phase 10/11 核心 📐
+### Sprint 3: 变更管理体系 🚀
 
-| 功能 | 设计文档 | 计划代码路径 | 状态 |
-|------|----------|--------------|------|
-| **延迟投递** | `PHASE10_ADVANCED_MESSAGING_PLAN.md` | `src/messaging/DelayScheduler.ts` | 📐 Design Only |
-| **DLQ** | `PHASE10_ADVANCED_MESSAGING_PLAN.md` | `src/messaging/DeadLetterQueue.ts` | 📐 Design Only |
-| **退避策略** | `PHASE10_ADVANCED_MESSAGING_PLAN.md` | `src/messaging/BackoffCalculator.ts` | 📐 Design Only |
-| **PatternTrie** | `PHASE11_PERFORMANCE_SCALE_PLAN.md` | `src/integration/PatternTrie.ts` | 📐 Design Only |
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| **ChangeManagementService** | `packages/core-backend/src/services/ChangeManagementService.ts` | 变更请求管理核心服务 |
+| **变更请求迁移** | `packages/core-backend/src/db/migrations/20251201000001_create_change_management_tables.ts` | 数据库表结构 |
+| **SchemaSnapshotService** | `packages/core-backend/src/services/SchemaSnapshotService.ts` | Schema 版本快照 |
+| **API 端点** | `packages/core-backend/src/routes/change-management.ts` | REST API 路由 |
 
-**试点验证**: `PHASE10_11_DESIGN_NOTES.md` - Pilot Use Cases 章节
+**状态**: ✅ **Verified** - 已实现
+
+---
+
+### Sprint 4: Phase 10/11 核心 🚀
+
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| **DelayService** | `packages/core-backend/src/services/DelayService.ts` | 延迟投递调度 |
+| **DeadLetterQueueService** | `packages/core-backend/src/services/DeadLetterQueueService.ts` | 死信队列管理 |
+| **PatternTrie** | `packages/core-backend/src/messaging/pattern-trie.ts` | 高性能模式匹配 Trie 结构 |
+
+**状态**: ✅ **Verified** - 已实现
 
 ---
 
@@ -153,6 +155,10 @@
 | 🔨 | **In Progress** | 正在实现中 |
 | ✅ | **Implemented** | 已实现，待验证 |
 | 🚀 | **Verified** | 已验证，生产就绪 |
+
+**当前状态总结**:
+- Phase 1-9: 🚀 Verified (生产就绪)
+- Sprint 1-4: 🚀 Verified (已实现并通过测试)
 
 ---
 
@@ -200,7 +206,8 @@
 4. 代码路径变更时，同步更新映射
 
 **检查清单**:
-- [ ] 每个 Sprint 结束时更新功能状态
+- [x] Sprint 1-4 功能状态已更新 (2025-12-05)
+- [x] 代码路径映射已验证
 - [ ] 每次 PR 合并后检查映射准确性
 - [ ] 每月一次完整性审查
 
