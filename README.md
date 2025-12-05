@@ -44,12 +44,24 @@ MetaSheet V2 is a collaborative spreadsheet platform built on a modern microkern
 git clone https://github.com/zensgit/metasheet2.git
 cd metasheet2
 
+# 🚀 One-click Setup (Recommended)
+# Installs dependencies, configures env, starts DB, runs migrations, and starts dev server
+bash scripts/dev-bootstrap.sh
+
+# Verify installation
+bash scripts/verify-features.sh all
+```
+
+### Manual Installation
+
+If you prefer manual setup:
+
+```bash
 # Install dependencies
 pnpm install
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your configuration
 
 # Run database migrations
 cd packages/core-backend
@@ -57,9 +69,6 @@ pnpm run migrate
 
 # Start development server
 pnpm run dev
-
-# Verify installation
-bash scripts/verify-features.sh all
 ```
 
 **📘 Detailed Instructions**: See [Quick Start Guide](claudedocs/QUICK_START_GUIDE.md) for complete setup instructions

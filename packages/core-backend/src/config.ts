@@ -26,8 +26,32 @@ export interface AppConfig {
   }
 }
 
+export interface SanitizedConfig {
+  db: {
+    poolMax: number
+    idleTimeoutMs: number
+    connTimeoutMs: number
+  }
+  server: {
+    port: number
+    host: string
+  }
+  auth: {
+    kanbanAuthRequired: boolean
+  }
+  ws: {
+    redisEnabled: string
+  }
+  kanban: {
+    authRequired: boolean
+  }
+}
+
+let cachedConfig: AppConfig | undefined
+
 export function getConfig(): AppConfig {
-  return {
+  if (cachedConfig) return cachedConfig
+  cachedConfig = {
     db: {
       url: process.env.DATABASE_URL || '',
       poolMax: parseInt(process.env.PGPOOL_MAX || '10', 10),
@@ -50,12 +74,22 @@ export function getConfig(): AppConfig {
       authRequired: process.env.KANBAN_AUTH_REQUIRED === 'true'
     }
   }
+  return cachedConfig
+}
+
+/**
+ * Reload configuration from environment variables
+ * Forces a fresh parse of all config values
+ */
+export function reloadConfig(): AppConfig {
+  cachedConfig = undefined
+  return getConfig()
 }
 
 /**
  * Sanitize config for external exposure (remove secrets)
  */
-export function sanitizeConfig(cfg: AppConfig): any {
+export function sanitizeConfig(cfg: AppConfig): SanitizedConfig {
   return {
     db: {
       poolMax: cfg.db.poolMax,
