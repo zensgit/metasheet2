@@ -1,8 +1,54 @@
 /**
- * 看板视图插件
+ * Kanban View Plugin
+ *
+ * Provides a kanban board view for records with drag-and-drop
+ * card management, customizable columns, and swimlanes.
+ *
+ * This plugin implements ViewConfigProvider to handle kanban-specific
+ * configuration storage, maintaining architectural separation of concerns.
  */
 
 import type { PluginLifecycle, PluginContext } from '@metasheet/core-backend/src/types/plugin'
+import type { Pool } from 'pg'
+
+// ============================================================
+// View Config Provider Types (matches core-backend interface)
+// ============================================================
+
+interface ViewConfigProvider<T = unknown> {
+  readonly viewType: string
+  getConfig(viewId: string, pool: Pool): Promise<T | null>
+  saveConfig(viewId: string, config: Partial<T>, pool: Pool): Promise<void>
+  deleteConfig(viewId: string, pool: Pool): Promise<void>
+  transformConfig?(rawConfig: Record<string, unknown>): Partial<T>
+  toApiFormat?(storedConfig: T): Record<string, unknown>
+}
+
+// ============================================================
+// Kanban Plugin Types
+// ============================================================
+
+interface KanbanConfig {
+  id: string
+  viewId: string
+  spreadsheetId: string
+  groupByField: string
+  swimlanesField?: string
+  cardFields: string[]
+  cardCoverField?: string
+  showEmptyGroups: boolean
+  columns: KanbanColumnConfig[]
+  createdAt: Date
+  updatedAt: Date
+}
+
+interface KanbanColumnConfig {
+  id: string
+  name: string
+  color?: string
+  wipLimit?: number
+  order: number
+}
 
 interface KanbanColumn {
   id: string
@@ -26,29 +72,179 @@ interface KanbanCard {
   tags?: string[]
 }
 
+// Database row type
+interface KanbanConfigRow {
+  view_id: string
+  group_by_field: string
+  swimlanes_field: string | null
+  card_fields: string[] | string | null
+  card_cover_field: string | null
+  show_empty_groups: boolean
+  created_at: Date
+  updated_at: Date
+}
+
+// ============================================================
+// Default Configurations
+// ============================================================
+
+const DEFAULT_COLUMNS: KanbanColumnConfig[] = [
+  { id: 'todo', name: 'To Do', order: 0 },
+  { id: 'in_progress', name: 'In Progress', order: 1 },
+  { id: 'review', name: 'Review', order: 2 },
+  { id: 'done', name: 'Done', order: 3 }
+]
+
+// ============================================================
+// Kanban View Config Provider (Database Integration)
+// ============================================================
+
+/**
+ * Kanban view configuration provider
+ * Handles reading/writing kanban_configs table
+ */
+class KanbanViewConfigProvider implements ViewConfigProvider<KanbanConfig> {
+  readonly viewType = 'kanban'
+
+  async getConfig(viewId: string, pool: Pool): Promise<KanbanConfig | null> {
+    const result = await pool.query<KanbanConfigRow>(
+      'SELECT * FROM kanban_configs WHERE view_id = $1',
+      [viewId]
+    )
+
+    if (result.rows.length === 0) {
+      return null
+    }
+
+    const row = result.rows[0]
+    return this.rowToConfig(row)
+  }
+
+  async saveConfig(viewId: string, config: Partial<KanbanConfig>, pool: Pool): Promise<void> {
+    const cardFields = config.cardFields || []
+
+    await pool.query(
+      `INSERT INTO kanban_configs (view_id, group_by_field, swimlanes_field, card_fields, card_cover_field, show_empty_groups, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (view_id) DO UPDATE SET
+         group_by_field = EXCLUDED.group_by_field,
+         swimlanes_field = EXCLUDED.swimlanes_field,
+         card_fields = EXCLUDED.card_fields,
+         card_cover_field = EXCLUDED.card_cover_field,
+         show_empty_groups = EXCLUDED.show_empty_groups,
+         updated_at = NOW()`,
+      [
+        viewId,
+        config.groupByField || 'status',
+        config.swimlanesField || null,
+        JSON.stringify(cardFields),
+        config.cardCoverField || null,
+        config.showEmptyGroups ?? true
+      ]
+    )
+  }
+
+  async deleteConfig(viewId: string, pool: Pool): Promise<void> {
+    await pool.query('DELETE FROM kanban_configs WHERE view_id = $1', [viewId])
+  }
+
+  /**
+   * Transform raw API config to internal format
+   */
+  transformConfig(rawConfig: Record<string, unknown>): Partial<KanbanConfig> {
+    return {
+      groupByField: rawConfig.groupByField as string || rawConfig.group_by_field as string || 'status',
+      swimlanesField: rawConfig.swimlanesField as string || rawConfig.swimlanes_field as string,
+      cardFields: rawConfig.cardFields as string[] || rawConfig.card_fields as string[] || [],
+      cardCoverField: rawConfig.cardCoverField as string || rawConfig.card_cover_field as string,
+      showEmptyGroups: rawConfig.showEmptyGroups as boolean ?? rawConfig.show_empty_groups as boolean ?? true,
+      columns: rawConfig.columns as KanbanColumnConfig[] || DEFAULT_COLUMNS
+    }
+  }
+
+  /**
+   * Transform stored config to API response format
+   */
+  toApiFormat(storedConfig: KanbanConfig): Record<string, unknown> {
+    return {
+      groupByField: storedConfig.groupByField,
+      swimlanesField: storedConfig.swimlanesField,
+      cardFields: storedConfig.cardFields,
+      cardCoverField: storedConfig.cardCoverField,
+      showEmptyGroups: storedConfig.showEmptyGroups,
+      columns: storedConfig.columns
+    }
+  }
+
+  private rowToConfig(row: KanbanConfigRow): KanbanConfig {
+    let cardFields: string[] = []
+    if (row.card_fields) {
+      cardFields = typeof row.card_fields === 'string'
+        ? JSON.parse(row.card_fields)
+        : row.card_fields
+    }
+
+    return {
+      id: `kanban:${row.view_id}`,
+      viewId: row.view_id,
+      spreadsheetId: '',
+      groupByField: row.group_by_field,
+      swimlanesField: row.swimlanes_field || undefined,
+      cardFields,
+      cardCoverField: row.card_cover_field || undefined,
+      showEmptyGroups: row.show_empty_groups,
+      columns: DEFAULT_COLUMNS, // Columns are stored in view.config, not kanban_configs
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+}
+
+// ============================================================
+// Kanban Plugin Implementation
+// ============================================================
+
 export default class KanbanPlugin implements PluginLifecycle {
   private context!: PluginContext
   private kanbanData = new Map<string, KanbanColumn[]>()
+  private kanbanConfigs = new Map<string, KanbanConfig>()
+  private configProvider = new KanbanViewConfigProvider()
 
   /**
-   * 插件激活
+   * Plugin activation
    */
   async activate(context: PluginContext): Promise<void> {
     this.context = context
+    this.context.logger.info('Kanban View Plugin activating...')
 
-    // 注册API路由
+    // Register view config provider with core registry
+    this.registerViewConfigProvider()
+
+    // Register API routes
     this.registerRoutes()
 
-    // 注册事件监听
+    // Register event listeners
     this.registerEventListeners()
 
-    // 注册插件API
+    // Register plugin API
     this.registerPluginAPI()
 
-    // 注册WebSocket事件
+    // Register WebSocket events
     this.registerWebSocketEvents()
 
-    context.logger.info('Kanban plugin activated successfully')
+    this.context.logger.info('Kanban View Plugin activated')
+  }
+
+  /**
+   * Register the view config provider with the core registry
+   */
+  private registerViewConfigProvider(): void {
+    // Emit event for core to register our provider
+    this.context.api.events.emit('view:configProvider:register', {
+      viewType: 'kanban',
+      provider: this.configProvider
+    })
+    this.context.logger.debug('Kanban view config provider registered')
   }
 
   /**

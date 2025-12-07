@@ -27,10 +27,17 @@ export async function initObservability(config: ObservabilityConfig, logger = ne
     return { enabled: false, started: false, reason: 'disabled' }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
   let NodeSDK: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
   let getNodeAutoInstrumentations: any
-  let Resource: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
+  let ResourcesModule: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
+  let ResourceCtor: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
   let SemanticResourceAttributes: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic imports from optional dependencies
   let OTLPTraceExporter: any
 
   try {
@@ -39,9 +46,11 @@ export async function initObservability(config: ObservabilityConfig, logger = ne
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     getNodeAutoInstrumentations = require('@opentelemetry/auto-instrumentations-node').getNodeAutoInstrumentations
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    Resource = require('@opentelemetry/resources').Resource
+    ResourcesModule = require('@opentelemetry/resources')
+    ResourceCtor = ResourcesModule.Resource || ResourcesModule.default
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    SemanticResourceAttributes = require('@opentelemetry/semantic-conventions').SemanticResourceAttributes
+    const semantic = require('@opentelemetry/semantic-conventions')
+    SemanticResourceAttributes = semantic.SemanticResourceAttributes || semantic.default?.SemanticResourceAttributes
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     OTLPTraceExporter = require('@opentelemetry/exporter-trace-otlp-http').OTLPTraceExporter
   } catch (err) {
@@ -49,7 +58,12 @@ export async function initObservability(config: ObservabilityConfig, logger = ne
     return { enabled: false, started: false, reason: 'missing-deps' }
   }
 
-  const resource = new Resource({
+  if (!ResourceCtor || !SemanticResourceAttributes) {
+    logger.warn('OTEL_ENABLED=true but @opentelemetry/resources or semantic-conventions exports not found; tracing skipped')
+    return { enabled: false, started: false, reason: 'missing-resource' }
+  }
+
+  const resource = new ResourceCtor({
     [SemanticResourceAttributes.SERVICE_NAME]: config.serviceName,
     [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV || 'development'
   })

@@ -466,12 +466,17 @@ export class PluginCapabilityManager extends EventEmitter {
         }
         break
 
-      case PluginCapability.API_ENDPOINT:
-        if (!manifest.main?.backend) {
+      case PluginCapability.API_ENDPOINT: {
+        // Support both string (V2) and object (V1) formats for main
+        const hasBackendEntry = typeof manifest.main === 'string'
+          ? !!manifest.main
+          : !!(manifest.main && manifest.main.backend)
+        if (!hasBackendEntry) {
           result.errors.push('API_ENDPOINT capability requires backend entry point in manifest')
           result.valid = false
         }
         break
+      }
 
       case PluginCapability.SETTINGS_PAGE:
         if (!manifest.contributes?.configuration) {

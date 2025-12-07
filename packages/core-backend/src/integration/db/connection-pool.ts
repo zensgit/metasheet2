@@ -2,6 +2,7 @@ import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { Pool } from 'pg'
 import { Logger } from '../../core/logger'
 import { secretManager } from '../../security/SecretManager'
+import { coreMetrics } from '../metrics/metrics'
 
 export interface QueryOptions {
   timeoutMs?: number
@@ -34,6 +35,9 @@ class ConnectionPool {
   private pool: Pool
   private slowMs: number
   private logger: Logger
+  private metricsTimer?: NodeJS.Timeout
+  private queryCount = 0
+  private queryErrorCount = 0
   readonly name: string
 
   constructor(opts: ConnectionPoolOptions) {
@@ -41,6 +45,53 @@ class ConnectionPool {
     this.slowMs = opts.slowQueryMs || parseInt(process.env.DB_SLOW_MS || '500', 10)
     this.name = opts.name || 'main'
     this.logger = new Logger(`ConnectionPool:${this.name}`)
+
+    // Start metrics collection
+    this.startMetricsCollection()
+  }
+
+  /**
+   * Start periodic metrics collection for Prometheus
+   * Sprint 5 Day 3: Prometheus metrics integration
+   */
+  private startMetricsCollection(): void {
+    // Collect metrics every 5 seconds
+    this.metricsTimer = setInterval(() => {
+      this.collectPoolMetrics()
+    }, 5000)
+
+    // Don't prevent process from exiting
+    if (this.metricsTimer.unref) {
+      this.metricsTimer.unref()
+    }
+  }
+
+  /**
+   * Collect and report pool metrics
+   */
+  private collectPoolMetrics(): void {
+    const pool = this.pool as unknown as PoolWithStats
+    const poolName = this.name
+
+    // Report pool connection metrics
+    coreMetrics.gauge(`db_pool_total_connections`, pool.totalCount || 0, { pool: poolName })
+    coreMetrics.gauge(`db_pool_idle_connections`, pool.idleCount || 0, { pool: poolName })
+    coreMetrics.gauge(`db_pool_waiting_clients`, pool.waitingCount || 0, { pool: poolName })
+    coreMetrics.gauge(`db_pool_active_connections`, (pool.totalCount || 0) - (pool.idleCount || 0), { pool: poolName })
+
+    // Report query metrics
+    coreMetrics.gauge(`db_pool_query_total`, this.queryCount, { pool: poolName })
+    coreMetrics.gauge(`db_pool_query_errors_total`, this.queryErrorCount, { pool: poolName })
+  }
+
+  /**
+   * Stop metrics collection
+   */
+  stopMetricsCollection(): void {
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer)
+      this.metricsTimer = undefined
+    }
   }
 
   async healthCheck(): Promise<void> {
@@ -53,12 +104,25 @@ class ConnectionPool {
     _options?: QueryOptions
   ): Promise<QueryResult<T>> {
     const start = Date.now()
-    const res = await this.pool.query<T>(sql, params)
-    const ms = Date.now() - start
-    if (ms > this.slowMs) {
-      this.logger.warn(`Slow query: ${ms}ms - ${sql.slice(0, 160)}`)
+    try {
+      const res = await this.pool.query<T>(sql, params)
+      const ms = Date.now() - start
+
+      // Track query metrics
+      this.queryCount++
+      coreMetrics.histogram('db_query_duration_ms', ms, { pool: this.name })
+
+      if (ms > this.slowMs) {
+        this.logger.warn(`Slow query: ${ms}ms - ${sql.slice(0, 160)}`)
+        coreMetrics.increment('db_slow_queries_total', { pool: this.name })
+      }
+
+      return res
+    } catch (error) {
+      this.queryErrorCount++
+      coreMetrics.increment('db_query_errors_total', { pool: this.name })
+      throw error
     }
-    return res
   }
 
   async transaction<T>(handler: (client: { query: PoolClient['query'] }) => Promise<T>): Promise<T> {
@@ -143,6 +207,17 @@ class PoolManager {
     return pool
   }
 
+  /**
+   * Initialize shard pools from configuration
+   * Sprint 6 Day 1: Multi-Pool Manager
+   */
+  initializeShards(shardConfigs: Array<{ id: string; config: ConnectionPoolOptions }>): void {
+    for (const { id, config } of shardConfigs) {
+      this.createPool(id, config)
+      this.logger.info(`Initialized shard pool: ${id}`)
+    }
+  }
+
   get(name = 'main'): ConnectionPool {
     return this.pools.get(name) || this.main
   }
@@ -197,12 +272,33 @@ class PoolManager {
     await Promise.all(
       Array.from(this.pools.values()).map(async (pool) => {
         try {
+          // Stop metrics collection before closing
+          pool.stopMetricsCollection()
           await pool.getInternalPool().end()
         } catch (error) {
           this.logger.error('Error closing pool', error instanceof Error ? error : undefined)
         }
       })
     )
+  }
+
+  /**
+   * Get metrics snapshot for all pools
+   * Sprint 5 Day 3: Returns current metrics for Prometheus endpoint
+   */
+  getMetricsSnapshot(): Record<string, number> {
+    const metrics: Record<string, number> = {}
+
+    for (const [name, pool] of this.pools.entries()) {
+      const internalPool = pool.getInternalPool() as unknown as PoolWithStats
+
+      metrics[`db_pool_total_connections{pool="${name}"}`] = internalPool.totalCount || 0
+      metrics[`db_pool_idle_connections{pool="${name}"}`] = internalPool.idleCount || 0
+      metrics[`db_pool_waiting_clients{pool="${name}"}`] = internalPool.waitingCount || 0
+      metrics[`db_pool_active_connections{pool="${name}"}`] = (internalPool.totalCount || 0) - (internalPool.idleCount || 0)
+    }
+
+    return metrics
   }
 }
 

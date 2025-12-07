@@ -1,9 +1,11 @@
 /**
  * Pattern Manager with Trie Optimization
  * Issue #28: High-performance pattern matching with prefix tree
+ * Sprint 5: Added plugin lifecycle support for MessageBus integration
  */
 
 import type { Subscription } from './pattern-trie';
+import type { MessageBusSubscription } from './types'
 import { PatternTrie } from './pattern-trie'
 import { EventEmitter } from 'events'
 import type { Logger } from '../core/logger'
@@ -14,18 +16,14 @@ export interface PatternManagerConfig {
   optimizationMode?: 'memory' | 'speed' | 'balanced'
   maxPatterns?: number
   cleanupIntervalMs?: number
+  /** TTL for cache entries in milliseconds (Day 2 enhancement) */
+  cacheTtlMs?: number
 }
 
 export interface MatchResult {
   subscriptions: Subscription[]
   matchTime: number
   cacheHit: boolean
-}
-
-interface CacheEntry {
-  topic: string
-  matches: number
-  age: number
 }
 
 interface TrieStatsData {
@@ -36,14 +34,204 @@ interface TrieStatsData {
   memoryUsage: number
 }
 
+/**
+ * LRU Cache with Time To Live (TTL) Support
+ * Map maintains insertion order for LRU eviction
+ * Sprint 5 Day 2: Added TTL support for automatic cache entry expiration
+ */
+interface CacheEntryWithTTL<V> {
+  value: V
+  expiresAt: number
+}
+
+interface LRUCacheConfig {
+  maxSize: number
+  /** Time To Live in milliseconds. 0 means no expiration. */
+  ttlMs?: number
+}
+
+class LRUCache<K, V> {
+  private cache: Map<K, CacheEntryWithTTL<V>>
+  private readonly maxSize: number
+  private readonly ttlMs: number
+  private hits = 0
+  private misses = 0
+  private ttlExpirations = 0
+
+  constructor(config: LRUCacheConfig | number) {
+    this.cache = new Map()
+    if (typeof config === 'number') {
+      // Legacy constructor support
+      this.maxSize = config
+      this.ttlMs = 0
+    } else {
+      this.maxSize = config.maxSize
+      this.ttlMs = config.ttlMs ?? 0
+    }
+  }
+
+  get(key: K): V | undefined {
+    const entry = this.cache.get(key)
+    if (entry !== undefined) {
+      // Check TTL expiration
+      if (this.ttlMs > 0 && Date.now() > entry.expiresAt) {
+        this.cache.delete(key)
+        this.ttlExpirations++
+        this.misses++
+        return undefined
+      }
+      // Move to end (most recently used)
+      this.cache.delete(key)
+      this.cache.set(key, entry)
+      this.hits++
+      return entry.value
+    }
+    this.misses++
+    return undefined
+  }
+
+  set(key: K, value: V): void {
+    const expiresAt = this.ttlMs > 0 ? Date.now() + this.ttlMs : Infinity
+    const entry: CacheEntryWithTTL<V> = { value, expiresAt }
+
+    // If key exists, delete it first to update position
+    if (this.cache.has(key)) {
+      this.cache.delete(key)
+    } else if (this.cache.size >= this.maxSize) {
+      // Evict oldest (first item in Map)
+      const firstKey = this.cache.keys().next().value
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey)
+      }
+    }
+    this.cache.set(key, entry)
+  }
+
+  has(key: K): boolean {
+    const entry = this.cache.get(key)
+    if (entry === undefined) return false
+    // Check TTL expiration
+    if (this.ttlMs > 0 && Date.now() > entry.expiresAt) {
+      this.cache.delete(key)
+      this.ttlExpirations++
+      return false
+    }
+    return true
+  }
+
+  delete(key: K): boolean {
+    return this.cache.delete(key)
+  }
+
+  clear(): void {
+    this.cache.clear()
+    this.hits = 0
+    this.misses = 0
+    this.ttlExpirations = 0
+  }
+
+  get size(): number {
+    return this.cache.size
+  }
+
+  get hitRate(): number {
+    const total = this.hits + this.misses
+    return total > 0 ? this.hits / total : 0
+  }
+
+  /**
+   * Clean up expired entries proactively
+   * Returns the number of entries removed
+   */
+  cleanupExpired(): number {
+    if (this.ttlMs === 0) return 0
+
+    const now = Date.now()
+    let removed = 0
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (now > entry.expiresAt) {
+        this.cache.delete(key)
+        removed++
+      }
+    }
+
+    this.ttlExpirations += removed
+    return removed
+  }
+
+  getStats(): {
+    size: number
+    hits: number
+    misses: number
+    hitRate: number
+    ttlMs: number
+    ttlExpirations: number
+  } {
+    return {
+      size: this.cache.size,
+      hits: this.hits,
+      misses: this.misses,
+      hitRate: this.hitRate,
+      ttlMs: this.ttlMs,
+      ttlExpirations: this.ttlExpirations
+    }
+  }
+
+  entries(): IterableIterator<[K, V]> {
+    const cache = this.cache
+    const ttlMs = this.ttlMs
+    const ttlExpirationsRef = { value: this.ttlExpirations }
+    const iterator = cache.entries()
+
+    // Return an iterator that unwraps the CacheEntryWithTTL
+    const iteratorObj: IterableIterator<[K, V]> = {
+      [Symbol.iterator]() {
+        return this
+      },
+      next(): IteratorResult<[K, V]> {
+        // eslint-disable-next-line no-constant-condition -- intentional loop with return/continue
+        while (true) {
+          const result = iterator.next()
+          if (result.done) {
+            return { done: true, value: undefined }
+          }
+          const [key, entry] = result.value
+          // Skip expired entries
+          if (ttlMs > 0 && Date.now() > entry.expiresAt) {
+            cache.delete(key)
+            ttlExpirationsRef.value++
+            continue
+          }
+          return { done: false, value: [key, entry.value] }
+        }
+      }
+    }
+
+    // Sync ttlExpirations back after iteration
+    const originalNext = iteratorObj.next.bind(iteratorObj)
+    iteratorObj.next = () => {
+      const result = originalNext()
+      this.ttlExpirations = ttlExpirationsRef.value
+      return result
+    }
+
+    return iteratorObj
+  }
+}
+
 export class PatternManager extends EventEmitter {
   private trie: PatternTrie
   private logger: Logger
   private metrics?: CoreMetrics
   private config: Required<PatternManagerConfig>
-  private matchCache: Map<string, { result: Subscription[], timestamp: number }>
+  private matchCache: LRUCache<string, Subscription[]>
   private cleanupTimer?: NodeJS.Timeout
   private metricsTimer?: NodeJS.Timeout
+  /** Plugin to subscription IDs mapping for lifecycle management */
+  private pluginSubscriptions: Map<string, Set<string>> = new Map()
+  /** Subscription ID to pattern mapping for unsubscribe operations */
+  private subscriptionPatterns: Map<string, string> = new Map()
 
   constructor(
     logger: Logger,
@@ -58,11 +246,16 @@ export class PatternManager extends EventEmitter {
       enableMetrics: config.enableMetrics ?? true,
       optimizationMode: config.optimizationMode ?? 'balanced',
       maxPatterns: config.maxPatterns ?? 10000,
-      cleanupIntervalMs: config.cleanupIntervalMs ?? 300000 // 5 minutes
+      cleanupIntervalMs: config.cleanupIntervalMs ?? 300000, // 5 minutes
+      cacheTtlMs: config.cacheTtlMs ?? (config.optimizationMode === 'speed' ? 30000 : 10000)
     }
 
     this.trie = new PatternTrie()
-    this.matchCache = new Map()
+    const maxCacheSize = this.config.optimizationMode === 'memory' ? 1000 : 5000
+    this.matchCache = new LRUCache({
+      maxSize: maxCacheSize,
+      ttlMs: this.config.cacheTtlMs
+    })
 
     this.startCleanupTimer()
     this.setupMetrics()
@@ -70,29 +263,63 @@ export class PatternManager extends EventEmitter {
 
   /**
    * Subscribe to a pattern
+   * @param pattern - The pattern to subscribe to (supports wildcards: user.*, *.login, user.*.action)
+   * @param callback - Handler function called when a matching topic is published
+   * @param options - Optional subscription options
+   * @param options.plugin - Plugin identifier for lifecycle management
+   * @param options.metadata - Additional metadata to attach to the subscription
+   * @returns Subscription ID
    */
   subscribe(
     pattern: string,
     callback: (topic: string, message: unknown) => void,
-    metadata?: Record<string, unknown>
+    options?: { plugin?: string; metadata?: Record<string, unknown> } | Record<string, unknown>
   ): string {
     const subscriptionId = this.generateSubscriptionId()
-    const subscription: Subscription = {
+
+    // Support both new format { plugin?, metadata? } and legacy format (direct metadata)
+    let plugin: string | undefined
+    let metadata: Record<string, unknown> | undefined
+
+    if (options) {
+      // Check if options has explicit plugin or metadata keys (new format)
+      if ('plugin' in options || 'metadata' in options) {
+        plugin = (options as { plugin?: string }).plugin
+        metadata = (options as { metadata?: Record<string, unknown> }).metadata
+      } else {
+        // Legacy format: options IS the metadata
+        metadata = options as Record<string, unknown>
+      }
+    }
+
+    const subscription: MessageBusSubscription = {
       id: subscriptionId,
       pattern,
       callback: callback as (topic: string, message: unknown) => void,
       createdAt: Date.now(),
-      metadata
+      metadata,
+      plugin
     }
 
     try {
       this.trie.addPattern(pattern, subscription)
       this.invalidateCache()
 
-      this.logger.debug(`Subscribed to pattern: ${pattern} (id: ${subscriptionId})`)
-      this.recordMetric('pattern.subscribe', { pattern, subscriptionId })
+      // Track plugin subscriptions for lifecycle management
+      if (plugin) {
+        if (!this.pluginSubscriptions.has(plugin)) {
+          this.pluginSubscriptions.set(plugin, new Set())
+        }
+        this.pluginSubscriptions.get(plugin)!.add(subscriptionId)
+      }
 
-      this.emit('subscribed', { pattern, subscriptionId, subscription })
+      // Track subscription to pattern mapping for unsubscribe
+      this.subscriptionPatterns.set(subscriptionId, pattern)
+
+      this.logger.debug(`Subscribed to pattern: ${pattern} (id: ${subscriptionId}${plugin ? `, plugin: ${plugin}` : ''})`)
+      this.recordMetric('pattern.subscribe', { pattern, subscriptionId, plugin })
+
+      this.emit('subscribed', { pattern, subscriptionId, subscription, plugin })
       return subscriptionId
     } catch (error) {
       const err = error as Error
@@ -103,7 +330,10 @@ export class PatternManager extends EventEmitter {
   }
 
   /**
-   * Unsubscribe from a pattern
+   * Unsubscribe from a pattern by subscription ID
+   * @param pattern - The pattern to unsubscribe from
+   * @param subscriptionId - The subscription ID to remove
+   * @returns true if the subscription was found and removed
    */
   unsubscribe(pattern: string, subscriptionId: string): boolean {
     try {
@@ -111,6 +341,7 @@ export class PatternManager extends EventEmitter {
 
       if (removed) {
         this.invalidateCache()
+        this.cleanupSubscriptionTracking(subscriptionId)
         this.logger.debug(`Unsubscribed from pattern: ${pattern} (id: ${subscriptionId})`)
         this.recordMetric('pattern.unsubscribe', { pattern, subscriptionId })
         this.emit('unsubscribed', { pattern, subscriptionId })
@@ -129,20 +360,103 @@ export class PatternManager extends EventEmitter {
   }
 
   /**
+   * Unsubscribe by subscription ID only (pattern is looked up internally)
+   * Convenience method for MessageBus integration
+   * @param subscriptionId - The subscription ID to remove
+   * @returns true if the subscription was found and removed
+   */
+  unsubscribeById(subscriptionId: string): boolean {
+    const pattern = this.subscriptionPatterns.get(subscriptionId)
+    if (!pattern) {
+      this.logger.warn(`Subscription ID not found: ${subscriptionId}`)
+      return false
+    }
+    return this.unsubscribe(pattern, subscriptionId)
+  }
+
+  /**
+   * Unsubscribe all subscriptions belonging to a plugin
+   * Used for plugin lifecycle management (deactivation/uninstall)
+   * @param plugin - The plugin identifier
+   * @returns Number of subscriptions removed
+   */
+  unsubscribeByPlugin(plugin: string): number {
+    const subscriptionIds = this.pluginSubscriptions.get(plugin)
+    if (!subscriptionIds || subscriptionIds.size === 0) {
+      this.logger.debug(`No subscriptions found for plugin: ${plugin}`)
+      return 0
+    }
+
+    let removedCount = 0
+    const idsToRemove = Array.from(subscriptionIds)
+
+    for (const subscriptionId of idsToRemove) {
+      const pattern = this.subscriptionPatterns.get(subscriptionId)
+      if (pattern) {
+        const removed = this.trie.removePattern(pattern, subscriptionId)
+        if (removed) {
+          removedCount++
+          this.subscriptionPatterns.delete(subscriptionId)
+          this.emit('unsubscribed', { pattern, subscriptionId, plugin })
+        }
+      }
+    }
+
+    // Clear plugin tracking
+    this.pluginSubscriptions.delete(plugin)
+
+    if (removedCount > 0) {
+      this.invalidateCache()
+      this.logger.info(`Unsubscribed ${removedCount} subscriptions for plugin: ${plugin}`)
+      this.recordMetric('pattern.unsubscribe.by_plugin', { plugin, count: removedCount })
+    }
+
+    return removedCount
+  }
+
+  /**
+   * Get all subscription IDs for a plugin
+   * @param plugin - The plugin identifier
+   * @returns Array of subscription IDs
+   */
+  getSubscriptionsByPlugin(plugin: string): string[] {
+    const subscriptionIds = this.pluginSubscriptions.get(plugin)
+    return subscriptionIds ? Array.from(subscriptionIds) : []
+  }
+
+  /**
+   * Clean up subscription tracking after removal
+   */
+  private cleanupSubscriptionTracking(subscriptionId: string): void {
+    this.subscriptionPatterns.delete(subscriptionId)
+
+    // Remove from plugin subscriptions
+    for (const [plugin, ids] of this.pluginSubscriptions) {
+      if (ids.has(subscriptionId)) {
+        ids.delete(subscriptionId)
+        if (ids.size === 0) {
+          this.pluginSubscriptions.delete(plugin)
+        }
+        break
+      }
+    }
+  }
+
+  /**
    * Find matching subscriptions for a topic
    */
   findMatches(topic: string): MatchResult {
     const startTime = process.hrtime.bigint()
 
-    // Check cache first
+    // Check cache first (TTL is handled by LRUCache)
     const cacheKey = this.getCacheKey(topic)
     const cached = this.matchCache.get(cacheKey)
 
-    if (cached && this.isCacheValid(cached.timestamp)) {
+    if (cached !== undefined) {
       const matchTime = Number(process.hrtime.bigint() - startTime) / 1_000_000 // Convert to ms
       this.recordMetric('pattern.match.cache_hit', { topic, matchTime })
       return {
-        subscriptions: cached.result,
+        subscriptions: cached,
         matchTime,
         cacheHit: true
       }
@@ -152,7 +466,7 @@ export class PatternManager extends EventEmitter {
     const subscriptions = this.trie.findMatches(topic)
     const matchTime = Number(process.hrtime.bigint() - startTime) / 1_000_000
 
-    // Cache the result
+    // Cache the result (TTL is applied automatically by LRUCache)
     this.cacheResult(cacheKey, subscriptions)
 
     this.recordMetric('pattern.match.cache_miss', {
@@ -235,19 +549,22 @@ export class PatternManager extends EventEmitter {
    */
   getStats(): {
     trie: TrieStatsData
-    cache: { size: number, hitRate: number }
-    performance: { averageMatchTime: number, averagePublishTime: number }
+    cache: { size: number; hitRate: number; ttlMs: number; ttlExpirations: number }
+    performance: { averageMatchTime: number; averagePublishTime: number }
   } {
     const trieStats = this.trie.getStats()
+    const cacheStats = this.matchCache.getStats()
 
-    // Calculate cache hit rate from metrics
-    const hitRate = this.calculateCacheHitRate()
+    // Calculate cache hit rate from metrics (uses internal LRU cache stats as fallback)
+    const hitRate = this.calculateCacheHitRate() || cacheStats.hitRate
 
     return {
       trie: trieStats,
       cache: {
-        size: this.matchCache.size,
-        hitRate
+        size: cacheStats.size,
+        hitRate,
+        ttlMs: cacheStats.ttlMs,
+        ttlExpirations: cacheStats.ttlExpirations
       },
       performance: {
         averageMatchTime: this.getAverageMetric('pattern.match.cache_miss', 'matchTime'),
@@ -269,6 +586,8 @@ export class PatternManager extends EventEmitter {
   clear(): void {
     this.trie.clear()
     this.matchCache.clear()
+    this.pluginSubscriptions.clear()
+    this.subscriptionPatterns.clear()
     this.logger.info('Pattern manager cleared')
     this.recordMetric('pattern.clear')
     this.emit('cleared')
@@ -295,19 +614,18 @@ export class PatternManager extends EventEmitter {
    */
   debug(): {
     trie: string
-    cache: CacheEntry[]
+    cache: Array<{ topic: string; matches: number }>
     stats: {
       trie: TrieStatsData
-      cache: { size: number, hitRate: number }
-      performance: { averageMatchTime: number, averagePublishTime: number }
+      cache: { size: number; hitRate: number; ttlMs: number; ttlExpirations: number }
+      performance: { averageMatchTime: number; averagePublishTime: number }
     }
   } {
     return {
       trie: this.trie.debug(),
       cache: Array.from(this.matchCache.entries()).map(([key, value]) => ({
         topic: key,
-        matches: value.result.length,
-        age: Date.now() - value.timestamp
+        matches: value.length
       })),
       stats: this.getStats()
     }
@@ -325,28 +643,9 @@ export class PatternManager extends EventEmitter {
     return `topic:${topic}`
   }
 
-  private isCacheValid(timestamp: number): boolean {
-    const maxAge = this.config.optimizationMode === 'speed' ? 30000 : 10000 // 30s or 10s
-    return Date.now() - timestamp < maxAge
-  }
-
   private cacheResult(key: string, result: Subscription[]): void {
-    // Limit cache size
-    const maxCacheSize = this.config.optimizationMode === 'memory' ? 1000 : 5000
-
-    if (this.matchCache.size >= maxCacheSize) {
-      // Remove oldest entries
-      const entries = Array.from(this.matchCache.entries())
-      entries.sort((a, b) => a[1].timestamp - b[1].timestamp)
-      const toRemove = entries.slice(0, Math.floor(maxCacheSize * 0.2)) // Remove 20%
-
-      toRemove.forEach(([key]) => this.matchCache.delete(key))
-    }
-
-    this.matchCache.set(key, {
-      result: result.slice(), // Copy array
-      timestamp: Date.now()
-    })
+    // LRU cache handles eviction and TTL automatically
+    this.matchCache.set(key, result.slice()) // Copy array
   }
 
   private invalidateCache(): void {
@@ -361,18 +660,10 @@ export class PatternManager extends EventEmitter {
   }
 
   private performCleanup(): void {
-    const before = this.matchCache.size
-    const cutoff = Date.now() - 300000 // 5 minutes
-
-    for (const [key, value] of this.matchCache.entries()) {
-      if (value.timestamp < cutoff) {
-        this.matchCache.delete(key)
-      }
-    }
-
-    const cleaned = before - this.matchCache.size
+    // LRU cache now handles TTL-based cleanup automatically
+    const cleaned = this.matchCache.cleanupExpired()
     if (cleaned > 0) {
-      this.logger.debug(`Cleaned ${cleaned} cache entries`)
+      this.logger.debug(`Cleaned ${cleaned} expired cache entries`)
       this.recordMetric('pattern.cache.cleanup', { cleaned })
     }
   }
@@ -424,9 +715,7 @@ export class PatternManager extends EventEmitter {
   }
 
   private calculateCacheHitRate(): number {
-    // This would typically be calculated from historical metrics
-    // For now, return a placeholder based on cache size
-    return Math.min(0.95, this.matchCache.size / 1000)
+    return this.matchCache.hitRate
   }
 
   private getAverageMetric(event: string, field: string): number {

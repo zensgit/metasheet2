@@ -7,6 +7,9 @@ import type { Kysely} from 'kysely';
 import { sql } from 'kysely'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  // Ensure clean state for plugin_event_permissions (compatible with older schemas)
+  await db.schema.dropTable('plugin_event_permissions').ifExists().execute()
+
   // 1. event_types - Event type definitions
   await db.schema
     .createTable('event_types')
@@ -14,11 +17,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       col.primaryKey().defaultTo(sql`gen_random_uuid()`)
     )
     .addColumn('event_name', 'varchar(255)', (col) => col.notNull().unique())
-    .addColumn('version', 'varchar(50)', (col) => col.notNull())
+    .addColumn('version', 'varchar(50)', (col) => col.notNull().defaultTo('1.0.0'))
+    .addColumn('category', 'text', (col) => col.notNull().defaultTo('general'))
     .addColumn('payload_schema', 'jsonb')
+    .addColumn('metadata_schema', 'jsonb')
     .addColumn('description', 'text')
     .addColumn('is_system', 'boolean', (col) => col.notNull().defaultTo(false))
     .addColumn('is_active', 'boolean', (col) => col.notNull().defaultTo(true))
+    .addColumn('is_async', 'boolean', (col) => col.notNull().defaultTo(false))
+    .addColumn('is_persistent', 'boolean', (col) => col.notNull().defaultTo(false))
+    .addColumn('is_transactional', 'boolean', (col) => col.notNull().defaultTo(false))
+    .addColumn('max_retries', 'integer', (col) => col.notNull().defaultTo(3))
+    .addColumn('retry_delay_ms', 'integer', (col) => col.notNull().defaultTo(1000))
+    .addColumn('ttl_seconds', 'integer')
     .addColumn('retention_days', 'integer', (col) => col.notNull().defaultTo(30))
     .addColumn('created_at', 'timestamptz', (col) =>
       col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`)
@@ -34,6 +45,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .on('event_types')
     .column('is_active')
     .execute()
+
+  // Backfill / add missing columns if running against existing database
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS category text DEFAULT 'general'`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS metadata_schema jsonb`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS is_async boolean DEFAULT false`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS is_persistent boolean DEFAULT false`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS is_transactional boolean DEFAULT false`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS max_retries integer DEFAULT 3`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS retry_delay_ms integer DEFAULT 1000`.execute(db)
+  await sql`ALTER TABLE event_types ADD COLUMN IF NOT EXISTS ttl_seconds integer`.execute(db)
+  await sql`ALTER TABLE event_types ALTER COLUMN version SET DEFAULT '1.0.0'`.execute(db)
 
   // 2. event_subscriptions - Event subscription registrations
   await db.schema
@@ -69,6 +91,32 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .createIndex('idx_event_subscriptions_pattern')
     .on('event_subscriptions')
     .column('event_pattern')
+    .execute()
+
+  // Plugin event permissions (per-plugin event guardrails)
+  await db.schema
+    .createTable('plugin_event_permissions')
+    .ifNotExists()
+    .addColumn('id', 'uuid', col => col.primaryKey().defaultTo(sql`gen_random_uuid()`))
+    .addColumn('plugin_id', 'varchar(255)', col => col.notNull())
+    .addColumn('can_emit', 'jsonb', col => col.notNull().defaultTo(sql`'[]'::jsonb`))
+    .addColumn('can_subscribe', 'jsonb', col => col.notNull().defaultTo(sql`'[]'::jsonb`))
+    .addColumn('max_events_per_minute', 'integer', col => col.notNull().defaultTo(1000))
+    .addColumn('max_subscriptions', 'integer', col => col.notNull().defaultTo(100))
+    .addColumn('max_event_size_kb', 'integer', col => col.notNull().defaultTo(64))
+    .addColumn('events_emitted_today', 'integer', col => col.notNull().defaultTo(0))
+    .addColumn('events_received_today', 'integer', col => col.notNull().defaultTo(0))
+    .addColumn('quota_reset_at', 'timestamptz')
+    .addColumn('is_active', 'boolean', col => col.notNull().defaultTo(true))
+    .addColumn('is_suspended', 'boolean', col => col.notNull().defaultTo(false))
+    .addColumn('created_at', 'timestamptz', col => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
+    .addColumn('updated_at', 'timestamptz', col => col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`))
+    .execute()
+
+  await db.schema
+    .createIndex('idx_plugin_event_permissions_plugin_id')
+    .on('plugin_event_permissions')
+    .column('plugin_id')
     .execute()
 
   // 3. event_store - Event sourcing store

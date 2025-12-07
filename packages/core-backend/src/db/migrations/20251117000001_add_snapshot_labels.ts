@@ -15,18 +15,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS release_channel text`.execute(db);
 
   // Create GIN index for array operations on tags
-  await sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_snapshots_tags ON snapshots USING GIN(tags)`.execute(
-    db
-  );
+  await sql`CREATE INDEX IF NOT EXISTS idx_snapshots_tags ON snapshots USING GIN(tags)`.execute(db);
 
   // Create B-tree indexes for protection_level and release_channel
-  await sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_snapshots_protection_level ON snapshots(protection_level)`.execute(
-    db
-  );
+  await sql`CREATE INDEX IF NOT EXISTS idx_snapshots_protection_level ON snapshots(protection_level)`.execute(db);
 
-  await sql`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_snapshots_release_channel ON snapshots(release_channel) WHERE release_channel IS NOT NULL`.execute(
-    db
-  );
+  await sql`CREATE INDEX IF NOT EXISTS idx_snapshots_release_channel ON snapshots(release_channel) WHERE release_channel IS NOT NULL`.execute(db);
 
   // Add check constraint for protection_level
   await sql`ALTER TABLE snapshots ADD CONSTRAINT chk_protection_level CHECK (protection_level IN ('normal', 'protected', 'critical'))`.execute(

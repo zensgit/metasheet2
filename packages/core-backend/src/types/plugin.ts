@@ -23,6 +23,20 @@ export interface PluginLifecycle {
 
   // 配置变更时调用
   onConfigChange?(config: PluginConfig): void
+
+  // === Sprint 7: Hot Swap Hooks ===
+
+  /**
+   * Called before plugin reload - return state to preserve
+   * State will be passed to afterReload after successful reload
+   */
+  beforeReload?(): Promise<Record<string, unknown> | void> | Record<string, unknown> | void
+
+  /**
+   * Called after plugin reload with restored state
+   * @param state - Previously saved state, or null if none/expired
+   */
+  afterReload?(state: Record<string, unknown> | null): Promise<void> | void
 }
 
 /**
@@ -220,15 +234,26 @@ export interface PluginManifest {
   license?: string
   path?: string // Plugin file path (added during loading)
 
-  // Capability declarations (simple string array format)
-  capabilities?: string[]
+  // Capability declarations - support both array (V1) and object (V2) formats
+  capabilities?: string[] | {
+    views?: string[]
+    workflows?: string[]
+    functions?: string[]
+  }
 
   engines?: {
     metasheet: string
     node?: string
   }
 
-  main?: {
+  // V2 format also supports "engine" (singular)
+  engine?: {
+    metasheet?: string
+    node?: string
+  }
+
+  // Support both string (V2) and object (V1) formats
+  main?: string | {
     backend?: string
     frontend?: string
   }

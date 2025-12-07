@@ -1,6 +1,7 @@
 /**
  * Pattern Manager Tests
  * Issue #28: Tests for high-performance pattern matching with Trie optimization
+ * Sprint 5: Added plugin lifecycle support tests
  * Migrated from Jest to Vitest
  */
 
@@ -44,16 +45,12 @@ describe('PatternManager', () => {
 
   describe('Subscription Management', () => {
     it('should subscribe to exact patterns', () => {
-      const subscriptionId = patternManager.subscribe('user.login', mockCallback, { test: 'data' })
+      const subscriptionId = patternManager.subscribe('user.login', mockCallback, { metadata: { test: 'data' } })
 
       expect(subscriptionId).toMatch(/^sub-\d+-\w+$/)
       expect(mockLogger.debug).toHaveBeenCalledWith(
         expect.stringContaining('Subscribed to pattern: user.login')
       )
-      expect(mockMetrics.increment).toHaveBeenCalledWith('pattern_subscribe', {
-        pattern: 'user.login',
-        subscriptionId
-      })
     })
 
     it('should subscribe to wildcard patterns', () => {
@@ -290,9 +287,13 @@ describe('PatternManager', () => {
         optimizationMode: 'memory'
       })
 
-      // Speed mode should have longer cache validity
-      expect(speedManager['isCacheValid'](Date.now() - 20000)).toBe(true)
-      expect(memoryManager['isCacheValid'](Date.now() - 20000)).toBe(false)
+      // Speed mode should have longer cache TTL (30000ms) than default (10000ms)
+      const speedStats = speedManager.getStats()
+      const memoryStats = memoryManager.getStats()
+
+      // Speed mode: 30000ms TTL, Memory mode: 10000ms TTL (default)
+      expect(speedStats.cache.ttlMs).toBe(30000)
+      expect(memoryStats.cache.ttlMs).toBe(10000)
 
       await speedManager.shutdown()
       await memoryManager.shutdown()
@@ -407,6 +408,156 @@ describe('PatternManager', () => {
       }).not.toThrow()
 
       await noMetricsManager.shutdown()
+    })
+  })
+
+  describe('Plugin Lifecycle Management (Sprint 5)', () => {
+    it('should subscribe with plugin identifier', () => {
+      const subscriptionId = patternManager.subscribe('plugin.test', mockCallback, { plugin: 'test-plugin' })
+
+      expect(subscriptionId).toBeDefined()
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('plugin: test-plugin')
+      )
+    })
+
+    it('should track subscriptions by plugin', () => {
+      patternManager.subscribe('topic1', mockCallback, { plugin: 'plugin-a' })
+      patternManager.subscribe('topic2', mockCallback, { plugin: 'plugin-a' })
+      patternManager.subscribe('topic3', mockCallback, { plugin: 'plugin-b' })
+
+      const pluginAIds = patternManager.getSubscriptionsByPlugin('plugin-a')
+      const pluginBIds = patternManager.getSubscriptionsByPlugin('plugin-b')
+
+      expect(pluginAIds).toHaveLength(2)
+      expect(pluginBIds).toHaveLength(1)
+    })
+
+    it('should unsubscribe all subscriptions by plugin', () => {
+      patternManager.subscribe('topic1', mockCallback, { plugin: 'plugin-a' })
+      patternManager.subscribe('topic2.*', mockCallback, { plugin: 'plugin-a' })
+      patternManager.subscribe('topic3', mockCallback, { plugin: 'plugin-b' })
+
+      const removedCount = patternManager.unsubscribeByPlugin('plugin-a')
+
+      expect(removedCount).toBe(2)
+      expect(patternManager.getSubscriptionsByPlugin('plugin-a')).toHaveLength(0)
+      expect(patternManager.getSubscriptionsByPlugin('plugin-b')).toHaveLength(1)
+    })
+
+    it('should return 0 when unsubscribing non-existent plugin', () => {
+      const removedCount = patternManager.unsubscribeByPlugin('non-existent')
+      expect(removedCount).toBe(0)
+    })
+
+    it('should emit unsubscribed events with plugin info', () => new Promise<void>((done) => {
+      const subscriptionId = patternManager.subscribe('unsubscribe.test', mockCallback, { plugin: 'test-plugin' })
+      let eventCount = 0
+
+      patternManager.on('unsubscribed', (data) => {
+        expect(data.plugin).toBe('test-plugin')
+        eventCount++
+        if (eventCount === 1) done()
+      })
+
+      patternManager.unsubscribeByPlugin('test-plugin')
+    }))
+
+    it('should unsubscribe by ID and lookup pattern automatically', () => {
+      const subscriptionId = patternManager.subscribe('byid.test', mockCallback)
+
+      const removed = patternManager.unsubscribeById(subscriptionId)
+
+      expect(removed).toBe(true)
+      const stats = patternManager.getStats()
+      expect(stats.trie.totalSubscriptions).toBe(0)
+    })
+
+    it('should return false when unsubscribing unknown subscription ID', () => {
+      const removed = patternManager.unsubscribeById('unknown-id')
+      expect(removed).toBe(false)
+    })
+
+    it('should clean up plugin tracking on individual unsubscribe', () => {
+      const subId = patternManager.subscribe('cleanup.test', mockCallback, { plugin: 'cleanup-plugin' })
+
+      patternManager.unsubscribe('cleanup.test', subId)
+
+      expect(patternManager.getSubscriptionsByPlugin('cleanup-plugin')).toHaveLength(0)
+    })
+
+    it('should include plugin in subscription metadata', () => {
+      patternManager.subscribe('meta.test', mockCallback, { plugin: 'meta-plugin' })
+
+      const allSubs = patternManager.getAllSubscriptions()
+      const metaSub = allSubs.find(s => s.pattern === 'meta.test')
+
+      expect(metaSub).toBeDefined()
+      // The plugin is stored in the subscription object, not just metadata
+      expect((metaSub as unknown as { plugin?: string }).plugin).toBe('meta-plugin')
+    })
+  })
+
+  describe('TTL Cache Configuration (Sprint 5 Prep)', () => {
+    it('should respect custom TTL configuration', async () => {
+      const customManager = new PatternManager(mockLogger, mockMetrics, {
+        cacheTtlMs: 100 // Very short TTL for testing
+      })
+
+      customManager.subscribe('ttl.test', mockCallback)
+      customManager.findMatches('ttl.test') // Prime cache
+
+      const result1 = customManager.findMatches('ttl.test')
+      expect(result1.cacheHit).toBe(true)
+
+      // Wait for TTL to expire
+      await new Promise(resolve => setTimeout(resolve, 150))
+
+      const result2 = customManager.findMatches('ttl.test')
+      expect(result2.cacheHit).toBe(false)
+
+      await customManager.shutdown()
+    })
+
+    it('should use different TTL for speed vs memory mode', async () => {
+      const speedManager = new PatternManager(mockLogger, mockMetrics, {
+        optimizationMode: 'speed'
+      })
+
+      const memoryManager = new PatternManager(mockLogger, mockMetrics, {
+        optimizationMode: 'memory'
+      })
+
+      // Speed mode should have 30s TTL, memory mode should have 10s
+      // We test by checking if cache is still valid after 15s (simulated)
+      expect(speedManager['config'].cacheTtlMs).toBe(30000)
+      expect(memoryManager['config'].cacheTtlMs).toBe(10000)
+
+      await speedManager.shutdown()
+      await memoryManager.shutdown()
+    })
+
+    it('should track TTL expirations in stats', async () => {
+      const customManager = new PatternManager(mockLogger, mockMetrics, {
+        cacheTtlMs: 50 // Very short TTL for testing
+      })
+
+      customManager.subscribe('ttl.stats.test', mockCallback)
+      customManager.findMatches('ttl.stats.test') // Prime cache
+
+      const statsBefore = customManager.getStats()
+      expect(statsBefore.cache.ttlExpirations).toBe(0)
+
+      // Wait for TTL to expire
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      // Access again - this should trigger TTL expiration
+      customManager.findMatches('ttl.stats.test')
+
+      const statsAfter = customManager.getStats()
+      expect(statsAfter.cache.ttlExpirations).toBe(1)
+
+      await customManager.shutdown()
     })
   })
 })

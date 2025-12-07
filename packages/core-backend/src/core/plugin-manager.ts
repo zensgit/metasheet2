@@ -97,9 +97,12 @@ export class PluginManager extends EventEmitter {
   private initialized = false
   // Store plugin contexts separately since LoadedPlugin doesn't have context
   private pluginContexts: Map<string, EnhancedPluginContext> = new Map()
+  // Store the CoreAPI for plugin injection
+  private coreAPI: CoreAPI
 
-  constructor(_coreAPI: CoreAPI, config: PluginManagerConfig = {}) {
+  constructor(coreAPI: CoreAPI, config: PluginManagerConfig = {}) {
     super()
+    this.coreAPI = coreAPI
     this.config = {
       autoLoad: true,
       autoStart: true,
@@ -538,11 +541,60 @@ export class PluginManager extends EventEmitter {
 
   /**
    * 为插件创建CoreAPI实例
+   *
+   * Creates a CoreAPI instance for a plugin with optional permission scoping.
+   * Future enhancement: Filter API access based on manifest.permissions
    */
-  private createCoreAPIForPlugin(_registration: PluginRegistrationWithId | PluginRegistration): CoreAPI {
-    // 这里可以基于插件的权限和能力创建定制的CoreAPI
-    // 目前返回标准的CoreAPI，实际实现中应该注入真实的CoreAPI
-    return {} as CoreAPI
+  private createCoreAPIForPlugin(registration: PluginRegistrationWithId | PluginRegistration): CoreAPI {
+    const pluginName = registration.manifest.name
+
+    // Create a scoped CoreAPI that wraps the base CoreAPI
+    // This allows us to add plugin-specific logging, metrics, and permission checks
+    const scopedAPI: CoreAPI = {
+      ...this.coreAPI,
+
+      // Wrap http to add plugin context to routes
+      http: {
+        ...this.coreAPI.http,
+        addRoute: (method: string, path: string, handler) => {
+          // Prefix routes with plugin namespace for isolation
+          const scopedPath = `/plugins/${pluginName}${path.startsWith('/') ? path : '/' + path}`
+          this.logger.debug(`Plugin ${pluginName} registering route: ${method} ${scopedPath}`)
+          return this.coreAPI.http.addRoute(method, scopedPath, handler)
+        }
+      },
+
+      // Wrap cache with plugin-specific key prefix
+      cache: {
+        get: async <T = unknown>(key: string) => {
+          return this.coreAPI.cache.get<T>(`plugin:${pluginName}:${key}`)
+        },
+        set: async <T = unknown>(key: string, value: T, ttl?: number) => {
+          return this.coreAPI.cache.set(`plugin:${pluginName}:${key}`, value, ttl)
+        },
+        delete: async (key: string) => {
+          return this.coreAPI.cache.delete(`plugin:${pluginName}:${key}`)
+        },
+        clear: async () => {
+          // Note: This would ideally only clear plugin-specific keys
+          this.logger.warn(`Plugin ${pluginName} requested cache clear - clearing all cache`)
+          return this.coreAPI.cache.clear()
+        }
+      },
+
+      // Wrap events with plugin namespace
+      events: {
+        ...this.coreAPI.events,
+        emit: (event: string, data?: unknown) => {
+          // Emit with plugin namespace for traceability
+          this.coreAPI.events.emit(`plugin:${pluginName}:${event}`, data)
+          // Also emit the original event for cross-plugin communication
+          return this.coreAPI.events.emit(event, data)
+        }
+      }
+    }
+
+    return scopedAPI
   }
 }
 

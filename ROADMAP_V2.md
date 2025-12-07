@@ -17,12 +17,12 @@
     - 10.4 EnhancedMessageBus integration
     - 10.5 Admin API endpoints (/api/admin/dlq)
     - 10.6 Prometheus metrics (dlqMessagesTotal, backoffDelayHistogram)
-11. Performance & Scale (pattern index, sharding) – PLANNED
-    - 11.1 PatternTrie implementation for O(log n) matching
-    - 11.2 LRU caching layer for hot patterns
-    - 11.3 Tenant-based sharding strategy
-    - 11.4 Benchmark test suite (autocannon)
-    - 11.5 Connection pool optimization
+11. Performance & Scale (pattern index, sharding) – DONE
+    - 11.1 PatternTrie implementation for O(log n) matching ✅
+    - 11.2 LRU caching layer for hot patterns ✅
+    - 11.3 Tenant-based sharding strategy ✅
+    - 11.4 Benchmark test suite (autocannon) ✅
+    - 11.5 Connection pool optimization ✅
 
 ## Completed
 - DB connection pool & stats
@@ -238,7 +238,35 @@ METRICS_URL="http://production:4000/metrics/prom" ./scripts/phase5-observe.sh
 - 3 条指标 (delayed, dlq, retries) ✅
 - 性能基准测试脚本 (无优化实现) ✅
 
-## Near-Term Planned (Legacy)
+### Sprint 5: 性能与扩展性优化 (Phase 11) ✅ 已完成
+ - [x] PatternTrie O(log N) 匹配引擎
+ - [x] LRU Cache + TTL 热点优化
+ - [x] 数据库连接池 Prometheus 监控
+ - [x] 分片策略接口与哈希算法
+ - [x] 4.7x 性能提升验证 (Benchmark)
+
+ ### Sprint 6: 多租户分片与可靠性 (Phase 11 & Reliability) ✅ 已完成
+ - [x] 多连接池管理器 (Multi-Pool)
+ - [x] 分片路由集成 (MessageBus)
+ - [x] RPC 内存泄漏修复
+ - [x] 租户级速率限制
+ - [x] 分片隔离性 E2E 验证
+ - [x] ESLint 代码质量修复 (10 errors + 10 warnings)
+
+ ### Sprint 7: 运维卓越与插件增强 (Operational Excellence) ✅ 已完成
+ - [x] 插件热替换 (Hot Swap)
+ - [x] 结构化审计日志 (Audit Logging)
+ - [x] 管理员 API 扩展 (Admin APIs)
+ - [x] 系统健康聚合看板 (Health Aggregation)
+ - [x] 综合负载与混沌测试 (Chaos Testing)
+
+ ### Sprint 8: 实时洞察与高级可靠性 (Real-time Insights & Reliability)
+ - [ ] WebSocket 实时指标流
+ - [ ] 幂等性机制 (Idempotency)
+ - [ ] RPC 延迟直方图
+ - [ ] 金丝雀路由基础
+
+ ## Near-Term Planned (Legacy)
 - Plugin hot swap during reload (cache module state)
 
 ## Future Enhancements

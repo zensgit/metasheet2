@@ -11,6 +11,8 @@ import type {
 import type { Request, Response, NextFunction } from 'express';
 import * as geoip from 'geoip-lite';
 import { Logger } from '../core/logger';
+import { messageBus } from '../integration/messaging/message-bus';
+import { coreMetrics } from '../integration/metrics/metrics';
 
 export interface AuditContext {
   userId?: number;
@@ -91,15 +93,142 @@ export interface DataChange {
   newValue?: unknown;
 }
 
+/**
+ * Sprint 7: Standard audit event structure for MessageBus
+ */
+export interface AuditMessageEvent {
+  /** Unique event ID */
+  id: string
+  /** Who performed the action (user ID, system, plugin name) */
+  who: {
+    userId?: number
+    userName?: string
+    userEmail?: string
+    sessionId?: string
+    actorType: 'user' | 'system' | 'plugin' | 'service'
+    actorId?: string
+  }
+  /** What action was performed */
+  what: {
+    eventType: string
+    eventCategory: string
+    action: string
+    resourceType?: string
+    resourceId?: string
+    details?: Record<string, unknown>
+  }
+  /** When the action occurred */
+  when: {
+    timestamp: string
+    timezone?: string
+  }
+  /** Where the action originated */
+  where: {
+    ipAddress?: string
+    userAgent?: string
+    deviceType?: string
+    geoCountry?: string
+    geoCity?: string
+    requestPath?: string
+    serviceName?: string
+  }
+  /** Outcome of the action */
+  outcome: {
+    success: boolean
+    statusCode?: number
+    errorCode?: string
+    errorMessage?: string
+    responseTimeMs?: number
+    severity: 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
+  }
+  /** Additional metadata */
+  metadata?: Record<string, unknown>
+}
+
 export class AuditService extends EventEmitter {
   private repository: AuditRepository;
   private context: AuditContext = {};
   private performanceStart: Map<string, number> = new Map();
   private logger = new Logger('AuditService');
+  /** Sprint 7: Enable MessageBus integration */
+  private messageBusEnabled: boolean;
 
-  constructor(repository?: AuditRepository) {
+  constructor(repository?: AuditRepository, options?: { enableMessageBus?: boolean }) {
     super();
     this.repository = repository || new AuditRepository();
+    this.messageBusEnabled = options?.enableMessageBus ?? true;
+  }
+
+  /**
+   * Sprint 7: Publish audit event to MessageBus
+   * Topic pattern: system.audit.{category}.{eventType}
+   */
+  private async publishToMessageBus(auditData: AuditLogData, logId?: number): Promise<void> {
+    if (!this.messageBusEnabled) return;
+
+    try {
+      const category = (auditData.eventCategory || 'SYSTEM').toLowerCase();
+      const eventType = (auditData.eventType || 'UNKNOWN').toLowerCase();
+      const topic = `system.audit.${category}.${eventType}`;
+
+      const event: AuditMessageEvent = {
+        id: `audit_${logId || Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        who: {
+          userId: auditData.userId,
+          userName: auditData.userName,
+          userEmail: auditData.userEmail,
+          sessionId: auditData.sessionId,
+          actorType: auditData.userId ? 'user' : 'system',
+          actorId: auditData.userId?.toString() || 'system'
+        },
+        what: {
+          eventType: auditData.eventType,
+          eventCategory: auditData.eventCategory || 'SYSTEM',
+          action: auditData.action,
+          resourceType: auditData.resourceType,
+          resourceId: auditData.resourceId,
+          details: auditData.actionDetails as Record<string, unknown>
+        },
+        when: {
+          timestamp: new Date().toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        },
+        where: {
+          ipAddress: auditData.ipAddress,
+          userAgent: auditData.userAgent,
+          deviceType: auditData.deviceType,
+          geoCountry: auditData.geoCountry,
+          geoCity: auditData.geoCity,
+          requestPath: auditData.requestPath,
+          serviceName: 'metasheet-core'
+        },
+        outcome: {
+          success: !auditData.errorCode && (auditData.responseStatus ?? 200) < 400,
+          statusCode: auditData.responseStatus,
+          errorCode: auditData.errorCode,
+          errorMessage: auditData.errorMessage,
+          responseTimeMs: auditData.responseTimeMs,
+          severity: (auditData.eventSeverity as 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL') || 'INFO'
+        },
+        metadata: {
+          logId,
+          correlationId: auditData.correlationId,
+          requestId: auditData.requestId,
+          complianceFlags: auditData.complianceFlags,
+          dataClassification: auditData.dataClassification
+        }
+      };
+
+      messageBus.publish(topic, event, {
+        correlationId: auditData.correlationId || auditData.requestId
+      });
+
+      coreMetrics.increment('audit_events_published', { category, eventType });
+      this.logger.debug(`Audit event published to ${topic}`, { logId });
+    } catch (error) {
+      this.logger.error('Failed to publish audit event to MessageBus', error instanceof Error ? error : undefined);
+      coreMetrics.increment('audit_events_publish_errors');
+    }
   }
 
   /**
@@ -221,6 +350,7 @@ export class AuditService extends EventEmitter {
 
   /**
    * Log a custom event
+   * Sprint 7: Now publishes to MessageBus in addition to database
    */
   async logEvent(
     eventType: string,
@@ -236,6 +366,10 @@ export class AuditService extends EventEmitter {
     };
 
     const logId = await this.repository.createAuditLog(auditData);
+
+    // Sprint 7: Publish to MessageBus for subscribers
+    await this.publishToMessageBus(auditData, logId);
+
     this.emit('logged', { logId, eventType, action });
     return logId;
   }

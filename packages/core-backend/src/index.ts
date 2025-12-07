@@ -36,9 +36,13 @@ import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
+import { dataSourcesRouter } from './routes/data-sources'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
+import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
+import workflowRouter from './routes/workflow'
+import workflowDesignerRouter from './routes/workflow-designer'
 import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
@@ -392,8 +396,35 @@ export class MetaSheetServer {
     // 路由：变更管理 (Sprint 3)
     this.app.use('/api', changeManagementRouter)
 
+    // 路由：工作流引擎 (V2 BPMN)
+    this.app.use('/api/workflow', workflowRouter)
+    // 路由：工作流设计器 (V2 Visual Designer)
+    this.app.use('/api/workflow-designer', workflowDesignerRouter)
+
+    // 路由：工作流 Echo/Mock API（用于前端并行开发）
+    // 当后端引擎未完全就绪时，返回 echo 响应
+    this.app.post('/api/workflow-mock/echo', (req, res) => {
+      res.json({
+        ok: true,
+        echo: req.body,
+        timestamp: new Date().toISOString(),
+        message: 'Workflow mock endpoint - use for frontend development'
+      })
+    })
+    this.app.get('/api/workflow-mock/status', (_req, res) => {
+      res.json({
+        ok: true,
+        engine: 'mock',
+        ready: false,
+        message: 'Workflow engine is in development. Use /api/workflow for real endpoints.'
+      })
+    })
+
     // 路由：事件总线
     this.app.use(eventsRouter())
+
+    // 路由：外部数据源管理 (V2)
+    this.app.use(dataSourcesRouter())
 
     // 路由：内部调试端点 (dev/staging only)
     this.app.use('/internal', internalRouter)
@@ -419,6 +450,9 @@ export class MetaSheetServer {
         res.status(500).json({ ok: false, error: { code: 'SIMULATED_ERROR', message: 'Simulated failure' } })
       })
     }
+
+    // 路由：视图管理 (V2 Unified)
+    this.app.use('/api/views', viewsRouter())
 
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
@@ -688,3 +722,85 @@ if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
     process.exit(1)
   })
 }
+
+// ============================================================
+// View Provider System Exports
+// ============================================================
+
+// View Config Provider exports
+export { getViewConfigRegistry, registerViewConfigProvider, unregisterViewConfigProvider } from './core/view-config-registry'
+export type { ViewConfigProvider, ViewConfigProviderRegistry, DatabasePool, BaseViewConfig, GalleryViewConfig, CalendarViewConfig, KanbanViewConfig } from './types/view-config'
+
+// View Data Provider exports
+export { getViewDataRegistry, registerViewDataProvider, unregisterViewDataProvider } from './core/view-data-registry'
+export { getDefaultViewDataProvider, DefaultViewDataProvider } from './core/default-view-data-provider'
+export type { ViewDataProvider, ViewDataProviderRegistry, DataPool, ViewDataContext, ViewDataQueryOptions, ViewDataResult, FilterCondition, SortOptions, PaginationOptions } from './types/view-data'
+
+// Convenience exports from views router
+export { registerViewConfigProviderSync, registerViewDataProviderSync } from './routes/views'
+
+// ============================================================
+// Plugin System Exports (Sprint 7)
+// ============================================================
+
+// Plugin Loader exports
+export { PluginLoader } from './core/plugin-loader'
+export type { LoadOptions, LoadedPlugin, CascadeReloadOptions, CascadeReloadResult } from './core/plugin-loader'
+
+// Plugin State Manager exports (Hot Swap)
+export {
+  PluginStateManager,
+  getPluginStateManager,
+  resetPluginStateManager
+} from './core/plugin-state-manager'
+export type {
+  PluginState,
+  StateSerializer,
+  HotSwapHooks,
+  StateSaveOptions,
+  StateRestoreResult
+} from './core/plugin-state-manager'
+
+// ============================================================
+// Audit System Exports (Sprint 7 Day 2)
+// ============================================================
+
+// AuditService exports
+export { AuditService } from './audit/AuditService'
+export type {
+  AuditContext,
+  AuditOptions,
+  AuditLogFilters,
+  UserActivitySummary,
+  SecurityEventSummary,
+  DataChange,
+  AuditMessageEvent
+} from './audit/AuditService'
+
+// AuditLogSubscriber exports (JSON Lines file writer)
+export {
+  AuditLogSubscriber,
+  createAuditLogSubscriber
+} from './audit/AuditLogSubscriber'
+export type {
+  AuditLogSubscriberOptions,
+  AuditLogStats
+} from './audit/AuditLogSubscriber'
+
+// Health Aggregation Exports (Sprint 7 Day 4)
+export {
+  HealthAggregatorService,
+  getHealthAggregator,
+  resetHealthAggregator
+} from './services/HealthAggregatorService'
+export type {
+  HealthStatus,
+  SubsystemHealth,
+  DatabaseHealth,
+  MessageBusHealth,
+  PluginSystemHealth,
+  RateLimitingHealth,
+  SystemResourceHealth,
+  AggregatedHealth,
+  HealthAggregatorConfig
+} from './services/HealthAggregatorService'

@@ -14,6 +14,7 @@ type LogContext = {
 const contextStore = new AsyncLocalStorage<LogContext>()
 
 // Optional OpenTelemetry API (loaded lazily to avoid hard dependency)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic import of optional dependency
 let otelApi: any
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires

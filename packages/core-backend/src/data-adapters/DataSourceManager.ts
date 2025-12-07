@@ -1,5 +1,6 @@
 import { EventEmitter } from 'eventemitter3'
-import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereValue } from './BaseAdapter'
+import type { Kysely } from 'kysely'
+import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereValue, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
@@ -7,14 +8,137 @@ import { MongoDBAdapter } from './MongoDBAdapter'
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
+// Database record types
+interface DataSourceRecord {
+  id: string
+  name: string
+  type: string
+  description: string | null
+  config: unknown // JSONB
+  status: string
+  last_connected_at: Date | null
+  last_error: string | null
+  owner_id: string
+  workspace_id: string | null
+  is_active: boolean
+  auto_connect: boolean
+  metadata: unknown | null
+  tags: unknown | null
+  created_at: Date
+  updated_at: Date
+  deleted_at: Date | null
+}
+
+export interface DataSourceManagerOptions {
+  db?: Kysely<unknown>
+  autoLoadFromDb?: boolean
+}
+
 export class DataSourceManager extends EventEmitter {
   private adapters: Map<string, BaseDataAdapter> = new Map()
   private adapterTypes: Map<string, AdapterConstructor> = new Map()
   private connectionPool: Map<string, Promise<void>> = new Map()
+  private db?: Kysely<unknown>
+  private initialized = false
 
-  constructor() {
+  constructor(options: DataSourceManagerOptions = {}) {
     super()
+    this.db = options.db
     this.registerDefaultAdapters()
+
+    // Auto-load from database if db is provided
+    if (options.autoLoadFromDb && this.db) {
+      this.loadFromDatabase().catch((err) => {
+        console.error('[DataSourceManager] Failed to auto-load from database:', err)
+      })
+    }
+  }
+
+  /**
+   * Initialize with database connection (for late binding)
+   */
+  async initialize(db: Kysely<unknown>): Promise<void> {
+    this.db = db
+    await this.loadFromDatabase()
+    this.initialized = true
+  }
+
+  /**
+   * Load all active data sources from database
+   */
+  async loadFromDatabase(): Promise<void> {
+    if (!this.db) {
+      console.warn('[DataSourceManager] No database connection, skipping load')
+      return
+    }
+
+    try {
+      const records = await this.db
+        .selectFrom('data_sources' as never)
+        .selectAll()
+        .where('is_active' as never, '=', true as never)
+        .where('deleted_at' as never, 'is', null as never)
+        .execute() as DataSourceRecord[]
+
+      for (const record of records) {
+        try {
+          const config = this.recordToConfig(record)
+          await this.addDataSourceInternal(config, false) // Don't persist again
+
+          if (record.auto_connect) {
+            await this.connectDataSource(config.id).catch((err) => {
+              console.error(`[DataSourceManager] Auto-connect failed for ${config.id}:`, err)
+            })
+          }
+        } catch (err) {
+          console.error(`[DataSourceManager] Failed to load data source ${record.id}:`, err)
+        }
+      }
+
+      console.log(`[DataSourceManager] Loaded ${records.length} data sources from database`)
+    } catch (err) {
+      // Table might not exist yet
+      console.warn('[DataSourceManager] Could not load from database:', err)
+    }
+  }
+
+  private recordToConfig(record: DataSourceRecord): DataSourceConfig {
+    const configData = record.config as Record<string, unknown>
+    return {
+      id: record.id,
+      name: record.name,
+      type: record.type,
+      connection: (configData.connection || {}) as ConnectionConfig,
+      credentials: configData.credentials as Credentials | undefined,
+      options: configData.options as AdapterOptions | undefined,
+      poolConfig: configData.poolConfig as DataSourceConfig['poolConfig']
+    }
+  }
+
+  private configToRecord(
+    config: DataSourceConfig,
+    ownerId: string,
+    workspaceId?: string
+  ): Omit<DataSourceRecord, 'created_at' | 'updated_at' | 'deleted_at' | 'last_connected_at' | 'last_error'> {
+    return {
+      id: config.id,
+      name: config.name,
+      type: config.type,
+      description: null,
+      config: {
+        connection: config.connection,
+        credentials: config.credentials, // TODO: Encrypt sensitive fields
+        options: config.options,
+        poolConfig: config.poolConfig
+      },
+      status: 'disconnected',
+      owner_id: ownerId,
+      workspace_id: workspaceId || null,
+      is_active: true,
+      auto_connect: config.options?.autoConnect === true,
+      metadata: null,
+      tags: null
+    }
   }
 
   private registerDefaultAdapters(): void {
@@ -30,7 +154,32 @@ export class DataSourceManager extends EventEmitter {
     this.adapterTypes.set(type.toLowerCase(), adapterClass)
   }
 
-  async addDataSource(config: DataSourceConfig): Promise<BaseDataAdapter> {
+  /**
+   * Add a new data source (with optional persistence)
+   */
+  async addDataSource(
+    config: DataSourceConfig,
+    options?: { ownerId?: string; workspaceId?: string; persist?: boolean }
+  ): Promise<BaseDataAdapter> {
+    const persist = options?.persist !== false && this.db !== undefined
+    const ownerId = options?.ownerId || 'system'
+    const workspaceId = options?.workspaceId
+
+    // Persist to database first (if enabled)
+    if (persist && this.db) {
+      await this.persistDataSource(config, ownerId, workspaceId)
+    }
+
+    return this.addDataSourceInternal(config, false)
+  }
+
+  /**
+   * Internal method to add data source to memory
+   */
+  private async addDataSourceInternal(
+    config: DataSourceConfig,
+    autoConnect = true
+  ): Promise<BaseDataAdapter> {
     if (this.adapters.has(config.id)) {
       throw new Error(`Data source with id '${config.id}' already exists`)
     }
@@ -43,21 +192,90 @@ export class DataSourceManager extends EventEmitter {
     const adapter = new AdapterClass(config)
 
     // Set up event forwarding
-    adapter.on('connected', (data) => this.emit('adapter:connected', { ...data, id: config.id }))
-    adapter.on('disconnected', (data) => this.emit('adapter:disconnected', { ...data, id: config.id }))
-    adapter.on('error', (data) => this.emit('adapter:error', { ...data, id: config.id }))
+    adapter.on('connected', (data) => {
+      this.emit('adapter:connected', { ...data, id: config.id })
+      this.updateStatus(config.id, 'connected').catch(() => {})
+    })
+    adapter.on('disconnected', (data) => {
+      this.emit('adapter:disconnected', { ...data, id: config.id })
+      this.updateStatus(config.id, 'disconnected').catch(() => {})
+    })
+    adapter.on('error', (data) => {
+      this.emit('adapter:error', { ...data, id: config.id })
+      this.updateStatus(config.id, 'error', (data as { error?: string }).error).catch(() => {})
+    })
 
     this.adapters.set(config.id, adapter)
 
     // Auto-connect if specified
-    if (config.options?.autoConnect !== false) {
+    if (autoConnect && config.options?.autoConnect !== false) {
       await this.connectDataSource(config.id)
     }
 
     return adapter
   }
 
-  async removeDataSource(id: string): Promise<void> {
+  /**
+   * Persist data source to database
+   */
+  private async persistDataSource(
+    config: DataSourceConfig,
+    ownerId: string,
+    workspaceId?: string
+  ): Promise<void> {
+    if (!this.db) return
+
+    const record = this.configToRecord(config, ownerId, workspaceId)
+
+    await this.db
+      .insertInto('data_sources' as never)
+      .values(record as never)
+      .onConflict((oc) =>
+        oc.column('id' as never).doUpdateSet({
+          name: record.name,
+          type: record.type,
+          config: record.config,
+          updated_at: new Date()
+        } as never)
+      )
+      .execute()
+  }
+
+  /**
+   * Update data source status in database
+   */
+  private async updateStatus(
+    id: string,
+    status: string,
+    error?: string
+  ): Promise<void> {
+    if (!this.db) return
+
+    try {
+      const updateData: Record<string, unknown> = {
+        status,
+        updated_at: new Date()
+      }
+
+      if (status === 'connected') {
+        updateData.last_connected_at = new Date()
+        updateData.last_error = null
+      } else if (status === 'error' && error) {
+        updateData.last_error = error
+      }
+
+      await this.db
+        .updateTable('data_sources' as never)
+        .set(updateData as never)
+        .where('id' as never, '=', id as never)
+        .execute()
+    } catch (err) {
+      // Non-critical, log and continue
+      console.warn(`[DataSourceManager] Failed to update status for ${id}:`, err)
+    }
+  }
+
+  async removeDataSource(id: string, options?: { hardDelete?: boolean }): Promise<void> {
     const adapter = this.adapters.get(id)
     if (!adapter) {
       throw new Error(`Data source with id '${id}' not found`)
@@ -70,6 +288,30 @@ export class DataSourceManager extends EventEmitter {
     adapter.removeAllListeners()
     this.adapters.delete(id)
     this.connectionPool.delete(id)
+
+    // Soft delete from database (or hard delete if specified)
+    if (this.db) {
+      try {
+        if (options?.hardDelete) {
+          await this.db
+            .deleteFrom('data_sources' as never)
+            .where('id' as never, '=', id as never)
+            .execute()
+        } else {
+          await this.db
+            .updateTable('data_sources' as never)
+            .set({
+              deleted_at: new Date(),
+              is_active: false,
+              updated_at: new Date()
+            } as never)
+            .where('id' as never, '=', id as never)
+            .execute()
+        }
+      } catch (err) {
+        console.warn(`[DataSourceManager] Failed to delete from database: ${id}`, err)
+      }
+    }
   }
 
   getDataSource(id: string): BaseDataAdapter {

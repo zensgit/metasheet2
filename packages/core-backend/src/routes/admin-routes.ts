@@ -30,6 +30,9 @@ import { dlqService } from '../services/DeadLetterQueueService';
 import { cache } from '../cache';
 import { db } from '../db/kysely';
 import type { Database } from '../db/types';
+import { poolManager } from '../integration/db/connection-pool';
+import { messageBus } from '../integration/messaging/message-bus';
+import { getRateLimiter } from '../integration/rate-limiting';
 
 const logger = new Logger('AdminRoutes');
 
@@ -941,6 +944,538 @@ router.delete(
     }
   }
 );
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 7 Day 3: Shard Management APIs
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/admin/shards
+ * Get health status of all database shards/pools
+ */
+router.get('/shards', async (req: Request, res: Response) => {
+  try {
+    const stats = await poolManager.getPoolStats();
+    const metricsSnapshot = poolManager.getMetricsSnapshot();
+
+    // Calculate overall health
+    const healthyCount = stats.filter(s => s.status === 'healthy').length;
+    const totalCount = stats.length;
+    const overallHealth = totalCount > 0 ? healthyCount / totalCount : 1;
+
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      summary: {
+        totalShards: totalCount,
+        healthyShards: healthyCount,
+        unhealthyShards: totalCount - healthyCount,
+        overallHealth: Math.round(overallHealth * 100) + '%'
+      },
+      shards: stats.map(shard => ({
+        name: shard.name,
+        status: shard.status,
+        connections: {
+          total: shard.totalConnections,
+          idle: shard.idleConnections,
+          active: shard.totalConnections - shard.idleConnections,
+          waiting: shard.waitingClients
+        },
+        error: shard.error || null
+      })),
+      metrics: metricsSnapshot
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get shard status', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/shards/:name
+ * Get detailed status of a specific shard
+ */
+router.get('/shards/:name', async (req: Request, res: Response) => {
+  try {
+    const { name } = req.params;
+    const stats = await poolManager.getPoolStats();
+    const shard = stats.find(s => s.name === name);
+
+    if (!shard) {
+      res.status(404).json({
+        success: false,
+        error: `Shard '${name}' not found`
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      shard: {
+        name: shard.name,
+        status: shard.status,
+        connections: {
+          total: shard.totalConnections,
+          idle: shard.idleConnections,
+          active: shard.totalConnections - shard.idleConnections,
+          waiting: shard.waitingClients
+        },
+        error: shard.error || null
+      }
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get shard details', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 7 Day 3: Queue Management APIs
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/admin/queues
+ * Get queue statistics (MessageBus + DLQ)
+ */
+router.get('/queues', async (req: Request, res: Response) => {
+  try {
+    // Get MessageBus stats
+    const messageBusStats = messageBus.getStats();
+
+    // Get DLQ stats
+    const dlqPending = await dlqService.list({ status: 'pending', limit: 0 });
+    const dlqRetrying = await dlqService.list({ status: 'retrying', limit: 0 });
+    const dlqResolved = await dlqService.list({ status: 'resolved', limit: 0 });
+
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      messageBus: {
+        queueLength: messageBusStats.queueLength,
+        exactSubscriptions: messageBusStats.exactSubscriptions,
+        patternSubscriptions: messageBusStats.patternSubscriptions,
+        pendingRpcCount: messageBusStats.pendingRpcCount,
+        usePatternTrie: messageBusStats.usePatternTrie,
+        patternManagerStats: messageBusStats.patternManagerStats || null
+      },
+      deadLetterQueue: {
+        pending: dlqPending.total,
+        retrying: dlqRetrying.total,
+        resolved: dlqResolved.total,
+        total: dlqPending.total + dlqRetrying.total + dlqResolved.total
+      },
+      health: {
+        status: dlqPending.total > 100 ? 'warning' : 'healthy',
+        warnings: dlqPending.total > 100 ? ['High DLQ pending count'] : []
+      }
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get queue stats', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * POST /api/admin/dlq/retry-all
+ * Retry all pending DLQ messages (with safety check)
+ */
+router.post(
+  '/dlq/retry-all',
+  requireSafetyCheck({
+    operation: OperationType.BULK_UPDATE,
+    getDetails: () => ({ action: 'retry_all_dlq' })
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const { limit = 100 } = req.body;
+      const pending = await dlqService.list({ status: 'pending', limit });
+
+      let succeeded = 0;
+      let failed = 0;
+
+      for (const entry of pending.items) {
+        try {
+          await dlqService.retry(entry.id);
+          succeeded++;
+        } catch {
+          failed++;
+        }
+      }
+
+      logger.info(`DLQ retry-all completed: ${succeeded} succeeded, ${failed} failed`);
+
+      res.json({
+        success: true,
+        message: `Retried ${succeeded} messages, ${failed} failed`,
+        retried: succeeded,
+        failed,
+        remaining: pending.total - succeeded - failed
+      });
+    } catch (error) {
+      const err = error as Error;
+      logger.error('DLQ retry-all failed', err);
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/admin/dlq/cleanup
+ * Cleanup old resolved/ignored DLQ messages
+ */
+router.post(
+  '/dlq/cleanup',
+  requireSafetyCheck({
+    operation: OperationType.DELETE_DATA,
+    getDetails: (req) => ({ action: 'cleanup_dlq', days: req.body.days || 30 })
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const { days = 30 } = req.body;
+      const deleted = await dlqService.cleanup(days);
+
+      logger.info(`DLQ cleanup completed: ${deleted} messages deleted`);
+
+      res.json({
+        success: true,
+        message: `Cleaned up ${deleted} old DLQ messages`,
+        deleted,
+        retentionDays: days
+      });
+    } catch (error) {
+      const err = error as Error;
+      logger.error('DLQ cleanup failed', err);
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 7 Day 3: Rate Limiting Monitoring APIs
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/admin/ratelimits
+ * Get current rate limiting status
+ */
+router.get('/ratelimits', async (req: Request, res: Response) => {
+  try {
+    const rateLimiter = getRateLimiter();
+    const globalStats = rateLimiter.getGlobalStats();
+    const config = rateLimiter.getConfig();
+
+    // Get individual bucket stats if requested
+    const { showBuckets } = req.query;
+    let buckets: Array<{
+      key: string;
+      tokensRemaining: number;
+      totalAccepted: number;
+      totalRejected: number;
+      acceptanceRate: number;
+    }> = [];
+
+    if (showBuckets === 'true') {
+      // Note: We'd need to expose getAllKeys() from TokenBucketRateLimiter
+      // For now, return global stats only
+    }
+
+    // Calculate health status
+    const rejectionRate = globalStats.totalAccepted + globalStats.totalRejected > 0
+      ? globalStats.totalRejected / (globalStats.totalAccepted + globalStats.totalRejected)
+      : 0;
+
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      config: {
+        tokensPerSecond: config.tokensPerSecond,
+        bucketCapacity: config.bucketCapacity,
+        cleanupIntervalMs: config.cleanupIntervalMs,
+        bucketIdleTimeoutMs: config.bucketIdleTimeoutMs
+      },
+      stats: {
+        activeBuckets: globalStats.activeBuckets,
+        totalAccepted: globalStats.totalAccepted,
+        totalRejected: globalStats.totalRejected,
+        averageTokensRemaining: Math.round(globalStats.averageTokensRemaining * 100) / 100,
+        rejectionRate: Math.round(rejectionRate * 10000) / 100 + '%'
+      },
+      health: {
+        status: rejectionRate > 0.1 ? 'warning' : 'healthy',
+        warnings: rejectionRate > 0.1 ? ['High rejection rate (>10%)'] : []
+      },
+      buckets: showBuckets === 'true' ? buckets : undefined
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get rate limit status', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/ratelimits/:key
+ * Get rate limit status for a specific key (tenant/user)
+ */
+router.get('/ratelimits/:key', async (req: Request, res: Response) => {
+  try {
+    const { key } = req.params;
+    const rateLimiter = getRateLimiter();
+    const stats = rateLimiter.getStats(key);
+
+    if (!stats) {
+      res.json({
+        success: true,
+        key,
+        status: 'not_tracked',
+        message: 'No rate limit bucket exists for this key'
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      key,
+      status: stats.tokensRemaining > 0 ? 'allowed' : 'limited',
+      stats: {
+        tokensRemaining: stats.tokensRemaining,
+        bucketCapacity: stats.bucketCapacity,
+        totalAccepted: stats.totalAccepted,
+        totalRejected: stats.totalRejected,
+        acceptanceRate: Math.round(stats.acceptanceRate * 10000) / 100 + '%'
+      }
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get rate limit status for key', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * POST /api/admin/ratelimits/:key/reset
+ * Reset rate limit for a specific key
+ */
+router.post(
+  '/ratelimits/:key/reset',
+  requireSafetyCheck({
+    operation: OperationType.RESET_METRICS,
+    getDetails: (req) => ({ action: 'reset_rate_limit', key: req.params.key })
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const { key } = req.params;
+      const rateLimiter = getRateLimiter();
+      rateLimiter.reset(key);
+
+      logger.info(`Rate limit reset for key: ${key}`);
+
+      res.json({
+        success: true,
+        message: `Rate limit reset for key: ${key}`,
+        key
+      });
+    } catch (error) {
+      const err = error as Error;
+      logger.error('Failed to reset rate limit', err);
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/admin/ratelimits/reset-all
+ * Reset all rate limits (requires safety confirmation)
+ */
+router.post(
+  '/ratelimits/reset-all',
+  requireSafetyCheck({
+    operation: OperationType.RESET_METRICS,
+    getDetails: () => ({ action: 'reset_all_rate_limits' })
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const rateLimiter = getRateLimiter();
+      rateLimiter.resetAll();
+
+      logger.info('All rate limits reset');
+
+      res.json({
+        success: true,
+        message: 'All rate limits have been reset'
+      });
+    } catch (error) {
+      const err = error as Error;
+      logger.error('Failed to reset all rate limits', err);
+      res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 7 Day 4: Health Aggregation APIs
+// ═══════════════════════════════════════════════════════════════════
+
+import { getHealthAggregator, type AggregatedHealth } from '../services/HealthAggregatorService';
+
+/**
+ * GET /api/admin/health/detailed
+ * Get detailed health status of all subsystems
+ */
+router.get('/health/detailed', async (req: Request, res: Response) => {
+  try {
+    const healthAggregator = getHealthAggregator();
+    const health = await healthAggregator.checkHealth();
+
+    res.json({
+      success: true,
+      timestamp: health.timestamp,
+      status: health.status,
+      uptime: health.uptime,
+      summary: health.summary,
+      subsystems: health.subsystems,
+      warnings: health.warnings,
+      errors: health.errors
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get detailed health', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/health/summary
+ * Get a quick health summary without full details
+ */
+router.get('/health/summary', async (req: Request, res: Response) => {
+  try {
+    const healthAggregator = getHealthAggregator();
+
+    // Use cached health if available, otherwise do a fresh check
+    let health = healthAggregator.getLastHealth();
+    if (!health) {
+      health = await healthAggregator.checkHealth();
+    }
+
+    res.json({
+      success: true,
+      timestamp: health.timestamp,
+      status: health.status,
+      uptime: health.uptime,
+      summary: health.summary,
+      hasWarnings: health.warnings.length > 0,
+      hasErrors: health.errors.length > 0
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get health summary', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/health/subsystem/:name
+ * Get health status of a specific subsystem
+ */
+router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
+  try {
+    const { name } = req.params;
+    const validSubsystems = ['database', 'messageBus', 'plugins', 'rateLimiting', 'system'];
+
+    if (!validSubsystems.includes(name)) {
+      res.status(400).json({
+        success: false,
+        error: `Invalid subsystem name. Valid names: ${validSubsystems.join(', ')}`
+      });
+      return;
+    }
+
+    const healthAggregator = getHealthAggregator();
+    const health = await healthAggregator.checkHealth();
+    const subsystem = health.subsystems[name as keyof typeof health.subsystems];
+
+    res.json({
+      success: true,
+      timestamp: health.timestamp,
+      subsystem
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to get subsystem health', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * POST /api/admin/health/check
+ * Force an immediate health check and return results
+ */
+router.post('/health/check', async (req: Request, res: Response) => {
+  try {
+    const healthAggregator = getHealthAggregator();
+    const health = await healthAggregator.checkHealth();
+
+    logger.info('Manual health check performed', {
+      status: health.status,
+      overallHealthPercent: health.summary.overallHealthPercent
+    });
+
+    res.json({
+      success: true,
+      message: 'Health check completed',
+      timestamp: health.timestamp,
+      status: health.status,
+      summary: health.summary
+    });
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to perform health check', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════
 // Sprint 2: Snapshot Protection Routes

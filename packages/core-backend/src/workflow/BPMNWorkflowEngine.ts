@@ -35,6 +35,9 @@ interface BPMNParsedDefinition {
 }
 
 interface BPMNSequenceFlow {
+  id: string
+  sourceRef?: string
+  targetRef?: string
   conditionExpression?: string
   [key: string]: unknown
 }
@@ -894,19 +897,190 @@ export class BPMNWorkflowEngine extends EventEmitter {
     this.emit('signal:broadcast', { signalName })
   }
 
-  private findActivity(_definition: BPMNParsedDefinition, _activityId: string): ActivityDefinition | null {
-    // Search in process definition for activity
-    // Return activity definition
+  /**
+   * Find activity definition by ID in BPMN definition
+   */
+  private findActivity(definition: BPMNParsedDefinition, activityId: string): ActivityDefinition | null {
+    const process = definition.definitions?.process?.[0]
+    if (!process) return null
+
+    // BPMN element types to search
+    const elementTypes = [
+      'bpmn:userTask',
+      'bpmn:serviceTask',
+      'bpmn:scriptTask',
+      'bpmn:exclusiveGateway',
+      'bpmn:parallelGateway',
+      'bpmn:inclusiveGateway',
+      'bpmn:startEvent',
+      'bpmn:endEvent',
+      'bpmn:intermediateCatchEvent',
+      'bpmn:intermediateThrowEvent',
+      'bpmn:boundaryEvent',
+      'bpmn:callActivity',
+      'bpmn:subProcess',
+      'bpmn:task'
+    ]
+
+    for (const elementType of elementTypes) {
+      const elements = this.findElementsByType(process, elementType)
+      for (const element of elements) {
+        if (element.$?.id === activityId) {
+          // Extract activity properties
+          const incoming = element['bpmn:incoming'] || []
+          const outgoing = element['bpmn:outgoing'] || []
+
+          // Extract additional properties based on element type
+          const properties: Record<string, unknown> = {}
+
+          // User task properties
+          if (elementType === 'bpmn:userTask') {
+            properties.assignee = element.$?.['camunda:assignee'] || element.$?.assignee
+            properties.candidateUsers = element.$?.['camunda:candidateUsers'] || element.$?.candidateUsers
+            properties.candidateGroups = element.$?.['camunda:candidateGroups'] || element.$?.candidateGroups
+            properties.formKey = element.$?.['camunda:formKey'] || element.$?.formKey
+            properties.priority = element.$?.priority
+            properties.dueDate = element.$?.dueDate
+          }
+
+          // Service task properties
+          if (elementType === 'bpmn:serviceTask') {
+            properties.class = element.$?.['camunda:class'] || element.$?.class
+            properties.expression = element.$?.['camunda:expression'] || element.$?.expression
+            properties.delegateExpression = element.$?.['camunda:delegateExpression'] || element.$?.delegateExpression
+            properties.resultVariable = element.$?.['camunda:resultVariable'] || element.$?.resultVariable
+            properties.topic = element.$?.['camunda:topic'] || element.$?.topic
+            properties.type = element.$?.['camunda:type'] || element.$?.type
+          }
+
+          // Script task properties
+          if (elementType === 'bpmn:scriptTask') {
+            properties.scriptFormat = element.$?.scriptFormat
+            const scriptElement = element['bpmn:script']
+            properties.script = Array.isArray(scriptElement) ? scriptElement[0] : scriptElement
+          }
+
+          // Timer event properties
+          const timerDef = element['bpmn:timerEventDefinition']
+          if (timerDef && timerDef[0]) {
+            const timer = timerDef[0]
+            if (timer['bpmn:timeDuration']) {
+              properties.timerDefinition = {
+                type: 'duration',
+                value: timer['bpmn:timeDuration'][0],
+                activityId
+              }
+            } else if (timer['bpmn:timeDate']) {
+              properties.timerDefinition = {
+                type: 'date',
+                value: timer['bpmn:timeDate'][0],
+                activityId
+              }
+            } else if (timer['bpmn:timeCycle']) {
+              properties.timerDefinition = {
+                type: 'cycle',
+                value: timer['bpmn:timeCycle'][0],
+                activityId
+              }
+            }
+          }
+
+          // Message event properties
+          const messageDef = element['bpmn:messageEventDefinition']
+          if (messageDef && messageDef[0]) {
+            properties.messageRef = messageDef[0].$?.messageRef
+          }
+
+          // Signal event properties
+          const signalDef = element['bpmn:signalEventDefinition']
+          if (signalDef && signalDef[0]) {
+            properties.signalRef = signalDef[0].$?.signalRef
+          }
+
+          return {
+            id: activityId,
+            name: element.$?.name,
+            type: elementType.replace('bpmn:', ''),
+            incoming: Array.isArray(incoming) ? incoming : [incoming].filter(Boolean),
+            outgoing: Array.isArray(outgoing) ? outgoing : [outgoing].filter(Boolean),
+            properties
+          }
+        }
+      }
+    }
+
     return null
   }
 
-  private async takeSequenceFlow(_instanceId: string, _flowId: string): Promise<void> {
-    // Find target activity and execute it
-    // Implementation depends on BPMN structure
+  /**
+   * Take a sequence flow and execute the target activity
+   */
+  private async takeSequenceFlow(instanceId: string, flowId: string): Promise<void> {
+    const instance = this.runningInstances.get(instanceId)
+    if (!instance) {
+      this.logger.warn(`Instance not found for sequence flow: ${instanceId}`)
+      return
+    }
+
+    const definition = this.processDefinitions.get(instance.processDefinitionId)
+    if (!definition) {
+      this.logger.warn(`Definition not found for instance: ${instanceId}`)
+      return
+    }
+
+    // Find the sequence flow to get target activity
+    const flow = await this.getSequenceFlow(flowId)
+    if (!flow) {
+      this.logger.warn(`Sequence flow not found: ${flowId}`)
+      return
+    }
+
+    const targetActivityId = flow.targetRef
+    if (!targetActivityId) {
+      this.logger.warn(`Target activity not found in flow: ${flowId}`)
+      return
+    }
+
+    // Find and execute target activity
+    const activityDef = this.findActivity(definition, targetActivityId)
+    if (activityDef) {
+      await this.executeActivity(instanceId, targetActivityId, activityDef)
+    } else {
+      this.logger.warn(`Activity definition not found: ${targetActivityId}`)
+    }
   }
 
-  private async getSequenceFlow(_flowId: string): Promise<BPMNSequenceFlow | null> {
-    // Get sequence flow definition
+  /**
+   * Get sequence flow definition from BPMN
+   */
+  private async getSequenceFlow(flowId: string): Promise<BPMNSequenceFlow | null> {
+    // Search all process definitions for the sequence flow
+    for (const [, definition] of this.processDefinitions) {
+      const process = definition.definitions?.process?.[0]
+      if (!process) continue
+
+      const sequenceFlows = this.findElementsByType(process, 'bpmn:sequenceFlow')
+      for (const flow of sequenceFlows) {
+        if (flow.$?.id === flowId) {
+          // Extract condition expression if present
+          let conditionExpression: string | undefined
+          const conditionElement = flow['bpmn:conditionExpression']
+          if (conditionElement && conditionElement[0]) {
+            conditionExpression = typeof conditionElement[0] === 'string'
+              ? conditionElement[0]
+              : conditionElement[0]._ || conditionElement[0]
+          }
+
+          return {
+            id: flowId,
+            sourceRef: flow.$?.sourceRef,
+            targetRef: flow.$?.targetRef,
+            conditionExpression
+          }
+        }
+      }
+    }
+
     return null
   }
 
