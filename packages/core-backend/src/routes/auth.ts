@@ -5,12 +5,49 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
+import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService } from '../auth/AuthService'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('AuthRouter')
 
 export const authRouter = Router()
+
+// ============================================
+// Dev Token (non-production only)
+// ============================================
+
+const DEV_FALLBACK_JWT_SECRET = 'fallback-development-secret-change-in-production'
+
+authRouter.get('/dev-token', (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, error: 'Not found' })
+  }
+
+  const userId = typeof req.query.userId === 'string' && req.query.userId.trim() ? req.query.userId.trim() : 'dev-user'
+  const rolesParam = typeof req.query.roles === 'string' ? req.query.roles : 'admin'
+  const permsParam = typeof req.query.perms === 'string'
+    ? req.query.perms
+    : 'permissions:read,permissions:write,approvals:read,approvals:write,comments:read,comments:write'
+  const expiresIn = (typeof req.query.expiresIn === 'string' && req.query.expiresIn.trim()
+    ? req.query.expiresIn.trim()
+    : '2h') as SignOptions['expiresIn']
+
+  const roles = rolesParam.split(',').map((v) => v.trim()).filter(Boolean)
+  const perms = permsParam.split(',').map((v) => v.trim()).filter(Boolean)
+
+  const secret = process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET
+
+  const payload = {
+    id: userId,
+    roles: roles.length > 0 ? roles : ['admin'],
+    perms,
+  }
+
+  const token = jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn })
+
+  return res.json({ token, payload })
+})
 
 // ============================================
 // Rate Limiting for Auth Endpoints

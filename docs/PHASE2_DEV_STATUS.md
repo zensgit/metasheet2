@@ -15,6 +15,7 @@ This document tracks the implementation progress of the Collaboration Enhancemen
 - [x] **3.2 Service Implementation**: Implement `CommentService` (CRUD).
 - [x] **3.3 Real-time Broadcasting**: Broadcast comment events via `CollabService`.
 - [x] **3.4 REST API**: Expose `/api/comments` endpoints.
+- [x] **3.5 Pagination & RBAC**: Support limit/offset/resolved filters and `comments:*` permissions.
 
 ## 3. Verification
 

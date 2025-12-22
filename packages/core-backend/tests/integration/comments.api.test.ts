@@ -38,6 +38,7 @@ describe('Comments API', () => {
   let createdCommentIds: string[] = []
 
   beforeAll(async () => {
+    process.env.RBAC_BYPASS = 'true'
     const canListen = await canListenOnEphemeralPort()
     if (!canListen) return
 
@@ -55,6 +56,7 @@ describe('Comments API', () => {
   })
 
   afterAll(async () => {
+    delete process.env.RBAC_BYPASS
     try {
       const pool = poolManager.get()
       if (createdCommentIds.length > 0) {
@@ -110,6 +112,8 @@ describe('Comments API', () => {
     const listJson = await listRes.json()
     expect(listJson.ok).toBe(true)
     const items = listJson.data?.items ?? []
+    const total = listJson.data?.total ?? 0
+    expect(total).toBeGreaterThanOrEqual(items.length)
     expect(items.some((item: any) => item.id === comment.id)).toBe(true)
 
     const listRowRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&rowId=${rowId}`, {
@@ -121,6 +125,23 @@ describe('Comments API', () => {
     const rowItems = listRowJson.data?.items ?? []
     expect(rowItems.length).toBeGreaterThan(0)
     expect(rowItems.every((item: any) => item.rowId === rowId)).toBe(true)
+
+    const listLimitedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&limit=1&offset=0`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(listLimitedRes.status).toBe(200)
+    const listLimitedJson = await listLimitedRes.json()
+    expect(listLimitedJson.ok).toBe(true)
+    expect(listLimitedJson.data?.items?.length).toBeLessThanOrEqual(1)
+    expect(listLimitedJson.data?.total).toBeGreaterThanOrEqual(1)
+
+    const listUnresolvedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&resolved=false`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(listUnresolvedRes.status).toBe(200)
+    const listUnresolvedJson = await listUnresolvedRes.json()
+    expect(listUnresolvedJson.ok).toBe(true)
+    expect(listUnresolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
 
     const resolveRes = await fetch(`${baseUrl}/api/comments/${comment.id}/resolve`, {
       method: 'POST',
@@ -135,5 +156,13 @@ describe('Comments API', () => {
     const listAfterJson = await listAfterRes.json()
     const updated = listAfterJson.data?.items?.find((item: any) => item.id === comment.id)
     expect(updated?.resolved).toBe(true)
+
+    const listResolvedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&resolved=true`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(listResolvedRes.status).toBe(200)
+    const listResolvedJson = await listResolvedRes.json()
+    expect(listResolvedJson.ok).toBe(true)
+    expect(listResolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
   })
 })

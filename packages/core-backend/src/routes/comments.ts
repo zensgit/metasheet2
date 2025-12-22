@@ -2,15 +2,40 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
 import { Injector } from '@wendellhu/redi'
-import { ICommentService } from '../di/identifiers'
+import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
+import { rbacGuard } from '../rbac/rbac'
 
 const logger = new Logger('CommentsRoutes')
+const DEFAULT_LIMIT = 50
+const MAX_LIMIT = 200
 
 function readQueryValue(value: unknown): string | undefined {
   if (Array.isArray(value)) return value[0]
   if (typeof value === 'string') return value
   return undefined
+}
+
+function parseBoolean(value: string | undefined): boolean | undefined {
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return undefined
+}
+
+function parseNumberParam(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function clampLimit(value?: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_LIMIT
+  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(value)))
+}
+
+function clampOffset(value?: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.max(0, Math.floor(value))
 }
 
 function getUserId(req: Request): string {
@@ -37,29 +62,43 @@ export function commentsRouter(injector?: Injector): Router {
     return router
   }
 
-  router.get('/api/comments', async (req: Request, res: Response) => {
+  router.get('/api/comments', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1),
       rowId: z.string().min(1).optional(),
+      resolved: z.boolean().optional(),
+      limit: z.number().int().nonnegative().optional(),
+      offset: z.number().int().nonnegative().optional(),
     })
     const parsed = schema.safeParse({
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
       rowId: readQueryValue(req.query.rowId),
+      resolved: parseBoolean(readQueryValue(req.query.resolved)),
+      limit: parseNumberParam(readQueryValue(req.query.limit)),
+      offset: parseNumberParam(readQueryValue(req.query.offset)),
     })
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
     try {
-      const comments = await commentService.getComments(parsed.data.spreadsheetId, parsed.data.rowId)
-      return res.json({ ok: true, data: { items: comments } })
+      const limit = clampLimit(parsed.data.limit)
+      const offset = clampOffset(parsed.data.offset)
+      const options: CommentQueryOptions = {
+        rowId: parsed.data.rowId,
+        resolved: parsed.data.resolved,
+        limit,
+        offset,
+      }
+      const result = await commentService.getComments(parsed.data.spreadsheetId, options)
+      return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
       logger.error('Failed to list comments', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list comments' } })
     }
   })
 
-  router.post('/api/comments', async (req: Request, res: Response) => {
+  router.post('/api/comments', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1),
       rowId: z.string().min(1),
@@ -88,7 +127,7 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.post('/api/comments/:commentId/resolve', async (req: Request, res: Response) => {
+  router.post('/api/comments/:commentId/resolve', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const commentId = req.params.commentId
     if (!commentId || commentId.trim().length === 0) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
