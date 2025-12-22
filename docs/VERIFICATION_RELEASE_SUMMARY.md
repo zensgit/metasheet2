@@ -35,6 +35,8 @@
 - `docs/verification-performance-2025-12-21.md`
 - `docs/verification-view-config-import-export-2025-12-21.md`
 - `docs/verification-view-config-ui-2025-12-22.md`
+- `docs/verification-rerun-2025-12-22.md`
+- `docs/verification-comments-api-2025-12-22.md`
 
 ## Status Updates
 
@@ -43,6 +45,7 @@
 ## Follow-ups
 
 - Real system validation (PLM/Athena) still pending
+- For Playwright scripts from repo root, prefer `NODE_PATH="$(pwd)/apps/web-react/node_modules"`
 
 ## Prior Run (2025-12-20)
 

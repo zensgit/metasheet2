@@ -45,6 +45,8 @@
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |
+| [verification-rerun-2025-12-22.md](./verification-rerun-2025-12-22.md) | Phase 1 复测记录 |
+| [verification-comments-api-2025-12-22.md](./verification-comments-api-2025-12-22.md) | Comments API 验证 |
 | [next-week-execution-checklist-2025-12-20.md](./next-week-execution-checklist-2025-12-20.md) | 下周执行清单 |
 | [real-system-validation-checklist.md](./real-system-validation-checklist.md) | 真实系统验证 |
 
@@ -56,6 +58,7 @@
 - `docs/verification-performance-2025-12-21.md`
 - `docs/verification-view-config-import-export-2025-12-21.md`
 - `docs/verification-view-config-ui-2025-12-22.md`
+- `docs/verification-rerun-2025-12-22.md`
 
 **相关脚本**:
 - `scripts/test-plm-complete.sh` - PLM API 验证

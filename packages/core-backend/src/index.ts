@@ -7,10 +7,12 @@ import type { Application, Request, Response, NextFunction, RequestHandler } fro
 import type { Server as HttpServer } from 'http';
 import express from 'express'
 import { createServer } from 'http'
-import { Server as SocketServer } from 'socket.io'
 import cors from 'cors'
 import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
+import { Injector } from '@wendellhu/redi' // IoC Container
+import { createContainer } from './di/container'
+import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
 import { PluginLoader } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData } from './types/plugin'
@@ -36,13 +38,17 @@ import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
-import { dataSourcesRouter } from './routes/data-sources'
+import { commentsRouter } from './routes/comments'
+import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
+import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
+import { univerMockRouter } from './routes/univer-mock'
+import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
@@ -51,49 +57,80 @@ import { initObservability } from './observability/otel'
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
-  private io: SocketServer
-  private pluginLoader: PluginLoader
   private logger: Logger
   private eventBus: EventEmitter
   private port: number
+  private host?: string
+  private portLocked: boolean
   private shuttingDown = false
-  private wsAdapterType: 'local' | 'redis' = 'local'
-  private wsRedis = { enabled: false, attached: false }
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
+  // Optional bypass/degraded-mode flags for local debug
+  private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
+  private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
+  
+  // IoC Container
+  private injector: Injector
 
-  constructor() {
+  // Helper to get PluginLoader from container
+  private get pluginLoader(): PluginLoader {
+    return this.injector.get(IPluginLoader)
+  }
+
+  constructor(options: { port?: number; host?: string; pluginDirs?: string[] } = {}) {
+    // Initialize IoC Container
+    this.injector = createContainer({ pluginDirs: options.pluginDirs })
+    
     this.app = express()
     this.httpServer = createServer(this.app)
-    this.io = new SocketServer(this.httpServer, {
-      cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
-      }
-    })
     this.eventBus = new EventEmitter()
     this.logger = new Logger('MetaSheetServer')
-    this.port = parseInt(process.env.PORT || '8900')
+    this.portLocked = typeof options.port === 'number'
+    this.port = options.port ?? parseInt(process.env.PORT || '7778')
+    this.host = options.host ?? process.env.HOST
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
-    this.pluginLoader = new PluginLoader(coreAPI)
+    
+    // Bind CoreAPI to container (needed by PluginLoader)
+    this.injector.add([ICoreAPI, { useValue: coreAPI }])
+    
     this.snapshotService = new SnapshotService()
 
     this.setupMiddleware()
-    this.setupWebSocket()
+    // WebSocket setup is now handled by CollabService via start()
     this.initializeCache()
   }
 
   /**
    * 创建核心API
    */
+
   private createCoreAPI(): CoreAPI {
     const routes = new Map<string, RequestHandler>()
 
     return {
+      injector: this.injector,
+      formula: {
+        calculate: (name, ...args) => this.injector.get(IFormulaService).calculate(name, ...args),
+        calculateFormula: (exp, resolver) => this.injector.get(IFormulaService).calculateFormula(exp, resolver),
+        getAvailableFunctions: () => this.injector.get(IFormulaService).getAvailableFunctions()
+      },
+      collection: {
+        register: (definition) => {
+          this.injector.get(ICollectionManager).register(definition)
+        },
+        getRepository: (name) => {
+          return this.injector.get(ICollectionManager).getRepository(name)
+        },
+        sync: async () => {
+          await this.injector.get(ICollectionManager).sync()
+        }
+      },
+
       http: {
+        // ... (existing http impl)
         addRoute: (method: string, path: string, handler: RequestHandler) => {
           const key = `${method.toUpperCase()}:${path}`
           routes.set(key, handler)
@@ -129,6 +166,33 @@ export class MetaSheetServer {
           // Return middleware by name
           return undefined
         }
+      },
+
+      plm: {
+        getProducts: (options) => this.injector.get(IPLMAdapter).getProducts(options),
+        getProductBOM: (id) => this.injector.get(IPLMAdapter).getProductBOM(id)
+      },
+
+      athena: {
+        listFolders: (parentId) => this.injector.get(IAthenaAdapter).listFolders(parentId),
+        searchDocuments: (params) => this.injector.get(IAthenaAdapter).searchDocuments(params),
+        getDocument: (id) => this.injector.get(IAthenaAdapter).getDocument(id),
+        uploadDocument: (params) => this.injector.get(IAthenaAdapter).uploadDocument(params)
+      },
+
+      dedup: {
+        search: (fileId, threshold) => this.injector.get(IDedupCADAdapter).search(fileId, threshold),
+        compare: (sourceId, targetId) => this.injector.get(IDedupCADAdapter).compare(sourceId, targetId)
+      },
+
+      ai: {
+        analyze: (fileId) => this.injector.get(ICADMLAdapter).analyze(fileId),
+        extractText: (fileId) => this.injector.get(ICADMLAdapter).extractText(fileId),
+        predictCost: (fileId, params) => this.injector.get(ICADMLAdapter).predictCost(fileId, params)
+      },
+
+      vision: {
+        generateDiff: (sourceId, targetId) => this.injector.get(IVisionAdapter).generateDiff(sourceId, targetId)
       },
 
       database: {
@@ -263,13 +327,13 @@ export class MetaSheetServer {
 
       websocket: {
         broadcast: (event: string, data: unknown) => {
-          this.io.emit(event, data)
+          this.injector.get(ICollabService).broadcast(event, data)
         },
         sendTo: (userId: string, event: string, data: unknown) => {
-          this.io.to(userId).emit(event, data)
+          this.injector.get(ICollabService).sendTo(userId, event, data)
         },
         onConnection: (handler: (socket: import('./types/plugin').SocketInfo) => void | Promise<void>) => {
-          this.io.on('connection', handler as (socket: unknown) => void)
+          this.injector.get(ICollabService).onConnection(handler)
         }
       },
       messaging: {
@@ -364,9 +428,7 @@ export class MetaSheetServer {
           timestamp: new Date().toISOString(),
           plugins: this.pluginLoader.getPlugins().size,
           pluginsSummary: pluginsSummary || undefined,
-          dbPool: stats || undefined,
-          wsAdapter: this.wsAdapterType,
-          redis: this.wsRedis
+          dbPool: stats || undefined
         })
         endTimer?.({ route: '/health', method: 'GET' })(200)
       } catch (err) {
@@ -388,8 +450,11 @@ export class MetaSheetServer {
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
     this.app.use(filesRouter())
-    this.app.use(spreadsheetsRouter())
+    this.app.use(spreadsheetsRouter(this.injector))
     this.app.use(spreadsheetPermissionsRouter())
+    this.app.use(commentsRouter(this.injector))
+    // 路由：看板（Kanban MVP API）
+    this.app.use('/api/kanban', kanbanRouter())
     // 路由：快照（Snapshot MVP）
     this.app.use(snapshotsRouter())
 
@@ -419,6 +484,13 @@ export class MetaSheetServer {
         message: 'Workflow engine is in development. Use /api/workflow for real endpoints.'
       })
     })
+
+    // 路由：Univer Mock API（用于前端 POC，不依赖数据库；仅非生产环境启用）
+    if (process.env.NODE_ENV !== 'production') {
+      this.app.use('/api/univer-mock', univerMockRouter())
+      // DB-backed Meta API（用于把 POC 写回真实 meta schema；仅非生产环境启用）
+      this.app.use('/api/univer-meta', univerMetaRouter())
+    }
 
     // 路由：事件总线
     this.app.use(eventsRouter())
@@ -457,7 +529,8 @@ export class MetaSheetServer {
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
       pluginLoader: this.pluginLoader,
-      snapshotService: this.snapshotService
+      snapshotService: this.snapshotService,
+      dataSourceManager: getDataSourceManager()
     }))
 
     // V2 测试端点
@@ -522,28 +595,6 @@ export class MetaSheetServer {
     })
 
     // Note: /metrics/prom endpoint is registered by installMetrics() in setupMiddleware()
-  }
-
-  /**
-   * 配置WebSocket
-   */
-  private setupWebSocket(): void {
-    if (process.env.WS_REDIS_ENABLED === 'true') {
-      this.wsRedis.enabled = true
-      this.logger.info('WS_REDIS_ENABLED=true; local adapter active (no Redis wiring yet)')
-    }
-    this.io.on('connection', (socket) => {
-      this.logger.info(`WebSocket client connected: ${socket.id}`)
-
-      socket.on('disconnect', () => {
-        this.logger.info(`WebSocket client disconnected: ${socket.id}`)
-      })
-
-      // 测试事件
-      socket.on('ping', () => {
-        socket.emit('pong', { timestamp: Date.now() })
-      })
-    })
   }
 
   /**
@@ -659,6 +710,20 @@ export class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
+    // IoC: Load configuration
+    if (!this.portLocked) {
+      try {
+        const configService = this.injector.get(IConfigService)
+        const configPort = await configService.get<number>('app.port')
+        if (typeof configPort === 'number') {
+          this.port = configPort
+          this.logger.info(`Port configured via ConfigService: ${this.port}`)
+        }
+      } catch (e) {
+        this.logger.warn(`Failed to load config from IoC container, using default/env port: ${this.port}`, e as Error)
+      }
+    }
+
     // 初始化可观测性（可选）
     const observabilityConfig = loadObservabilityConfig()
     try {
@@ -673,7 +738,7 @@ export class MetaSheetServer {
     }
 
     // 初始化EventBusService (允许降级跳过以保证度量端可用)
-    if (process.env.DISABLE_EVENT_BUS === 'true') {
+    if (this.disableEventBus) {
       this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS=true)')
     } else {
       this.logger.info('Initializing EventBusService...')
@@ -699,17 +764,59 @@ export class MetaSheetServer {
       }
     }
 
+    // Initialize WebSocket Service
+    try {
+      const collabService = this.injector.get(ICollabService)
+      collabService.initialize(this.httpServer)
+    } catch (e) {
+      this.logger.error('Failed to initialize WebSocket service', e as Error)
+    }
+
     this.logger.info('Starting HTTP server listen phase...')
-    this.httpServer.listen(this.port, () => {
-      this.logger.info(`MetaSheet v2 core listening on http://localhost:${this.port}`)
-      this.logger.info(`Health:  http://localhost:${this.port}/health`)
-      this.logger.info(`Metrics: http://localhost:${this.port}/metrics/prom`)
-      this.logger.info(`Plugins: http://localhost:${this.port}/api/plugins`)
-      this.logger.info(`Events:  http://localhost:${this.port}/api/events`)
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          this.logger.error(`Port ${this.port} is already in use. Stop the process using it or set PORT to another value.`)
+        } else if (err.code === 'EACCES') {
+          this.logger.error(`Permission denied binding to port ${this.port}. Try a higher port or check permissions.`)
+        } else {
+          this.logger.error('HTTP server error', err)
+        }
+        reject(err)
+      }
+
+      this.httpServer.once('error', onError)
+      const onListening = () => {
+        this.httpServer.off('error', onError)
+
+        // If port=0, update port to actual assigned port
+        const addr = this.httpServer.address()
+        if (addr && typeof addr === 'object') {
+          this.port = addr.port
+        }
+
+        const displayHost = this.host ?? 'localhost'
+        this.logger.info(`MetaSheet v2 core listening on http://${displayHost}:${this.port}`)
+        this.logger.info(`Health:  http://${displayHost}:${this.port}/health`)
+        this.logger.info(`Metrics: http://${displayHost}:${this.port}/metrics/prom`)
+        this.logger.info(`Plugins: http://${displayHost}:${this.port}/api/plugins`)
+        this.logger.info(`Events:  http://${displayHost}:${this.port}/api/events`)
+        resolve()
+      }
+
+      // Preserve previous behavior: if no host specified, listen on all interfaces.
+      if (this.host) {
+        this.httpServer.listen(this.port, this.host, onListening)
+      } else {
+        this.httpServer.listen(this.port, onListening)
+      }
     })
 
-    process.on('SIGTERM', () => this.stop('SIGTERM').then(() => process.exit(0)))
-    process.on('SIGINT', () => this.stop('SIGINT').then(() => process.exit(0)))
+    // Register signal handlers only for real runtime, not test runners.
+    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+      process.on('SIGTERM', () => this.stop('SIGTERM').then(() => process.exit(0)))
+      process.on('SIGINT', () => this.stop('SIGINT').then(() => process.exit(0)))
+    }
   }
 }
 
