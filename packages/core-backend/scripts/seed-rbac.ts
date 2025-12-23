@@ -19,17 +19,17 @@ async function main() {
     await client.query('BEGIN')
     const adminUserId = process.env.RBAC_ADMIN_USER || 'dev-user'
     const adminRoleId = process.env.RBAC_ADMIN_ROLE || 'admin'
-    const perms: Array<[string, string | null]> = [
-      ['demo:read', 'Demo read permission for CI'],
-      ['permissions:read', 'List permissions'],
-      ['permissions:write', 'Grant/Revoke permissions'],
-      ['roles:read', 'List roles'],
-      ['roles:write', 'Manage roles'],
+    const perms: Array<[string, string, string | null]> = [
+      ['demo:read', 'Demo Read', 'Demo read permission for CI'],
+      ['permissions:read', 'Permissions Read', 'List permissions'],
+      ['permissions:write', 'Permissions Write', 'Grant/Revoke permissions'],
+      ['roles:read', 'Roles Read', 'List roles'],
+      ['roles:write', 'Roles Write', 'Manage roles'],
     ]
-    for (const [code, desc] of perms) {
+    for (const [code, name, desc] of perms) {
       await client.query(
-        'INSERT INTO permissions(code, description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',
-        [code, desc]
+        'INSERT INTO permissions(code, name, description) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING',
+        [code, name, desc]
       )
     }
     await client.query(
