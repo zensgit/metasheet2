@@ -35,4 +35,4 @@ gh workflow run smoke-verify.yml --ref main
 Result:
 
 - ❌ `HTTP 404: workflow smoke-verify.yml not found on the default branch`
-- Action needed: push `.github/workflows/smoke-verify.yml` to the remote default branch before retrying.
+- Action needed: merge branch `ci/smoke-verify-workflow` (contains `.github/workflows/smoke-verify.yml`) into the default branch, then retry.

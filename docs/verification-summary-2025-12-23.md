@@ -11,7 +11,7 @@
 - Duplicate approvals history handler removed; auth guard still enforced.
 - Migration + RBAC seed executed and RBAC integration revalidated.
 - Smoke suite rerun via `pnpm verify:smoke:all` with updated artifacts.
-- CI smoke workflow trigger pending (workflow not yet on remote default branch).
+- CI smoke workflow trigger pending (workflow pushed to `ci/smoke-verify-workflow`, needs merge to default branch).
 
 ## Verification Commands
 
