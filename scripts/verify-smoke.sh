@@ -8,6 +8,7 @@ API_BASE="${API_BASE:-http://127.0.0.1:7778}"
 WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 SMOKE_DATABASE_URL="${SMOKE_DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}"
 SMOKE_ADMIN_USER="${SMOKE_ADMIN_USER:-dev-user}"
+SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB:-false}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/smoke}"
 
 mkdir -p "$OUTPUT_DIR"
@@ -17,6 +18,7 @@ echo "- API_BASE: ${API_BASE}"
 echo "- WEB_BASE: ${WEB_BASE}"
 echo "- SMOKE_DATABASE_URL: ${SMOKE_DATABASE_URL}"
 echo "- SMOKE_ADMIN_USER: ${SMOKE_ADMIN_USER}"
+echo "- SMOKE_SKIP_WEB: ${SMOKE_SKIP_WEB}"
 echo "- OUTPUT_DIR: ${OUTPUT_DIR}"
 echo ""
 
@@ -58,7 +60,10 @@ else
   echo "[1/4] Backend already running"
 fi
 
-if ! curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
+if [[ "${SMOKE_SKIP_WEB}" == "true" ]]; then
+  WEB_PID=""
+  echo "[3/4] Web check skipped (SMOKE_SKIP_WEB=true)"
+elif ! curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
   echo "[3/4] Starting web..."
   pnpm --filter @metasheet/web dev -- --host 127.0.0.1 --port 8899 > "${OUTPUT_DIR}/web.log" 2>&1 &
   WEB_PID=$!

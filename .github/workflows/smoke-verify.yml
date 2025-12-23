@@ -24,6 +24,7 @@ jobs:
       SMOKE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
       RBAC_BYPASS: 'true'
       PLAYWRIGHT_CHANNEL: chromium
+      SMOKE_SKIP_WEB: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4

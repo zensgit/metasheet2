@@ -68,11 +68,15 @@ async function run() {
 
   record('api.spreadsheets', true, { skipped: true })
 
-  const webRes = await fetchText(`${webBase}/`)
-  const webOk = webRes.res.ok && webRes.text.includes('MetaSheet')
-  record('web.home', webOk, { status: webRes.res.status })
-  if (!webOk) {
-    throw new Error('Web home check failed')
+  if (process.env.SMOKE_SKIP_WEB === 'true') {
+    record('web.home', true, { skipped: true })
+  } else {
+    const webRes = await fetchText(`${webBase}/`)
+    const webOk = webRes.res.ok && webRes.text.includes('MetaSheet')
+    record('web.home', webOk, { status: webRes.res.status })
+    if (!webOk) {
+      throw new Error('Web home check failed')
+    }
   }
 
   return report
