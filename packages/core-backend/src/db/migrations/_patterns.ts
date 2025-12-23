@@ -97,7 +97,9 @@ export async function checkColumnExists<DB>(db: Kysely<DB>, tableName: string, c
   const result = await sql<CountResult>`
     SELECT count(*)::int as count
     FROM information_schema.columns
-    WHERE table_name = ${tableName} AND column_name = ${columnName}
+    WHERE table_name = ${tableName}
+      AND column_name = ${columnName}
+      AND table_schema = current_schema()
   `.execute(db)
   return result.rows[0] ? parseInt(String(result.rows[0].count), 10) > 0 : false
 }
@@ -111,6 +113,7 @@ export async function checkTableExists<DB>(db: Kysely<DB>, tableName: string): P
     SELECT count(*)::int as count
     FROM information_schema.tables
     WHERE table_name = ${tableName}
+      AND table_schema = current_schema()
   `.execute(db)
   return result.rows[0] ? parseInt(String(result.rows[0].count), 10) > 0 : false
 }
