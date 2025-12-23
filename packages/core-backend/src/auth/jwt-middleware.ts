@@ -14,6 +14,7 @@ const AUTH_WHITELIST = [
   '/api/auth/register',
   '/api/auth/refresh',
   '/api/auth/refresh-token',
+  '/api/auth/dev-token',
   '/api/plugins',
   '/api/v2/hello',
   '/api/v2/rpc-test',
