@@ -42,6 +42,10 @@ Entry points:
   - Run: `pnpm verify:smoke`
   - Latest report: `docs/verification-smoke-2025-12-23.md`
   - Full local runner: `pnpm verify:smoke:all`
+- Smoke verify (local runner update):
+  - Run: `scripts/verify-smoke.sh` (uses `scripts/verify-smoke-core.mjs`)
+  - Report: `docs/smoke-verify-run-2025-12-23.md`
+  - Notes: `web.home` accepts `MetaSheet` or `#app`; adds `univer-meta` checks (`sheets/fields/views/records-summary`)
 
 ## Full Regression
 
@@ -75,3 +79,9 @@ Entry points:
 - WebSocket/metrics noise:
   - Ensure `.env.local` contains `VITE_API_URL=http://127.0.0.1:7778`
   - Admin realtime metrics uses Socket.IO via `/socket.io`
+
+## Recent Smoke Updates
+
+- Local smoke runner now uses `scripts/verify-smoke-core.mjs` with `web.home` tolerant of `MetaSheet` or `#app`.
+- `univer-meta` smoke checks added: `sheets`, `fields`, `views`, `records-summary`.
+- Latest report: `docs/smoke-verify-run-2025-12-23.md`.
