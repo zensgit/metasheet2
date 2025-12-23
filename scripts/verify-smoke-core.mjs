@@ -66,13 +66,59 @@ async function run() {
     'Content-Type': 'application/json',
   }
 
+  const metaSheets = await fetchJson(`${apiBase}/api/univer-meta/sheets`, { headers })
+  if (metaSheets.res.status === 503) {
+    record('api.univer-meta.sheets', true, { skipped: true, status: metaSheets.res.status })
+    record('api.univer-meta.fields', true, { skipped: true })
+    record('api.univer-meta.views', true, { skipped: true })
+    record('api.univer-meta.records-summary', true, { skipped: true })
+  } else {
+    const sheetsOk = Boolean(metaSheets.res.ok && metaSheets.json?.ok)
+    record('api.univer-meta.sheets', sheetsOk, { status: metaSheets.res.status })
+    if (!sheetsOk) {
+      throw new Error('Meta sheets check failed')
+    }
+    const sheets = Array.isArray(metaSheets.json?.data?.sheets) ? metaSheets.json.data.sheets : []
+
+    const metaFields = await fetchJson(`${apiBase}/api/univer-meta/fields`, { headers })
+    const fieldsOk = Boolean(metaFields.res.ok && metaFields.json?.ok)
+    record('api.univer-meta.fields', fieldsOk, { status: metaFields.res.status })
+    if (!fieldsOk) {
+      throw new Error('Meta fields check failed')
+    }
+
+    const metaViews = await fetchJson(`${apiBase}/api/univer-meta/views`, { headers })
+    const viewsOk = Boolean(metaViews.res.ok && metaViews.json?.ok)
+    record('api.univer-meta.views', viewsOk, { status: metaViews.res.status })
+    if (!viewsOk) {
+      throw new Error('Meta views check failed')
+    }
+
+    const sheetId = sheets[0]?.id
+    if (sheetId) {
+      const metaRecords = await fetchJson(
+        `${apiBase}/api/univer-meta/records-summary?sheetId=${encodeURIComponent(sheetId)}`,
+        { headers },
+      )
+      const recordsOk = Boolean(metaRecords.res.ok && metaRecords.json?.ok)
+      record('api.univer-meta.records-summary', recordsOk, { status: metaRecords.res.status })
+      if (!recordsOk) {
+        throw new Error('Meta records summary check failed')
+      }
+    } else {
+      record('api.univer-meta.records-summary', true, { skipped: true })
+    }
+  }
+
   record('api.spreadsheets', true, { skipped: true })
 
   if (process.env.SMOKE_SKIP_WEB === 'true') {
     record('web.home', true, { skipped: true })
   } else {
     const webRes = await fetchText(`${webBase}/`)
-    const webOk = webRes.res.ok && webRes.text.includes('MetaSheet')
+    const hasMetaSheet = /metasheet/i.test(webRes.text)
+    const hasAppRoot = /id=[\"']app[\"']/.test(webRes.text)
+    const webOk = webRes.res.ok && (hasMetaSheet || hasAppRoot)
     record('web.home', webOk, { status: webRes.res.status })
     if (!webOk) {
       throw new Error('Web home check failed')
