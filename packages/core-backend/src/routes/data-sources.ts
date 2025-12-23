@@ -90,6 +90,10 @@ function getManager(): DataSourceManager {
   return dataSourceManager
 }
 
+export function getDataSourceManager(): DataSourceManager {
+  return getManager()
+}
+
 // Helper to sanitize config for response (remove credentials)
 function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'credentials'> & { hasCredentials: boolean } {
   const { credentials, ...rest } = config

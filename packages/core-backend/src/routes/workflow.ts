@@ -25,10 +25,14 @@ const router = Router()
 const logger = new Logger('WorkflowAPI')
 const workflowEngine = new BPMNWorkflowEngine()
 
-// Initialize engine
-workflowEngine.initialize().catch(error => {
-  logger.error('Failed to initialize Workflow Engine:', error)
-})
+// Initialize engine unless explicitly disabled (e.g., CI smoke).
+if (process.env.DISABLE_WORKFLOW === 'true') {
+  logger.warn('Workflow engine disabled (DISABLE_WORKFLOW=true)')
+} else {
+  workflowEngine.initialize().catch(error => {
+    logger.error('Failed to initialize Workflow Engine:', error)
+  })
+}
 
 // Type definitions for database rows
 interface ProcessDefinition {
