@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @metasheet/web dev",
+    "verify:smoke": "node scripts/verify-smoke-core.mjs",
+    "verify:smoke:all": "bash scripts/verify-smoke.sh",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
     "test": "pnpm -r test",

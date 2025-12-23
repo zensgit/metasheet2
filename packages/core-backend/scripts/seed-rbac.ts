@@ -17,6 +17,8 @@ async function main() {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    const adminUserId = process.env.RBAC_ADMIN_USER || 'dev-user'
+    const adminRoleId = process.env.RBAC_ADMIN_ROLE || 'admin'
     const perms: Array<[string, string | null]> = [
       ['demo:read', 'Demo read permission for CI'],
       ['permissions:read', 'List permissions'],
@@ -30,8 +32,12 @@ async function main() {
         [code, desc]
       )
     }
+    await client.query(
+      'INSERT INTO user_roles(user_id, role_id) VALUES ($1,$2) ON CONFLICT (user_id, role_id) DO NOTHING',
+      [adminUserId, adminRoleId]
+    )
     await client.query('COMMIT')
-    console.log('RBAC seed complete')
+    console.log(`RBAC seed complete (admin ${adminUserId} -> ${adminRoleId})`)
   } catch (e) {
     try { await client.query('ROLLBACK') } catch {}
     console.error('RBAC seed failed', e)
@@ -43,4 +49,3 @@ async function main() {
 }
 
 main()
-

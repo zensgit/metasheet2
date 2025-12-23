@@ -42,9 +42,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-
       - name: Run smoke verification
         run: pnpm verify:smoke:all
 
@@ -62,3 +59,4 @@ jobs:
             artifacts/editable-demo-ui-verification.json
             artifacts/smoke/backend.log
             artifacts/smoke/web.log
+            artifacts/smoke/smoke-report.json
