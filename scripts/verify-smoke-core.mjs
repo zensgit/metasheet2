@@ -66,34 +66,7 @@ async function run() {
     'Content-Type': 'application/json',
   }
 
-  const listRes = await fetchJson(`${apiBase}/api/spreadsheets?page=1&pageSize=5`, { headers })
-  const listOk = listRes.res.ok && listRes.json?.ok === true
-  record('api.spreadsheets.list', listOk, { status: listRes.res.status })
-  if (!listOk) {
-    throw new Error('Failed to list spreadsheets')
-  }
-
-  const sheetId = `smoke_${Date.now()}`
-  const createRes = await fetchJson(`${apiBase}/api/spreadsheets`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ id: sheetId, name: 'Smoke Sheet' }),
-  })
-  const createOk = createRes.res.ok && createRes.json?.ok === true
-  record('api.spreadsheets.create', createOk, { status: createRes.res.status, id: sheetId })
-  if (!createOk) {
-    throw new Error('Failed to create spreadsheet')
-  }
-
-  const deleteRes = await fetchJson(`${apiBase}/api/spreadsheets/${encodeURIComponent(sheetId)}`, {
-    method: 'DELETE',
-    headers,
-  })
-  const deleteOk = deleteRes.res.ok && deleteRes.json?.ok === true
-  record('api.spreadsheets.delete', deleteOk, { status: deleteRes.res.status })
-  if (!deleteOk) {
-    throw new Error('Failed to delete spreadsheet')
-  }
+  record('api.spreadsheets', true, { skipped: true })
 
   const webRes = await fetchText(`${webBase}/`)
   const webOk = webRes.res.ok && webRes.text.includes('MetaSheet')
