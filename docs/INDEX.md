@@ -42,11 +42,13 @@
 | 文档 | 用途 |
 |------|------|
 | [verification-test-report.md](./verification-test-report.md) | 测试报告 |
+| [verification-index.md](./verification-index.md) | 验证索引（常用命令/产物） |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |
 | [verification-rerun-2025-12-22.md](./verification-rerun-2025-12-22.md) | Phase 1 复测记录 |
 | [verification-comments-api-2025-12-22.md](./verification-comments-api-2025-12-22.md) | Comments API 验证 |
+| [smoke-verify-run-2025-12-23.md](./smoke-verify-run-2025-12-23.md) | Smoke 验证（本地+CI） |
 | [next-week-execution-checklist-2025-12-20.md](./next-week-execution-checklist-2025-12-20.md) | 下周执行清单 |
 | [real-system-validation-checklist.md](./real-system-validation-checklist.md) | 真实系统验证 |
 
