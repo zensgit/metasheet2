@@ -84,4 +84,5 @@ Entry points:
 
 - Local smoke runner now uses `scripts/verify-smoke-core.mjs` with `web.home` tolerant of `MetaSheet` or `#app`.
 - `univer-meta` smoke checks added: `sheets`, `fields`, `views`, `records-summary`.
+- `univer-meta` checks auto-skip when the DB reports `DB_NOT_READY` (503).
 - Latest report: `docs/smoke-verify-run-2025-12-23.md`.
