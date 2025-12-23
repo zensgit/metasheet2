@@ -29,7 +29,7 @@ if ! curl -fsS "${API_BASE}/health" >/dev/null 2>&1; then
   echo "[1/4] Preparing database..."
   DATABASE_URL="${SMOKE_DATABASE_URL}" pnpm --filter @metasheet/core-backend migrate >/dev/null
   DATABASE_URL="${SMOKE_DATABASE_URL}" RBAC_ADMIN_USER="${SMOKE_ADMIN_USER}" \
-    pnpm --filter @metasheet/core-backend exec tsx packages/core-backend/scripts/seed-rbac.ts >/dev/null
+    pnpm --filter @metasheet/core-backend exec tsx scripts/seed-rbac.ts >/dev/null
 
   echo "[2/4] Starting backend..."
   PORT="$(python3 - <<'PY'

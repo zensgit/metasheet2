@@ -52,11 +52,6 @@ jobs:
           name: smoke-verify
           retention-days: 14
           path: |
-            artifacts/comments-ui-grid.png
-            artifacts/comments-ui-kanban.png
-            artifacts/editable-demo-grid.png
-            artifacts/editable-demo-kanban.png
-            artifacts/editable-demo-ui-verification.json
             artifacts/smoke/backend.log
             artifacts/smoke/web.log
             artifacts/smoke/smoke-report.json
