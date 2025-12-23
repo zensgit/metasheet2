@@ -1,0 +1,64 @@
+name: Smoke Verify
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SMOKE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+      RBAC_BYPASS: 'true'
+      PLAYWRIGHT_CHANNEL: chromium
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke verification
+        run: pnpm verify:smoke:all
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-verify
+          retention-days: 14
+          path: |
+            artifacts/comments-ui-grid.png
+            artifacts/comments-ui-kanban.png
+            artifacts/editable-demo-grid.png
+            artifacts/editable-demo-kanban.png
+            artifacts/editable-demo-ui-verification.json
+            artifacts/smoke/backend.log
+            artifacts/smoke/web.log

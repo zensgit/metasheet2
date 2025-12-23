@@ -4,6 +4,22 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 
 ## Workflows
 
+- `comments-nightly.yml`
+  - Runs nightly (02:30 UTC) and on manual dispatch.
+  - Spins up Postgres, runs migrations + RBAC seed, then starts backend/web.
+  - Executes `pnpm verify:comments` (summary + UI smoke) and `pnpm verify:editable-demo`.
+  - Set `RUN_EDITABLE_DEMO_SMOKE=false` to skip the editable demo smoke step.
+  - Uploads artifacts (retention 14 days): `artifacts/comments-ui-grid.png`, `artifacts/comments-ui-kanban.png`,
+    `artifacts/editable-demo-grid.png`, `artifacts/editable-demo-kanban.png`,
+    `artifacts/editable-demo-ui-verification.json`, `/tmp/metasheet-core-backend.log`, `/tmp/metasheet-web.log`.
+
+- `smoke-verify.yml`
+  - Manual dispatch only (lightweight smoke).
+  - Runs `pnpm verify:smoke:all` with `SMOKE_DATABASE_URL` and `PLAYWRIGHT_CHANNEL=chromium`.
+  - Uploads artifacts (retention 14 days): `artifacts/comments-ui-grid.png`, `artifacts/comments-ui-kanban.png`,
+    `artifacts/editable-demo-grid.png`, `artifacts/editable-demo-kanban.png`,
+    `artifacts/editable-demo-ui-verification.json`, `artifacts/smoke/backend.log`, `artifacts/smoke/web.log`.
+
 - `phase5-nightly-validation-regression.yml`
   - Triggers nightly at 02:00 UTC and via manual dispatch.
   - Pre‑checks metrics endpoint reachability; skips gracefully if unreachable.
