@@ -67,11 +67,39 @@
           </div>
         </div>
         <div v-if="relatedUpdateCount > 0" class="univer-kanban__related">
-          <span>外表更新 {{ relatedUpdateCount }} 条</span>
-          <button type="button" class="univer-kanban__btn" @click="reload">点击刷新</button>
-          <span v-if="relatedUpdateSheets.length" class="univer-kanban__related-note">
-            来源: {{ relatedUpdateSheets.join(', ') }}
-          </span>
+          <div class="univer-kanban__related-header">
+            <span>外表更新 {{ relatedUpdateCount }} 条</span>
+            <button type="button" class="univer-kanban__btn" @click="reload">点击刷新</button>
+            <button type="button" class="univer-kanban__btn" @click="relatedPanelOpen = !relatedPanelOpen">
+              {{ relatedPanelOpen ? '收起' : '查看详情' }}
+            </button>
+            <button type="button" class="univer-kanban__btn" @click="clearRelatedUpdates">清空</button>
+            <span v-if="relatedUpdateSheets.length" class="univer-kanban__related-note">
+              来源: {{ relatedUpdateSheets.join(', ') }}
+            </span>
+          </div>
+          <div v-if="relatedPanelOpen" class="univer-kanban__related-panel">
+            <div v-for="group in relatedUpdateGroups" :key="group.sheetId" class="univer-kanban__related-group">
+              <div class="univer-kanban__related-group-header">
+                <span class="univer-kanban__related-sheet">{{ group.sheetId }}</span>
+                <button
+                  type="button"
+                  class="univer-kanban__btn"
+                  @click="openRelatedSheet(group.sheetId)"
+                >
+                  打开
+                </button>
+              </div>
+              <div
+                v-for="record in group.records"
+                :key="record.recordId"
+                class="univer-kanban__related-record"
+              >
+                <span class="univer-kanban__related-record-id">{{ record.recordId }}</span>
+                <span class="univer-kanban__related-record-data">{{ formatRelatedData(record.data) }}</span>
+              </div>
+            </div>
+          </div>
         </div>
         <div v-if="demoHint" class="univer-kanban__hint">
           <span>{{ demoHint.text }}</span>
@@ -481,10 +509,23 @@ const readonlyMetrics = ref<ReadonlyMetrics>({
   lastKind: null,
 })
 const relatedUpdates = ref<RelatedRecord[]>([])
+const relatedPanelOpen = ref(false)
 const relatedUpdateCount = computed(() => relatedUpdates.value.length)
 const relatedUpdateSheets = computed(() =>
   Array.from(new Set(relatedUpdates.value.map((record) => record.sheetId))).filter((id) => id.length > 0),
 )
+const relatedUpdateGroups = computed(() => {
+  const grouped = new Map<string, RelatedRecord[]>()
+  for (const record of relatedUpdates.value) {
+    const list = grouped.get(record.sheetId) ?? []
+    list.push(record)
+    grouped.set(record.sheetId, list)
+  }
+  return Array.from(grouped.entries()).map(([sheetId, records]) => ({
+    sheetId,
+    records: records.slice(0, 6),
+  }))
+})
 const commentsEnabled = computed(() => toStr(route.query.source)?.toLowerCase() === 'meta')
 const commentsSpreadsheetId = computed(() => (commentsEnabled.value ? viewId.value : ''))
 const selectedRecordId = ref<string>('')
@@ -1139,6 +1180,37 @@ function handleRelatedRecords(records: RelatedRecord[]) {
   const external = records.filter((record) => record.sheetId !== currentSheetId)
   if (external.length === 0) return
   relatedUpdates.value = mergeRelatedUpdates(relatedUpdates.value, external)
+}
+
+function clearRelatedUpdates() {
+  relatedUpdates.value = []
+  relatedPanelOpen.value = false
+}
+
+function formatRelatedValue(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (Array.isArray(value)) return value.map((v) => formatRelatedValue(v)).filter(Boolean).join(', ')
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function formatRelatedData(data: Record<string, unknown>): string {
+  const entries = Object.entries(data)
+  if (entries.length === 0) return '-'
+  return entries
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${formatRelatedValue(value)}`)
+    .join(' | ')
+}
+
+function openRelatedSheet(sheetId: string) {
+  if (!sheetId) return
+  const href = router.resolve({ path: '/univer-kanban', query: { source: 'meta', sheetId } }).href
+  window.open(href, '_blank')
 }
 
 function transformToWorkbook(view: UniverMockView): IWorkbookData {
@@ -2156,18 +2228,80 @@ onUnmounted(() => {
 }
 
 .univer-kanban__related {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 8px;
-  border-radius: 999px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 12px;
   border: 1px solid #ffd591;
   background: #fff7e6;
   color: #8c6d1f;
   font-size: 12px;
 }
 
+.univer-kanban__related-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .univer-kanban__related-note {
+  color: #6b7280;
+}
+
+.univer-kanban__related-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  color: #1f2937;
+}
+
+.univer-kanban__related-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px dashed #f3c78d;
+  background: #fffaf2;
+}
+
+.univer-kanban__related-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #8c6d1f;
+}
+
+.univer-kanban__related-sheet {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  font-size: 11px;
+}
+
+.univer-kanban__related-record {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #fde3b5;
+}
+
+.univer-kanban__related-record-id {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  font-size: 11px;
+  color: #9a3412;
+}
+
+.univer-kanban__related-record-data {
+  font-size: 11px;
   color: #6b7280;
 }
 
