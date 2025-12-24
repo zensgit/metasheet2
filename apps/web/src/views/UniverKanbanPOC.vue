@@ -525,7 +525,7 @@ const mapping = {
   fieldIdToColIndex: {} as Record<string, number>,
   fieldIdToType: {} as Record<string, UniverMockField['type']>,
   fieldIdToSelectOptions: {} as Record<string, Array<{ value: string; color?: string }>>,
-  fieldIdToProperty: {} as Record<string, UniverMockField['property']>,
+  fieldIdToProperty: {} as Record<string, Record<string, unknown>>,
   fieldIdToReadonlyReason: {} as Record<string, string>,
   fieldIdToLabel: {} as Record<string, string>,
 }
@@ -1685,7 +1685,7 @@ onMounted(() => {
 
   const embed = createUniverEmbed(
     hostEl,
-    (mountEl) =>
+    (mountEl: HTMLElement) =>
       createUniver({
         theme: defaultTheme,
         locale: LocaleType.ZH_CN,
@@ -1711,11 +1711,11 @@ onMounted(() => {
     getViewId: () => viewId.value,
     getApiPrefix,
     mapping,
-    setStatus: (text, kind) => {
+    setStatus: (text: string, kind: 'ok' | 'error') => {
       statusText.value = text
       statusKind.value = kind
     },
-    onUpdated: (updated) => {
+    onUpdated: (updated: Array<{ recordId: string; version: number }>) => {
       for (const u of updated) {
         const record = recordsById.value[u.recordId]
         if (record) record.version = u.version
@@ -1723,14 +1723,14 @@ onMounted(() => {
     },
     onRecords: applyComputedRecords,
     onRelatedRecords: handleRelatedRecords,
-    onConflict: (serverVersion) => {
+    onConflict: (serverVersion: number | null) => {
       hasConflict.value = true
       conflictServerVersion.value = serverVersion
     },
     flushDelayMs: 120,
   })
 
-  const disposable = univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event) => {
+  const disposable = univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event: { id: string; params?: unknown }) => {
     if (event.id === SetSelectionsOperation.id) {
       const selections = (event.params as { selections?: Array<{ primary?: { actualRow?: number; actualColumn?: number } | null }> })
         ?.selections
@@ -1864,11 +1864,11 @@ onMounted(() => {
           mapping.recordIdToData[recordId][fieldId] = value as any
         }
 
-        patchQueue.stageChange(recordId, fieldId, value)
+        patchQueue?.stageChange(recordId, fieldId, value)
       }
     }
 
-    patchQueue.requestFlush(120)
+    patchQueue?.requestFlush(120)
   })
 
   const start = async () => {
@@ -1915,9 +1915,7 @@ onMounted(() => {
           .map((f) => [f.id, f.options ?? []]),
       )
       mapping.fieldIdToProperty = Object.fromEntries(
-        response.data.fields
-          .filter((f) => f.property)
-          .map((f) => [f.id, f.property]),
+        response.data.fields.map((f) => [f.id, (f.property ?? {}) as Record<string, unknown>]),
       )
       mapping.fieldIdToReadonlyReason = Object.fromEntries(
         response.data.fields
@@ -2013,7 +2011,7 @@ onMounted(() => {
 
   univerDispose = () => {
     headerIconCleanup?.()
-    patchQueue.dispose()
+    patchQueue?.dispose()
     disposable.dispose()
     embed.dispose()
   }
