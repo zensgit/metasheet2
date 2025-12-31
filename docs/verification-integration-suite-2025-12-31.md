@@ -26,17 +26,19 @@ SKIP_PLUGINS=false pnpm exec vitest run --config vitest.integration.config.ts --
 ```
 
 Result:
-- Completed with failures (exit code 1).
-- Summary: `Test Files 2 failed | 6 passed`, `Tests 4 failed | 47 passed | 12 skipped`.
-- Failures:
-  - `tests/integration/kanban-plugin.test.ts`
-    - Plugin Activation: `plugins.find is not a function`
-    - Event Registration: `Event timeout`
-    - Permission Check: `plugins.find is not a function`
-  - `tests/integration/plugins-api.contract.test.ts`
-    - Expected `/api/plugins` response to be an array (received non-array)
+- Completed successfully (exit code 0).
+- Summary: `Test Files 8 passed (8)`, `Tests 51 passed | 12 skipped`.
+- Expected logs observed:
+  - Plugin failure fixtures log permission/version errors (expected for negative tests).
+  - Formula error for `INVALIDFUNC` (test asserts error handling).
+  - Audit log warnings about missing `event_type` column (non-fatal in tests).
+
+Re-run command (for plugin focus, still runs full integration suite):
+```bash
+cd packages/core-backend
+SKIP_PLUGINS=false LOG_LEVEL=info pnpm exec vitest run --config vitest.integration.config.ts --reporter=dot -- tests/integration/kanban-plugin.test.ts
+```
 
 ## Notes
-- Targeted runs (single test files) exit cleanly.
+- Targeted run using `-- tests/integration/kanban-plugin.test.ts` still executes the full integration suite with current config.
 - Full suite no longer hangs when `SKIP_PLUGINS=true`.
-- With plugins enabled, `/api/plugins` response shape appears incompatible with contract tests (likely returning an object instead of an array).

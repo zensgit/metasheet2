@@ -37,6 +37,9 @@ describe('Federation PLM (Yuantus) product detail', () => {
           code: 'ASM-001',
           version: 'A',
           status: 'Draft',
+          description: 'Assembly description',
+          itemType: 'Assembly',
+          properties: { item_number: 'ASM-001', material: 'Al' },
           created_at: '2025-01-01T00:00:00.000Z',
           updated_at: '2025-01-01T00:00:00.000Z',
         }
@@ -61,5 +64,11 @@ describe('Federation PLM (Yuantus) product detail', () => {
     expect(res.body?.ok).toBe(true)
     expect(calls).toEqual([{ id: 'abc123', itemType: 'Assembly' }])
     expect(res.body?.data?.partNumber).toBe('ASM-001')
+    expect(res.body?.data?.description).toBe('Assembly description')
+    expect(res.body?.data?.updatedAt).toBe('2025-01-01T00:00:00.000Z')
+    expect(res.body?.data?.code).toBe('ASM-001')
+    expect(res.body?.data?.version).toBe('A')
+    expect(res.body?.data?.itemType).toBe('Assembly')
+    expect(res.body?.data?.properties).toEqual({ item_number: 'ASM-001', material: 'Al' })
   })
 })

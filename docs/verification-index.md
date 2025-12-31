@@ -37,6 +37,12 @@ Entry points:
   - Run: `pnpm verify:yuantus`
   - Report: `docs/verification-yuantus-plm-20251231_1507.md`
 
+- PLM product detail mapping:
+  - Report: `docs/verification-plm-product-detail-20251231_1535.md`
+
+- PLM UI integration:
+  - Report: `docs/verification-plm-ui-20251231_1540.md`
+
 - Federation config persistence (PLM/Athena):
   - Script: `scripts/verify_federation_config.sh`
   - Report: `docs/verification-federation-config-20251231_1446.md`

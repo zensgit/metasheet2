@@ -1755,12 +1755,16 @@ type PLMProductWire = AdapterPLMProduct & {
   partNumber?: string
   revision?: string
   createdAt?: string
+  updatedAt?: string
+  itemType?: string
+  properties?: Record<string, unknown>
 }
 
 function mapPLMProduct(product: PLMProductWire) {
   const partNumber = product.partNumber || product.code || ''
   const revision = product.revision || product.version || ''
   const createdAt = product.createdAt || product.created_at
+  const updatedAt = product.updatedAt || product.updated_at
 
   return {
     id: product.id,
@@ -1769,6 +1773,12 @@ function mapPLMProduct(product: PLMProductWire) {
     status: product.status,
     revision,
     createdAt,
+    updatedAt,
+    code: product.code,
+    version: product.version,
+    description: product.description,
+    itemType: product.itemType,
+    properties: product.properties,
   }
 }
 

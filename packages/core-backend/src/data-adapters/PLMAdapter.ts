@@ -10,6 +10,8 @@ export interface PLMProduct {
   version: string
   status: string
   description?: string
+  itemType?: string
+  properties?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -245,6 +247,8 @@ interface YuantusItem {
   id: string
   type?: string
   state?: string
+  created_on?: string
+  modified_on?: string
   properties?: Record<string, unknown>
 }
 
@@ -677,8 +681,8 @@ export class PLMAdapter extends HTTPAdapter {
     const version = String(props.version || props.revision || props.rev || '')
     const status = String(item.state || props.state || '')
     const description = props.description ? String(props.description) : undefined
-    const createdAt = this.toIsoString(props.created_at || props.created_on || props.create_date)
-    const updatedAt = this.toIsoString(props.updated_at || props.modified_on || props.write_date)
+    const createdAt = this.toIsoString(item.created_on || props.created_at || props.created_on || props.create_date)
+    const updatedAt = this.toIsoString(item.modified_on || props.updated_at || props.modified_on || props.write_date)
 
     return {
       id: String(item.id),
@@ -687,6 +691,8 @@ export class PLMAdapter extends HTTPAdapter {
       version,
       status,
       description,
+      itemType: item.type,
+      properties: props,
       created_at: createdAt,
       updated_at: updatedAt,
     }
