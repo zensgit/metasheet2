@@ -34,6 +34,7 @@
 |------|------|
 | [DATA_SOURCE_ADAPTERS.md](./DATA_SOURCE_ADAPTERS.md) | 适配器架构 |
 | [plm-integration-design.md](./plm-integration-design.md) | PLM 集成设计 |
+| [yuantus-plm-connection.md](./yuantus-plm-connection.md) | Yuantus 接口与鉴权 |
 
 ---
 

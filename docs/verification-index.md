@@ -36,6 +36,7 @@ Entry points:
   - Script: `scripts/verify-yuantus-plm.sh`
   - Run: `pnpm verify:yuantus`
   - Report: `docs/verification-yuantus-plm-20251231_1507.md`
+  - Connection notes: `docs/yuantus-plm-connection.md`
 
 - PLM product detail mapping:
   - Report: `docs/verification-plm-product-detail-20251231_1535.md`
@@ -91,6 +92,9 @@ Entry points:
 
 - Token auto-refresh (Athena + PLM):
   - Report: `docs/verification-token-refresh-20251229_1827.md`
+
+- Athena Keycloak auth smoke:
+  - Report: `docs/verification-athena-keycloak-20251231_1740.md`
 
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`

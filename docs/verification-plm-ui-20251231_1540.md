@@ -106,3 +106,27 @@ Note:
 - Screenshot capture via MCP timed out twice; UI state verified via accessibility snapshot.
 
 Note: previously provided item IDs were not present in the current PLM dataset; verification used the first available Part from search.
+
+## Re-validation (2025-12-31 17:35 CST)
+Env:
+- PLM_BASE_URL: http://127.0.0.1:7910
+- PLM_TENANT_ID / PLM_ORG_ID: tenant-1 / org-1
+- PLM_API_TOKEN: obtained via `POST /api/v1/auth/login` (admin/admin)
+- RBAC_BYPASS: true (dev token set in `localStorage.auth_token`)
+- Frontend dev server used `http://localhost:8900` (8899 already in use)
+
+IDs used:
+- Product (Part A): `de7453f0-495d-4e22-babd-b5166cc1dffb`
+- Where-used child: `3a5116a6-443a-4ac2-ae44-010f9d1c511d`
+- BOM line (relationship): `6c8dd3e3-8fd9-4111-9a1b-e11e709a1bfb`
+- BOM compare left/right: `1b63c0db-0708-4d6b-b993-e4f971020e84` / `b456ca7b-4920-43ae-b263-e587c934df16`
+
+Result:
+- Product detail rendered (Part A / P-BOM-A-1766556289 / Draft).
+- BOM table showed two lines (P-BOM-B / P-BOM-C, qty 2/3).
+- Where-used returned 2 parents (Part B / Part A).
+- BOM compare summary rendered (新增 1 / 删除 1 / 变更 1).
+- Substitutes returned count 0 for the selected BOM line.
+
+Note:
+- MCP screenshot capture timed out (full page + viewport). UI state verified via accessibility snapshot.
