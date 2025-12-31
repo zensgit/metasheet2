@@ -96,9 +96,19 @@ interface BatchRequestItem {
   params?: unknown;
 }
 
+interface TokenProvider {
+  getToken: () => Promise<string | null>;
+  onAuthError?: () => void;
+}
+
 export class HTTPAdapter extends BaseDataAdapter {
   private client: AxiosInstance | null = null
   private endpoints: Map<string, EndpointConfig> = new Map()
+  private tokenProvider: TokenProvider | null = null
+
+  setTokenProvider(provider: TokenProvider): void {
+    this.tokenProvider = provider
+  }
 
   async connect(): Promise<void> {
     if (this.connected) {
@@ -144,7 +154,13 @@ export class HTTPAdapter extends BaseDataAdapter {
 
       // Add request interceptor for logging
       this.client.interceptors.request.use(
-        (config: AxiosRequestConfig) => {
+        async (config: AxiosRequestConfig) => {
+          if (this.tokenProvider?.getToken) {
+            const token = await this.tokenProvider.getToken()
+            if (token) {
+              config.headers = { ...(config.headers || {}), Authorization: `Bearer ${token}` }
+            }
+          }
           this.emit('request', { method: config.method, url: config.url })
           return config
         },
@@ -161,6 +177,10 @@ export class HTTPAdapter extends BaseDataAdapter {
           return response
         },
         (error: unknown) => {
+          const status = (error as { response?: { status?: number } })?.response?.status
+          if (status === 401 && this.tokenProvider?.onAuthError) {
+            this.tokenProvider.onAuthError()
+          }
           this.emit('error', { error })
           return Promise.reject(error)
         }

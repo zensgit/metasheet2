@@ -10,6 +10,7 @@
         <router-link to="/calendar" class="nav-link">Calendar</router-link>
         <router-link to="/gallery" class="nav-link">Gallery</router-link>
         <router-link to="/form" class="nav-link">Form</router-link>
+        <router-link to="/plm" class="nav-link">PLM</router-link>
       </div>
     </nav>
     <main class="app-main">

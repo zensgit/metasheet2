@@ -43,6 +43,7 @@ coverage/
 temp/
 .backend.pid
 .core-backend-dev.pid
+.web-dev.pid
 
 # Insync sync files
 .~*
