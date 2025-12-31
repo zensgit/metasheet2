@@ -58,3 +58,24 @@ Result:
 
 Next action:
 - Start Postgres (`DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet`) and rerun.
+
+## 2025-12-31 Re-run (DATABASE_URL set)
+```bash
+cd packages/core-backend
+DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet \
+SKIP_PLUGINS=true pnpm exec vitest run --config vitest.integration.config.ts --reporter=dot
+```
+
+Result:
+- Completed successfully (exit code 0).
+- Summary: `Test Files 5 passed | 3 skipped`, `Tests 42 passed | 21 skipped`.
+
+```bash
+cd packages/core-backend
+DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet \
+SKIP_PLUGINS=false pnpm exec vitest run --config vitest.integration.config.ts --reporter=dot
+```
+
+Result:
+- Completed successfully (exit code 0).
+- Summary: `Test Files 8 passed (8)`, `Tests 51 passed | 12 skipped`.
