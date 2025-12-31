@@ -13,9 +13,9 @@ import { EventEmitter } from 'eventemitter3'
 import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
-import { PluginLoader } from './core/plugin-loader'
+import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
-import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData } from './types/plugin'
+import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData, PluginContext, PluginApiMethod, PluginCommunication, PluginStorage } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { eventBus } from './integration/events/event-bus'
@@ -26,6 +26,7 @@ import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
+import { poolManager } from './integration/db/connection-pool'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -40,11 +41,13 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
+import { getSafetyGuard } from './guards'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import { univerMockRouter } from './routes/univer-mock'
@@ -66,6 +69,8 @@ export class MetaSheetServer {
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
+  private pluginApis = new Map<string, Record<string, PluginApiMethod>>()
+  private pluginContexts = new Map<string, PluginContext>()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -329,8 +334,15 @@ export class MetaSheetServer {
         broadcast: (event: string, data: unknown) => {
           this.injector.get(ICollabService).broadcast(event, data)
         },
+        broadcastTo: (room: string, event: string, data: unknown) => {
+          this.injector.get(ICollabService).broadcastTo(room, event, data)
+        },
         sendTo: (userId: string, event: string, data: unknown) => {
           this.injector.get(ICollabService).sendTo(userId, event, data)
+        },
+        join: (room: string, options: { userId?: string }) => {
+          if (!options?.userId) return
+          this.injector.get(ICollabService).joinRoom(room, options.userId)
         },
         onConnection: (handler: (socket: import('./types/plugin').SocketInfo) => void | Promise<void>) => {
           this.injector.get(ICollabService).onConnection(handler)
@@ -363,6 +375,61 @@ export class MetaSheetServer {
         request: <T = unknown, R = unknown>(topic: string, payload: T, timeoutMs?: number): Promise<R> => messageBus.request(topic, payload, timeoutMs),
         rpcHandler: <T = unknown, R = unknown>(topic: string, handler: RpcHandler<T, R>) => messageBus.createRpcHandler(topic, handler)
       }
+    }
+  }
+
+  private createPluginContext(loaded: LoadedPlugin, coreAPI: CoreAPI): PluginContext {
+    const storageMap = new Map<string, unknown>()
+    const storage: PluginStorage = {
+      get: async (key: string) => storageMap.has(key) ? (storageMap.get(key) as unknown) : null,
+      set: async (key: string, value: unknown) => {
+        storageMap.set(key, value)
+      },
+      delete: async (key: string) => {
+        storageMap.delete(key)
+      },
+      list: async () => Array.from(storageMap.keys())
+    }
+
+    const communication: PluginCommunication = {
+      call: async (plugin: string, method: string, ...args: unknown[]) => {
+        const api = this.pluginApis.get(plugin)
+        if (!api || typeof api[method] !== 'function') {
+          throw new Error(`Plugin API not found: ${plugin}.${method}`)
+        }
+        return api[method](...args)
+      },
+      register: (name: string, api: Record<string, PluginApiMethod>) => {
+        this.pluginApis.set(name, api)
+      },
+      on: (event: string, handler: (...args: unknown[]) => void | Promise<void>) => {
+        this.eventBus.on(event, handler)
+      },
+      emit: (event: string, data?: unknown) => {
+        this.eventBus.emit(event, data)
+      }
+    }
+
+    const rawAuthor = loaded.manifest.author
+    const author = typeof rawAuthor === 'string'
+      ? rawAuthor
+      : (rawAuthor && typeof rawAuthor === 'object' ? (rawAuthor as { name?: string }).name : undefined)
+
+    return {
+      metadata: {
+        name: loaded.manifest.name,
+        version: loaded.manifest.version,
+        displayName: loaded.manifest.displayName,
+        description: loaded.manifest.description,
+        author,
+        path: loaded.path
+      },
+      api: coreAPI,
+      core: coreAPI,
+      storage,
+      config: {},
+      communication,
+      logger: new Logger(`Plugin:${loaded.manifest.name}`)
     }
   }
 
@@ -420,7 +487,7 @@ export class MetaSheetServer {
         // 尽量不破坏现有字段，同时补充插件摘要，便于快速可见
         let pluginsSummary: Record<string, unknown> | undefined = undefined
         try {
-          // 与 /api/plugins 的 summary 保持一致结构
+          // 与 PluginLoader summary 保持一致结构
           pluginsSummary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.()
         } catch { /* ignore plugin summary errors */ }
         res.json({
@@ -497,6 +564,8 @@ export class MetaSheetServer {
 
     // 路由：外部数据源管理 (V2)
     this.app.use(dataSourcesRouter())
+    // 路由：联邦集成（PLM/Athena/MetaSheet）
+    this.app.use(federationRouter(this.injector))
 
     // 路由：内部调试端点 (dev/staging only)
     this.app.use('/internal', internalRouter)
@@ -572,11 +641,10 @@ export class MetaSheetServer {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         const list = (this.pluginLoader as unknown as Record<string, () => unknown[]>).getList?.() || []
-        const summary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.() || {}
-        res.json({ list, summary })
+        res.json(list)
         endTimer?.({ route: '/api/plugins', method: 'GET' })(200)
       } catch (e: unknown) {
-        res.json({ list: [], summary: { error: e instanceof Error ? e.message : String(e) } })
+        res.status(500).json({ error: e instanceof Error ? e.message : String(e) })
         endTimer?.({ route: '/api/plugins', method: 'GET' })(500)
       }
     })
@@ -628,6 +696,17 @@ export class MetaSheetServer {
 
     const shutdownTasks: Promise<void>[] = []
 
+    // 0. Close WebSocket server early to release open handles
+    shutdownTasks.push((async () => {
+      try {
+        const collabService = this.injector.get(ICollabService)
+        await collabService.close()
+        this.logger.info('WebSocket server closed')
+      } catch (err) {
+        this.logger.warn(`WebSocket close error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
@@ -662,6 +741,16 @@ export class MetaSheetServer {
       }
     })())
 
+    // 2.1 Close integration connection pools
+    shutdownTasks.push((async () => {
+      try {
+        await poolManager.close()
+        this.logger.info('Integration pools closed')
+      } catch (err) {
+        this.logger.warn(`Integration pool close error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {
       try {
@@ -669,6 +758,17 @@ export class MetaSheetServer {
         this.logger.info('Plugins unloaded')
       } catch (err) {
         this.logger.warn(`Plugin unload error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    // 3.1 Shutdown SafetyGuard timers
+    shutdownTasks.push((async () => {
+      try {
+        const guard = getSafetyGuard()
+        guard.destroy()
+        this.logger.info('SafetyGuard destroyed')
+      } catch (err) {
+        this.logger.warn(`SafetyGuard shutdown error: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -757,7 +857,20 @@ export class MetaSheetServer {
     } else {
       this.logger.info('Loading plugins...')
       try {
-        await this.pluginLoader.loadPlugins()
+        const loadedPlugins = await this.pluginLoader.loadPlugins()
+        const coreAPI = this.injector.get(ICoreAPI)
+        for (const loaded of loadedPlugins) {
+          if (loaded.plugin && typeof loaded.plugin.activate === 'function') {
+            try {
+              const context = this.createPluginContext(loaded, coreAPI)
+              await loaded.plugin.activate(context)
+              this.pluginContexts.set(loaded.manifest.name, context)
+              this.logger.info(`Plugin activated: ${loaded.manifest.name}`)
+            } catch (err) {
+              this.logger.error(`Plugin activation failed: ${loaded.manifest.name}`, err as Error)
+            }
+          }
+        }
         this.logger.info('Plugins loaded successfully')
       } catch (e) {
         this.logger.error('Plugin loading failed; continuing startup without full plugin set', e as Error)

@@ -77,6 +77,18 @@ interface AuditLogEntry {
   [key: string]: unknown;
 }
 
+const parseJsonValue = <T>(value: unknown, fallback: T): T => {
+  if (value === null || value === undefined) return fallback
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T
+    } catch {
+      return fallback
+    }
+  }
+  return value as T
+}
+
 // Import shared Kysely types
 import type { ExpressionBuilder } from '../types/kysely'
 
@@ -156,7 +168,7 @@ router.get(
       let query = db
         .selectFrom('bpmn_process_definitions')
         .selectAll()
-        .where('tenant_id', '=', tenantId || null)
+        .where('tenant_id', tenantId ? '=' : 'is', tenantId ?? null)
 
       if (category) {
         query = query.where('category', '=', category as string)
@@ -176,7 +188,7 @@ router.get(
         success: true,
         data: definitions.map((def) => ({
           ...def,
-          diagram_json: def.diagram_json ? JSON.parse(def.diagram_json) : null
+          diagram_json: parseJsonValue(def.diagram_json, null)
         }))
       })
     } catch (error: unknown) {
@@ -252,7 +264,7 @@ router.get(
       let query = db
         .selectFrom('bpmn_process_instances')
         .selectAll()
-        .where('tenant_id', '=', tenantId || null)
+        .where('tenant_id', tenantId ? '=' : 'is', tenantId ?? null)
 
       if (state) {
         query = query.where('state', '=', state as string)
@@ -275,7 +287,7 @@ router.get(
         success: true,
         data: instances.map((inst) => ({
           ...inst,
-          variables: inst.variables ? JSON.parse(inst.variables) : {}
+          variables: parseJsonValue(inst.variables, {})
         }))
       })
     } catch (error: unknown) {
@@ -327,6 +339,7 @@ router.get(
       // Get variables
       interface Variable {
         json_value?: string;
+        value?: unknown;
         [key: string]: unknown;
       }
 
@@ -340,11 +353,11 @@ router.get(
         success: true,
         data: {
           ...instance,
-          variables: instance.variables ? JSON.parse(instance.variables) : {},
+          variables: parseJsonValue(instance.variables, {}),
           activities,
           variableList: variables.map((v) => ({
             ...v,
-            json_value: v.json_value ? JSON.parse(v.json_value) : null
+            json_value: parseJsonValue(v.json_value ?? v.value, null)
           }))
         }
       })

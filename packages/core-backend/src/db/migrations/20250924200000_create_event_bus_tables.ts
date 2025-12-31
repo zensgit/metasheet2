@@ -250,31 +250,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .columns(['event_name', 'window_type', 'window_start'])
     .execute()
 
-  // 7. plugin_event_permissions - Plugin event access control
-  await db.schema
-    .createTable('plugin_event_permissions')
-    .addColumn('id', 'uuid', (col) =>
-      col.primaryKey().defaultTo(sql`gen_random_uuid()`)
-    )
-    .addColumn('plugin_id', 'varchar(255)', (col) => col.notNull())
-    .addColumn('event_name', 'varchar(255)', (col) => col.notNull())
-    .addColumn('permission_type', 'varchar(50)', (col) => col.notNull())
-    .addColumn('is_granted', 'boolean', (col) => col.notNull().defaultTo(false))
-    .addColumn('granted_by', 'varchar(255)', (col) => col.notNull())
-    .addColumn('granted_at', 'timestamptz', (col) =>
-      col.notNull().defaultTo(sql`CURRENT_TIMESTAMP`)
-    )
-    .execute()
-
-  // Unique constraint on plugin-event-permission combination
-  await db.schema
-    .createIndex('idx_plugin_event_permissions_unique')
-    .unique()
-    .on('plugin_event_permissions')
-    .columns(['plugin_id', 'event_name', 'permission_type'])
-    .execute()
-
-  // 8. dead_letter_events - Failed event delivery queue
+  // 7. dead_letter_events - Failed event delivery queue
   await db.schema
     .createTable('dead_letter_events')
     .addColumn('id', 'uuid', (col) =>

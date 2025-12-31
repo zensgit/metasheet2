@@ -61,10 +61,12 @@ try {
   const secret = process.env.JWT_SECRET || 'dev-secret-key'
 
   // Create default payload with admin role for CI/E2E tests
+  const tenantId = process.env.JWT_TENANT_ID || process.env.TENANT_ID
   const payload = {
     id: process.env.USER_ID || 'dev-user',
     roles: ['admin'],
-    perms: ['permissions:read', 'permissions:write', 'approvals:read', 'approvals:write']
+    perms: ['permissions:read', 'permissions:write', 'approvals:read', 'approvals:write'],
+    ...(tenantId ? { tenantId } : {})
   }
 
   // Generate token

@@ -524,7 +524,7 @@ export default class KanbanPlugin implements PluginLifecycle {
     })
 
     // 广播更新
-    api.websocket.broadcast(`kanban:${spreadsheetId}`, 'kanban:cardMoved', {
+    api.websocket.broadcastTo(`kanban:${spreadsheetId}`, 'kanban:cardMoved', {
       cardId,
       fromColumn,
       toColumn,
@@ -584,7 +584,7 @@ export default class KanbanPlugin implements PluginLifecycle {
     await this.syncKanbanData(spreadsheetId)
 
     // 广播更新
-    api.websocket.broadcast(`kanban:${spreadsheetId}`, 'kanban:cardUpdated', {
+    api.websocket.broadcastTo(`kanban:${spreadsheetId}`, 'kanban:cardUpdated', {
       cardId,
       updates
     })
@@ -613,7 +613,7 @@ export default class KanbanPlugin implements PluginLifecycle {
     this.kanbanData.set(spreadsheetId, columns)
 
     // 广播更新
-    this.context.api.websocket.broadcast(`kanban:${spreadsheetId}`, 'kanban:columnAdded', column)
+    this.context.api.websocket.broadcastTo(`kanban:${spreadsheetId}`, 'kanban:columnAdded', column)
 
     return column
   }
@@ -640,7 +640,7 @@ export default class KanbanPlugin implements PluginLifecycle {
   private async handleRecordCreated(data: any): Promise<void> {
     await this.syncKanbanData(data.spreadsheetId)
 
-    this.context.api.websocket.broadcast(
+    this.context.api.websocket.broadcastTo(
       `kanban:${data.spreadsheetId}`,
       'kanban:recordCreated',
       data
@@ -653,7 +653,7 @@ export default class KanbanPlugin implements PluginLifecycle {
   private async handleRecordUpdated(data: any): Promise<void> {
     await this.syncKanbanData(data.spreadsheetId)
 
-    this.context.api.websocket.broadcast(
+    this.context.api.websocket.broadcastTo(
       `kanban:${data.spreadsheetId}`,
       'kanban:recordUpdated',
       data
@@ -666,7 +666,7 @@ export default class KanbanPlugin implements PluginLifecycle {
   private async handleRecordDeleted(data: any): Promise<void> {
     await this.syncKanbanData(data.spreadsheetId)
 
-    this.context.api.websocket.broadcast(
+    this.context.api.websocket.broadcastTo(
       `kanban:${data.spreadsheetId}`,
       'kanban:recordDeleted',
       data

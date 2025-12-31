@@ -9,7 +9,7 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2025-12-23.md`
+  - Report: `docs/verification-summary-2025-12-28.md`
 
 - Comments smoke (API + UI):
   - Run: `pnpm verify:comments`
@@ -19,6 +19,43 @@ Entry points:
 - Comments RBAC enforcement:
   - Run: `pnpm --filter @metasheet/core-backend test:integration -- --filter="Comments RBAC"`
   - Report: `docs/verification-comments-rbac-2025-12-23.md`
+
+- Labs/POC gating (UI):
+  - Run: `pnpm verify:labs-gating`
+  - Output: `artifacts/labs-gating-verification.json`
+  - Report: `docs/verification-labs-gating-2025-12-27.md`
+
+- Real systems adapter probe:
+  - Run: `bash scripts/adapter-probe.sh` + `bash scripts/test-real-systems.sh`
+  - Report: `docs/verification-real-systems-2025-12-28.md`
+
+- PLM real system verification:
+  - Report: `docs/verification-plm-2025-12-28.md`
+
+- Yuantus PLM verification:
+  - Script: `scripts/verify-yuantus-plm.sh`
+  - Run: `pnpm verify:yuantus`
+  - Report: `docs/verification-yuantus-plm-20251231_1507.md`
+
+- Federation config persistence (PLM/Athena):
+  - Script: `scripts/verify_federation_config.sh`
+  - Report: `docs/verification-federation-config-20251231_1446.md`
+
+- Workflow minimal (deploy/list/start/instances):
+  - Script: `scripts/verify_workflow_minimal.sh`
+  - Report: `docs/verification-workflow-minimal-20251231.md`
+
+- UI federation (Dashboard):
+  - Report: `docs/verification-ui-federation-20251229_1810.md`
+
+- Token auto-refresh (Athena + PLM):
+  - Report: `docs/verification-token-refresh-20251229_1827.md`
+
+- Real systems env + UI:
+  - Report: `docs/verification-env-real-systems-20251229_1836.md`
+
+- Dashboard default Athena query:
+  - Report: `docs/verification-dashboard-athena-default-query-20251229_1859.md`
 
 - Approvals + workflow auth guards:
   - Run: `pnpm --filter @metasheet/core-backend test:integration -- --filter="Approvals + Workflow auth guards"`
@@ -32,6 +69,18 @@ Entry points:
   - Run: `pnpm --filter @metasheet/core-backend test:integration -- --filter="Approvals + Workflow auth guards"`
   - Report: `docs/verification-approvals-history-route-2025-12-23.md`
 
+- Integration suite (core-backend):
+  - Run: `pnpm --filter @metasheet/core-backend test:integration`
+  - Report: `docs/verification-integration-2025-12-28.md`
+
+- Plugin integration (Kanban):
+  - Run: `SKIP_PLUGINS=false pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/kanban-plugin.test.ts tests/integration/kanban.mvp.api.test.ts tests/integration/plugins-api.contract.test.ts --reporter=dot`
+  - Report: `docs/verification-kanban-plugins-2025-12-28.md`
+
+- Plugin scan suppression (non-plugin tests):
+  - Run: `SKIP_PLUGINS=false pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/rooms.basic.test.ts tests/integration/snapshot-protection.test.ts tests/integration/kanban-plugin.test.ts tests/integration/kanban.mvp.api.test.ts tests/integration/plugins-api.contract.test.ts --reporter=dot`
+  - Report: `docs/verification-plugin-scan-suppression-2025-12-28.md`
+
 - Editable demo smoke (Grid + Kanban drag/write-back):
   - Run: `pnpm verify:editable-demo`
   - Report: `docs/editable-demo-ui-verification-2025-12-23.md`
@@ -40,18 +89,25 @@ Entry points:
 
 - Combined smoke:
   - Run: `pnpm verify:smoke`
-  - Latest report: `docs/verification-smoke-2025-12-23.md`
+  - Latest report: `docs/verification-smoke-2025-12-27.md`
   - Full local runner: `pnpm verify:smoke:all`
 - Smoke verify (local runner update):
   - Run: `scripts/verify-smoke.sh` (uses `scripts/verify-smoke-core.mjs`)
   - Report: `docs/smoke-verify-run-2025-12-23.md`
   - Notes: `web.home` accepts `MetaSheet` or `#app`; adds `univer-meta` checks (`sheets/fields/views/records-summary`)
 
+- Labs/POC gating + production safeguard:
+  - Report: `docs/local-smoke-verification.md`
+  - Smoke UI check: `artifacts/labs-gating-verification.json`
+
 ## Full Regression
 
 - Univer full suite:
   - Run: `bash scripts/verify-univer-all.sh`
   - Outputs under `artifacts/univer-poc/` (see `verification-*.md/json` files)
+  - Report: `docs/verification-univer-all-2025-12-27.md`
+  - Core mode attempt (blocked in automation): `docs/verification-univer-all-core-2025-12-27.md`
+  - Core mode + windowing: `docs/verification-univer-all-core-windowing-2025-12-27.md`
   - Optional flags:
     - `BACKEND_MODE=core` (use Meta(DB))
     - `RUN_WINDOWING=true`

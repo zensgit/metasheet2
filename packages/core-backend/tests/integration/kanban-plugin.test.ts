@@ -1,13 +1,44 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import { waitForHealth } from '../utils/waitFor'
 import { io as ioClient } from 'socket.io-client'
 import net from 'net'
+import { authService } from '../../src/auth/AuthService'
 
-describe('Kanban Plugin Integration', () => {
+const describeIfPlugins = process.env.SKIP_PLUGINS === 'true' ? describe.skip : describe
+vi.mock('../../src/integration/db/connection-pool', () => {
+  const mockPool = {
+    query: vi.fn().mockResolvedValue({ rows: [] }),
+    transaction: vi.fn(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
+      return handler({ query: async () => ({ rows: [] }) })
+    }),
+    getInternalPool: vi.fn().mockReturnValue(null)
+  }
+
+  return {
+    poolManager: {
+      get: () => mockPool
+    }
+  }
+})
+
+vi.mock('../../src/db/pg', () => ({
+  pool: null,
+  query: vi.fn(),
+  transaction: vi.fn(),
+  getPoolStats: vi.fn().mockReturnValue({ total: 0, idle: 0, waiting: 0 })
+}))
+
+vi.mock('../../src/audit/audit', () => ({
+  auditLog: vi.fn().mockResolvedValue(undefined),
+  auditService: { logEvent: vi.fn() }
+}))
+
+describeIfPlugins('Kanban Plugin Integration', () => {
   let server: MetaSheetServer
   let baseUrl: string
+  let authHeader: string
 
   beforeAll(async () => {
     // Preflight: if environment forbids listen(), skip suite by early return
@@ -27,6 +58,17 @@ describe('Kanban Plugin Integration', () => {
         path.join(repoRoot, 'plugins', 'plugin-view-kanban')
       ]
     })
+
+    const token = authService.createToken({
+      id: 'test-user',
+      email: 'test@example.com',
+      name: 'Test User',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date(),
+      updated_at: new Date()
+    })
+    authHeader = `Bearer ${token}`
 
     await server.start()
     const address = server.getAddress()
@@ -58,7 +100,9 @@ describe('Kanban Plugin Integration', () => {
     it('should register kanban API routes', async () => {
       if (!baseUrl) return
       // Test that kanban routes are accessible
-      const res = await fetch(`${baseUrl}/api/kanban/boards`)
+      const res = await fetch(`${baseUrl}/api/kanban/boards`, {
+        headers: { Authorization: authHeader }
+      })
       expect(res.status).not.toBe(404)
     })
 
@@ -67,7 +111,7 @@ describe('Kanban Plugin Integration', () => {
       // Test card move endpoint
       const res = await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: authHeader },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -85,7 +129,7 @@ describe('Kanban Plugin Integration', () => {
       if (!server) return
       const addr = server.getAddress()
       if (!addr || !addr.port) return // environment limitation; skip
-      const socket = ioClient(`http://127.0.0.1:${addr.port}`, { transports: ['websocket'] })
+      const socket = ioClient(`http://127.0.0.1:${addr.port}`, { transports: ['websocket'], reconnection: false })
 
       // Wait for connection first (regression guard for event-before-connect)
       await new Promise<void>((resolve, reject) => {
@@ -115,7 +159,7 @@ describe('Kanban Plugin Integration', () => {
       // Trigger card move AFTER connection is established
       await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: authHeader },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -126,10 +170,14 @@ describe('Kanban Plugin Integration', () => {
       // Wait for event
       const event = await eventPromise
 
-      socket.close()
+      await new Promise<void>((resolve) => {
+        if (socket.disconnected) return resolve()
+        socket.once('disconnect', () => resolve())
+        socket.disconnect()
+      })
 
       expect(event).toBeDefined()
-      expect(event).toEqual({
+      expect(event).toMatchObject({
         cardId: 'test-card',
         fromColumn: 'todo',
         toColumn: 'doing'

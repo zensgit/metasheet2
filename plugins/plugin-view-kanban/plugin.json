@@ -1,14 +1,23 @@
 {
   "manifestVersion": "2.0.0",
-  "name": "plugin-view-kanban",
-  "version": "0.1.0",
-  "displayName": "Kanban View Plugin",
-  "description": "Provides a Kanban view for records.",
+  "name": "@metasheet/plugin-view-kanban",
+  "version": "1.0.0",
+  "displayName": "看板视图",
+  "description": "提供拖拽式看板视图，适合项目管理和任务跟踪",
   "author": { "name": "MetaSheet" },
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "dist/index.js",
   "capabilities": { "views": ["kanban"] },
-  "permissions": {
-    "http": { "internal": true }
-  }
+  "contributes": {
+    "views": [
+      { "id": "kanban", "name": "看板", "component": "KanbanView" }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "websocket.broadcast",
+    "events.emit"
+  ]
 }

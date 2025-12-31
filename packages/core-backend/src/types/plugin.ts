@@ -498,7 +498,9 @@ export type WebSocketConnectionHandler = (socket: SocketInfo) => void | Promise<
  */
 export interface WebSocketAPI {
   broadcast(event: string, data: unknown): void
+  broadcastTo(room: string, event: string, data: unknown): void
   sendTo(userId: string, event: string, data: unknown): void
+  join(room: string, options: { userId?: string }): void
   onConnection(handler: WebSocketConnectionHandler): void
 }
 

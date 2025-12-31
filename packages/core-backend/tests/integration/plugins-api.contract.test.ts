@@ -3,7 +3,9 @@ import { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 
-describe('GET /api/plugins contract', () => {
+const describeIfPlugins = process.env.SKIP_PLUGINS === 'true' ? describe.skip : describe
+
+describeIfPlugins('GET /api/plugins contract', () => {
   let server: MetaSheetServer
   let baseUrl: string
 

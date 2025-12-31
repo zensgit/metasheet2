@@ -154,6 +154,22 @@ export class BPMNWorkflowEngine extends EventEmitter {
     this.signalSubscriptions = new Map()
   }
 
+  private getDefinitionsRoot(definition: BPMNParsedDefinition): Record<string, unknown> | null {
+    const root = (definition as Record<string, unknown>).definitions
+      ?? (definition as Record<string, unknown>)['bpmn:definitions']
+      ?? (definition as Record<string, unknown>)['bpmn2:definitions']
+    return root && typeof root === 'object' ? root as Record<string, unknown> : null
+  }
+
+  private getProcessList(definition: BPMNParsedDefinition): Array<Record<string, unknown>> {
+    const root = this.getDefinitionsRoot(definition)
+    if (!root) return []
+    const processes = (root as Record<string, unknown>).process
+      ?? (root as Record<string, unknown>)['bpmn:process']
+      ?? (root as Record<string, unknown>)['bpmn2:process']
+    return Array.isArray(processes) ? processes as Array<Record<string, unknown>> : []
+  }
+
   /**
    * Initialize the workflow engine
    */
@@ -202,7 +218,10 @@ export class BPMNWorkflowEngine extends EventEmitter {
       const parsed = await this.parseBPMN(definition.bpmnXml)
 
       // Extract process information
-      const process = parsed.definitions.process[0]
+      const process = this.getProcessList(parsed)[0]
+      if (!process) {
+        throw new Error('No process definition found in BPMN XML')
+      }
       const processKey = process.$.id || definition.key
       const processName = process.$.name || definition.name
 
@@ -220,7 +239,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
           version,
           bpmn_xml: definition.bpmnXml,
           deployment_id: null,
-          is_active: definition.isExecutable !== false
+          is_active: definition.isExecutable !== false,
+          category: definition.category ?? null,
+          tenant_id: definition.tenantId ?? null
         })
         .execute()
 
@@ -264,10 +285,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .values({
           id: instanceId,
           process_definition_id: definition.id,
+          process_definition_key: processKey,
           business_key: businessKey || null,
           parent_process_instance_id: null,
           state: 'ACTIVE',
-          variables: JSON.stringify(variables) as string
+          variables: JSON.stringify(variables) as string,
+          tenant_id: tenantId ?? null
         })
         .execute()
 
@@ -901,7 +924,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    * Find activity definition by ID in BPMN definition
    */
   private findActivity(definition: BPMNParsedDefinition, activityId: string): ActivityDefinition | null {
-    const process = definition.definitions?.process?.[0]
+    const process = this.getProcessList(definition)[0]
     if (!process) return null
 
     // BPMN element types to search
@@ -1056,7 +1079,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private async getSequenceFlow(flowId: string): Promise<BPMNSequenceFlow | null> {
     // Search all process definitions for the sequence flow
     for (const [, definition] of this.processDefinitions) {
-      const process = definition.definitions?.process?.[0]
+      const process = this.getProcessList(definition)[0]
       if (!process) continue
 
       const sequenceFlows = this.findElementsByType(process, 'bpmn:sequenceFlow')
@@ -1593,7 +1616,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
         const processInstance: ProcessInstance = {
           id: instance.id,
           processDefinitionId: instance.process_definition_id,
-          processDefinitionKey: instance.process_definition_id, // Use definition ID as key fallback
+          processDefinitionKey: instance.process_definition_key || instance.process_definition_id,
           businessKey: instance.business_key || undefined,
           state: instance.state as ProcessInstance['state'],
           variables: instance.variables as Record<string, unknown>,
@@ -1636,7 +1659,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    */
   private registerEventSubscriptions(definitionId: string, parsed: BPMNParsedDefinition): void {
     try {
-      const process = parsed.definitions?.process?.[0]
+      const process = this.getProcessList(parsed)[0]
       if (!process) return
 
       // Register message events
@@ -1698,11 +1721,19 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Get latest version of process definition
    */
-  private async getLatestVersion(key: string, _tenantId?: string): Promise<number> {
-    const result = await db
+  private async getLatestVersion(key: string, tenantId?: string): Promise<number> {
+    let query = db
       .selectFrom('bpmn_process_definitions')
       .select('version')
       .where('key', '=', key)
+
+    if (tenantId) {
+      query = query.where('tenant_id', '=', tenantId)
+    } else {
+      query = query.where('tenant_id', 'is', null)
+    }
+
+    const result = await query
       .orderBy('version', 'desc')
       .limit(1)
       .executeTakeFirst()
@@ -1713,12 +1744,20 @@ export class BPMNWorkflowEngine extends EventEmitter {
   /**
    * Get process definition
    */
-  private async getProcessDefinition(key: string, _tenantId?: string): Promise<BPMNDatabaseDefinition | undefined> {
-    const result = await db
+  private async getProcessDefinition(key: string, tenantId?: string): Promise<BPMNDatabaseDefinition | undefined> {
+    let query = db
       .selectFrom('bpmn_process_definitions')
       .selectAll()
       .where('key', '=', key)
       .where('is_active', '=', true)
+
+    if (tenantId) {
+      query = query.where('tenant_id', '=', tenantId)
+    } else {
+      query = query.where('tenant_id', 'is', null)
+    }
+
+    const result = await query
       .orderBy('version', 'desc')
       .limit(1)
       .executeTakeFirst()
@@ -1738,7 +1777,7 @@ export class BPMNWorkflowEngine extends EventEmitter {
    * Execute start events
    */
   private async executeStartEvents(instanceId: string, parsed: BPMNParsedDefinition): Promise<void> {
-    const process = parsed.definitions?.process?.[0]
+    const process = this.getProcessList(parsed)[0]
     if (!process) return
 
     const startEvents = this.findElementsByType(process, 'bpmn:startEvent')

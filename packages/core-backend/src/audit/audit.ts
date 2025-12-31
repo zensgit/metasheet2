@@ -12,14 +12,23 @@ export interface AuditLogOptions {
 }
 
 export async function auditLog(options: AuditLogOptions): Promise<void> {
-  await auditService.logEvent(
-    options.action.toUpperCase(),
-    options.action,
-    {
-      userId: options.actorType === 'user' && options.actorId ? parseInt(options.actorId) : undefined,
-      resourceType: options.resourceType,
-      resourceId: options.resourceId,
-      actionDetails: options.meta
-    }
-  )
+  try {
+    const parsedUserId = options.actorType === 'user' && options.actorId
+      ? Number.parseInt(options.actorId, 10)
+      : undefined
+    const userId = Number.isFinite(parsedUserId) ? parsedUserId : undefined
+    await auditService.logEvent(
+      options.action.toUpperCase(),
+      options.action,
+      {
+        userId,
+        resourceType: options.resourceType,
+        resourceId: options.resourceId,
+        actionDetails: options.meta
+      }
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[Audit] Failed to record audit log: ${message}`)
+  }
 }

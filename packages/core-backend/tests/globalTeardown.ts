@@ -1,6 +1,8 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
+import { poolManager } from '../src/integration/db/connection-pool'
+import { pool } from '../src/db/pg'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -17,5 +19,26 @@ export default async function globalTeardown() {
   // Additional cleanup for potential resource leaks
   if (global.gc) {
     global.gc()
+  }
+
+  try {
+    await poolManager.close()
+  } catch {
+    // ignore pool cleanup errors
+  }
+
+  try {
+    if (pool) {
+      await pool.end()
+    }
+  } catch {
+    // ignore legacy pool cleanup errors
+  }
+
+  const exitTimer = setTimeout(() => {
+    process.exit(process.exitCode ?? 0)
+  }, 100)
+  if (exitTimer.unref) {
+    exitTimer.unref()
   }
 }

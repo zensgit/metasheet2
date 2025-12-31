@@ -215,6 +215,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .unique()
     .execute()
 
+  // Ensure updated_at trigger function exists before creating triggers
+  await sql`
+    CREATE OR REPLACE FUNCTION update_updated_at_column()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+        RETURN NEW;
+    END;
+    $$ language 'plpgsql';
+  `.execute(db)
+
   // Add triggers for updated_at columns
   await sql`
     CREATE TRIGGER update_gantt_tasks_updated_at BEFORE UPDATE ON gantt_tasks

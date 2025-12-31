@@ -176,6 +176,7 @@ class PoolManager {
         // 超时配置
         idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '30000', 10), // 空闲连接超时
         connectionTimeoutMillis: parseInt(process.env.DB_CONNECT_TIMEOUT || '10000', 10), // 连接超时
+        allowExitOnIdle: process.env.NODE_ENV === 'test',
         // Note: acquireTimeoutMillis is not a valid pg Pool option, removing to fix compilation
 
         // SSL配置

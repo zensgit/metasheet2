@@ -29,8 +29,8 @@ describe('WebSocket Rooms - basic flow', () => {
   it('broadcastTo affects only members of the room', async () => {
     if (!baseUrl || !server) return
     // Connect two clients with userIds
-    const a = ioClient(`${baseUrl}?userId=a`, { transports: ['websocket'] })
-    const b = ioClient(`${baseUrl}?userId=b`, { transports: ['websocket'] })
+    const a = ioClient(`${baseUrl}?userId=a`, { transports: ['websocket'], reconnection: false })
+    const b = ioClient(`${baseUrl}?userId=b`, { transports: ['websocket'], reconnection: false })
 
     // Wait for connection
     await Promise.all([
@@ -67,7 +67,12 @@ describe('WebSocket Rooms - basic flow', () => {
     await new Promise(r => setTimeout(r, 100))
     expect(gotB).toBe(false)
 
-    a.close(); b.close()
+    const closeSocket = (socket: ReturnType<typeof ioClient>) => new Promise<void>((resolve) => {
+      if (socket.disconnected) return resolve()
+      socket.once('disconnect', () => resolve())
+      socket.disconnect()
+    })
+
+    await Promise.all([closeSocket(a), closeSocket(b)])
   })
 })
-

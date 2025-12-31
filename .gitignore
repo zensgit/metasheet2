@@ -13,6 +13,7 @@ build/
 .env
 .env.local
 .env.*.local
+.env.real-systems
 
 # IDE
 .vscode/
@@ -40,6 +41,8 @@ coverage/
 *.tmp
 .cache/
 temp/
+.backend.pid
+.core-backend-dev.pid
 
 # Insync sync files
 .~*

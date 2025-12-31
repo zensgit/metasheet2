@@ -39,7 +39,10 @@ export interface ILogger {
 export interface ICollabService {
   initialize(httpServer: any): void; // Using any for HttpServer to avoid direct dependency import in identifiers for now
   broadcast(event: string, data: unknown): void;
+  broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;
+  joinRoom(room: string, userId: string): void;
+  close(): Promise<void>;
   onConnection(handler: (socket: any) => void): void;
 }
 
