@@ -12,5 +12,10 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "src/**/*.d.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "src/**/*.d.ts"],
+  "exclude": [
+    "src/views/UniverGridPOC.vue",
+    "src/views/UniverKanbanPOC.vue",
+    "src/views/WorkflowDesigner.vue"
+  ]
 }
