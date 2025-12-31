@@ -42,3 +42,19 @@ SKIP_PLUGINS=false LOG_LEVEL=info pnpm exec vitest run --config vitest.integrati
 ## Notes
 - Targeted run using `-- tests/integration/kanban-plugin.test.ts` still executes the full integration suite with current config.
 - Full suite no longer hangs when `SKIP_PLUGINS=true`.
+
+## 2025-12-31 Re-run (SKIP_PLUGINS=true)
+```bash
+cd packages/core-backend
+SKIP_PLUGINS=true pnpm exec vitest run --config vitest.integration.config.ts --reporter=dot
+```
+
+Result:
+- Completed with failures (exit code 1).
+- Summary: `Test Files 3 failed | 2 passed | 3 skipped`, `Tests 7 failed | 34 passed | 21 skipped`.
+- Failure pattern:
+  - `snapshot-protection.test.ts` failures with `Connection terminated due to connection timeout` (Postgres not available).
+  - Slow query warnings on Kanban MVP tests (DB pool not healthy).
+
+Next action:
+- Start Postgres (`DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet`) and rerun.
