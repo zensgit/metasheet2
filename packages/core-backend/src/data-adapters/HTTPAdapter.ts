@@ -241,10 +241,8 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
-    try {
-      // Check if it's a registered endpoint
-      const endpointConfig = this.endpoints.get(endpoint)
-
+    const endpointConfig = this.endpoints.get(endpoint)
+    const executeRequest = async (): Promise<QueryResult<T>> => {
       if (endpointConfig) {
         const requestConfig: AxiosRequestConfig = {
           url: endpointConfig.url,
@@ -279,7 +277,6 @@ export class HTTPAdapter extends BaseDataAdapter {
         }
       }
 
-      // Direct endpoint call
       const response = await this.client.get<T>(endpoint, { params: params?.[0] as Record<string, unknown> })
       const data = response.data
 
@@ -290,11 +287,26 @@ export class HTTPAdapter extends BaseDataAdapter {
           columns: this.extractColumns(data)
         }
       }
-    } catch (error) {
-      return {
-        data: [],
-        error: error as Error
+    }
+
+    let lastError: Error | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await executeRequest()
+      } catch (error) {
+        lastError = error as Error
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 && attempt === 0 && this.tokenProvider) {
+          this.tokenProvider.onAuthError?.()
+          continue
+        }
+        break
       }
+    }
+
+    return {
+      data: [],
+      error: lastError
     }
   }
 
@@ -303,7 +315,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
-    try {
+    const executeRequest = async (): Promise<QueryResult<T>> => {
       const method = options?.method || 'GET'
       const url = options?.endpoint || endpoint
 
@@ -367,11 +379,26 @@ export class HTTPAdapter extends BaseDataAdapter {
           columns: this.extractColumns(resultData)
         }
       }
-    } catch (error) {
-      return {
-        data: [],
-        error: error as Error
+    }
+
+    let lastError: Error | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await executeRequest()
+      } catch (error) {
+        lastError = error as Error
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 && attempt === 0 && this.tokenProvider) {
+          this.tokenProvider.onAuthError?.()
+          continue
+        }
+        break
       }
+    }
+
+    return {
+      data: [],
+      error: lastError
     }
   }
 
@@ -380,7 +407,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
-    try {
+    const executeRequest = async (): Promise<QueryResult<T>> => {
       const response = await this.client.post<T>(endpoint, data)
       const responseData = response.data
 
@@ -390,11 +417,26 @@ export class HTTPAdapter extends BaseDataAdapter {
           totalCount: Array.isArray(responseData) ? responseData.length : 1
         }
       }
-    } catch (error) {
-      return {
-        data: [],
-        error: error as Error
+    }
+
+    let lastError: Error | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await executeRequest()
+      } catch (error) {
+        lastError = error as Error
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 && attempt === 0 && this.tokenProvider) {
+          this.tokenProvider.onAuthError?.()
+          continue
+        }
+        break
       }
+    }
+
+    return {
+      data: [],
+      error: lastError
     }
   }
 
@@ -407,7 +449,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
-    try {
+    const executeRequest = async (): Promise<QueryResult<T>> => {
       // For REST APIs, typically update by ID
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
@@ -424,11 +466,26 @@ export class HTTPAdapter extends BaseDataAdapter {
           totalCount: Array.isArray(responseData) ? responseData.length : 1
         }
       }
-    } catch (error) {
-      return {
-        data: [],
-        error: error as Error
+    }
+
+    let lastError: Error | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await executeRequest()
+      } catch (error) {
+        lastError = error as Error
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 && attempt === 0 && this.tokenProvider) {
+          this.tokenProvider.onAuthError?.()
+          continue
+        }
+        break
       }
+    }
+
+    return {
+      data: [],
+      error: lastError
     }
   }
 
@@ -437,7 +494,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
-    try {
+    const executeRequest = async (): Promise<QueryResult<T>> => {
       // For REST APIs, typically delete by ID
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
@@ -454,11 +511,26 @@ export class HTTPAdapter extends BaseDataAdapter {
           totalCount: Array.isArray(responseData) ? responseData.length : 1
         }
       }
-    } catch (error) {
-      return {
-        data: [],
-        error: error as Error
+    }
+
+    let lastError: Error | undefined
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await executeRequest()
+      } catch (error) {
+        lastError = error as Error
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 && attempt === 0 && this.tokenProvider) {
+          this.tokenProvider.onAuthError?.()
+          continue
+        }
+        break
       }
+    }
+
+    return {
+      data: [],
+      error: lastError
     }
   }
 

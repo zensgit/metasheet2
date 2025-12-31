@@ -42,6 +42,41 @@ Entry points:
 
 - PLM UI integration:
   - Report: `docs/verification-plm-ui-20251231_1540.md`
+  - Notes: includes substitutes verification and token retry behavior (query/select/insert/update/delete)
+
+- Univer POC build (deps restored):
+  - Report: `docs/verification-univer-poc-20251231_2233.md`
+
+- Univer POC verify (mock mode):
+  - Report: `docs/verification-univer-poc-20251231_2246.md`
+  - Artifact: `artifacts/univer-poc/verify-univer-all.json`
+
+- Univer POC verify (core mode):
+  - Report: `docs/verification-univer-poc-20251231_2251.md`
+  - Artifact: `artifacts/univer-poc/verify-univer-all.json`
+
+- Univer POC verify (core mode, fresh DB):
+  - Report: `docs/verification-univer-poc-20251231_2310.md`
+  - Artifact: `artifacts/univer-poc/verify-univer-all.json`
+
+- Univer POC UI routes (dev-only):
+  - Report: `docs/verification-univer-poc-ui-20251231_2348.md`
+
+- Univer UI smoke (manual):
+  - Report: `docs/verification-univer-ui-smoke-20260101_0104.md`
+
+- Univer UI smoke (Playwright):
+  - Run: `pnpm verify:univer-ui-smoke`
+  - Script: `scripts/verify-univer-ui-smoke.mjs`
+  - Report: `docs/verification-univer-ui-smoke-20260101_0110.md`
+
+- Univer POC UI backend connectivity:
+  - Report: `docs/verification-univer-poc-ui-20260101_0004.md`
+
+- Univer dev proxy fallback:
+  - Report: `docs/verification-univer-dev-proxy-20260101_0055.md`
+  - Script: `scripts/verify-univer-proxy.sh`
+  - Report: `docs/verification-univer-proxy-20260101_0057.md`
 
 - Federation config persistence (PLM/Athena):
   - Script: `scripts/verify_federation_config.sh`
@@ -111,6 +146,7 @@ Entry points:
 - Univer full suite:
   - Run: `bash scripts/verify-univer-all.sh`
   - Outputs under `artifacts/univer-poc/` (see `verification-*.md/json` files)
+  - Latest report: `docs/verification-univer-all-20260101_0103.md`
   - Report: `docs/verification-univer-all-2025-12-27.md`
   - Core mode attempt (blocked in automation): `docs/verification-univer-all-core-2025-12-27.md`
   - Core mode + windowing: `docs/verification-univer-all-core-windowing-2025-12-27.md`

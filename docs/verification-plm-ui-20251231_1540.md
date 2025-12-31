@@ -9,6 +9,7 @@
   - `src/views/UniverGridPOC.vue`
   - `src/views/UniverKanbanPOC.vue`
   - `src/views/WorkflowDesigner.vue`
+- Added a one-time retry on 401 in `HTTPAdapter` (`query`/`select`/`insert`/`update`/`delete`) to refresh bearer tokens before returning errors.
 
 ## Manual check (optional)
 ```bash
@@ -62,18 +63,46 @@ Pass (vue-tsc + vite build).
 
 ## Validation run (2025-12-31)
 - PLM token obtained via `POST /api/v1/auth/login` (admin/admin, tenant-1/org-1).
+- Cleared stale PLM tokens in `system_configs` (`plm.apiToken`, `plm.token`, `plm.authToken`) and reconnected federation system.
 - ItemType list confirmed via `GET /api/v1/meta/item-types` (Part exists; no Assembly type).
 - Existing sample Part ID resolved via `GET /api/v1/search/?q=&item_type=Part&limit=5`.
 
 Sample IDs used:
 - Part: `aa67a635-533f-4a61-a116-3801dbde7028`
 - Compare right: `1cffed2e-0ee7-42b4-9562-8132928a0c74`
+- BOM line (relationship): `a28d03e7-d6f2-409e-b0b4-ffae504c4272`
 
 API results (via federation):
 - Product detail (Part): `ok: true`, fields returned (name/partNumber/status/itemType/properties).
-- BOM tree: `ok: true`, `items: []` (no children in this dataset).
+- BOM tree: `ok: true`, 1 child line from `GET /api/v1/bom/{parent_id}/tree`.
 - Where-used: `ok: true`, `parents: []`.
 - BOM compare: `ok: true`, summary all zeros.
-- Substitutes: not verified (no bomLineId available in dataset).
+- Substitutes: `ok: true`, `count: 1` (verified via `/api/federation/plm/query` with bomLineId).
+
+## UI verification (MCP, 2025-12-31)
+Dev server started with API base override (or `apps/web/.env.local` set to `VITE_API_BASE=http://127.0.0.1:7778`):
+```bash
+pnpm --filter @metasheet/web dev
+```
+
+Steps:
+1. Open `http://127.0.0.1:8899/plm`.
+2. Set `localStorage.auth_token` using `/api/auth/dev-token`.
+3. Fill IDs and run:
+   - 产品详情（Part ID `aa67a635-533f-4a61-a116-3801dbde7028`）
+   - BOM（父件同上）
+   - Where-used（子件 ID `1cffed2e-0ee7-42b4-9562-8132928a0c74`）
+   - BOM 对比（left/right 同上）
+   - 替代件（BOM Line ID `a28d03e7-d6f2-409e-b0b4-ffae504c4272`）
+
+Result:
+- Product detail rendered (name/part number/state).
+- BOM table shows 1 line (RPC Part, qty 2, find #10).
+- Where-used shows 1 parent with relationship id.
+- BOM compare shows counts (新增 0 / 删除 1 / 变更 0).
+- Substitutes shows 1 item (RPC Part).
+
+Note:
+- Screenshot capture via MCP timed out twice; UI state verified via accessibility snapshot.
 
 Note: previously provided item IDs were not present in the current PLM dataset; verification used the first available Part from search.
