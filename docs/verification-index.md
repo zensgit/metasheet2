@@ -108,6 +108,9 @@ Entry points:
 - PLM (Yuantus) AML + BOM verification:
   - Report: `docs/verification-plm-yuantus-aml-bom-20260101_2252.md`
 
+- PLM (Yuantus) federation query verification:
+  - Report: `docs/verification-plm-yuantus-federation-20260101_2312.md`
+
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
 
