@@ -99,6 +99,9 @@ Entry points:
 - Athena real API verification:
   - Report: `docs/verification-athena-real-20251231_1810.md`
 
+- PLM (Yuantus) real API verification:
+  - Report: `docs/verification-plm-yuantus-real-20260101_1253.md`
+
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
 
