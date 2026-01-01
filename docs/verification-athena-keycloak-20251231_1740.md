@@ -37,3 +37,12 @@ curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${TOKEN}" http:
     1) Set Keycloak `KC_HOSTNAME=keycloak` and restart, or
     2) Override ECM core env: `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=http://localhost:8080/realms/ecm`.
 - After aligning, re-run `/api/v1/users` with the same token.
+
+## Re-validation (2025-12-31 17:56 CST)
+Applied fix:
+- Added `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=http://localhost:8080/realms/ecm`
+  to `Athena/docker-compose.yml` (ecm-core env), then restarted `athena-ecm-core-1`.
+
+Results:
+- ECM core health: `200`
+- `/api/v1/users`: `200` with `Authorization: Bearer <admin token>`
