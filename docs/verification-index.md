@@ -96,6 +96,9 @@ Entry points:
 - Athena Keycloak auth smoke:
   - Report: `docs/verification-athena-keycloak-20251231_1740.md`
 
+- Athena real API verification:
+  - Report: `docs/verification-athena-real-20251231_1810.md`
+
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
 
