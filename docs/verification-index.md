@@ -114,6 +114,9 @@ Entry points:
 - PLM (Yuantus) BOM non-empty verification:
   - Report: `docs/verification-plm-yuantus-bom-nonempty-20260101_2332.md`
 
+- UI verification via MCP:
+  - Report: `docs/verification-ui-mcp-access-20260101_2353.md`
+
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
 
