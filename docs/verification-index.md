@@ -74,6 +74,9 @@ Entry points:
 - Univer POC UI backend connectivity:
   - Report: `docs/verification-univer-poc-ui-20260101_0004.md`
 
+- UI dev proxy smoke (backend + web):
+  - Report: `docs/verification-ui-dev-proxy-20260101_1259.md`
+
 - Univer dev proxy fallback:
   - Report: `docs/verification-univer-dev-proxy-20260101_0055.md`
   - Script: `scripts/verify-univer-proxy.sh`
