@@ -120,6 +120,9 @@ Entry points:
 - PLM UI API verification:
   - Report: `docs/verification-plm-ui-api-20260102_0012.md`
 
+- PLM (Yuantus) BOM rollback verification:
+  - Report: `docs/verification-plm-yuantus-bom-rollback-20260102_0018.md`
+
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
 
