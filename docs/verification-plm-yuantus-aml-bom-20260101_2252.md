@@ -53,3 +53,9 @@ curl --max-time 10 -s -o /dev/null -w "bom-tree:%{http_code}\\n" \
 ## Notes
 - The earlier timeouts were resolved by using a fresh token from the same host and a valid `id` from search results.
 - If timeouts recur, verify token signature (`Invalid signature` indicates a mismatched token/secret) and avoid stale tokens.
+- Recommended runtime env for auto-refresh:
+  - `PLM_API_MODE=yuantus`
+  - `PLM_TENANT_ID=tenant-1`
+  - `PLM_ORG_ID=org-1`
+  - `PLM_USERNAME=admin`
+  - `PLM_PASSWORD=admin`
