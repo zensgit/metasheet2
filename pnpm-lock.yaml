@@ -123,6 +123,9 @@ importers:
       '@types/bcryptjs':
         specifier: ^3.0.0
         version: 3.0.0
+      '@wendellhu/redi':
+        specifier: ^1.1.0
+        version: 1.1.0
       ajv:
         specifier: ^8.12.0
         version: 8.17.1
@@ -1359,6 +1362,15 @@ packages:
 
   '@vueuse/shared@9.13.0':
     resolution: {integrity: sha512-UrnhU+Cnufu4S6JLCPZnkWh0WwZGUp72ktOF2DFptMlOs3TOdVv8xJN53zhHGARmVOsz5KqOls09+J1NR6sBKw==}
+
+  '@wendellhu/redi@1.1.0':
+    resolution: {integrity: sha512-LKgJfzE9TxBi6Y63aDHcNGo0ALe0TOEb1gP1z6lOvnrVRcLylfVtq86ISxv1VHbx7LuF2Fc1oHEzIrJ44Kbufw==}
+    engines: {node: '>=22.12.0'}
+    peerDependencies:
+      react: '>=16.8.0'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   abbrev@1.1.1:
     resolution: {integrity: sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q==}
@@ -4574,6 +4586,8 @@ snapshots:
     transitivePeerDependencies:
       - '@vue/composition-api'
       - vue
+
+  '@wendellhu/redi@1.1.0': {}
 
   abbrev@1.1.1: {}
 

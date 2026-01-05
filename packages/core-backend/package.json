@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@types/bcryptjs": "^3.0.0",
+    "@wendellhu/redi": "^1.1.0",
     "ajv": "^8.12.0",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.3",
