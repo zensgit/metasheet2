@@ -65,6 +65,8 @@ export interface ApprovalQueryOptions {
   status?: string
   limit?: number
   offset?: number
+  productId?: string
+  requesterId?: string
 }
 
 export interface PLMDrawing {
@@ -113,6 +115,7 @@ export interface BOMCompareParams {
   maxLevels?: number
   lineKey?: string
   compareMode?: string
+  includeChildFields?: boolean
   includeSubstitutes?: boolean
   includeEffectivity?: boolean
   includeRelationshipProps?: string[]
@@ -202,6 +205,9 @@ export interface PLMDocument {
   file_size?: number
   mime_type?: string
   is_production_doc?: boolean
+  preview_url?: string
+  download_url?: string
+  metadata?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -221,6 +227,13 @@ interface PLMDocumentRaw {
   updated_at?: string
   create_date?: string
   write_date?: string
+}
+
+export interface DocumentQueryOptions {
+  limit?: number
+  offset?: number
+  role?: string
+  includeMetadata?: boolean
 }
 
 type PLMApiMode = 'legacy' | 'yuantus'
@@ -279,6 +292,42 @@ interface YuantusBomRelationship {
 interface YuantusBomChild {
   child: YuantusBomNode
   relationship: YuantusBomRelationship
+}
+
+interface YuantusItemFile {
+  id?: string
+  file_id?: string
+  filename?: string
+  file_role?: string
+  description?: string
+  file_type?: string
+  file_size?: number
+  document_type?: string
+  document_version?: string
+  preview_url?: string
+  download_url?: string
+}
+
+interface YuantusFileMetadata {
+  id?: string
+  filename?: string
+  file_type?: string
+  mime_type?: string
+  file_size?: number
+  document_type?: string
+  document_version?: string
+  created_at?: string
+}
+
+interface YuantusEco {
+  id: string
+  name?: string
+  eco_type?: string
+  product_id?: string
+  state?: string
+  created_by_id?: string | number
+  created_at?: string
+  updated_at?: string
 }
 
 export class PLMAdapter extends HTTPAdapter {
@@ -380,6 +429,20 @@ export class PLMAdapter extends HTTPAdapter {
       this.yuantusItemType = itemType
     }
 
+    if (this.apiMode === 'yuantus' && !this.mockMode) {
+      if (this.yuantusCredentials) {
+        const needsRefresh = !this.authToken || this.authTokenExpiresAt <= Date.now() + this.authBufferMs
+        if (needsRefresh) {
+          const refreshed = await this.fetchYuantusToken()
+          if (!refreshed) {
+            this.logger.warn('PLM Yuantus login failed; check PLM_USERNAME/PLM_PASSWORD/PLM_TENANT_ID/PLM_ORG_ID')
+          }
+        }
+      } else if (this.authToken && this.authTokenExpiresAt <= Date.now() + this.authBufferMs) {
+        this.logger.warn('PLM Yuantus token near expiry but no credentials available for refresh')
+      }
+    }
+
     if (this.apiMode === 'yuantus' && (this.authToken || this.yuantusCredentials)) {
       this.setTokenProvider({
         getToken: async () => this.getYuantusToken(),
@@ -401,6 +464,16 @@ export class PLMAdapter extends HTTPAdapter {
 
   private withTrailingSlash(path: string): string {
     return path.endsWith('/') ? path : `${path}/`
+  }
+
+  private resolveUrl(path?: string): string | undefined {
+    if (!path) return undefined
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path
+    }
+    const base = String(this.config.connection.baseURL || this.config.connection.url || '')
+    if (!base) return path
+    return `${base.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
   }
 
   private resolveApiMode(
@@ -447,6 +520,9 @@ export class PLMAdapter extends HTTPAdapter {
   private cacheAuthToken(token: string): void {
     this.authToken = token
     this.authTokenExpiresAt = this.getTokenExpiry(token)
+    const headers = (this.config.connection.headers as Record<string, string> | undefined) || {}
+    headers.Authorization = `Bearer ${token}`
+    this.config.connection.headers = headers
   }
 
   private invalidateAuthToken(): void {
@@ -654,6 +730,23 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private mapDocumentFields(raw: PLMDocumentRaw): PLMDocument {
+    return {
+      id: String(raw.id),
+      name: raw.name || '',
+      engineering_code: raw.engineering_code,
+      engineering_revision: raw.engineering_revision,
+      document_type: raw.document_type || 'other',
+      description: raw.description,
+      engineering_state: raw.engineering_state || 'unknown',
+      file_size: raw.file_size,
+      mime_type: raw.mime_type,
+      is_production_doc: raw.is_production_doc,
+      created_at: raw.created_at || raw.create_date || new Date().toISOString(),
+      updated_at: raw.updated_at || raw.write_date || new Date().toISOString(),
+    }
+  }
+
   private mapYuantusProductFields(hit: YuantusSearchHit): PLMProduct {
     const props = hit.properties || {}
     const name = String(hit.name || props.name || props.item_name || '')
@@ -661,6 +754,8 @@ export class PLMAdapter extends HTTPAdapter {
     const version = String(props.version || props.revision || props.rev || '')
     const status = String(hit.state || props.state || '')
     const description = (hit.description || props.description) ? String(hit.description || props.description) : undefined
+    const createdAt = this.toIsoString(hit.created_at)
+    const updatedAt = this.toIsoString(hit.updated_at) || createdAt
 
     return {
       id: String(hit.id),
@@ -669,8 +764,8 @@ export class PLMAdapter extends HTTPAdapter {
       version,
       status,
       description,
-      created_at: this.toIsoString(hit.created_at),
-      updated_at: this.toIsoString(hit.updated_at),
+      created_at: createdAt,
+      updated_at: updatedAt,
     }
   }
 
@@ -682,7 +777,7 @@ export class PLMAdapter extends HTTPAdapter {
     const status = String(item.state || props.state || '')
     const description = props.description ? String(props.description) : undefined
     const createdAt = this.toIsoString(item.created_on || props.created_at || props.created_on || props.create_date)
-    const updatedAt = this.toIsoString(item.modified_on || props.updated_at || props.modified_on || props.write_date)
+    const updatedAt = this.toIsoString(item.modified_on || props.updated_at || props.modified_on || props.write_date) || createdAt
 
     return {
       id: String(item.id),
@@ -698,6 +793,137 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private async fetchYuantusSearchHit(
+    itemId: string,
+    itemType?: string
+  ): Promise<YuantusSearchHit | null> {
+    if (!itemId) return null
+    const params: Record<string, unknown> = {
+      q: itemId,
+      limit: 5,
+    }
+    if (itemType) {
+      params.item_type = itemType
+    }
+
+    try {
+      const result = await this.query<YuantusSearchResponse>('/api/v1/search/', [params])
+      const payload = result.data[0]
+      const hits = payload?.hits ?? []
+      const match = hits.find((hit) => String(hit.id) === String(itemId))
+      return match || null
+    } catch (_err) {
+      return null
+    }
+  }
+
+  private mergeYuantusProductDetail(
+    base: PLMProduct,
+    hit: YuantusSearchHit
+  ): PLMProduct {
+    const hitProps = hit.properties || {}
+    const baseProps = base.properties || {}
+    const mergedProps = { ...hitProps, ...baseProps }
+    const baseNameIsId = base.name === base.id
+    const hitName = hit.name || hitProps.name || hitProps.item_name
+    const name = (!base.name || baseNameIsId) && hitName ? String(hitName) : base.name
+    const code = base.code || String(
+      hit.item_number || hitProps.item_number || hitProps.code || hitProps.internal_reference || ''
+    )
+    const version = base.version || String(hitProps.version || hitProps.revision || hitProps.rev || '')
+    const status = base.status || String(hit.state || hitProps.state || '')
+    const description = base.description ?? (
+      hit.description || hitProps.description ? String(hit.description || hitProps.description) : undefined
+    )
+    const createdAt = base.created_at ? base.created_at : this.toIsoString(hit.created_at)
+    const updatedAt = base.updated_at ? base.updated_at : (this.toIsoString(hit.updated_at) || createdAt)
+
+    return {
+      ...base,
+      name: name || base.name,
+      code: code || base.code,
+      version: version || base.version,
+      status: status || base.status,
+      description,
+      itemType: base.itemType || hit.item_type_id,
+      properties: mergedProps,
+      created_at: createdAt,
+      updated_at: updatedAt,
+    }
+  }
+
+  private mapYuantusDocumentFields(entry: YuantusItemFile, metadata?: YuantusFileMetadata | null): PLMDocument {
+    const fileId = String(entry.file_id || entry.id || '')
+    const filename = metadata?.filename || entry.filename || fileId
+    const documentType = String(metadata?.document_type || entry.document_type || entry.file_type || 'other')
+    const documentVersion = metadata?.document_version || entry.document_version
+    const fileSize = this.toNumber(metadata?.file_size ?? entry.file_size, 0)
+    const mimeType = metadata?.mime_type || entry.file_type
+    const createdAt = this.toIsoString(metadata?.created_at) || new Date().toISOString()
+    const fileRole = entry.file_role ? String(entry.file_role) : ''
+    const previewUrl = this.resolveUrl(entry.preview_url)
+    const downloadUrl = this.resolveUrl(entry.download_url)
+
+    return {
+      id: fileId || String(entry.id || ''),
+      name: filename || fileId,
+      engineering_code: fileId || undefined,
+      engineering_revision: documentVersion || undefined,
+      document_type: documentType,
+      description: entry.description,
+      engineering_state: fileRole || 'unknown',
+      file_size: fileSize,
+      mime_type: mimeType,
+      is_production_doc: fileRole === 'production' || fileRole === 'primary',
+      preview_url: previewUrl,
+      download_url: downloadUrl,
+      metadata: {
+        file_id: fileId || entry.id,
+        file_role: fileRole || undefined,
+        document_version: documentVersion || undefined,
+        preview_url: previewUrl,
+        download_url: downloadUrl,
+      },
+      created_at: createdAt,
+      updated_at: createdAt,
+    }
+  }
+
+  private mapYuantusApprovalStatus(state?: string): ApprovalRequest['status'] {
+    const normalized = (state || '').toLowerCase()
+    if (['approved', 'done'].includes(normalized)) {
+      return 'approved'
+    }
+    if (['rejected', 'canceled', 'cancelled'].includes(normalized)) {
+      return 'rejected'
+    }
+    return 'pending'
+  }
+
+  private mapYuantusEcoApproval(eco: YuantusEco): ApprovalRequest {
+    const requesterId = eco.created_by_id ? String(eco.created_by_id) : 'unknown'
+    return {
+      id: eco.id,
+      request_type: eco.eco_type || 'eco',
+      title: eco.name || eco.id,
+      requester_id: requesterId,
+      requester_name: requesterId,
+      status: this.mapYuantusApprovalStatus(eco.state),
+      created_at: this.toIsoString(eco.created_at) || new Date().toISOString(),
+      product_id: eco.product_id,
+    }
+  }
+
+  private async fetchYuantusFileMetadata(fileId: string): Promise<YuantusFileMetadata | null> {
+    if (!fileId) return null
+    try {
+      const result = await this.query<YuantusFileMetadata>(`/api/v1/file/${fileId}`)
+      return result.data[0] ?? null
+    } catch (_err) {
+      return null
+    }
+  }
+
   async getProductById(id: string, options?: { itemType?: string }): Promise<PLMProduct | null> {
     if (this.mockMode) {
       const products = this.getMockProducts().data;
@@ -710,11 +936,72 @@ export class PLMAdapter extends HTTPAdapter {
         data: { type: itemType, action: 'get', id },
       })
       const item = result.data[0]
-      return item ? this.mapYuantusItemFields(item) : null
+      if (!item) return null
+      const mapped = this.mapYuantusItemFields(item)
+      if (mapped.created_at && mapped.updated_at) {
+        return mapped
+      }
+      const hit = await this.fetchYuantusSearchHit(id, itemType)
+      return hit ? this.mergeYuantusProductDetail(mapped, hit) : mapped
     }
     const result = await this.select<PLMProductRaw>(`${this.productsPath()}${id}`)
     if (result.data.length === 0) return null
     return this.mapProductFields(result.data[0])
+  }
+
+  async getProductDocuments(
+    productId: string,
+    options?: DocumentQueryOptions
+  ): Promise<QueryResult<PLMDocument>> {
+    if (this.mockMode) {
+      const mockDocs: PLMDocument[] = [
+        {
+          id: 'doc-1',
+          name: 'Spec.pdf',
+          document_type: 'specification',
+          engineering_state: 'released',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]
+      return { data: mockDocs, metadata: { totalCount: mockDocs.length } }
+    }
+
+    if (this.apiMode === 'yuantus') {
+      const params: Record<string, unknown> = {}
+      if (options?.role) params.role = options.role
+
+      const result = await this.query<YuantusItemFile>(`/api/v1/file/item/${productId}`, [params])
+      const includeMetadata = options?.includeMetadata !== false
+      const mapped = await Promise.all(
+        result.data.map(async (entry) => {
+          const fileId = String(entry.file_id || entry.id || '')
+          const metadata = includeMetadata ? await this.fetchYuantusFileMetadata(fileId) : null
+          return this.mapYuantusDocumentFields(entry, metadata)
+        })
+      )
+      const offset = options?.offset ?? 0
+      const limit = options?.limit
+      const sliced = typeof limit === 'number' ? mapped.slice(offset, offset + limit) : mapped.slice(offset)
+
+      return {
+        data: sliced,
+        metadata: { totalCount: mapped.length },
+        error: result.error,
+      }
+    }
+
+    const params: Record<string, unknown> = { product_id: productId }
+    if (options?.limit) params.limit = options.limit
+    if (options?.offset) params.skip = options.offset
+    const result = await this.select<PLMDocumentRaw>(this.documentsPath(), { params })
+    const mapped = result.data.map(raw => this.mapDocumentFields(raw))
+
+    return {
+      data: mapped,
+      metadata: result.metadata,
+      error: result.error,
+    }
   }
 
   async getProductBOM(productId: string): Promise<QueryResult<BOMItem>> {
@@ -737,6 +1024,43 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: items, metadata: { totalCount: items.length }, error: result.error }
     }
     return this.query<BOMItem>(`/api/products/${productId}/bom`)
+  }
+
+  async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {
+    if (this.mockMode) {
+      return {
+        data: [],
+        metadata: { totalCount: 0 },
+      }
+    }
+
+    if (this.apiMode === 'yuantus') {
+      const params: Record<string, unknown> = {}
+      if (options?.productId) params.product_id = options.productId
+      if (options?.requesterId) params.created_by_id = options.requesterId
+      if (options?.limit) params.limit = options.limit
+      if (options?.offset) params.offset = options.offset
+
+      const result = await this.query<YuantusEco>('/api/v1/eco', [params])
+      const filtered = options?.status
+        ? result.data.filter((eco) => this.mapYuantusApprovalStatus(eco.state) === options.status)
+        : result.data
+      const mapped = filtered.map((eco) => this.mapYuantusEcoApproval(eco))
+
+      return {
+        data: mapped,
+        metadata: { totalCount: mapped.length },
+        error: result.error,
+      }
+    }
+
+    const params: Record<string, unknown> = {}
+    if (options?.status) params.status = options.status
+    if (options?.requesterId) params.user_id = options.requesterId
+    if (options?.limit) params.limit = options.limit
+    if (options?.offset) params.skip = options.offset
+
+    return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
   }
 
   async getWhereUsed(
@@ -797,6 +1121,9 @@ export class PLMAdapter extends HTTPAdapter {
 
     if (params.lineKey) queryParams.line_key = params.lineKey
     if (params.compareMode) queryParams.compare_mode = params.compareMode
+    if (typeof params.includeChildFields === 'boolean') {
+      queryParams.include_child_fields = params.includeChildFields
+    }
     if (typeof params.includeSubstitutes === 'boolean') {
       queryParams.include_substitutes = params.includeSubstitutes
     }
@@ -882,6 +1209,15 @@ export class PLMAdapter extends HTTPAdapter {
         data: [],
         metadata: { totalCount: 0 },
       }
+    }
+
+    if (this.apiMode === 'yuantus') {
+      return this.getApprovals({
+        status,
+        limit: options?.limit,
+        offset: options?.offset,
+        requesterId: userId,
+      })
     }
 
     const params: Record<string, unknown> = {

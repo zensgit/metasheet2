@@ -1,0 +1,101 @@
+{
+  "summary": {
+    "strict": false,
+    "detail": {
+      "ok": true
+    },
+    "products": {
+      "count": 1
+    },
+    "documents": {
+      "count": 1
+    },
+    "approvals": {
+      "count": 0
+    }
+  },
+  "detail": {
+    "ok": true,
+    "data": {
+      "id": "4a826410-120b-40b3-8e8a-b246f56fdb05",
+      "name": "\u6d69\u8fb0CAD\u96f6\u4ef6",
+      "partNumber": "HC-1767490220",
+      "status": "Draft",
+      "revision": "A",
+      "createdAt": "2026-01-04T01:30:21",
+      "updatedAt": "2026-01-04T01:30:21",
+      "code": "HC-1767490220",
+      "version": "A",
+      "description": "\u6d69\u8fb0CAD\u96f6\u4ef6",
+      "itemType": "Part",
+      "properties": {
+        "item_number": "HC-1767490220",
+        "description": "\u6d69\u8fb0CAD\u96f6\u4ef6",
+        "name": "\u6d69\u8fb0CAD\u96f6\u4ef6",
+        "revision": "A",
+        "state": "Draft"
+      }
+    }
+  },
+  "products": {
+    "ok": true,
+    "data": {
+      "items": [
+        {
+          "id": "4a826410-120b-40b3-8e8a-b246f56fdb05",
+          "name": "\u6d69\u8fb0CAD\u96f6\u4ef6",
+          "partNumber": "HC-1767490220",
+          "status": "Draft",
+          "revision": "A",
+          "createdAt": "2026-01-04T01:30:21",
+          "updatedAt": "2026-01-04T01:30:21",
+          "code": "HC-1767490220",
+          "version": "A",
+          "description": "\u6d69\u8fb0CAD\u96f6\u4ef6"
+        }
+      ],
+      "total": 1,
+      "limit": 100,
+      "offset": 0
+    }
+  },
+  "documents": {
+    "ok": true,
+    "data": {
+      "productId": "4a826410-120b-40b3-8e8a-b246f56fdb05",
+      "items": [
+        {
+          "id": "3ae1c647-1cc7-4098-b20a-decb85a27b7b",
+          "name": "yuantus_cad_auto_part_1767490220.dwg",
+          "engineering_code": "3ae1c647-1cc7-4098-b20a-decb85a27b7b",
+          "document_type": "2d",
+          "description": null,
+          "engineering_state": "native_cad",
+          "file_size": 84,
+          "mime_type": "image/vnd.dwg",
+          "is_production_doc": false,
+          "download_url": "http://127.0.0.1:7910/api/v1/file/3ae1c647-1cc7-4098-b20a-decb85a27b7b/download",
+          "metadata": {
+            "file_id": "3ae1c647-1cc7-4098-b20a-decb85a27b7b",
+            "file_role": "native_cad",
+            "download_url": "http://127.0.0.1:7910/api/v1/file/3ae1c647-1cc7-4098-b20a-decb85a27b7b/download"
+          },
+          "created_at": "2026-01-04T01:30:21",
+          "updated_at": "2026-01-04T01:30:21"
+        }
+      ],
+      "total": 1,
+      "limit": 100,
+      "offset": 0
+    }
+  },
+  "approvals": {
+    "ok": true,
+    "data": {
+      "items": [],
+      "total": 0,
+      "limit": 100,
+      "offset": 0
+    }
+  }
+}

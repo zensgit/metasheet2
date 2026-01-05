@@ -35,6 +35,8 @@
 | [DATA_SOURCE_ADAPTERS.md](./DATA_SOURCE_ADAPTERS.md) | 适配器架构 |
 | [plm-integration-design.md](./plm-integration-design.md) | PLM 集成设计 |
 | [yuantus-plm-connection.md](./yuantus-plm-connection.md) | Yuantus 接口与鉴权 |
+| [PLM_PRODUCT_DETAIL_MAPPING.md](./PLM_PRODUCT_DETAIL_MAPPING.md) | PLM 产品详情映射 |
+| [PLM_DOCUMENTS_APPROVALS_MAPPING.md](./PLM_DOCUMENTS_APPROVALS_MAPPING.md) | PLM 文档与审批映射 |
 
 ---
 
@@ -68,6 +70,8 @@
 - `scripts/test-athena-complete.sh` - Athena API 验证
 - `scripts/test-formdata-upload.sh` - FormData 上传测试
 - `scripts/verify-adapter-mapping.cjs` - 映射验证
+- `scripts/verify-plm-field-mapping.sh` - PLM field mapping verification (`--strict` treats warnings as errors)
+- `scripts/verify-plm-ui-regression.sh` - PLM UI regression (search -> detail -> BOM tools)
 - `scripts/mock-api-server.cjs` - Mock 服务器
 
 ---

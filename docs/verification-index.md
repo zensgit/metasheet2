@@ -9,7 +9,11 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2025-12-28.md`
+  - Report: `docs/verification-summary-2026-01-05.md`
+  - Previous: `docs/verification-summary-2025-12-28.md`
+
+- Core backend typecheck + runtime attempt:
+  - Report: `docs/verification-core-backend-typecheck-20260105_1553.md`
 
 - Comments smoke (API + UI):
   - Run: `pnpm verify:comments`
@@ -39,11 +43,86 @@ Entry points:
   - Connection notes: `docs/yuantus-plm-connection.md`
 
 - PLM product detail mapping:
-  - Report: `docs/verification-plm-product-detail-20251231_1535.md`
+  - Report: `docs/verification-plm-product-detail-20260104_1132.md`
+- PLM adapter mapping (product/docs/approvals):
+  - Report: `docs/verification-plm-adapter-mapping-20260104_1559.md`
+- PLM field mapping API verification:
+  - Script: `scripts/verify-plm-field-mapping.sh`
+  - Report: `docs/verification-plm-field-mapping-api-20260105_150732.md`
+  - Report: `docs/verification-plm-field-mapping-api-20260105_062050.md`
+  - Report: `docs/verification-plm-field-mapping-api-20260105_062646.md`
+  - Artifact: `artifacts/plm-field-mapping-api-20260105_150732.json`
+  - Artifact: `artifacts/plm-field-mapping-api-20260105_062032.json`
+  - Artifact: `artifacts/plm-field-mapping-api-20260105_062646.json`
+
+- PLM documents/approvals backend mapping:
+  - Report: `docs/verification-plm-docs-approvals-backend-20260101_0201.md`
+
+- PLM documents/approvals UI:
+  - Report: `docs/verification-plm-docs-approvals-ui-20260101_0203.md`
+
+- PLM documents/approvals federation:
+  - Script: `scripts/verify-plm-docs-approvals.sh`
+  - Report: `docs/verification-plm-docs-approvals-federation-20260101_1301.md`
+  - Report: `docs/verification-plm-docs-approvals-federation-20260105_062050.md`
+
+- PLM CAD batch import:
+  - Script: `scripts/import-plm-cad-files.sh`
+  - Report: `docs/verification-plm-cad-import-20260101_1212.md`
+  - Artifact: `artifacts/plm-cad-import-20260101_1210.json`
+
+- PLM CAD duplicate cleanup:
+  - Script: `scripts/cleanup-plm-duplicate-parts.py`
+  - Report: `docs/verification-plm-cad-duplicate-cleanup-20260101_1257.md`
+  - Artifact: `artifacts/plm-cad-duplicate-cleanup-20260101_1256.json`
+
+- PLM CAD conversion (preview + geometry):
+  - Script: `scripts/verify-plm-cad-conversion.sh`
+  - Report: `docs/verification-plm-cad-conversion-20260101_1319.md`
+  - Artifact: `artifacts/plm-cad-conversion-20260101_1319.json`
+
+- PLM CADGF 2D pipeline (DWG/DXF):
+  - Report: `docs/verification-plm-cadgf-2d-conversion-20260101_1325.md`
 
 - PLM UI integration:
   - Report: `docs/verification-plm-ui-20251231_1540.md`
   - Notes: includes substitutes verification and token retry behavior (query/select/insert/update/delete)
+- PLM UI update (updatedAt fallback):
+  - Report: `docs/verification-plm-ui-20260104_1220.md`
+- PLM UI verification (product + docs):
+  - Report: `docs/verification-plm-ui-20260105_174643.md`
+  - Artifact: `artifacts/plm-ui-product-docs-20260105_174643.png`
+- PLM UI empty states:
+  - Report: `docs/verification-plm-ui-empty-states-20260105_175520.md`
+  - Artifact: `artifacts/plm-ui-empty-hints-20260105_180232.png`
+- PLM UI BOM compare field mapping:
+  - Report: `docs/verification-plm-ui-bom-compare-fieldmap-20260104_1442.md`
+  - Artifact: `artifacts/plm-ui-bom-compare-fieldmap-20260104_1442.png`
+- PLM UI field mapping (product/doc/approval):
+  - Report: `docs/verification-plm-ui-field-mapping-20260104_1520.md`
+  - Artifact: `artifacts/plm-ui-field-mapping-20260104_1520.png`
+- PLM UI where-used path view:
+  - Report: `docs/verification-plm-ui-where-used-path-20260104_1314.md`
+  - Artifacts: `artifacts/where-used-path-20260104_1314.json`, `artifacts/plm-ui-where-used-path-20260104_1330.png`
+
+- PLM BOM tools federation:
+  - Script: `scripts/verify-plm-bom-tools.sh`
+  - Report: `docs/verification-plm-bom-tools-20260102_0011.md`
+  - Artifact: `artifacts/plm-bom-tools-20260102_0011.json`
+  - Report: `docs/verification-plm-bom-tools-20260105_0835.md`
+  - Artifact: `artifacts/plm-bom-tools-20260105_0835.json`
+  - JSON mirror: `docs/verification-plm-bom-tools-20260105_0835.json`
+- PLM UI BOM tools:
+  - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
+  - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
+- PLM UI regression (search → detail → BOM tools):
+  - Script: `scripts/verify-plm-ui-regression.sh`
+  - Report: `docs/verification-plm-ui-regression-20260105_175324.md`
+  - Artifact: `artifacts/plm-ui-regression-20260105_175324.png`
+  - Report: `docs/verification-plm-ui-regression-20260105_181443.md`
+  - Artifact: `artifacts/plm-ui-regression-20260105_181443.png`
+  - Report: `docs/verification-plm-ui-regression-20260105_212131.md`
+  - Artifact: `artifacts/smoke/plm-ui-regression-20260105_212131.png`
 
 - Univer POC build (deps restored):
   - Report: `docs/verification-univer-poc-20251231_2233.md`
@@ -62,6 +141,8 @@ Entry points:
 
 - Univer POC UI routes (dev-only):
   - Report: `docs/verification-univer-poc-ui-20251231_2348.md`
+- Univer POC UI + PLM (Yuantus) verification:
+  - Report: `docs/verification-univer-poc-ui-20260104_1134.md`
 
 - Univer UI smoke (manual):
   - Report: `docs/verification-univer-ui-smoke-20260101_0104.md`
@@ -69,7 +150,7 @@ Entry points:
 - Univer UI smoke (Playwright):
   - Run: `pnpm verify:univer-ui-smoke`
   - Script: `scripts/verify-univer-ui-smoke.mjs`
-  - Report: `docs/verification-univer-ui-smoke-20260101_0110.md`
+  - Report: `docs/verification-univer-ui-smoke-20260101_0122.md`
 
 - Univer POC UI backend connectivity:
   - Report: `docs/verification-univer-poc-ui-20260101_0004.md`
@@ -85,6 +166,8 @@ Entry points:
 - Federation config persistence (PLM/Athena):
   - Script: `scripts/verify_federation_config.sh`
   - Report: `docs/verification-federation-config-20251231_1446.md`
+- Federation live verification (PLM + Athena):
+  - Report: `docs/verification-federation-plm-athena-20260104_0847.md`
 
 - Workflow minimal (deploy/list/start/instances):
   - Script: `scripts/verify_workflow_minimal.sh`
@@ -101,6 +184,12 @@ Entry points:
 
 - Athena real API verification:
   - Report: `docs/verification-athena-real-20251231_1810.md`
+- Athena real API verification (2026-01-04):
+  - Report: `docs/verification-athena-real-20260104_0836.md`
+- Athena upload + federation verification:
+  - Report: `docs/verification-athena-upload-federation-20260104_0855.md`
+- Athena UI verification (Swagger UI):
+  - Report: `docs/verification-athena-ui-20260104_0923.md`
 
 - PLM (Yuantus) real API verification:
   - Report: `docs/verification-plm-yuantus-real-20260101_1253.md`
@@ -113,15 +202,31 @@ Entry points:
 
 - PLM (Yuantus) BOM non-empty verification:
   - Report: `docs/verification-plm-yuantus-bom-nonempty-20260101_2332.md`
+- PLM (Yuantus) BOM non-empty verification (local instance):
+  - Report: `docs/verification-plm-yuantus-bom-nonempty-20260104_0825.md`
+- PLM (Yuantus) BOM compare + where-used (federation):
+  - Report: `docs/verification-plm-yuantus-bom-compare-whereused-20260104_0855.md`
 
 - UI verification via MCP:
   - Report: `docs/verification-ui-mcp-access-20260101_2353.md`
 
 - PLM UI API verification:
-  - Report: `docs/verification-plm-ui-api-20260102_0012.md`
+  - Report: `docs/verification-plm-ui-api-20260104_1216.md`
+- PLM UI federation verification:
+  - Report: `docs/verification-plm-ui-federation-20260104_0855.md`
+- PLM UI a11y (form ids):
+  - Report: `docs/verification-plm-ui-a11y-20260104_1144.md`
+- PLM UI search selector:
+  - Report: `docs/verification-plm-ui-search-20260104_1210.md`
+- PLM UI auth status banner:
+  - Report: `docs/verification-plm-ui-auth-status-20260105_0842.md`
 
 - PLM (Yuantus) BOM rollback verification:
   - Report: `docs/verification-plm-yuantus-bom-rollback-20260102_0018.md`
+- PLM (Yuantus) auth mismatch verification:
+  - Report: `docs/verification-plm-yuantus-auth-mismatch-20260102_0034.md`
+- PLM (Yuantus) auth recovery verification:
+  - Report: `docs/verification-plm-yuantus-auth-recovered-20260102_1148.md`
 
 - Real systems env + UI:
   - Report: `docs/verification-env-real-systems-20251229_1836.md`
@@ -161,8 +266,10 @@ Entry points:
 
 - Combined smoke:
   - Run: `pnpm verify:smoke`
-  - Latest report: `docs/verification-smoke-2025-12-27.md`
+  - Latest report: `docs/verification-smoke-20260105_212131.md`
+  - Previous report: `docs/verification-smoke-20260101_0126.md`
   - Full local runner: `pnpm verify:smoke:all`
+  - Notes: `verify:smoke:all` runs Univer UI smoke; set `RUN_UNIVER_UI_SMOKE=false` to skip. Output: `artifacts/smoke/verify-univer-ui-smoke.json`.
 - Smoke verify (local runner update):
   - Run: `scripts/verify-smoke.sh` (uses `scripts/verify-smoke-core.mjs`)
   - Report: `docs/smoke-verify-run-2025-12-23.md`

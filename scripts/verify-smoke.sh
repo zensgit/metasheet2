@@ -9,6 +9,14 @@ WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 SMOKE_DATABASE_URL="${SMOKE_DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}"
 RBAC_BYPASS="${RBAC_BYPASS:-true}"
 SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB:-false}"
+RUN_UNIVER_UI_SMOKE="${RUN_UNIVER_UI_SMOKE:-false}"
+RUN_PLM_UI_REGRESSION="${RUN_PLM_UI_REGRESSION:-false}"
+PLM_BASE_URL="${PLM_BASE_URL:-http://127.0.0.1:7910}"
+PLM_API_MODE="${PLM_API_MODE:-yuantus}"
+PLM_TENANT_ID="${PLM_TENANT_ID:-tenant-1}"
+PLM_ORG_ID="${PLM_ORG_ID:-org-1}"
+PLM_USERNAME="${PLM_USERNAME:-admin}"
+PLM_PASSWORD="${PLM_PASSWORD:-admin}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/smoke}"
 
 mkdir -p "$OUTPUT_DIR"
@@ -19,6 +27,12 @@ echo "- WEB_BASE: ${WEB_BASE}"
 echo "- SMOKE_DATABASE_URL: ${SMOKE_DATABASE_URL}"
 echo "- RBAC_BYPASS: ${RBAC_BYPASS}"
 echo "- SMOKE_SKIP_WEB: ${SMOKE_SKIP_WEB}"
+echo "- RUN_UNIVER_UI_SMOKE: ${RUN_UNIVER_UI_SMOKE}"
+echo "- RUN_PLM_UI_REGRESSION: ${RUN_PLM_UI_REGRESSION}"
+echo "- PLM_BASE_URL: ${PLM_BASE_URL}"
+echo "- PLM_API_MODE: ${PLM_API_MODE}"
+echo "- PLM_TENANT_ID: ${PLM_TENANT_ID}"
+echo "- PLM_ORG_ID: ${PLM_ORG_ID}"
 echo "- OUTPUT_DIR: ${OUTPUT_DIR}"
 echo ""
 
@@ -39,8 +53,15 @@ u=urlparse(os.environ.get("API_BASE","http://127.0.0.1:7778"))
 print(u.port or 7778)
 PY
 )"
-  PORT="${PORT}" DATABASE_URL="${SMOKE_DATABASE_URL}" DISABLE_WORKFLOW=true DISABLE_EVENT_BUS=true SKIP_PLUGINS=true RBAC_BYPASS="${RBAC_BYPASS}" \
-    pnpm --filter @metasheet/core-backend dev:core > "${OUTPUT_DIR}/backend.log" 2>&1 &
+  if [[ "${RUN_PLM_UI_REGRESSION}" == "true" ]]; then
+    PORT="${PORT}" DATABASE_URL="${SMOKE_DATABASE_URL}" DISABLE_WORKFLOW=true DISABLE_EVENT_BUS=true SKIP_PLUGINS=true RBAC_BYPASS="${RBAC_BYPASS}" \
+      PLM_BASE_URL="${PLM_BASE_URL}" PLM_API_MODE="${PLM_API_MODE}" PLM_TENANT_ID="${PLM_TENANT_ID}" PLM_ORG_ID="${PLM_ORG_ID}" \
+      PLM_USERNAME="${PLM_USERNAME}" PLM_PASSWORD="${PLM_PASSWORD}" \
+      pnpm --filter @metasheet/core-backend dev:core > "${OUTPUT_DIR}/backend.log" 2>&1 &
+  else
+    PORT="${PORT}" DATABASE_URL="${SMOKE_DATABASE_URL}" DISABLE_WORKFLOW=true DISABLE_EVENT_BUS=true SKIP_PLUGINS=true RBAC_BYPASS="${RBAC_BYPASS}" \
+      pnpm --filter @metasheet/core-backend dev:core > "${OUTPUT_DIR}/backend.log" 2>&1 &
+  fi
   BACK_PID=$!
 
   for i in {1..30}; do
@@ -92,3 +113,17 @@ echo ""
 echo "Running smoke suite..."
 API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_PATH="${OUTPUT_DIR}/smoke-report.json" \
   SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB}" node scripts/verify-smoke-core.mjs
+
+if [[ "${RUN_UNIVER_UI_SMOKE}" == "true" ]]; then
+  echo ""
+  echo "Running Univer UI smoke..."
+  API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" AUTO_START=false \
+    node scripts/verify-univer-ui-smoke.mjs
+fi
+
+if [[ "${RUN_PLM_UI_REGRESSION}" == "true" ]]; then
+  echo ""
+  echo "Running PLM UI regression..."
+  API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" AUTO_START=false \
+    bash scripts/verify-plm-ui-regression.sh
+fi

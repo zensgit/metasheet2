@@ -1,0 +1,77 @@
+{
+  "summary": {
+    "strict": false,
+    "detail": {
+      "ok": true
+    },
+    "products": {
+      "count": 1
+    },
+    "documents": {
+      "count": 0
+    },
+    "approvals": {
+      "count": 0
+    }
+  },
+  "detail": {
+    "ok": true,
+    "data": {
+      "id": "a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b",
+      "name": "Tenant A Org A Part",
+      "partNumber": "MT-A1-1767490184",
+      "status": "Draft",
+      "revision": "",
+      "createdAt": "2026-01-04T01:29:46",
+      "updatedAt": "2026-01-04T01:29:46",
+      "code": "MT-A1-1767490184",
+      "version": "",
+      "itemType": "Part",
+      "properties": {
+        "item_number": "MT-A1-1767490184",
+        "name": "Tenant A Org A Part",
+        "state": "Draft"
+      }
+    }
+  },
+  "products": {
+    "ok": true,
+    "data": {
+      "items": [
+        {
+          "id": "a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b",
+          "name": "Tenant A Org A Part",
+          "partNumber": "MT-A1-1767490184",
+          "status": "Draft",
+          "revision": "",
+          "createdAt": "2026-01-04T01:29:46",
+          "updatedAt": "2026-01-04T01:29:46",
+          "code": "MT-A1-1767490184",
+          "version": ""
+        }
+      ],
+      "total": 1,
+      "limit": 100,
+      "offset": 0
+    }
+  },
+  "documents": {
+    "ok": true,
+    "data": {
+      "productId": "a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b",
+      "items": [],
+      "total": 0,
+      "limit": 100,
+      "offset": 0
+    }
+  },
+  "approvals": {
+    "ok": true,
+    "data": {
+      "items": [],
+      "total": 0,
+      "limit": 100,
+      "offset": 0
+    }
+  }
+}
