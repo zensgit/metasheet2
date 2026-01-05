@@ -7,7 +7,7 @@ settings:
 overrides:
   vite: ^5.4.0
 
-packageExtensionsChecksum: sha256-ZVrOAnBL1MHEIUP5gGvEOrOiHO65fddnw5DblUDTTI0=
+packageExtensionsChecksum: afa7ae145dbbea839bac5363d0e61cfc
 
 importers:
 
