@@ -54,5 +54,6 @@ jobs:
           retention-days: 14
           path: |
             artifacts/smoke/backend.log
+            artifacts/smoke/smoke-report.json
             artifacts/smoke/web.log
             artifacts/smoke/smoke-report.json
