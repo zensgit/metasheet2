@@ -61,4 +61,5 @@ jobs:
             artifacts/editable-demo-kanban.png
             artifacts/editable-demo-ui-verification.json
             artifacts/smoke/backend.log
+            artifacts/smoke/smoke-report.json
             artifacts/smoke/web.log

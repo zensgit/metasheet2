@@ -40,7 +40,7 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function fetchJsonWithRetry(url, options = {}, { attempts = 5, delayMs = 1000 } = {}) {
+async function fetchJsonWithRetry(url, options = {}, { attempts = 20, delayMs = 1000 } = {}) {
   let last = null
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -94,7 +94,7 @@ async function run() {
 
   const metaSheets = await fetchJsonWithRetry(`${apiBase}/api/univer-meta/sheets`, { headers })
   const sheetsOk = Boolean(metaSheets.res.ok && metaSheets.json?.ok)
-  record('api.univer-meta.sheets', sheetsOk, { status: metaSheets.res.status })
+  record('api.univer-meta.sheets', sheetsOk, { status: metaSheets.res.status, body: metaSheets.json })
   if (!sheetsOk) {
     throw new Error('Meta sheets check failed')
   }
@@ -102,14 +102,14 @@ async function run() {
 
   const metaFields = await fetchJsonWithRetry(`${apiBase}/api/univer-meta/fields`, { headers })
   const fieldsOk = Boolean(metaFields.res.ok && metaFields.json?.ok)
-  record('api.univer-meta.fields', fieldsOk, { status: metaFields.res.status })
+  record('api.univer-meta.fields', fieldsOk, { status: metaFields.res.status, body: metaFields.json })
   if (!fieldsOk) {
     throw new Error('Meta fields check failed')
   }
 
   const metaViews = await fetchJsonWithRetry(`${apiBase}/api/univer-meta/views`, { headers })
   const viewsOk = Boolean(metaViews.res.ok && metaViews.json?.ok)
-  record('api.univer-meta.views', viewsOk, { status: metaViews.res.status })
+  record('api.univer-meta.views', viewsOk, { status: metaViews.res.status, body: metaViews.json })
   if (!viewsOk) {
     throw new Error('Meta views check failed')
   }
