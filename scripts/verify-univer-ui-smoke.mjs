@@ -67,6 +67,47 @@ function isLoadedStatus(text) {
   return /^Loaded \+\d+/.test(status)
 }
 
+async function waitForReady(page, options) {
+  const { statusSelector, mountSelector } = options
+  const startedAt = Date.now()
+  let lastSnapshot = {
+    statusText: '',
+    hasStatus: false,
+    hasMount: false,
+    univerReady: false,
+  }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    lastSnapshot = await page.evaluate(
+      ({ statusSelector, mountSelector }) => {
+        const statusEl = statusSelector ? document.querySelector(statusSelector) : null
+        const statusText = statusEl ? statusEl.textContent?.trim() ?? '' : ''
+        const mountEl = mountSelector ? document.querySelector(mountSelector) : null
+        const univerReady = Boolean(window.__univer)
+        return {
+          statusText,
+          hasStatus: Boolean(statusEl),
+          hasMount: Boolean(mountEl),
+          univerReady,
+        }
+      },
+      { statusSelector, mountSelector },
+    )
+
+    if (lastSnapshot.statusText && isLoadedStatus(lastSnapshot.statusText)) {
+      return { ok: true, ...lastSnapshot }
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  if (lastSnapshot.hasMount && lastSnapshot.univerReady) {
+    return { ok: true, ...lastSnapshot, note: 'status not reported, mount ready' }
+  }
+
+  return { ok: false, ...lastSnapshot, note: 'status/mount not ready' }
+}
+
 let started = false
 
 async function ensureServices() {
@@ -114,16 +155,16 @@ async function getToken() {
   return token
 }
 
-async function verifyPage(page, pathName, statusSelector) {
+async function verifyPage(page, pathName, selectors) {
+  const { rootSelector, statusSelector, mountSelector } = selectors
   await page.goto(`${webBase}${pathName}`, {
     waitUntil: 'domcontentloaded',
     timeout: timeoutMs,
   })
 
-  await page.waitForSelector(statusSelector, { timeout: timeoutMs })
-  const statusText = await page.locator(statusSelector).innerText()
-  const ok = isLoadedStatus(statusText)
-  record(`ui${pathName}.status`, ok, { statusText })
+  await page.waitForSelector(rootSelector, { timeout: timeoutMs })
+  const result = await waitForReady(page, { statusSelector, mountSelector })
+  record(`ui${pathName}.status`, result.ok, result)
 }
 
 async function run() {
@@ -139,8 +180,16 @@ async function run() {
   const page = await context.newPage()
 
   try {
-    await verifyPage(page, '/univer', '.univer-poc__status')
-    await verifyPage(page, '/univer-kanban', '.univer-kanban__status')
+    await verifyPage(page, '/univer', {
+      rootSelector: '.univer-poc',
+      statusSelector: '.univer-poc__status',
+      mountSelector: '.univer-poc__mount',
+    })
+    await verifyPage(page, '/univer-kanban', {
+      rootSelector: '.univer-kanban',
+      statusSelector: '.univer-kanban__status',
+      mountSelector: '.univer-kanban__grid-mount',
+    })
   } finally {
     await browser.close()
   }
