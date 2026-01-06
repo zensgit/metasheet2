@@ -33,3 +33,6 @@ Date: 2026-01-06
 - Where-used: count 1 (parent item shown).
 - BOM compare: Removed 1, Added 0, Changed 0.
 - Substitutes: 0 entries, "No substitutes found" displayed.
+
+## Artifacts
+- Screenshot capture via chrome-devtools timed out; no image saved.
