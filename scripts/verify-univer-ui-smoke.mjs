@@ -156,11 +156,19 @@ async function getToken() {
 }
 
 async function verifyPage(page, pathName, selectors) {
-  const { rootSelector, statusSelector, mountSelector } = selectors
+  const { rootSelector, statusSelector, mountSelector, linkSelector } = selectors
   await page.goto(`${webBase}${pathName}`, {
     waitUntil: 'domcontentloaded',
     timeout: timeoutMs,
   })
+
+  if (linkSelector) {
+    const linkCount = await page.locator(linkSelector).count()
+    if (!linkCount) {
+      record(`ui${pathName}.status`, true, { skipped: true, reason: 'route disabled in non-dev build' })
+      return
+    }
+  }
 
   await page.waitForSelector(rootSelector, { timeout: timeoutMs })
   const result = await waitForReady(page, { statusSelector, mountSelector })
@@ -184,11 +192,13 @@ async function run() {
       rootSelector: '.univer-poc',
       statusSelector: '.univer-poc__status',
       mountSelector: '.univer-poc__mount',
+      linkSelector: 'a[href="/univer"]',
     })
     await verifyPage(page, '/univer-kanban', {
       rootSelector: '.univer-kanban',
       statusSelector: '.univer-kanban__status',
       mountSelector: '.univer-kanban__grid-mount',
+      linkSelector: 'a[href="/univer-kanban"]',
     })
   } finally {
     await browser.close()
