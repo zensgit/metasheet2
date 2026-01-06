@@ -4,6 +4,8 @@
  */
 
 import type { RequestHandler } from 'express'
+import type { Injector } from '@wendellhu/redi'
+import type { CollectionDefinition } from './collection'
 
 /**
  * 插件生命周期接口
@@ -312,6 +314,7 @@ export interface PluginManifest {
  * 核心API接口
  */
 export interface CoreAPI {
+  injector?: Injector
   http: HttpAPI
   database: DatabaseAPI
   auth: AuthAPI
@@ -322,6 +325,52 @@ export interface CoreAPI {
   websocket: WebSocketAPI
   messaging: MessagingAPI
   notification?: NotificationService  // Optional notification service
+  formula?: FormulaAPI
+  collection?: CollectionAPI
+  plm?: PLMApi
+  athena?: AthenaApi
+  dedup?: DedupApi
+  ai?: AiApi
+  vision?: VisionApi
+}
+
+export interface FormulaAPI {
+  calculate(functionName: string, ...args: unknown[]): unknown
+  calculateFormula(expression: string, contextResolver?: (key: string) => unknown): unknown
+  getAvailableFunctions(): string[]
+}
+
+export interface CollectionAPI {
+  register(definition: CollectionDefinition): void
+  getRepository(name: string): unknown
+  sync(): Promise<void>
+}
+
+export interface PLMApi {
+  getProducts(options?: Record<string, unknown>): Promise<unknown>
+  getProductBOM(id: string): Promise<unknown>
+}
+
+export interface AthenaApi {
+  listFolders(parentId?: string): Promise<unknown>
+  searchDocuments(params: Record<string, unknown>): Promise<unknown>
+  getDocument(id: string): Promise<unknown>
+  uploadDocument(params: Record<string, unknown>): Promise<unknown>
+}
+
+export interface DedupApi {
+  search(fileId: string, threshold?: number): Promise<unknown>
+  compare(sourceId: string, targetId: string): Promise<unknown>
+}
+
+export interface AiApi {
+  analyze(fileId: string): Promise<unknown>
+  extractText(fileId: string): Promise<unknown>
+  predictCost(fileId: string, params?: Record<string, unknown>): Promise<unknown>
+}
+
+export interface VisionApi {
+  generateDiff(sourceId: string, targetId: string): Promise<unknown>
 }
 
 /**

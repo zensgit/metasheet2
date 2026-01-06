@@ -12,6 +12,7 @@ import KanbanView from './views/KanbanView.vue'
 import CalendarView from './views/CalendarView.vue'
 import GalleryView from './views/GalleryView.vue'
 import FormView from './views/FormView.vue'
+import PlmProductView from './views/PlmProductView.vue'
 
 // Define routes
 const routes = [
@@ -49,6 +50,12 @@ const routes = [
     name: 'form',
     component: FormView,
     meta: { title: 'Form View' }
+  },
+  {
+    path: '/plm',
+    name: 'plm',
+    component: PlmProductView,
+    meta: { title: 'PLM' }
   },
   {
     path: '/:pathMatch(.*)*',

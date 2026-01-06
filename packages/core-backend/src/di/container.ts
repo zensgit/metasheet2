@@ -6,6 +6,7 @@ import { CollabService } from '../services/CollabService'
 import { eventBus } from '../integration/events/event-bus'
 import { CollectionManager } from '../core/database/CollectionManager'
 import { PluginLoader } from '../core/plugin-loader'
+import { PLMAdapter } from '../data-adapters/PLMAdapter'
 import { FormulaService } from '../services/FormulaService'
 import { CommentService } from '../services/CommentService'
 import type { CoreAPI } from '../types/plugin'
@@ -59,7 +60,13 @@ export function createContainer(options: ContainerOptions = {}): Injector {
   ])
 
   const adapterStub = new AdapterStub()
-  injector.add([IPLMAdapter, { useValue: adapterStub }])
+  injector.add([
+    IPLMAdapter,
+    {
+      useFactory: (config: IConfigService, logger: ILogger) => new PLMAdapter(config, logger),
+      deps: [IConfigService, ILogger],
+    },
+  ])
   injector.add([IAthenaAdapter, { useValue: adapterStub }])
   injector.add([IDedupCADAdapter, { useValue: adapterStub }])
   injector.add([ICADMLAdapter, { useValue: adapterStub }])
