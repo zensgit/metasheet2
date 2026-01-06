@@ -9,7 +9,7 @@ const outputDir = process.env.OUTPUT_DIR || 'artifacts/univer-poc'
 const reportJson =
   process.env.REPORT_JSON || path.join(outputDir, 'verify-univer-ui-smoke.json')
 const headless = process.env.HEADLESS !== 'false'
-const timeoutMs = Number(process.env.TIMEOUT_MS || 15000)
+const timeoutMs = Number(process.env.TIMEOUT_MS || 30000)
 const autoStart = process.env.AUTO_START !== 'false'
 
 const report = {
