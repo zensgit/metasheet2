@@ -1,23 +1,26 @@
 # PLM Federation Integration Verification
 
-Date: 2026-01-06 15:03:17
+Date: 2026-01-06 15:11:36
 
 ## Environment
 - Core backend: http://127.0.0.1:7778
 - PLM backend: http://127.0.0.1:7910
 - PLM API mode: yuantus
 - Tenant/Org: tenant-1 / org-1
+- Parent item id: d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a
+- Child item id: fdd72a36-be6e-4967-b697-13069e93f59f
+- BOM line id: 027384a6-aea1-4b54-ae1b-0ada996ab9ca
 
 ## Results
 
-- products: OK (total=548, sample_ids=['a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b', '4a826410-120b-40b3-8e8a-b246f56fdb05', 'e2f6714b-1e95-4319-8da1-c1a12729468b'])
-- product_detail: OK (id=a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b)
-- bom: OK (total=0, sample_line_id=None)
+- products: OK (total=550, sample_ids=['a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b', '4a826410-120b-40b3-8e8a-b246f56fdb05', 'e2f6714b-1e95-4319-8da1-c1a12729468b'])
+- product_detail: OK (id=d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a)
+- bom: OK (total=1, sample_line_id=027384a6-aea1-4b54-ae1b-0ada996ab9ca)
 - documents: OK (total=0)
 - approvals: OK (total=20)
-- where_used: OK (count=0)
-- bom_compare: OK (summary={'added': 0, 'removed': 0, 'changed': 0, 'changed_major': 0, 'changed_minor': 0, 'changed_info': 0})
-- substitutes: SKIP (missing prerequisite data)
+- where_used: OK (count=1)
+- bom_compare: OK (summary={'added': 0, 'removed': 1, 'changed': 0, 'changed_major': 0, 'changed_minor': 0, 'changed_info': 0})
+- substitutes: OK (count=0)
 
 ## Raw Samples
 
@@ -52,28 +55,10 @@ Date: 2026-01-06 15:03:17
       "status": "Draft",
       "created_at": "2026-01-04T01:33:58",
       "updated_at": "2026-01-04T01:33:58"
-    },
-    {
-      "id": "841eaa73-d930-4b7e-b359-9d152c4ccf28",
-      "name": "Verify Part 1767491621",
-      "code": "P-VERIFY-1767491621",
-      "version": "A",
-      "status": "Draft",
-      "created_at": "2026-01-04T01:53:41",
-      "updated_at": "2026-01-05T06:50:49"
-    },
-    {
-      "id": "d177a982-8027-4d01-8ee8-08acee7b7b9e",
-      "name": "RPC Part",
-      "code": "P-RPC-1767491621",
-      "version": "",
-      "status": "Draft",
-      "created_at": "2026-01-04T01:53:41",
-      "updated_at": "2026-01-04T01:53:41"
     }
   ],
-  "total": 548,
-  "limit": 5,
+  "total": 550,
+  "limit": 3,
   "offset": 0
 }
 ```
@@ -82,19 +67,19 @@ Date: 2026-01-06 15:03:17
 ```json
 {
   "data": {
-    "id": "a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b",
-    "name": "Tenant A Org A Part",
-    "code": "MT-A1-1767490184",
+    "id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+    "name": "Part A (Test)",
+    "code": "P-BOM-A-1767683231",
     "version": "",
     "status": "Draft",
     "itemType": "Part",
     "properties": {
-      "item_number": "MT-A1-1767490184",
-      "name": "Tenant A Org A Part",
+      "item_number": "P-BOM-A-1767683231",
+      "name": "Part A (Test)",
       "state": "Draft"
     },
-    "created_at": "2026-01-04T01:29:46",
-    "updated_at": "2026-01-04T01:29:46"
+    "created_at": "2026-01-06T07:07:11",
+    "updated_at": "2026-01-06T07:07:11"
   }
 }
 ```
@@ -102,8 +87,23 @@ Date: 2026-01-06 15:03:17
 ### bom
 ```json
 {
-  "data": [],
-  "total": 0
+  "data": [
+    {
+      "id": "027384a6-aea1-4b54-ae1b-0ada996ab9ca",
+      "product_id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+      "parent_item_id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+      "component_id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+      "component_name": "Part B (Child)",
+      "component_code": "P-BOM-B-1767683231",
+      "quantity": 1,
+      "unit": "EA",
+      "level": 1,
+      "sequence": 10,
+      "created_at": "2026-01-06T07:07:11",
+      "updated_at": "2026-01-06T07:11:36.555Z"
+    }
+  ],
+  "total": 1
 }
 ```
 
@@ -332,9 +332,54 @@ Date: 2026-01-06 15:03:17
 ```json
 {
   "data": {
-    "item_id": "a338fc4f-bcc6-43b6-971d-a5e3c2a08e6b",
-    "count": 0,
-    "parents": []
+    "item_id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+    "count": 1,
+    "parents": [
+      {
+        "relationship": {
+          "id": "027384a6-aea1-4b54-ae1b-0ada996ab9ca",
+          "item_type_id": "Part BOM",
+          "config_id": "5110fbd2-6f1b-4174-9d1f-082c38ccd472",
+          "generation": 1,
+          "is_current": true,
+          "state": "Active",
+          "current_state": null,
+          "current_version_id": null,
+          "created_by_id": 1,
+          "created_on": "2026-01-06T07:07:11",
+          "modified_by_id": null,
+          "modified_on": null,
+          "owner_id": null,
+          "permission_id": "EffReadOnly-1767629020",
+          "source_id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+          "related_id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+          "quantity": 1,
+          "uom": "EA",
+          "find_num": "10"
+        },
+        "parent": {
+          "id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+          "item_type_id": "Part",
+          "config_id": "80159431-ee95-4074-a21e-c19e9cb47e90",
+          "generation": 1,
+          "is_current": true,
+          "state": "Draft",
+          "current_state": "e0cd9dd7-cb45-4d53-a8cd-0824ed98046b",
+          "current_version_id": null,
+          "created_by_id": 1,
+          "created_on": "2026-01-06T07:07:11",
+          "modified_by_id": null,
+          "modified_on": null,
+          "owner_id": null,
+          "permission_id": "EffReadOnly-1767629020",
+          "source_id": null,
+          "related_id": null,
+          "item_number": "P-BOM-A-1767683231",
+          "name": "Part A (Test)"
+        },
+        "level": 1
+      }
+    ]
   }
 }
 ```
@@ -345,15 +390,67 @@ Date: 2026-01-06 15:03:17
   "data": {
     "summary": {
       "added": 0,
-      "removed": 0,
+      "removed": 1,
       "changed": 0,
       "changed_major": 0,
       "changed_minor": 0,
       "changed_info": 0
     },
     "added": [],
-    "removed": [],
+    "removed": [
+      {
+        "parent_id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+        "child_id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+        "relationship_id": "027384a6-aea1-4b54-ae1b-0ada996ab9ca",
+        "line_key": "ROOT::bb724d96-12be-40dc-bfa5-021e2c90f2aa",
+        "parent_config_id": "ROOT",
+        "child_config_id": "bb724d96-12be-40dc-bfa5-021e2c90f2aa",
+        "level": 1,
+        "path": [
+          {
+            "id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+            "config_id": "ROOT",
+            "item_number": "P-BOM-A-1767683231",
+            "name": "Part A (Test)"
+          },
+          {
+            "id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+            "config_id": "bb724d96-12be-40dc-bfa5-021e2c90f2aa",
+            "item_number": "P-BOM-B-1767683231",
+            "name": "Part B (Child)"
+          }
+        ],
+        "properties": {
+          "quantity": 1,
+          "uom": "EA",
+          "find_num": "10"
+        },
+        "parent": {
+          "id": "d9f64c3b-4411-455c-a04f-cbaf9a7f4d7a",
+          "config_id": "ROOT",
+          "item_number": "P-BOM-A-1767683231",
+          "name": "Part A (Test)"
+        },
+        "child": {
+          "id": "fdd72a36-be6e-4967-b697-13069e93f59f",
+          "config_id": "bb724d96-12be-40dc-bfa5-021e2c90f2aa",
+          "item_number": "P-BOM-B-1767683231",
+          "name": "Part B (Child)"
+        }
+      }
+    ],
     "changed": []
+  }
+}
+```
+
+### substitutes
+```json
+{
+  "data": {
+    "bom_line_id": "027384a6-aea1-4b54-ae1b-0ada996ab9ca",
+    "count": 0,
+    "substitutes": []
   }
 }
 ```
