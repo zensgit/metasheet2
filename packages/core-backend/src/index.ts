@@ -40,6 +40,7 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
@@ -497,6 +498,9 @@ export class MetaSheetServer {
 
     // 路由：外部数据源管理 (V2)
     this.app.use(dataSourcesRouter())
+
+    // 路由：联邦系统（PLM/Athena 等）
+    this.app.use(federationRouter(this.injector))
 
     // 路由：内部调试端点 (dev/staging only)
     this.app.use('/internal', internalRouter)

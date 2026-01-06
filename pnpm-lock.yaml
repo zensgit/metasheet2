@@ -7,7 +7,7 @@ settings:
 overrides:
   vite: ^5.4.0
 
-packageExtensionsChecksum: afa7ae145dbbea839bac5363d0e61cfc
+packageExtensionsChecksum: sha256-ZVrOAnBL1MHEIUP5gGvEOrOiHO65fddnw5DblUDTTI0=
 
 importers:
 
@@ -117,6 +117,9 @@ importers:
       ajv:
         specifier: ^8.12.0
         version: 8.17.1
+      axios:
+        specifier: ^1.8.0
+        version: 1.13.2
       bcrypt:
         specifier: ^5.1.1
         version: 5.1.1(encoding@0.1.13)
