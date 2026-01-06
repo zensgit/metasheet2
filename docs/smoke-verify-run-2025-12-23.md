@@ -45,4 +45,3 @@
 ## Notes
 - This run supersedes earlier failures on 2025-12-23.
 - Local verification used a fresh smoke database to avoid migration drift.
-- Univer-meta checks are skipped when the DB is not ready (503), until meta schema migrations are present.
