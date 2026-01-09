@@ -85,7 +85,7 @@ fi
 
 if ! curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
   echo "[3/3] Starting web..."
-  pnpm --filter @metasheet/web dev -- --host 127.0.0.1 --port 8899 > "${OUTPUT_DIR}/web.log" 2>&1 &
+  VITE_API_BASE="${API_BASE}" pnpm --filter @metasheet/web dev -- --host 127.0.0.1 --port 8899 > "${OUTPUT_DIR}/web.log" 2>&1 &
   WEB_PID=$!
   for i in {1..30}; do
     if curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
