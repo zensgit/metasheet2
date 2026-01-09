@@ -11,12 +11,14 @@ RBAC_BYPASS="${RBAC_BYPASS:-true}"
 SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB:-false}"
 RUN_UNIVER_UI_SMOKE="${RUN_UNIVER_UI_SMOKE:-false}"
 RUN_PLM_UI_REGRESSION="${RUN_PLM_UI_REGRESSION:-false}"
+RUN_PLM_REGRESSION="${RUN_PLM_REGRESSION:-false}"
 PLM_BASE_URL="${PLM_BASE_URL:-http://127.0.0.1:7910}"
 PLM_API_MODE="${PLM_API_MODE:-yuantus}"
 PLM_TENANT_ID="${PLM_TENANT_ID:-tenant-1}"
 PLM_ORG_ID="${PLM_ORG_ID:-org-1}"
 PLM_USERNAME="${PLM_USERNAME:-admin}"
 PLM_PASSWORD="${PLM_PASSWORD:-admin}"
+PLM_SEED_ENV="${PLM_SEED_ENV:-local}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/smoke}"
 
 mkdir -p "$OUTPUT_DIR"
@@ -29,10 +31,12 @@ echo "- RBAC_BYPASS: ${RBAC_BYPASS}"
 echo "- SMOKE_SKIP_WEB: ${SMOKE_SKIP_WEB}"
 echo "- RUN_UNIVER_UI_SMOKE: ${RUN_UNIVER_UI_SMOKE}"
 echo "- RUN_PLM_UI_REGRESSION: ${RUN_PLM_UI_REGRESSION}"
+echo "- RUN_PLM_REGRESSION: ${RUN_PLM_REGRESSION}"
 echo "- PLM_BASE_URL: ${PLM_BASE_URL}"
 echo "- PLM_API_MODE: ${PLM_API_MODE}"
 echo "- PLM_TENANT_ID: ${PLM_TENANT_ID}"
 echo "- PLM_ORG_ID: ${PLM_ORG_ID}"
+echo "- PLM_SEED_ENV: ${PLM_SEED_ENV}"
 echo "- OUTPUT_DIR: ${OUTPUT_DIR}"
 echo ""
 
@@ -126,4 +130,13 @@ if [[ "${RUN_PLM_UI_REGRESSION}" == "true" ]]; then
   echo "Running PLM UI regression..."
   API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" AUTO_START=false \
     bash scripts/verify-plm-ui-regression.sh
+fi
+
+if [[ "${RUN_PLM_REGRESSION}" == "true" ]]; then
+  echo ""
+  echo "Running PLM regression..."
+  API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="artifacts" REPORT_DIR="docs" AUTO_START=false \
+    PLM_BASE_URL="${PLM_BASE_URL}" PLM_TENANT_ID="${PLM_TENANT_ID}" PLM_ORG_ID="${PLM_ORG_ID}" \
+    PLM_USERNAME="${PLM_USERNAME}" PLM_PASSWORD="${PLM_PASSWORD}" PLM_SEED_ENV="${PLM_SEED_ENV}" \
+    bash scripts/verify-plm-regression.sh
 fi

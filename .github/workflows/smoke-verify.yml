@@ -2,6 +2,15 @@ name: Smoke Verify
 
 on:
   workflow_dispatch:
+    inputs:
+      run_plm_regression:
+        description: 'Run PLM regression (starts Yuantus PLM via docker compose)'
+        type: boolean
+        default: false
+      plm_seed_env:
+        description: 'PLM seed env suffix (default: local)'
+        type: string
+        default: ci
 
 jobs:
   smoke-verify:
@@ -24,6 +33,8 @@ jobs:
       SMOKE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
       RBAC_BYPASS: 'true'
       PLAYWRIGHT_CHANNEL: chromium
+      RUN_PLM_REGRESSION: ${{ inputs.run_plm_regression }}
+      PLM_SEED_ENV: ${{ inputs.plm_seed_env }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,10 +54,59 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Checkout Yuantus PLM
+        if: ${{ inputs.run_plm_regression }}
+        uses: actions/checkout@v4
+        with:
+          repository: zensgit/yuantus-plm
+          ref: main
+          path: yuantus-plm
+
+      - name: Start Yuantus PLM (docker compose)
+        if: ${{ inputs.run_plm_regression }}
+        run: |
+          cd yuantus-plm
+          docker compose up -d --build
+
+      - name: Wait for Yuantus PLM
+        if: ${{ inputs.run_plm_regression }}
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:7910/api/v1/health >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Yuantus PLM failed to become healthy." >&2
+          exit 1
+
+      - name: Seed Yuantus PLM identity/meta
+        if: ${{ inputs.run_plm_regression }}
+        run: |
+          cd yuantus-plm
+          docker compose exec -T api yuantus seed-identity --tenant tenant-1 --org org-1 --username admin --password admin
+          docker compose exec -T api yuantus seed-meta
+
+      - name: Set PLM env (local Yuantus)
+        if: ${{ inputs.run_plm_regression }}
+        run: |
+          echo "PLM_BASE_URL=http://127.0.0.1:7910" >> "$GITHUB_ENV"
+          echo "PLM_TENANT_ID=tenant-1" >> "$GITHUB_ENV"
+          echo "PLM_ORG_ID=org-1" >> "$GITHUB_ENV"
+          echo "PLM_USERNAME=admin" >> "$GITHUB_ENV"
+          echo "PLM_PASSWORD=admin" >> "$GITHUB_ENV"
+          echo "PLM_SEED_ENV=${{ inputs.plm_seed_env }}" >> "$GITHUB_ENV"
 
       - name: Run smoke verification
         run: pnpm verify:smoke:all
+
+      - name: Stop Yuantus PLM
+        if: ${{ always() && inputs.run_plm_regression }}
+        run: |
+          cd yuantus-plm
+          docker compose down -v
 
       - name: Upload artifacts
         if: always()
@@ -63,3 +123,5 @@ jobs:
             artifacts/smoke/backend.log
             artifacts/smoke/smoke-report.json
             artifacts/smoke/web.log
+            artifacts/smoke/smoke-report.json
+            artifacts/smoke/verify-univer-ui-smoke.json

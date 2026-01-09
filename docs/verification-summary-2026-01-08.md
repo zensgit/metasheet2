@@ -1,0 +1,94 @@
+# Verification Summary - 2026-01-08
+
+## Scope
+- PLM deep-link scope presets (user-saved local presets).
+- Workflow task summary adds other state + task drawer JSON search/depth controls.
+- Workflow task JSON highlight + next match navigation.
+- Workflow task stats scope includes all + JSON prev match.
+- Workflow task stats mine + JSON clear.
+- Workflow task stats mine toggle guard.
+- Workflow task stats scope select + JSON clear scroll.
+- Workflow task JSON match navigator.
+- Workflow task filters copy + F3 navigation.
+- Workflow task JSON enter + copy.
+- Workflow task summary copy + JSON match tooltip.
+- Workflow task stats scope toggle + JSON highlight count display.
+- Workflow task summary format selector + JSON case-sensitive search (persisted + tests).
+- Workflow task drawer UI persisted state smoke (case-sensitive + summary format).
+- Workflow task list auth headers (workflow tasks panel).
+- Workflow task UI seed cleanup.
+- Workflow task JSON search highlight (case-sensitive).
+- Workflow task JSON search seed cleanup.
+
+## Verification
+- PLM BOM tools:
+  - `API_BASE=http://localhost:7788 AUTO_START=false bash scripts/verify-plm-bom-tools.sh`
+  - Result: PASS
+- PLM UI regression:
+  - `API_BASE=http://localhost:7788 AUTO_START=true FORCE_WEB=true WEB_BASE=http://localhost:8898 WEB_PORT=8898 bash scripts/verify-plm-ui-regression.sh`
+  - Result: PASS
+- PLM UI deep-link autoload:
+  - `API_BASE=http://localhost:7788 AUTO_START=true FORCE_WEB=true WEB_BASE=http://localhost:8898 WEB_PORT=8898 bash scripts/verify-plm-ui-deeplink.sh`
+  - Result: PASS
+- PLM substitutes mutation:
+  - `API_BASE=http://localhost:7788 AUTO_START=true bash scripts/verify-plm-substitutes-mutation.sh`
+  - Result: PASS
+- PLM UI substitutes mutation:
+  - `API_BASE=http://localhost:7788 AUTO_START=true FORCE_WEB=true WEB_BASE=http://localhost:8898 WEB_PORT=8898 bash scripts/verify-plm-ui-substitutes-mutation.sh`
+  - Result: PASS
+- PLM substitutes fixture seed:
+  - `bash scripts/seed-plm-substitutes-fixture.sh`
+  - Result: PASS
+- PLM regression:
+  - `API_BASE=http://localhost:7788 WEB_BASE=http://localhost:8898 WEB_PORT=8898 AUTO_START=true bash scripts/verify-plm-regression.sh`
+  - Result: PASS
+- Yuantus PLM API (local):
+  - `PLM_ITEM_ID=... PLM_BOM_ITEM_ID=... bash scripts/verify-yuantus-plm.sh`
+  - Result: PASS
+- Workflow JSON search utils:
+  - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/json-search-utils.spec.ts`
+  - Result: PASS
+
+## Reports
+- PLM BOM tools: `artifacts/plm-bom-tools-20260108_1342.md`
+- PLM UI regression: `docs/verification-plm-ui-regression-20260108_141810.md`
+- PLM UI regression screenshot: `artifacts/plm-ui-regression-20260108_141810.png`
+- PLM UI deep-link autoload: `docs/verification-plm-ui-deeplink-20260108_141834.md`
+- PLM UI deep-link screenshot: `artifacts/plm-ui-deeplink-20260108_141834.png`
+- PLM substitutes mutation: `docs/verification-plm-substitutes-mutation-20260108_141750.md`
+- PLM UI substitutes mutation: `docs/verification-plm-ui-substitutes-mutation-20260108_144845.md`
+- PLM UI substitutes mutation screenshot: `artifacts/plm-ui-substitutes-mutation-20260108_144845.png`
+- PLM substitutes fixture seed: `docs/verification-plm-substitutes-fixture-20260108_152816.md`
+- PLM regression: `docs/verification-plm-regression-20260108_152816.md`
+- PLM BOM tools (latest): `artifacts/plm-bom-tools-20260108_152816.md`
+- PLM BOM tools JSON (latest): `artifacts/plm-bom-tools-20260108_152816.json`
+- PLM substitutes mutation (latest): `docs/verification-plm-substitutes-mutation-20260108_152816.md`
+- PLM UI substitutes mutation (latest): `docs/verification-plm-ui-substitutes-mutation-20260108_152816.md`
+- PLM UI substitutes mutation screenshot (latest): `artifacts/plm-ui-substitutes-mutation-20260108_152816.png`
+- Yuantus PLM API: `docs/verification-plm-yuantus-20260108_134341.md`
+- Workflow tasks stats update: `docs/verification-workflow-tasks-stats-20260108_0821.md`
+- Workflow tasks JSON update: `docs/verification-workflow-tasks-json-search-20260108_0825.md`
+- Workflow tasks JSON highlight: `docs/verification-workflow-tasks-json-highlight-20260108_0835.md`
+- Workflow tasks stats all: `docs/verification-workflow-tasks-stats-all-20260108_0914.md`
+- Workflow tasks stats mine: `docs/verification-workflow-tasks-stats-mine-20260108_0932.md`
+- Workflow tasks stats mine guard: `docs/verification-workflow-tasks-stats-mine-20260108_1340.md`
+- Workflow tasks stats select: `docs/verification-workflow-tasks-stats-select-20260108_1410.md`
+- Workflow tasks JSON nav: `docs/verification-workflow-tasks-json-nav-20260108_1440.md`
+- Workflow tasks filters copy: `docs/verification-workflow-tasks-filters-copy-20260108_1446.md`
+- Workflow tasks JSON copy: `docs/verification-workflow-tasks-json-copy-20260108_1451.md`
+- Workflow tasks summary copy: `docs/verification-workflow-tasks-summary-copy-20260108_1454.md`
+- Workflow tasks stats toggle: `docs/verification-workflow-tasks-stats-toggle-20260108_0855.md`
+- Workflow tasks case-sensitive JSON + summary format: `docs/verification-workflow-tasks-case-sensitive-summary-format-20260108_1504.md`
+- Workflow tasks UI case-sensitive smoke: `docs/verification-workflow-tasks-ui-case-sensitive-20260108_1630.md`
+- Workflow tasks auth header: `docs/verification-workflow-tasks-auth-header-20260108_1634.md`
+- Workflow tasks UI seed cleanup: `docs/verification-workflow-tasks-ui-seed-cleanup-20260109_1356.md`
+- Workflow tasks search highlight: `docs/verification-workflow-tasks-ui-search-highlight-20260109_1405.md`
+- Workflow tasks search cleanup: `docs/verification-workflow-tasks-ui-search-cleanup-20260109_1410.md`
+
+## Notes
+- Custom presets are stored in localStorage (`plm_deep_link_presets`).
+- Custom presets support rename + ordering in the scope selector.
+- Custom presets can be exported/imported as JSON.
+- File-based JSON import is supported via the picker in the scope toolbar.
+- Drag-and-drop JSON import is supported in the scope toolbar.
+- External PLM checklist added: `docs/PLM_EXTERNAL_ENV_CHECKLIST.md`.

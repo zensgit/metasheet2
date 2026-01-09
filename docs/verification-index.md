@@ -9,8 +9,19 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2026-01-05.md`
-  - Previous: `docs/verification-summary-2025-12-28.md`
+  - Report: `docs/verification-summary-2026-01-08.md`
+  - Previous: `docs/verification-summary-2026-01-07.md`
+
+- Univer POC runtime start (core mode):
+  - Report: `docs/verification-univer-poc-runtime-20260106_1207.md`
+  - Report: `docs/verification-univer-poc-runtime-20260106_1217.md`
+
+- Migrations + typecheck:
+  - Report: `docs/verification-migrations-typecheck-20260106_1217.md`
+
+- Smoke verification:
+  - Report: `docs/verification-smoke-20260106_2041.md`
+  - Artifact: `artifacts/smoke/smoke-report-20260106_2041.json`
 
 - Core backend typecheck + runtime attempt:
   - Report: `docs/verification-core-backend-typecheck-20260105_1553.md`
@@ -41,6 +52,9 @@ Entry points:
   - Run: `pnpm verify:yuantus`
   - Report: `docs/verification-yuantus-plm-20251231_1507.md`
   - Connection notes: `docs/yuantus-plm-connection.md`
+  - External env checklist: `docs/PLM_EXTERNAL_ENV_CHECKLIST.md`
+  - Report: `docs/verification-plm-yuantus-20260108_132652.md`
+  - Report: `docs/verification-plm-yuantus-20260108_134341.md`
 
 - PLM product detail mapping:
   - Report: `docs/verification-plm-product-detail-20260104_1132.md`
@@ -64,6 +78,14 @@ Entry points:
 - PLM documents/approvals federation:
   - Script: `scripts/verify-plm-docs-approvals.sh`
   - Report: `docs/verification-plm-docs-approvals-federation-20260101_1301.md`
+  - Report: `docs/verification-plm-docs-approvals-federation-20260106_2049.md`
+  - Report: `docs/verification-plm-docs-approvals-federation-20260106_2101.md`
+
+- PLM (Yuantus) direct API verification:
+  - Report: `docs/verification-plm-yuantus-20260106_2049.md`
+  - Report: `docs/verification-plm-yuantus-20260106_2101.md`
+  - Artifact: `artifacts/verification-plm-yuantus-20260106_2049.log`
+  - Artifact: `artifacts/verification-plm-yuantus-20260106_2101.log`
   - Report: `docs/verification-plm-docs-approvals-federation-20260105_062050.md`
 
 - PLM CAD batch import:
@@ -112,6 +134,16 @@ Entry points:
   - Report: `docs/verification-plm-bom-tools-20260105_0835.md`
   - Artifact: `artifacts/plm-bom-tools-20260105_0835.json`
   - JSON mirror: `docs/verification-plm-bom-tools-20260105_0835.json`
+  - Report: `artifacts/plm-bom-tools-20260108_1300.md`
+  - Artifact: `artifacts/plm-bom-tools-20260108_1300.json`
+  - Report: `artifacts/plm-bom-tools-20260108_1342.md`
+  - Artifact: `artifacts/plm-bom-tools-20260108_1342.json`
+  - Report: `artifacts/plm-bom-tools-20260108_150410.md`
+  - Artifact: `artifacts/plm-bom-tools-20260108_150410.json`
+  - Report: `artifacts/plm-bom-tools-20260108_151809.md`
+  - Artifact: `artifacts/plm-bom-tools-20260108_151809.json`
+  - Report: `artifacts/plm-bom-tools-20260108_152816.md`
+  - Artifact: `artifacts/plm-bom-tools-20260108_152816.json`
 - PLM UI BOM tools:
   - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
   - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
@@ -123,6 +155,86 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260105_181443.png`
   - Report: `docs/verification-plm-ui-regression-20260105_212131.md`
   - Artifact: `artifacts/smoke/plm-ui-regression-20260105_212131.png`
+  - Report: `docs/verification-plm-ui-regression-20260106_232444.md`
+  - Artifact: `artifacts/plm-ui-regression-20260106_232444.png`
+  - Report: `docs/verification-plm-ui-regression-20260106_233239.md`
+  - Artifact: `artifacts/plm-ui-regression-20260106_233239.png`
+  - Report: `docs/verification-plm-ui-regression-20260106_234159.md`
+  - Artifact: `artifacts/plm-ui-regression-20260106_234159.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_081948.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_081948.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_083647.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_083647.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_095120.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_095120.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_114729.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_114729.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_121733.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_121733.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_134716.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_134716.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_135236.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_135236.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_140207.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_140207.png`
+  - Report: `docs/verification-plm-ui-regression-20260107_140512.md`
+  - Artifact: `artifacts/plm-ui-regression-20260107_140512.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_082156.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_082156.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_082656.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_082656.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_083007.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_083007.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_084135.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_084135.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_085551.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_085551.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_130225.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_130225.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_134247.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_134247.png`
+  - Report: `docs/verification-plm-ui-regression-20260108_141810.md`
+  - Artifact: `artifacts/plm-ui-regression-20260108_141810.png`
+- PLM UI deep-link autoload:
+  - Script: `scripts/verify-plm-ui-deeplink.sh`
+  - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`
+  - Artifact: `artifacts/plm-ui-deeplink-20260108_131533.png`
+  - Report: `docs/verification-plm-ui-deeplink-20260108_134303.md`
+  - Artifact: `artifacts/plm-ui-deeplink-20260108_134303.png`
+  - Report: `docs/verification-plm-ui-deeplink-20260108_141834.md`
+  - Artifact: `artifacts/plm-ui-deeplink-20260108_141834.png`
+
+- PLM substitutes mutation:
+  - Script: `scripts/verify-plm-substitutes-mutation.sh`
+  - Report: `docs/verification-plm-substitutes-mutation-20260108_141750.md`
+  - Artifact: `artifacts/plm-substitutes-mutation-20260108_141750.json`
+  - Report: `docs/verification-plm-substitutes-mutation-20260108_150410.md`
+  - Artifact: `artifacts/plm-substitutes-mutation-20260108_150410.json`
+  - Report: `docs/verification-plm-substitutes-mutation-20260108_151809.md`
+  - Artifact: `artifacts/plm-substitutes-mutation-20260108_151809.json`
+  - Report: `docs/verification-plm-substitutes-mutation-20260108_152816.md`
+  - Artifact: `artifacts/plm-substitutes-mutation-20260108_152816.json`
+- PLM substitutes fixture seed:
+  - Script: `scripts/seed-plm-substitutes-fixture.sh`
+  - Report: `docs/verification-plm-substitutes-fixture-20260108_150410.md`
+  - Artifact: `artifacts/plm-substitutes-fixture.json`
+  - Report: `docs/verification-plm-substitutes-fixture-20260108_151809.md`
+  - Report: `docs/verification-plm-substitutes-fixture-20260108_152816.md`
+- PLM UI substitutes mutation:
+  - Script: `scripts/verify-plm-ui-substitutes-mutation.sh`
+  - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_144845.md`
+  - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_144845.png`
+  - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_150410.md`
+  - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_150410.png`
+  - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_151809.md`
+  - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_151809.png`
+  - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_152816.md`
+  - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_152816.png`
+- PLM regression:
+  - Script: `scripts/verify-plm-regression.sh`
+  - Report: `docs/verification-plm-regression-20260108_150410.md`
+  - Report: `docs/verification-plm-regression-20260108_151809.md`
+  - Report: `docs/verification-plm-regression-20260108_152816.md`
 
 - Univer POC build (deps restored):
   - Report: `docs/verification-univer-poc-20251231_2233.md`
@@ -151,6 +263,7 @@ Entry points:
   - Run: `pnpm verify:univer-ui-smoke`
   - Script: `scripts/verify-univer-ui-smoke.mjs`
   - Report: `docs/verification-univer-ui-smoke-20260101_0122.md`
+  - Report: `docs/verification-univer-ui-smoke-20260106_2045.md`
 
 - Univer POC UI backend connectivity:
   - Report: `docs/verification-univer-poc-ui-20260101_0004.md`
@@ -173,6 +286,66 @@ Entry points:
   - Script: `scripts/verify_workflow_minimal.sh`
   - Report: `docs/verification-workflow-minimal-20251231.md`
 
+- Workflow tasks panel auto-refresh (frontend):
+  - Report: `docs/verification-workflow-tasks-panel-20260106_2336.md`
+  - Report: `docs/verification-workflow-tasks-panel-20260107_0825.md`
+- Workflow tasks pagination (backend + frontend):
+  - Report: `docs/verification-workflow-tasks-pagination-20260107_0835.md`
+- Workflow tasks status/error handling (frontend):
+  - Report: `docs/verification-workflow-tasks-status-20260107_0950.md`
+- Workflow tasks labels/badges (frontend):
+  - Report: `docs/verification-workflow-tasks-labels-20260107_1039.md`
+- Workflow tasks filter persistence + tooltips (frontend):
+  - Report: `docs/verification-workflow-tasks-filters-persist-20260107_1102.md`
+- Workflow tasks empty state + click copy (frontend):
+  - Report: `docs/verification-workflow-tasks-empty-click-20260107_1125.md`
+- Workflow tasks clear filters (frontend):
+  - Report: `docs/verification-workflow-tasks-clear-filters-20260107_1129.md`
+- Workflow tasks only-mine + instance copy (frontend/backend):
+  - Report: `docs/verification-workflow-tasks-my-filter-20260107_1138.md`
+- Workflow tasks details drawer + only-mine OR (frontend/backend):
+  - Report: `docs/verification-workflow-tasks-details-20260107_1353.md`
+- Workflow tasks card meta + top clear filters (frontend):
+  - Report: `docs/verification-workflow-tasks-card-meta-20260107_1400.md`
+- Workflow tasks summary bar + drawer JSON (frontend):
+  - Report: `docs/verification-workflow-tasks-summary-20260107_1407.md`
+- Workflow tasks stats from backend (frontend/backend):
+  - Report: `docs/verification-workflow-tasks-stats-20260108_0821.md`
+- Workflow tasks JSON search/depth (frontend):
+  - Report: `docs/verification-workflow-tasks-json-search-20260108_0825.md`
+- Workflow tasks JSON highlight (frontend):
+  - Report: `docs/verification-workflow-tasks-json-highlight-20260108_0835.md`
+- Workflow tasks stats scope toggle (frontend):
+  - Report: `docs/verification-workflow-tasks-stats-toggle-20260108_0855.md`
+- Workflow tasks stats scope all + JSON prev (frontend/backend):
+  - Report: `docs/verification-workflow-tasks-stats-all-20260108_0914.md`
+- Workflow tasks stats mine + JSON clear (frontend/backend):
+  - Report: `docs/verification-workflow-tasks-stats-mine-20260108_0932.md`
+- Workflow tasks stats mine guard (frontend):
+  - Report: `docs/verification-workflow-tasks-stats-mine-20260108_1340.md`
+- Workflow tasks stats scope select (frontend):
+  - Report: `docs/verification-workflow-tasks-stats-select-20260108_1410.md`
+- Workflow tasks JSON match navigator (frontend):
+  - Report: `docs/verification-workflow-tasks-json-nav-20260108_1440.md`
+- Workflow tasks filters copy + F3 (frontend):
+  - Report: `docs/verification-workflow-tasks-filters-copy-20260108_1446.md`
+- Workflow tasks JSON enter + copy (frontend):
+  - Report: `docs/verification-workflow-tasks-json-copy-20260108_1451.md`
+- Workflow tasks summary copy + tooltip (frontend):
+  - Report: `docs/verification-workflow-tasks-summary-copy-20260108_1454.md`
+- Workflow tasks case-sensitive JSON + summary format (frontend + tests):
+  - Report: `docs/verification-workflow-tasks-case-sensitive-summary-format-20260108_1504.md`
+- Workflow tasks UI persisted state smoke:
+  - Report: `docs/verification-workflow-tasks-ui-case-sensitive-20260108_1630.md`
+- Workflow tasks auth headers:
+  - Report: `docs/verification-workflow-tasks-auth-header-20260108_1634.md`
+- Workflow tasks UI seed cleanup:
+  - Report: `docs/verification-workflow-tasks-ui-seed-cleanup-20260109_1356.md`
+- Workflow tasks search highlight:
+  - Report: `docs/verification-workflow-tasks-ui-search-highlight-20260109_1405.md`
+- Workflow tasks search cleanup:
+  - Report: `docs/verification-workflow-tasks-ui-search-cleanup-20260109_1410.md`
+
 - UI federation (Dashboard):
   - Report: `docs/verification-ui-federation-20251229_1810.md`
 
@@ -190,6 +363,10 @@ Entry points:
   - Report: `docs/verification-athena-upload-federation-20260104_0855.md`
 - Athena UI verification (Swagger UI):
   - Report: `docs/verification-athena-ui-20260104_0923.md`
+- Athena ECM (Keycloak + ECM endpoints):
+  - Script: `scripts/verify-athena-ecm.sh`
+  - Report: `docs/verification-athena-ecm-20260106_2109.md`
+  - Report: `docs/verification-athena-ecm-20260106_2126.md`
 
 - PLM (Yuantus) real API verification:
   - Report: `docs/verification-plm-yuantus-real-20260101_1253.md`

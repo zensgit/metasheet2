@@ -21,6 +21,7 @@
     "verify:labs-gating": "NODE_PATH=apps/web-react/node_modules node scripts/verify-labs-gating-ui.cjs",
     "verify:smoke:all": "RUN_UNIVER_UI_SMOKE=true bash scripts/verify-smoke.sh",
     "verify:plm-ui-regression": "bash scripts/verify-plm-ui-regression.sh",
+    "verify:plm-regression": "bash scripts/verify-plm-regression.sh",
     "verify:univer-ui-smoke": "node scripts/verify-univer-ui-smoke.mjs",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
