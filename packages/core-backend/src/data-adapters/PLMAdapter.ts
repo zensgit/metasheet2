@@ -194,6 +194,13 @@ export interface BOMSubstitutesResponse {
   substitutes: BOMSubstituteEntry[]
 }
 
+export interface BOMSubstituteMutationResponse {
+  ok: boolean
+  substitute_id: string
+  bom_line_id?: string
+  substitute_item_id?: string
+}
+
 export interface PLMDocument {
   id: string
   name: string
@@ -1154,6 +1161,55 @@ export class PLMAdapter extends HTTPAdapter {
     }
 
     return this.query<BOMSubstitutesResponse>(`/api/v1/bom/${bomLineId}/substitutes`)
+  }
+
+  async addBomSubstitute(
+    bomLineId: string,
+    substituteItemId: string,
+    properties?: Record<string, unknown>
+  ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          ok: true,
+          substitute_id: `mock-${Date.now()}`,
+          bom_line_id: bomLineId,
+          substitute_item_id: substituteItemId,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
+    }
+
+    const payload: Record<string, unknown> = { substitute_item_id: substituteItemId }
+    if (properties && Object.keys(properties).length) {
+      payload.properties = properties
+    }
+
+    return this.insert<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, payload)
+  }
+
+  async removeBomSubstitute(
+    bomLineId: string,
+    substituteId: string
+  ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          ok: true,
+          substitute_id: substituteId,
+          bom_line_id: bomLineId,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
+    }
+
+    return this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, { id: substituteId })
   }
 
   private flattenYuantusBomTree(root: YuantusBomNode, rootId: string): BOMItem[] {
