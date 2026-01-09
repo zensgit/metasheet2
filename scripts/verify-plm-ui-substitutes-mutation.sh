@@ -318,9 +318,36 @@ async function waitForSelectorWithReload(page, selector) {
   }
 
   const substitutesSection = page.locator('section:has(h2:has-text("替代件"))');
+  const queryButton = substitutesSection.locator('button:has-text("查询")');
+  const addButton = substitutesSection.locator('button:has-text("新增替代件")');
+  const deleteStatus = substitutesSection.locator('p.status', { hasText: '已删除替代件' });
+  const addStatus = substitutesSection.locator('p.status', { hasText: '已新增替代件' });
+  const statusError = substitutesSection.locator('p.status.error');
+
+  async function waitForStatus() {
+    await substitutesSection.locator('p.status').first().waitFor({ timeout: 60000 });
+    const errorText = await statusError.first().textContent().catch(() => '');
+    if (errorText && errorText.trim()) {
+      throw new Error(`Substitutes error: ${errorText.trim()}`);
+    }
+  }
+
+  async function waitForRows(maxAttempts = 3) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const rows = substitutesSection.locator('table.data-table tbody tr');
+      if (await rows.count()) {
+        return rows.first();
+      }
+      await queryButton.click();
+      await waitForStatus();
+      await page.waitForTimeout(500);
+    }
+    throw new Error('Substitutes table still empty after retries');
+  }
+
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
-  await substitutesSection.locator('button:has-text("查询")').click();
-  await substitutesSection.locator('p.status').waitFor({ timeout: 60000 });
+  await queryButton.click();
+  await waitForStatus();
 
   const substituteItemId = process.env.SUBSTITUTE_ITEM_ID;
   if (!substituteItemId) {
@@ -330,17 +357,27 @@ async function waitForSelectorWithReload(page, selector) {
   await substitutesSection.locator('#plm-substitute-item-id').fill(substituteItemId);
   await substitutesSection.locator('#plm-substitute-rank').fill('1');
   await substitutesSection.locator('#plm-substitute-note').fill('auto');
-  await substitutesSection.locator('button:has-text("新增替代件")').click();
+  await addButton.click();
 
-  await substitutesSection.locator('table.data-table tbody tr').first().waitFor({ timeout: 60000 });
+  await Promise.race([
+    addStatus.waitFor({ timeout: 60000 }),
+    statusError.waitFor({ timeout: 60000 }),
+  ]);
+  await waitForStatus();
 
-  const deleteButton = substitutesSection.locator('table.data-table tbody tr').first().locator('button:has-text("删除")');
+  const firstRow = await waitForRows();
+
+  const deleteButton = firstRow.locator('button:has-text("删除")');
   page.once('dialog', async (dialog) => {
     await dialog.accept();
   });
   await deleteButton.click();
 
-  await substitutesSection.locator('p.status').waitFor({ timeout: 60000 });
+  await Promise.race([
+    deleteStatus.waitFor({ timeout: 60000 }),
+    statusError.waitFor({ timeout: 60000 }),
+  ]);
+  await waitForStatus();
   await page.waitForTimeout(1000);
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await browser.close();
