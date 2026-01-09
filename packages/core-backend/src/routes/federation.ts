@@ -149,6 +149,15 @@ const PLMQuerySchema = z.object({
   }).optional(),
 })
 
+const PLMMutationSchema = z.object({
+  operation: z.enum(['substitutes_add', 'substitutes_remove']),
+  bomLineId: z.string().optional(),
+  substituteItemId: z.string().optional(),
+  substituteId: z.string().optional(),
+  properties: z.record(z.unknown()).optional(),
+  filters: z.record(z.unknown()).optional(),
+})
+
 const AthenaQuerySchema = z.object({
   operation: z.enum(['documents', 'search', 'preview', 'versions', 'workflow']),
   documentId: z.string().optional(),
@@ -1140,6 +1149,140 @@ export function federationRouter(injector?: Injector): Router {
   )
 
   /**
+   * POST /api/federation/plm/mutate
+   * Execute write operations against PLM (e.g., BOM substitutes)
+   */
+  router.post(
+    '/api/federation/plm/mutate',
+    rbacGuard('federation', 'write'),
+    async (req: Request, res: Response) => {
+      const parse = PLMMutationSchema.safeParse(req.body)
+      if (!parse.success) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: parse.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; '),
+          },
+        })
+      }
+
+      const metrics = getAdapterMetrics()
+      const startTime = Date.now()
+
+      try {
+        const {
+          operation,
+          bomLineId,
+          substituteItemId,
+          substituteId,
+          properties,
+          filters,
+        } = parse.data
+
+        const filterParams = (filters && typeof filters === 'object' && !Array.isArray(filters)) ? filters : {}
+        const adapter = await ensurePlmAdapter()
+        if (!adapter) {
+          return res.status(503).json({
+            ok: false,
+            error: {
+              code: 'PLM_UNAVAILABLE',
+              message: 'PLM adapter not configured',
+            },
+          })
+        }
+
+        if (operation === 'substitutes_add') {
+          const resolvedBomLineId = bomLineId
+            || toStringParam(filterParams.bom_line_id ?? filterParams.bomLineId ?? filterParams.line_id ?? filterParams.lineId)
+          const resolvedSubstituteItemId = substituteItemId
+            || toStringParam(filterParams.substitute_item_id ?? filterParams.substituteItemId ?? filterParams.item_id)
+          if (!resolvedBomLineId || !resolvedSubstituteItemId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'bomLineId and substituteItemId are required',
+              },
+            })
+          }
+
+          const result = await adapter.addBomSubstitute(
+            resolvedBomLineId,
+            resolvedSubstituteItemId,
+            properties && typeof properties === 'object' ? properties : undefined
+          )
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? {
+              ok: true,
+              substitute_id: '',
+              bom_line_id: resolvedBomLineId,
+              substitute_item_id: resolvedSubstituteItemId,
+            },
+          })
+        }
+
+        if (operation === 'substitutes_remove') {
+          const resolvedBomLineId = bomLineId
+            || toStringParam(filterParams.bom_line_id ?? filterParams.bomLineId ?? filterParams.line_id ?? filterParams.lineId)
+          const resolvedSubstituteId = substituteId
+            || toStringParam(filterParams.substitute_id ?? filterParams.substituteId ?? filterParams.id)
+          if (!resolvedBomLineId || !resolvedSubstituteId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'bomLineId and substituteId are required',
+              },
+            })
+          }
+
+          const result = await adapter.removeBomSubstitute(resolvedBomLineId, resolvedSubstituteId)
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? { ok: true, substitute_id: resolvedSubstituteId },
+          })
+        }
+
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `Unsupported operation: ${operation}`,
+          },
+        })
+      } catch (error) {
+        metrics.recordRequest(
+          { adapter: 'plm', method: 'POST', endpoint: '/plm/mutate', status: '500' },
+          Date.now() - startTime
+        )
+        metrics.recordError({ adapter: 'plm', error_code: 'MUTATION_FAILED', operation: 'mutate' })
+
+        return res.status(500).json({
+          ok: false,
+          error: {
+            code: 'PLM_MUTATION_FAILED',
+            message: error instanceof Error ? error.message : 'PLM mutation failed',
+          },
+        })
+      }
+    }
+  )
+
+  /**
    * GET /api/federation/plm/products/:id
    * Get a specific product from PLM
    */
@@ -1746,7 +1889,18 @@ export function federationRouter(injector?: Injector): Router {
 
 function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
   if (type === 'plm') {
-    return ['products', 'bom', 'documents', 'approvals', 'drawings', 'where_used', 'bom_compare', 'substitutes']
+    return [
+      'products',
+      'bom',
+      'documents',
+      'approvals',
+      'drawings',
+      'where_used',
+      'bom_compare',
+      'substitutes',
+      'substitutes_add',
+      'substitutes_remove',
+    ]
   }
   return ['documents', 'search', 'preview', 'versions', 'workflow', 'collaboration']
 }
