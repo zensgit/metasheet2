@@ -5,6 +5,7 @@
 // Vite environment type declaration
 declare global {
   interface ImportMetaEnv {
+    VITE_API_URL?: string
     VITE_API_BASE?: string
     MODE: string
     DEV: boolean
@@ -19,23 +20,40 @@ declare global {
  * Get the API base URL from environment or default to relative path
  */
 export function getApiBase(): string {
-  // In development, use VITE_API_BASE if set
-  if (import.meta.env.VITE_API_BASE) {
-    return import.meta.env.VITE_API_BASE as string
+  const envValue = (key: 'VITE_API_URL') => {
+    const fromMeta = import.meta.env[key]
+    if (typeof fromMeta === 'string' && fromMeta.trim().length > 0) return fromMeta
+    const fromProcess = (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.[key]
+    if (typeof fromProcess === 'string' && fromProcess.trim().length > 0) return fromProcess
+    return ''
   }
-  // In production or when not set, use relative path (same origin)
-  return ''
+
+  const apiUrl = envValue('VITE_API_URL')
+  if (apiUrl) return apiUrl
+
+  if (typeof window !== 'undefined') {
+    const origin = window?.location?.origin
+    if (typeof origin === 'string' && origin.trim().length > 0) {
+      return origin
+    }
+  }
+
+  return 'http://localhost:8900'
 }
 
 /**
  * Build authorization headers for authenticated requests
  */
-export function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem('auth_token')
-  if (token) {
-    return { Authorization: `Bearer ${token}` }
+export function authHeaders(token?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
   }
-  return {}
+  const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null
+  const resolvedToken = typeof token === 'string' ? token : storedToken ?? ''
+  if (resolvedToken.trim().length > 0) {
+    headers.Authorization = `Bearer ${resolvedToken}`
+  }
+  return headers
 }
 
 /**

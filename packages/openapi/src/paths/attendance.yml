@@ -1,0 +1,413 @@
+paths:
+  /api/attendance/punch:
+    x-plugin: plugin-attendance
+    post:
+      summary: Punch attendance (check in/out)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventType:
+                  type: string
+                  enum: [check_in, check_out]
+                occurredAt:
+                  type: string
+                  format: date-time
+                timezone:
+                  type: string
+                source:
+                  type: string
+                location:
+                  type: object
+                meta:
+                  type: object
+                orgId:
+                  type: string
+              required: [eventType]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      event: { $ref: '#/components/schemas/AttendanceEvent' }
+                      record: { $ref: '#/components/schemas/AttendanceRecord' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/records:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance records
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceRecord' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/summary:
+    x-plugin: plugin-attendance
+    get:
+      summary: Attendance summary
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/requests:
+    x-plugin: plugin-attendance
+    post:
+      summary: Create attendance adjustment request
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workDate:
+                  type: string
+                  format: date
+                requestType:
+                  type: string
+                  enum: [missed_check_in, missed_check_out, time_correction]
+                requestedInAt:
+                  type: string
+                  format: date-time
+                requestedOutAt:
+                  type: string
+                  format: date-time
+                reason:
+                  type: string
+                orgId:
+                  type: string
+              required: [workDate, requestType]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      request: { $ref: '#/components/schemas/AttendanceRequest' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      summary: List attendance requests
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceRequest' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/requests/{id}/approve:
+    x-plugin: plugin-attendance
+    post:
+      summary: Approve attendance request
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string }
+                metadata: { type: object }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      status: { type: string }
+                      orgId: { type: string }
+                      userId: { type: string }
+                      record: { $ref: '#/components/schemas/AttendanceRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/requests/{id}/reject:
+    x-plugin: plugin-attendance
+    post:
+      summary: Reject attendance request
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string }
+                metadata: { type: object }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      status: { type: string }
+                      orgId: { type: string }
+                      userId: { type: string }
+                      record:
+                        nullable: true
+                        allOf:
+                          - { $ref: '#/components/schemas/AttendanceRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/rules/default:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get default attendance rule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceRule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/settings:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance settings
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      summary: Update attendance settings
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceSettings' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceSettings' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/export:
+    x-plugin: plugin-attendance
+    get:
+      summary: Export attendance records as CSV
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000, maximum: 5000 }
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      summary: Update default attendance rule
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                timezone: { type: string }
+                workStartTime: { type: string }
+                workEndTime: { type: string }
+                lateGraceMinutes: { type: integer }
+                earlyGraceMinutes: { type: integer }
+                roundingMinutes: { type: integer }
+                workingDays:
+                  type: array
+                  items: { type: integer }
+                orgId: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceRule' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
