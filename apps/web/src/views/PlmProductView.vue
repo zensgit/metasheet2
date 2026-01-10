@@ -562,7 +562,7 @@
             v-model="cadViewStateDraft"
             class="cad-textarea"
             rows="6"
-            placeholder='{"hidden_entity_ids": [12, 15], "notes": [{"entity_id": 12, "note": "check hole"}]}'
+            placeholder='{"hidden_entity_ids": [12, 15], "notes": [{"entity_id": 12, "note": "检查孔位"}]}'
           ></textarea>
           <details class="json-block">
             <summary>原始数据</summary>
