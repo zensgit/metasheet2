@@ -1,15 +1,17 @@
 # Attendance Plugin Development Report
 
-Date: 2026-01-10
+Date: 2026-01-11
 
 ## Overview
-The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, and automated absence scheduling. Auto-absence now respects org membership through a `user_orgs` mapping. Frontend support surfaces org/user filters, admin controls, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
+The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
 
 ## Backend + Plugin Changes
 - Implemented org-aware attendance routes in `plugins/plugin-attendance/index.cjs` (punch, records, summary, requests, approvals, rules, settings, export).
 - Added settings management with caching and scheduled auto-absence processing.
 - Added event emissions for punches, requests, resolutions, rule updates, settings updates, absence generation, and export.
 - Auto-absence now inserts records only for active users mapped to the org in `user_orgs`.
+- Added shift/assignment/holiday management endpoints with schedule-aware attendance context.
+- Attendance metrics now respect shift working days and holiday overrides, storing `is_workday` and `off` status when applicable.
 - Added `org_id` support across attendance tables via migration.
 - Updated RBAC seed to include attendance permissions with required `name` field.
 - Removed legacy `packages/core-backend/src/routes/attendance.ts`.
@@ -26,6 +28,18 @@ The attendance module has been finalized as an optional plugin with org-aware da
 - `POST /api/attendance/requests/:id/reject`
 - `GET /api/attendance/rules/default`
 - `PUT /api/attendance/rules/default`
+- `GET /api/attendance/shifts`
+- `POST /api/attendance/shifts`
+- `PUT /api/attendance/shifts/:id`
+- `DELETE /api/attendance/shifts/:id`
+- `GET /api/attendance/assignments`
+- `POST /api/attendance/assignments`
+- `PUT /api/attendance/assignments/:id`
+- `DELETE /api/attendance/assignments/:id`
+- `GET /api/attendance/holidays`
+- `POST /api/attendance/holidays`
+- `PUT /api/attendance/holidays/:id`
+- `DELETE /api/attendance/holidays/:id`
 - `GET /api/attendance/settings`
 - `PUT /api/attendance/settings`
 - `GET /api/attendance/export`
@@ -33,24 +47,26 @@ The attendance module has been finalized as an optional plugin with org-aware da
 ## Database Changes
 - Added migration `20260110120000_add_attendance_org_id.ts` to introduce `org_id` to attendance tables and update indexes.
 - Added migration `zzzz20260110123000_create_user_orgs_table.ts` to track user/org membership for auto-absence.
+- Added migration `20260111120000_add_attendance_scheduling_tables.ts` for shifts, shift assignments, holidays, and `attendance_records.is_workday`.
 - Updated Kysely types in `packages/core-backend/src/db/types.ts` to include `org_id` on attendance tables.
 - Added `user_orgs` table type to Kysely Database typing.
 
 ## Frontend Changes
-- `apps/web/src/views/AttendanceView.vue` now includes org/user filters, CSV export, and an admin console for settings and default rule management.
+- `apps/web/src/views/AttendanceView.vue` now includes org/user filters, CSV export, an admin console for settings, default rule management, shifts, assignments, and holiday calendars.
+- Calendar view now highlights holidays/off days and the summary includes off-day totals.
 - Attendance navigation is gated on plugin activation (`apps/web/src/App.vue`).
 - Added a view registry helper at `apps/web/src/view-registry.ts` for dynamic view tests.
 - Updated API utilities to honor `VITE_API_URL` with origin fallback and consistent `Content-Type` header handling.
 
 ## OpenAPI Updates
-- Added `org_id` fields to attendance schemas and `AttendanceSettings` schema in `packages/openapi/src/base.yml`.
-- Added `orgId` parameters to relevant paths and added settings/export paths in `packages/openapi/src/paths/attendance.yml`.
+- Added `org_id` fields to attendance schemas, `AttendanceSettings`, shift, assignment, and holiday schemas in `packages/openapi/src/base.yml`.
+- Added `orgId` parameters to relevant paths and added shift/assignment/holiday paths in `packages/openapi/src/paths/attendance.yml`.
 
 ## Plugin Manifest
 - Added `events.emit` permission in `plugins/plugin-attendance/plugin.json`.
 
 ## Notes / Risks
-- Auto-absence depends on `user_orgs` membership; ensure the new migration runs and org mappings are populated for non-default orgs.
+- Auto-absence depends on `user_orgs` membership and shift schedules; ensure migrations run and org mappings are populated for non-default orgs.
 
 ## Supporting Updates
 - Added `apps/web/src/view-registry.ts` for dynamic view tests.

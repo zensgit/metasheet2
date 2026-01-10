@@ -66,6 +66,9 @@ export interface Database {
   attendance_records: AttendanceRecordsTable
   attendance_requests: AttendanceRequestsTable
   attendance_rules: AttendanceRulesTable
+  attendance_shifts: AttendanceShiftsTable
+  attendance_shift_assignments: AttendanceShiftAssignmentsTable
+  attendance_holidays: AttendanceHolidaysTable
   // Meta tables
   meta_sheets: MetaSheetsTable
   meta_fields: MetaFieldsTable
@@ -795,7 +798,8 @@ export interface AttendanceRecordsTable {
   work_minutes: number
   late_minutes: number
   early_leave_minutes: number
-  status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted'
+  status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted' | 'off'
+  is_workday: boolean
   meta: JSONColumnType<Record<string, unknown> | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
@@ -831,6 +835,43 @@ export interface AttendanceRulesTable {
   rounding_minutes: number
   working_days: JSONColumnType<number[] | null>
   is_default: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceShiftsTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  timezone: string
+  work_start_time: string
+  work_end_time: string
+  late_grace_minutes: number
+  early_grace_minutes: number
+  rounding_minutes: number
+  working_days: JSONColumnType<number[] | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceShiftAssignmentsTable {
+  id: Generated<string>
+  org_id: string
+  user_id: string
+  shift_id: string
+  start_date: ColumnType<string, string | undefined, string>
+  end_date: ColumnType<string | null, string | undefined, string | null>
+  is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceHolidaysTable {
+  id: Generated<string>
+  org_id: string
+  holiday_date: ColumnType<string, string | undefined, string>
+  name: string | null
+  is_working_day: boolean
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
