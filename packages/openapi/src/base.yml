@@ -90,6 +90,8 @@ components:
           type: integer
         status:
           type: string
+        is_workday:
+          type: boolean
         meta:
           type: object
         created_at:
@@ -166,6 +168,8 @@ components:
           type: integer
         adjusted_days:
           type: integer
+        off_days:
+          type: integer
     AttendanceRule:
       type: object
       properties:
@@ -192,6 +196,66 @@ components:
           items:
             type: integer
         isDefault:
+          type: boolean
+    AttendanceShift:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        workStartTime:
+          type: string
+        workEndTime:
+          type: string
+        lateGraceMinutes:
+          type: integer
+        earlyGraceMinutes:
+          type: integer
+        roundingMinutes:
+          type: integer
+        workingDays:
+          type: array
+          items:
+            type: integer
+    AttendanceShiftAssignment:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        shiftId:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        isActive:
+          type: boolean
+    AttendanceHoliday:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+          nullable: true
+        isWorkingDay:
           type: boolean
     AttendanceSettings:
       type: object

@@ -14,6 +14,17 @@ const DEFAULT_RULE = {
   workingDays: [1, 2, 3, 4, 5],
   isDefault: true,
 }
+const DEFAULT_SHIFT = {
+  orgId: DEFAULT_ORG_ID,
+  name: 'Standard Shift',
+  timezone: DEFAULT_RULE.timezone,
+  workStartTime: DEFAULT_RULE.workStartTime,
+  workEndTime: DEFAULT_RULE.workEndTime,
+  lateGraceMinutes: DEFAULT_RULE.lateGraceMinutes,
+  earlyGraceMinutes: DEFAULT_RULE.earlyGraceMinutes,
+  roundingMinutes: DEFAULT_RULE.roundingMinutes,
+  workingDays: [...DEFAULT_RULE.workingDays],
+}
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
@@ -45,9 +56,15 @@ class HttpError extends Error {
 
 function isDatabaseSchemaError(error) {
   if (error?.code === '42P01') return true
+  if (error?.code === '42703') return true
   if (typeof error?.message === 'string') {
     const msg = error.message.toLowerCase()
-    return (msg.includes('relation') || msg.includes('table')) && msg.includes('does not exist')
+    if ((msg.includes('relation') || msg.includes('table')) && msg.includes('does not exist')) {
+      return true
+    }
+    if (msg.includes('column') && msg.includes('does not exist')) {
+      return true
+    }
   }
   return false
 }
@@ -209,6 +226,58 @@ function mapRuleRow(row) {
   }
 }
 
+function mapShiftRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name ?? DEFAULT_SHIFT.name,
+    timezone: row.timezone ?? DEFAULT_SHIFT.timezone,
+    workStartTime: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
+    workEndTime: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
+    lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
+    earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
+    roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
+    workingDays: normalizeWorkingDays(row.working_days),
+  }
+}
+
+function mapAssignmentRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    userId: row.user_id,
+    shiftId: row.shift_id,
+    startDate: row.start_date,
+    endDate: row.end_date ?? null,
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapShiftFromAssignmentRow(row) {
+  return mapShiftRow({
+    id: row.shift_id,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.shift_name,
+    timezone: row.shift_timezone,
+    work_start_time: row.shift_work_start_time,
+    work_end_time: row.shift_work_end_time,
+    late_grace_minutes: row.shift_late_grace_minutes,
+    early_grace_minutes: row.shift_early_grace_minutes,
+    rounding_minutes: row.shift_rounding_minutes,
+    working_days: row.shift_working_days,
+  })
+}
+
+function mapHolidayRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    date: row.holiday_date,
+    name: row.name ?? null,
+    isWorkingDay: row.is_working_day ?? false,
+  }
+}
+
 function toWorkDate(value, timeZone) {
   try {
     return new Intl.DateTimeFormat('en-CA', {
@@ -253,7 +322,21 @@ function roundMinutes(value, step) {
   return Math.floor(value / step) * step
 }
 
-function computeMetrics(rule, firstInAt, lastOutAt) {
+function computeMetrics(options) {
+  const { rule, firstInAt, lastOutAt, isWorkingDay } = options
+
+  if (!isWorkingDay) {
+    if (!firstInAt && !lastOutAt) {
+      return { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'off' }
+    }
+    if (!firstInAt || !lastOutAt) {
+      return { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'off' }
+    }
+    const rawMinutes = Math.max(0, Math.floor((lastOutAt.getTime() - firstInAt.getTime()) / 60000))
+    const workMinutes = roundMinutes(rawMinutes, rule.roundingMinutes)
+    return { workMinutes, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'off' }
+  }
+
   if (!firstInAt && !lastOutAt) {
     return { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'absent' }
   }
@@ -379,6 +462,76 @@ async function loadDefaultRule(db, orgId) {
   }
 }
 
+async function loadHoliday(db, orgId, workDate) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, org_id, holiday_date, name, is_working_day
+       FROM attendance_holidays
+       WHERE org_id = $1 AND holiday_date = $2
+       LIMIT 1`,
+      [targetOrg, workDate]
+    )
+    if (!rows.length) return null
+    return mapHolidayRow(rows[0])
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function loadShiftAssignment(db, orgId, userId, workDate) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+              s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
+              s.working_days AS shift_working_days
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s ON s.id = a.shift_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND a.start_date <= $3
+         AND (a.end_date IS NULL OR a.end_date >= $3)
+       ORDER BY a.start_date DESC, a.created_at DESC
+       LIMIT 1`,
+      [targetOrg, userId, workDate]
+    )
+    if (!rows.length) return null
+    const row = rows[0]
+    return {
+      assignment: mapAssignmentRow(row),
+      shift: mapShiftFromAssignmentRow(row),
+    }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function resolveWorkContext(options) {
+  const { db, orgId, userId, workDate, defaultRule, holidayOverride } = options
+  const rule = defaultRule ?? await loadDefaultRule(db, orgId)
+  const holiday = holidayOverride ?? await loadHoliday(db, orgId, workDate)
+  const assignmentInfo = userId ? await loadShiftAssignment(db, orgId, userId, workDate) : null
+  const profile = assignmentInfo?.shift ?? rule
+  const weekday = getWeekdayFromDateKey(workDate)
+  let isWorkingDay = profile.workingDays.includes(weekday)
+  if (holiday) {
+    isWorkingDay = holiday.isWorkingDay === true
+  }
+  return {
+    rule: profile,
+    assignment: assignmentInfo?.assignment ?? null,
+    holiday,
+    isWorkingDay,
+    source: assignmentInfo ? 'shift' : 'rule',
+  }
+}
+
 async function upsertAttendanceRecord(options) {
   const {
     userId,
@@ -390,6 +543,7 @@ async function upsertAttendanceRecord(options) {
     updateLastOutAt,
     mode,
     statusOverride,
+    isWorkday,
     client,
   } = options
 
@@ -413,13 +567,18 @@ async function upsertAttendanceRecord(options) {
     }
   }
 
-  const metrics = computeMetrics(rule, firstInAt, lastOutAt)
+  const metrics = computeMetrics({
+    rule,
+    firstInAt,
+    lastOutAt,
+    isWorkingDay: isWorkday !== false,
+  })
   const status = statusOverride ?? metrics.status
 
   const updated = await client.query(
     `INSERT INTO attendance_records
-      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
      ON CONFLICT (user_id, work_date, org_id)
      DO UPDATE SET
        org_id = EXCLUDED.org_id,
@@ -430,6 +589,7 @@ async function upsertAttendanceRecord(options) {
        late_minutes = EXCLUDED.late_minutes,
        early_leave_minutes = EXCLUDED.early_leave_minutes,
        status = EXCLUDED.status,
+       is_workday = EXCLUDED.is_workday,
        updated_at = now()
      RETURNING *`,
     [
@@ -443,6 +603,7 @@ async function upsertAttendanceRecord(options) {
       metrics.lateMinutes,
       metrics.earlyLeaveMinutes,
       status,
+      isWorkday !== false,
     ]
   )
 
@@ -506,22 +667,24 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings
   }
 }
 
-async function generateAbsenceRecords(db, orgId, workDate, timezone, rule) {
+async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
+  if (!userIds || userIds.length === 0) return []
   return db.query(
     `INSERT INTO attendance_records
-       (user_id, org_id, work_date, timezone, work_minutes, late_minutes, early_leave_minutes, status, created_at, updated_at)
-     SELECT uo.user_id, $2, $1, $3, 0, 0, 0, 'absent', now(), now()
+       (user_id, org_id, work_date, timezone, work_minutes, late_minutes, early_leave_minutes, status, is_workday, created_at, updated_at)
+     SELECT uo.user_id, $2, $1, $3, 0, 0, 0, 'absent', true, now(), now()
      FROM user_orgs uo
      JOIN users u ON u.id = uo.user_id
      WHERE uo.org_id = $2
        AND uo.is_active = true
        AND u.is_active = true
+       AND uo.user_id = ANY($4)
        AND NOT EXISTS (
          SELECT 1 FROM attendance_records r
          WHERE r.user_id = uo.user_id AND r.work_date = $1 AND r.org_id = $2
        )
      RETURNING user_id`,
-    [workDate, orgId, timezone]
+    [workDate, orgId, timezone, userIds]
   )
 }
 
@@ -564,13 +727,35 @@ function scheduleAutoAbsence({ db, logger, emit }) {
         for (let offset = 1; offset <= lookbackDays; offset += 1) {
           const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
           const workDate = toWorkDate(targetDate, rule.timezone)
-          const weekday = getWeekdayFromDateKey(workDate)
-          if (!rule.workingDays.includes(weekday)) {
+          const holiday = await loadHoliday(db, orgId, workDate)
+          if (holiday && holiday.isWorkingDay === false) {
             continue
           }
           const key = `${orgId}:${workDate}`
           if (key === lastAutoAbsenceKey) continue
-          const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, rule)
+          const userRows = await db.query(
+            `SELECT uo.user_id
+             FROM user_orgs uo
+             JOIN users u ON u.id = uo.user_id
+             WHERE uo.org_id = $1
+               AND uo.is_active = true
+               AND u.is_active = true`,
+            [orgId]
+          )
+          const targetUsers = []
+          for (const row of userRows) {
+            const context = await resolveWorkContext({
+              db,
+              orgId,
+              userId: row.user_id,
+              workDate,
+              defaultRule: rule,
+              holidayOverride: holiday,
+            })
+            if (!context.isWorkingDay) continue
+            targetUsers.push(row.user_id)
+          }
+          const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
           lastAutoAbsenceKey = key
           emit('attendance.absence.generated', {
             orgId,
@@ -717,6 +902,37 @@ module.exports = {
       orgId: z.string().optional(),
     })
 
+    const shiftCreateSchema = z.object({
+      name: z.string().min(1),
+      timezone: z.string().optional(),
+      workStartTime: z.string().optional(),
+      workEndTime: z.string().optional(),
+      lateGraceMinutes: z.number().int().min(0).optional(),
+      earlyGraceMinutes: z.number().int().min(0).optional(),
+      roundingMinutes: z.number().int().min(0).optional(),
+      workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+      orgId: z.string().optional(),
+    })
+    const shiftUpdateSchema = shiftCreateSchema.partial()
+
+    const assignmentCreateSchema = z.object({
+      userId: z.string().min(1),
+      shiftId: z.string().min(1),
+      startDate: z.string().min(1),
+      endDate: z.string().nullable().optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const assignmentUpdateSchema = assignmentCreateSchema.partial()
+
+    const holidayCreateSchema = z.object({
+      date: z.string().min(1),
+      name: z.string().nullable().optional(),
+      isWorkingDay: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const holidayUpdateSchema = holidayCreateSchema.partial()
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/punch',
@@ -740,9 +956,30 @@ module.exports = {
           const settings = await getSettings(db)
           await enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req })
 
-          const rule = await loadDefaultRule(db, orgId)
-          const timezone = parsed.data.timezone ?? rule.timezone
-          const workDate = toWorkDate(occurredAt, timezone)
+          const baseRule = await loadDefaultRule(db, orgId)
+          const baseTimezone = parsed.data.timezone ?? baseRule.timezone
+          let workDate = toWorkDate(occurredAt, baseTimezone)
+          let context = await resolveWorkContext({
+            db,
+            orgId,
+            userId,
+            workDate,
+            defaultRule: baseRule,
+          })
+          let timezone = parsed.data.timezone ?? context.rule.timezone
+          if (timezone !== baseTimezone) {
+            const recalculated = toWorkDate(occurredAt, timezone)
+            if (recalculated !== workDate) {
+              workDate = recalculated
+              context = await resolveWorkContext({
+                db,
+                orgId,
+                userId,
+                workDate,
+                defaultRule: baseRule,
+              })
+            }
+          }
 
           const result = await db.transaction(async (trx) => {
             const event = await trx.query(
@@ -769,10 +1006,11 @@ module.exports = {
               orgId,
               workDate,
               timezone,
-              rule: { ...rule, timezone },
+              rule: { ...context.rule, timezone },
               updateFirstInAt: parsed.data.eventType === 'check_in' ? occurredAt : null,
               updateLastOutAt: parsed.data.eventType === 'check_out' ? occurredAt : null,
               mode: 'append',
+              isWorkday: context.isWorkingDay,
               client: trx,
             })
 
@@ -928,15 +1166,16 @@ module.exports = {
         try {
           const rows = await db.query(
             `SELECT
-               COUNT(*)::int AS total_days,
-               COALESCE(SUM(work_minutes), 0)::int AS total_minutes,
-               COALESCE(SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
-               COALESCE(SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
-               COALESCE(SUM(CASE WHEN status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
-               COALESCE(SUM(CASE WHEN status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
-               COALESCE(SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
-               COALESCE(SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
-               COALESCE(SUM(CASE WHEN status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days
+               COALESCE(SUM(CASE WHEN is_workday THEN 1 ELSE 0 END), 0)::int AS total_days,
+               COALESCE(SUM(CASE WHEN is_workday THEN work_minutes ELSE 0 END), 0)::int AS total_minutes,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
+               COALESCE(SUM(CASE WHEN is_workday AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
+               COALESCE(SUM(CASE WHEN NOT is_workday THEN 1 ELSE 0 END), 0)::int AS off_days
              FROM attendance_records
              WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
             [targetUserId, orgId, from, to]
@@ -953,6 +1192,7 @@ module.exports = {
             partial_days: Number(row.partial_days ?? 0),
             absent_days: Number(row.absent_days ?? 0),
             adjusted_days: Number(row.adjusted_days ?? 0),
+            off_days: Number(row.off_days ?? 0),
           }
 
           res.json({ ok: true, data: summary })
@@ -1234,19 +1474,28 @@ module.exports = {
           let record = null
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
           if (action === 'approve') {
-            const rule = await loadDefaultRule(trx, orgId)
+            const baseRule = await loadDefaultRule(trx, orgId)
+            const context = await resolveWorkContext({
+              db: trx,
+              orgId,
+              userId: requestRow.user_id,
+              workDate: requestRow.work_date,
+              defaultRule: baseRule,
+            })
+            const timezone = context.rule.timezone
             const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
             const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
             record = await upsertAttendanceRecord({
               userId: requestRow.user_id,
               orgId,
               workDate: requestRow.work_date,
-              timezone: rule.timezone,
-              rule,
+              timezone,
+              rule: context.rule,
               updateFirstInAt,
               updateLastOutAt,
               mode: 'override',
               statusOverride: 'adjusted',
+              isWorkday: context.isWorkingDay,
               client: trx,
             })
 
@@ -1262,7 +1511,7 @@ module.exports = {
                 resolvedAt,
                 'adjustment',
                 'request',
-                rule.timezone,
+                timezone,
                 JSON.stringify({}),
                 JSON.stringify({
                   requestId,
@@ -1407,6 +1656,684 @@ module.exports = {
 
     context.api.http.addRoute(
       'GET',
+      '/api/attendance/shifts',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_shifts WHERE org_id = $1',
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT * FROM attendance_shifts
+             WHERE org_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapShiftRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shifts query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load shifts' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/shifts',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = shiftCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          name: parsed.data.name ?? DEFAULT_SHIFT.name,
+          timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
+          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
+          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
+          lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
+          earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
+          roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
+          workingDays: normalizeWorkingDays(parsed.data.workingDays ?? DEFAULT_SHIFT.workingDays),
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_shifts
+             (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.name,
+              payload.timezone,
+              payload.workStartTime,
+              payload.workEndTime,
+              payload.lateGraceMinutes,
+              payload.earlyGraceMinutes,
+              payload.roundingMinutes,
+              JSON.stringify(payload.workingDays),
+            ]
+          )
+          const shift = mapShiftRow(rows[0])
+          emitEvent('attendance.shift.created', { orgId, shiftId: shift.id })
+          res.status(201).json({ ok: true, data: shift })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shift creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/shifts/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = shiftUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const shiftId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [shiftId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const workingDays = parsed.data.workingDays
+            ? normalizeWorkingDays(parsed.data.workingDays)
+            : normalizeWorkingDays(existing.working_days)
+
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            timezone: parsed.data.timezone ?? existing.timezone,
+            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
+            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
+            lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
+            earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
+            roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
+            workingDays,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_shifts
+             SET name = $3,
+                 timezone = $4,
+                 work_start_time = $5,
+                 work_end_time = $6,
+                 late_grace_minutes = $7,
+                 early_grace_minutes = $8,
+                 rounding_minutes = $9,
+                 working_days = $10::jsonb,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              shiftId,
+              orgId,
+              payload.name,
+              payload.timezone,
+              payload.workStartTime,
+              payload.workEndTime,
+              payload.lateGraceMinutes,
+              payload.earlyGraceMinutes,
+              payload.roundingMinutes,
+              JSON.stringify(payload.workingDays),
+            ]
+          )
+
+          const shift = mapShiftRow(rows[0])
+          emitEvent('attendance.shift.updated', { orgId, shiftId: shift.id })
+          res.json({ ok: true, data: shift })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shift update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/shifts/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const shiftId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2 RETURNING id',
+            [shiftId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+          emitEvent('attendance.shift.deleted', { orgId, shiftId })
+          res.json({ ok: true, data: { id: shiftId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shift delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/assignments',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          userId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const params = [orgId]
+          let userFilter = ''
+          if (parsed.data.userId) {
+            params.push(parsed.data.userId)
+            userFilter = `AND a.user_id = $${params.length}`
+          }
+
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_shift_assignments a
+             WHERE a.org_id = $1 ${userFilter}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          params.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+                    s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+                    s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+                    s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
+                    s.working_days AS shift_working_days
+             FROM attendance_shift_assignments a
+             JOIN attendance_shifts s ON s.id = a.shift_id
+             WHERE a.org_id = $1 ${userFilter}
+             ORDER BY a.start_date DESC, a.created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(row => ({
+                assignment: mapAssignmentRow(row),
+                shift: mapShiftFromAssignmentRow(row),
+              })),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance assignments query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load assignments' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/assignments',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = assignmentCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const normalizedEndDate = typeof parsed.data.endDate === 'string' && parsed.data.endDate.trim().length > 0
+          ? parsed.data.endDate
+          : null
+
+        const payload = {
+          userId: parsed.data.userId,
+          shiftId: parsed.data.shiftId,
+          startDate: parsed.data.startDate,
+          endDate: normalizedEndDate,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        if (payload.endDate && payload.endDate < payload.startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+          return
+        }
+
+        try {
+          const shiftRows = await db.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [payload.shiftId, orgId]
+          )
+          if (!shiftRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+
+          const rows = await db.query(
+            `INSERT INTO attendance_shift_assignments
+             (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.userId,
+              payload.shiftId,
+              payload.startDate,
+              payload.endDate,
+              payload.isActive,
+            ]
+          )
+
+          const assignment = mapAssignmentRow(rows[0])
+          const shift = mapShiftRow(shiftRows[0])
+          emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
+          res.status(201).json({ ok: true, data: { assignment, shift } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance assignment creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/assignments/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = assignmentUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const assignmentId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const normalizedEndDate = typeof parsed.data.endDate === 'string'
+            ? (parsed.data.endDate.trim().length > 0 ? parsed.data.endDate : null)
+            : parsed.data.endDate
+
+          const payload = {
+            userId: parsed.data.userId ?? existing.user_id,
+            shiftId: parsed.data.shiftId ?? existing.shift_id,
+            startDate: parsed.data.startDate ?? existing.start_date,
+            endDate: normalizedEndDate ?? existing.end_date,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          if (payload.endDate && payload.endDate < payload.startDate) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+            return
+          }
+
+          const shiftRows = await db.query(
+            'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [payload.shiftId, orgId]
+          )
+          if (!shiftRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_shift_assignments
+             SET user_id = $3,
+                 shift_id = $4,
+                 start_date = $5,
+                 end_date = $6,
+                 is_active = $7,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              assignmentId,
+              orgId,
+              payload.userId,
+              payload.shiftId,
+              payload.startDate,
+              payload.endDate,
+              payload.isActive,
+            ]
+          )
+
+          const assignment = mapAssignmentRow(rows[0])
+          const shift = mapShiftRow(shiftRows[0])
+          emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
+          res.json({ ok: true, data: { assignment, shift } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance assignment update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/assignments/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const assignmentId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
+            [assignmentId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
+            return
+          }
+          emitEvent('attendance.assignment.deleted', { orgId, assignmentId })
+          res.json({ ok: true, data: { id: assignmentId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance assignment delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/holidays',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          from: z.string().optional(),
+          to: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
+        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_holidays
+             WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3`,
+            [orgId, from, to]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT id, org_id, holiday_date, name, is_working_day
+             FROM attendance_holidays
+             WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3
+             ORDER BY holiday_date ASC`,
+            [orgId, from, to]
+          )
+
+          res.json({ ok: true, data: { items: rows.map(mapHolidayRow), total } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holidays query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load holidays' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/holidays',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = holidayCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
+          ? null
+          : parsed.data.name ?? null
+
+        const payload = {
+          date: parsed.data.date,
+          name: normalizedName,
+          isWorkingDay: parsed.data.isWorkingDay ?? false,
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_holidays
+             (id, org_id, holiday_date, name, is_working_day)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, org_id, holiday_date, name, is_working_day`,
+            [
+              randomUUID(),
+              orgId,
+              payload.date,
+              payload.name,
+              payload.isWorkingDay,
+            ]
+          )
+          const holiday = mapHolidayRow(rows[0])
+          emitEvent('attendance.holiday.created', { orgId, holidayId: holiday.id })
+          res.status(201).json({ ok: true, data: holiday })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holiday creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create holiday' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/holidays/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = holidayUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const holidayId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT id, org_id, holiday_date, name, is_working_day FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+            [holidayId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
+            ? null
+            : parsed.data.name
+
+          const payload = {
+            date: parsed.data.date ?? existing.holiday_date,
+            name: normalizedName ?? existing.name,
+            isWorkingDay: parsed.data.isWorkingDay ?? existing.is_working_day,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_holidays
+             SET holiday_date = $3,
+                 name = $4,
+                 is_working_day = $5,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING id, org_id, holiday_date, name, is_working_day`,
+            [holidayId, orgId, payload.date, payload.name, payload.isWorkingDay]
+          )
+
+          const holiday = mapHolidayRow(rows[0])
+          emitEvent('attendance.holiday.updated', { orgId, holidayId: holiday.id })
+          res.json({ ok: true, data: holiday })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holiday update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update holiday' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/holidays/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const holidayId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_holidays WHERE id = $1 AND org_id = $2 RETURNING id',
+            [holidayId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
+            return
+          }
+          emitEvent('attendance.holiday.deleted', { orgId, holidayId })
+          res.json({ ok: true, data: { id: holidayId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holiday delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete holiday' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
       '/api/attendance/settings',
       withPermission('attendance:admin', async (_req, res) => {
         try {
@@ -1502,7 +2429,7 @@ module.exports = {
         try {
           const rows = await db.query(
             `SELECT user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes,
-                    early_leave_minutes, status
+                    early_leave_minutes, status, is_workday
              FROM attendance_records
              WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
              ORDER BY work_date DESC
@@ -1521,6 +2448,7 @@ module.exports = {
             'late_minutes',
             'early_leave_minutes',
             'status',
+            'is_workday',
           ]
           const csv = buildCsv(rows, headers)
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`

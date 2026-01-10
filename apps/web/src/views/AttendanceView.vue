@@ -95,6 +95,10 @@
               <span>Adjusted</span>
               <strong>{{ summary.adjusted_days }}</strong>
             </div>
+            <div class="attendance__summary-item">
+              <span>Off</span>
+              <strong>{{ summary.off_days }}</strong>
+            </div>
           </div>
           <div v-else class="attendance__empty">No summary yet.</div>
         </div>
@@ -390,6 +394,311 @@
                 {{ ruleLoading ? 'Saving...' : 'Save rule' }}
               </button>
             </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Shifts</h4>
+                <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
+                  {{ shiftLoading ? 'Loading...' : 'Reload shifts' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-shift-name">
+                  <span>Name</span>
+                  <input id="attendance-shift-name" name="shiftName" v-model="shiftForm.name" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-shift-timezone">
+                  <span>Timezone</span>
+                  <input
+                    id="attendance-shift-timezone"
+                    name="shiftTimezone"
+                    v-model="shiftForm.timezone"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-start">
+                  <span>Work start</span>
+                  <input
+                    id="attendance-shift-start"
+                    name="shiftWorkStartTime"
+                    v-model="shiftForm.workStartTime"
+                    type="time"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-end">
+                  <span>Work end</span>
+                  <input
+                    id="attendance-shift-end"
+                    name="shiftWorkEndTime"
+                    v-model="shiftForm.workEndTime"
+                    type="time"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-late-grace">
+                  <span>Late grace (min)</span>
+                  <input
+                    id="attendance-shift-late-grace"
+                    name="shiftLateGraceMinutes"
+                    v-model.number="shiftForm.lateGraceMinutes"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-early-grace">
+                  <span>Early grace (min)</span>
+                  <input
+                    id="attendance-shift-early-grace"
+                    name="shiftEarlyGraceMinutes"
+                    v-model.number="shiftForm.earlyGraceMinutes"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-shift-rounding">
+                  <span>Rounding (min)</span>
+                  <input
+                    id="attendance-shift-rounding"
+                    name="shiftRoundingMinutes"
+                    v-model.number="shiftForm.roundingMinutes"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-shift-working-days">
+                  <span>Working days (0-6)</span>
+                  <input
+                    id="attendance-shift-working-days"
+                    name="shiftWorkingDays"
+                    v-model="shiftForm.workingDays"
+                    type="text"
+                    placeholder="1,2,3,4,5"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="shiftSaving" @click="saveShift">
+                  {{ shiftSaving ? 'Saving...' : shiftEditingId ? 'Update shift' : 'Create shift' }}
+                </button>
+                <button v-if="shiftEditingId" class="attendance__btn" :disabled="shiftSaving" @click="resetShiftForm">
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="shifts.length === 0" class="attendance__empty">No shifts yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Timezone</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Working days</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="shift in shifts" :key="shift.id">
+                      <td>{{ shift.name }}</td>
+                      <td>{{ shift.timezone }}</td>
+                      <td>{{ shift.workStartTime }}</td>
+                      <td>{{ shift.workEndTime }}</td>
+                      <td>{{ shift.workingDays.join(',') }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editShift(shift)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteShift(shift.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Assignments</h4>
+                <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
+                  {{ assignmentLoading ? 'Loading...' : 'Reload assignments' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-assignment-user-id">
+                  <span>User ID</span>
+                  <input
+                    id="attendance-assignment-user-id"
+                    name="assignmentUserId"
+                    v-model="assignmentForm.userId"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-assignment-shift-id">
+                  <span>Shift</span>
+                  <select
+                    id="attendance-assignment-shift-id"
+                    name="assignmentShiftId"
+                    v-model="assignmentForm.shiftId"
+                    :disabled="shifts.length === 0"
+                  >
+                    <option value="" disabled>Select shift</option>
+                    <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
+                      {{ shift.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-assignment-start-date">
+                  <span>Start date</span>
+                  <input
+                    id="attendance-assignment-start-date"
+                    name="assignmentStartDate"
+                    v-model="assignmentForm.startDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-assignment-end-date">
+                  <span>End date</span>
+                  <input
+                    id="attendance-assignment-end-date"
+                    name="assignmentEndDate"
+                    v-model="assignmentForm.endDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-assignment-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-assignment-active"
+                    name="assignmentActive"
+                    v-model="assignmentForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="assignmentSaving" @click="saveAssignment">
+                  {{ assignmentSaving ? 'Saving...' : assignmentEditingId ? 'Update assignment' : 'Create assignment' }}
+                </button>
+                <button
+                  v-if="assignmentEditingId"
+                  class="attendance__btn"
+                  :disabled="assignmentSaving"
+                  @click="resetAssignmentForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="assignments.length === 0" class="attendance__empty">No assignments yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Shift</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in assignments" :key="item.assignment.id">
+                      <td>{{ item.assignment.userId }}</td>
+                      <td>{{ item.shift.name }}</td>
+                      <td>{{ item.assignment.startDate }}</td>
+                      <td>{{ item.assignment.endDate || '--' }}</td>
+                      <td>{{ item.assignment.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editAssignment(item)">Edit</button>
+                        <button
+                          class="attendance__btn attendance__btn--danger"
+                          @click="deleteAssignment(item.assignment.id)"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Holidays</h4>
+                <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
+                  {{ holidayLoading ? 'Loading...' : 'Reload holidays' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-holiday-date">
+                  <span>Date</span>
+                  <input
+                    id="attendance-holiday-date"
+                    name="holidayDate"
+                    v-model="holidayForm.date"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-name">
+                  <span>Name</span>
+                  <input
+                    id="attendance-holiday-name"
+                    name="holidayName"
+                    v-model="holidayForm.name"
+                    type="text"
+                    placeholder="Optional"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-working">
+                  <span>Working day override</span>
+                  <input
+                    id="attendance-holiday-working"
+                    name="holidayWorkingDay"
+                    v-model="holidayForm.isWorkingDay"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="holidaySaving" @click="saveHoliday">
+                  {{ holidaySaving ? 'Saving...' : holidayEditingId ? 'Update holiday' : 'Create holiday' }}
+                </button>
+                <button
+                  v-if="holidayEditingId"
+                  class="attendance__btn"
+                  :disabled="holidaySaving"
+                  @click="resetHolidayForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="holidays.length === 0" class="attendance__empty">No holidays in this range.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Name</th>
+                      <th>Working day</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="holiday in holidays" :key="holiday.id">
+                      <td>{{ holiday.date }}</td>
+                      <td>{{ holiday.name || '--' }}</td>
+                      <td>{{ holiday.isWorkingDay ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editHoliday(holiday)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteHoliday(holiday.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -458,6 +767,7 @@ interface AttendanceSummary {
   partial_days: number
   absent_days: number
   adjusted_days: number
+  off_days: number
 }
 
 interface AttendanceRecord {
@@ -469,6 +779,7 @@ interface AttendanceRecord {
   late_minutes: number
   early_leave_minutes: number
   status: string
+  is_workday?: boolean
 }
 
 interface AttendanceRequest {
@@ -509,6 +820,42 @@ interface AttendanceRule {
   isDefault?: boolean
 }
 
+interface AttendanceShift {
+  id: string
+  orgId?: string
+  name: string
+  timezone: string
+  workStartTime: string
+  workEndTime: string
+  lateGraceMinutes: number
+  earlyGraceMinutes: number
+  roundingMinutes: number
+  workingDays: number[]
+}
+
+interface AttendanceAssignment {
+  id: string
+  orgId?: string
+  userId: string
+  shiftId: string
+  startDate: string
+  endDate: string | null
+  isActive: boolean
+}
+
+interface AttendanceAssignmentItem {
+  assignment: AttendanceAssignment
+  shift: AttendanceShift
+}
+
+interface AttendanceHoliday {
+  id: string
+  orgId?: string
+  date: string
+  name: string | null
+  isWorkingDay: boolean
+}
+
 interface CalendarDay {
   key: string
   day: number
@@ -532,8 +879,22 @@ const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
 const ruleLoading = ref(false)
+const shiftLoading = ref(false)
+const shiftSaving = ref(false)
+const assignmentLoading = ref(false)
+const assignmentSaving = ref(false)
+const holidayLoading = ref(false)
+const holidaySaving = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+
+const shifts = ref<AttendanceShift[]>([])
+const assignments = ref<AttendanceAssignmentItem[]>([])
+const holidays = ref<AttendanceHoliday[]>([])
+
+const shiftEditingId = ref<string | null>(null)
+const assignmentEditingId = ref<string | null>(null)
+const holidayEditingId = ref<string | null>(null)
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -571,6 +932,14 @@ const recordMap = computed(() => {
   return map
 })
 
+const holidayMap = computed(() => {
+  const map = new Map<string, AttendanceHoliday>()
+  holidays.value.forEach((holiday) => {
+    map.set(holiday.date, holiday)
+  })
+  return map
+})
+
 const calendarDays = computed<CalendarDay[]>(() => {
   const year = calendarMonth.value.getFullYear()
   const month = calendarMonth.value.getMonth()
@@ -585,11 +954,19 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const date = new Date(year, month, index - startOffset + 1)
     const key = toDateKey(date)
     const record = recordMap.value.get(key)
-    const status = record?.status
-    const statusLabel = status ? formatStatus(status) : undefined
-    const tooltip = record
+    const holiday = holidayMap.value.get(key)
+    let status = record?.status
+    let statusLabel = status ? formatStatus(status) : undefined
+    let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
+    if (!record && holiday && holiday.isWorkingDay === false) {
+      status = 'off'
+      statusLabel = 'Holiday'
+      tooltip = holiday.name ? `${key} · ${holiday.name}` : `${key} · Holiday`
+    } else if (record && status === 'off' && holiday?.name) {
+      tooltip = `${key} · ${holiday.name} · ${record.work_minutes} min`
+    }
     return {
       key,
       day: date.getDate(),
@@ -632,6 +1009,31 @@ const ruleForm = reactive({
   workingDays: '1,2,3,4,5',
 })
 
+const shiftForm = reactive({
+  name: 'Standard Shift',
+  timezone: defaultTimezone,
+  workStartTime: '09:00',
+  workEndTime: '18:00',
+  lateGraceMinutes: 10,
+  earlyGraceMinutes: 10,
+  roundingMinutes: 5,
+  workingDays: '1,2,3,4,5',
+})
+
+const assignmentForm = reactive({
+  userId: '',
+  shiftId: '',
+  startDate: toDateInput(today),
+  endDate: '',
+  isActive: true,
+})
+
+const holidayForm = reactive({
+  date: toDateInput(today),
+  name: '',
+  isWorkingDay: false,
+})
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
@@ -659,6 +1061,7 @@ function formatStatus(value: string): string {
     partial: 'Partial',
     absent: 'Absent',
     adjusted: 'Adjusted',
+    off: 'Off',
   }
   return map[value] ?? value
 }
@@ -789,7 +1192,7 @@ async function refreshAll() {
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   try {
-    await Promise.all([loadSummary(), loadRecords(), loadRequests()])
+    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadHolidays()])
   } catch (error: any) {
     setStatus(error?.message || 'Refresh failed', 'error')
   } finally {
@@ -1054,8 +1457,318 @@ async function saveRule() {
   }
 }
 
+function resetShiftForm() {
+  shiftEditingId.value = null
+  shiftForm.name = 'Standard Shift'
+  shiftForm.timezone = defaultTimezone
+  shiftForm.workStartTime = '09:00'
+  shiftForm.workEndTime = '18:00'
+  shiftForm.lateGraceMinutes = 10
+  shiftForm.earlyGraceMinutes = 10
+  shiftForm.roundingMinutes = 5
+  shiftForm.workingDays = '1,2,3,4,5'
+}
+
+function editShift(shift: AttendanceShift) {
+  shiftEditingId.value = shift.id
+  shiftForm.name = shift.name
+  shiftForm.timezone = shift.timezone
+  shiftForm.workStartTime = shift.workStartTime
+  shiftForm.workEndTime = shift.workEndTime
+  shiftForm.lateGraceMinutes = shift.lateGraceMinutes
+  shiftForm.earlyGraceMinutes = shift.earlyGraceMinutes
+  shiftForm.roundingMinutes = shift.roundingMinutes
+  shiftForm.workingDays = shift.workingDays.join(',')
+}
+
+async function loadShifts() {
+  shiftLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/shifts?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load shifts')
+    }
+    adminForbidden.value = false
+    shifts.value = data.data.items || []
+    if (!assignmentForm.shiftId && shifts.value.length > 0) {
+      assignmentForm.shiftId = shifts.value[0].id
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load shifts', 'error')
+  } finally {
+    shiftLoading.value = false
+  }
+}
+
+async function saveShift() {
+  shiftSaving.value = true
+  const isEditing = Boolean(shiftEditingId.value)
+  try {
+    const payload = {
+      name: shiftForm.name,
+      timezone: shiftForm.timezone,
+      workStartTime: shiftForm.workStartTime,
+      workEndTime: shiftForm.workEndTime,
+      lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,
+      earlyGraceMinutes: Number(shiftForm.earlyGraceMinutes) || 0,
+      roundingMinutes: Number(shiftForm.roundingMinutes) || 0,
+      workingDays: parseWorkingDaysInput(shiftForm.workingDays),
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/shifts/${shiftEditingId.value}`
+      : '/api/attendance/shifts'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save shift')
+    }
+    adminForbidden.value = false
+    await loadShifts()
+    resetShiftForm()
+    setStatus(isEditing ? 'Shift updated.' : 'Shift created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save shift', 'error')
+  } finally {
+    shiftSaving.value = false
+  }
+}
+
+async function deleteShift(id: string) {
+  if (!window.confirm('Delete this shift? Assignments will be removed.')) return
+  try {
+    const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete shift')
+    }
+    adminForbidden.value = false
+    await loadShifts()
+    await loadAssignments()
+    setStatus('Shift deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete shift', 'error')
+  }
+}
+
+function resetAssignmentForm() {
+  assignmentEditingId.value = null
+  assignmentForm.userId = ''
+  assignmentForm.shiftId = shifts.value[0]?.id ?? ''
+  assignmentForm.startDate = toDateInput(today)
+  assignmentForm.endDate = ''
+  assignmentForm.isActive = true
+}
+
+function editAssignment(item: AttendanceAssignmentItem) {
+  assignmentEditingId.value = item.assignment.id
+  assignmentForm.userId = item.assignment.userId
+  assignmentForm.shiftId = item.assignment.shiftId
+  assignmentForm.startDate = item.assignment.startDate
+  assignmentForm.endDate = item.assignment.endDate ?? ''
+  assignmentForm.isActive = item.assignment.isActive
+}
+
+async function loadAssignments() {
+  assignmentLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load assignments')
+    }
+    adminForbidden.value = false
+    assignments.value = data.data.items || []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load assignments', 'error')
+  } finally {
+    assignmentLoading.value = false
+  }
+}
+
+async function saveAssignment() {
+  assignmentSaving.value = true
+  const isEditing = Boolean(assignmentEditingId.value)
+  try {
+    if (!assignmentForm.userId.trim()) {
+      throw new Error('User ID is required')
+    }
+    if (!assignmentForm.shiftId) {
+      throw new Error('Shift selection is required')
+    }
+    const endDate = assignmentForm.endDate.trim()
+    const payload = {
+      userId: assignmentForm.userId.trim(),
+      shiftId: assignmentForm.shiftId,
+      startDate: assignmentForm.startDate,
+      endDate: endDate.length > 0 ? endDate : null,
+      isActive: assignmentForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/assignments/${assignmentEditingId.value}`
+      : '/api/attendance/assignments'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save assignment')
+    }
+    adminForbidden.value = false
+    await loadAssignments()
+    resetAssignmentForm()
+    setStatus(isEditing ? 'Assignment updated.' : 'Assignment created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save assignment', 'error')
+  } finally {
+    assignmentSaving.value = false
+  }
+}
+
+async function deleteAssignment(id: string) {
+  if (!window.confirm('Delete this assignment?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete assignment')
+    }
+    adminForbidden.value = false
+    await loadAssignments()
+    setStatus('Assignment deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete assignment', 'error')
+  }
+}
+
+function resetHolidayForm() {
+  holidayEditingId.value = null
+  holidayForm.date = toDateInput(today)
+  holidayForm.name = ''
+  holidayForm.isWorkingDay = false
+}
+
+function editHoliday(holiday: AttendanceHoliday) {
+  holidayEditingId.value = holiday.id
+  holidayForm.date = holiday.date
+  holidayForm.name = holiday.name ?? ''
+  holidayForm.isWorkingDay = holiday.isWorkingDay
+}
+
+async function loadHolidays() {
+  holidayLoading.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      orgId: normalizedOrgId(),
+    })
+    const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load holidays')
+    }
+    holidays.value = data.data.items || []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load holidays', 'error')
+  } finally {
+    holidayLoading.value = false
+  }
+}
+
+async function saveHoliday() {
+  holidaySaving.value = true
+  const isEditing = Boolean(holidayEditingId.value)
+  try {
+    if (!holidayForm.date) {
+      throw new Error('Holiday date is required')
+    }
+    const payload = {
+      date: holidayForm.date,
+      name: holidayForm.name.trim().length > 0 ? holidayForm.name.trim() : null,
+      isWorkingDay: holidayForm.isWorkingDay,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/holidays/${holidayEditingId.value}`
+      : '/api/attendance/holidays'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save holiday')
+    }
+    adminForbidden.value = false
+    await loadHolidays()
+    resetHolidayForm()
+    setStatus(isEditing ? 'Holiday updated.' : 'Holiday created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save holiday', 'error')
+  } finally {
+    holidaySaving.value = false
+  }
+}
+
+async function deleteHoliday(id: string) {
+  if (!window.confirm('Delete this holiday?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete holiday')
+    }
+    adminForbidden.value = false
+    await loadHolidays()
+    setStatus('Holiday deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete holiday', 'error')
+  }
+}
+
 async function loadAdminData() {
-  await Promise.all([loadSettings(), loadRule()])
+  await Promise.all([loadSettings(), loadRule(), loadShifts(), loadAssignments(), loadHolidays()])
 }
 
 onMounted(() => {
@@ -1074,7 +1787,8 @@ onMounted(() => {
 
 watch(orgId, () => {
   if (attendancePluginActive.value) {
-    loadRule()
+    refreshAll()
+    loadAdminData()
   }
 })
 </script>
@@ -1338,6 +2052,11 @@ watch(orgId, () => {
   border-color: #b2ebf2;
 }
 
+.attendance__calendar-cell--off {
+  background: #f3f4f6;
+  border-color: #d6d6d6;
+}
+
 .attendance__request-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1416,12 +2135,23 @@ watch(orgId, () => {
   margin-top: 12px;
 }
 
+.attendance__table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
 .attendance__table th,
 .attendance__table td {
   border-bottom: 1px solid #e0e0e0;
   padding: 8px;
   text-align: left;
   font-size: 13px;
+}
+
+.attendance__table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .attendance__records-header {
@@ -1461,6 +2191,12 @@ watch(orgId, () => {
   flex-direction: column;
   gap: 12px;
   margin-top: 16px;
+}
+
+.attendance__admin-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .attendance__admin-section-header {
