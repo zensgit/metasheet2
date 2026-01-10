@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @metasheet/web dev",
-    "verify:smoke": "node scripts/verify-smoke-core.mjs",
+    "verify:smoke": "node scripts/verify-smoke-core.mjs && pnpm verify:attendance-ui:optional",
+    "verify:attendance-ui": "node scripts/verify-attendance-ui.mjs",
+    "verify:attendance-ui:optional": "bash -c 'if [ \"${RUN_ATTENDANCE_UI_SMOKE}\" = \"true\" ]; then node scripts/verify-attendance-ui.mjs; else echo \"skip attendance ui (set RUN_ATTENDANCE_UI_SMOKE=true)\"; fi'",
     "verify:smoke:all": "bash scripts/verify-smoke.sh",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
