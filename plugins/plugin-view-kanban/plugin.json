@@ -7,7 +7,7 @@
   "author": { "name": "MetaSheet" },
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "dist/index.js",
-  "capabilities": { "views": ["kanban"] },
+  "capabilities": { "views": ["kanban"], "workflows": [], "functions": [] },
   "contributes": {
     "views": [
       { "id": "kanban", "name": "看板", "component": "KanbanView" }

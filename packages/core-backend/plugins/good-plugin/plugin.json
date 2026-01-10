@@ -4,5 +4,5 @@
   "displayName": "Good Plugin",
   "engines": { "metasheet": ">=1.0.0" },
   "permissions": ["database.read"],
-  "main": { "backend": "dist/index.js" }
+  "main": "index.js"
 }

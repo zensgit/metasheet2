@@ -31,6 +31,196 @@ components:
               type: string
             message:
               type: string
+    AttendanceEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        occurred_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+          enum: [check_in, check_out, adjustment]
+        source:
+          type: string
+        timezone:
+          type: string
+        location:
+          type: object
+        meta:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+    AttendanceRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        timezone:
+          type: string
+        first_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_out_at:
+          type: string
+          format: date-time
+          nullable: true
+        work_minutes:
+          type: integer
+        late_minutes:
+          type: integer
+        early_leave_minutes:
+          type: integer
+        status:
+          type: string
+        meta:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AttendanceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        request_type:
+          type: string
+          enum: [missed_check_in, missed_check_out, time_correction]
+        requested_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        requested_out_at:
+          type: string
+          format: date-time
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, approved, rejected, cancelled]
+        approval_instance_id:
+          type: string
+          nullable: true
+        resolved_by:
+          type: string
+          nullable: true
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AttendanceSummary:
+      type: object
+      properties:
+        total_days:
+          type: integer
+        total_minutes:
+          type: integer
+        normal_days:
+          type: integer
+        late_days:
+          type: integer
+        early_leave_days:
+          type: integer
+        late_early_days:
+          type: integer
+        partial_days:
+          type: integer
+        absent_days:
+          type: integer
+        adjusted_days:
+          type: integer
+    AttendanceRule:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        workStartTime:
+          type: string
+        workEndTime:
+          type: string
+        lateGraceMinutes:
+          type: integer
+        earlyGraceMinutes:
+          type: integer
+        roundingMinutes:
+          type: integer
+        workingDays:
+          type: array
+          items:
+            type: integer
+        isDefault:
+          type: boolean
+    AttendanceSettings:
+      type: object
+      properties:
+        autoAbsence:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            runAt:
+              type: string
+            lookbackDays:
+              type: integer
+        ipAllowlist:
+          type: array
+          items:
+            type: string
+        geoFence:
+          type: object
+          nullable: true
+          properties:
+            lat:
+              type: number
+            lng:
+              type: number
+            radiusMeters:
+              type: integer
+        minPunchIntervalMinutes:
+          type: integer
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token

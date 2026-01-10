@@ -7,7 +7,7 @@
   "author": { "name": "MetaSheet" },
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "dist/index.js",
-  "capabilities": {},
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
   "permissions": {
     "http": { "internal": true },
     "events": {

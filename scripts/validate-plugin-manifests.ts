@@ -71,8 +71,11 @@ function validateManifest(manifest: any, pluginDir: string): ValidationResult {
 
   if (!manifest.name) {
     errors.push('Missing required field: name')
-  } else if (!/^[a-z0-9-]+$/.test(manifest.name)) {
-    errors.push(`Invalid name format: ${manifest.name} (must be lowercase with hyphens)`)
+  } else {
+    const namePattern = /^(@[a-z0-9-]+\/)?[a-z0-9-]+$/
+    if (!namePattern.test(manifest.name)) {
+      errors.push(`Invalid name format: ${manifest.name} (must be lowercase with optional scope and hyphens)`)
+    }
   }
 
   if (!manifest.version) {

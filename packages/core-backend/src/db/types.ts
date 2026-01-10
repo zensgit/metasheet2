@@ -13,6 +13,7 @@ export type NullableTimestamp = ColumnType<Date, string | undefined, Date | stri
 export interface Database {
   // Core tables
   users: UsersTable
+  user_orgs: UserOrgsTable
   cells: CellsTable
   formulas: FormulasTable
   tables: TablesTable
@@ -60,6 +61,20 @@ export interface Database {
   workflow_instances: WorkflowInstancesTable
   workflow_tokens: WorkflowTokensTable
   workflow_incidents: WorkflowIncidentsTable
+  // Attendance tables
+  attendance_events: AttendanceEventsTable
+  attendance_records: AttendanceRecordsTable
+  attendance_requests: AttendanceRequestsTable
+  attendance_rules: AttendanceRulesTable
+  // Meta tables
+  meta_sheets: MetaSheetsTable
+  meta_fields: MetaFieldsTable
+  meta_views: MetaViewsTable
+  meta_records: MetaRecordsTable
+  meta_links: MetaLinksTable
+  meta_comments: MetaCommentsTable
+  meta_dashboards: MetaDashboardsTable
+  meta_widgets: MetaWidgetsTable
 }
 
 export interface SnapshotsTable {
@@ -362,6 +377,8 @@ export interface BpmnProcessDefinitionsTable {
   bpmn_xml: string
   deployment_id: string | null
   is_active: boolean
+  category: string | null
+  tenant_id: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -369,12 +386,14 @@ export interface BpmnProcessDefinitionsTable {
 export interface BpmnProcessInstancesTable {
   id: Generated<string>
   process_definition_id: string
+  process_definition_key: string
   business_key: string | null
   parent_process_instance_id: string | null
   state: string
   start_time: CreatedAt
   end_time: NullableTimestamp
   variables: JSONColumnType<Record<string, unknown>>
+  tenant_id: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -404,6 +423,8 @@ export interface BpmnUserTasksTable {
   follow_up_date: NullableTimestamp
   priority: number | null
   state: string
+  variables: JSONColumnType<Record<string, unknown>>
+  form_data: JSONColumnType<Record<string, unknown> | null, string | null, string | null>
   created_at: CreatedAt
   completed_at: NullableTimestamp
 }
@@ -546,6 +567,90 @@ export interface WorkflowIncidentsTable {
   resolved_at: NullableTimestamp
 }
 
+// Meta Tables
+export interface MetaSheetsTable {
+  id: Generated<string>
+  name: string
+  description: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+  deleted_at: NullableTimestamp
+}
+
+export interface MetaFieldsTable {
+  id: Generated<string>
+  sheet_id: string
+  name: string
+  type: string
+  property: JSONColumnType<Record<string, unknown> | null>
+  order: number
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaViewsTable {
+  id: Generated<string>
+  sheet_id: string
+  name: string
+  type: string
+  filter_info: JSONColumnType<Record<string, unknown> | null>
+  sort_info: JSONColumnType<Record<string, unknown> | null>
+  group_info: JSONColumnType<Record<string, unknown> | null>
+  hidden_field_ids: JSONColumnType<string[]>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaRecordsTable {
+  id: Generated<string>
+  sheet_id: string
+  data: JSONColumnType<Record<string, unknown>>
+  version: number
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaLinksTable {
+  id: Generated<string>
+  field_id: string
+  record_id: string
+  foreign_record_id: string
+  created_at: CreatedAt
+}
+
+export interface MetaCommentsTable {
+  id: Generated<string>
+  spreadsheet_id: string
+  row_id: string
+  field_id: string | null
+  content: string
+  author_id: string
+  parent_id: string | null
+  resolved: boolean
+  mentions: JSONColumnType<string[]>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaDashboardsTable {
+  id: Generated<string>
+  name: string
+  owner_id: string
+  description: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaWidgetsTable {
+  id: Generated<string>
+  dashboard_id: string
+  type: string
+  title: string | null
+  config: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
 // ============================================
 // Core Tables (added for type safety)
 // ============================================
@@ -561,6 +666,13 @@ export interface UsersTable {
   last_login_at: NullableTimestamp
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+export interface UserOrgsTable {
+  user_id: string
+  org_id: string
+  is_active: boolean
+  created_at: CreatedAt
 }
 
 export interface TablesTable {
@@ -650,6 +762,75 @@ export interface SystemConfigsTable {
   value: string
   is_encrypted: boolean
   description: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+// ============================================
+// Attendance Tables
+// ============================================
+
+export interface AttendanceEventsTable {
+  id: Generated<string>
+  user_id: string
+  org_id: string
+  work_date: ColumnType<string, string | undefined, string>
+  occurred_at: UpdatedAt
+  event_type: 'check_in' | 'check_out' | 'adjustment'
+  source: string
+  timezone: string
+  location: JSONColumnType<Record<string, unknown> | null>
+  meta: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+}
+
+export interface AttendanceRecordsTable {
+  id: Generated<string>
+  user_id: string
+  org_id: string
+  work_date: ColumnType<string, string | undefined, string>
+  timezone: string
+  first_in_at: NullableTimestamp
+  last_out_at: NullableTimestamp
+  work_minutes: number
+  late_minutes: number
+  early_leave_minutes: number
+  status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted'
+  meta: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRequestsTable {
+  id: Generated<string>
+  user_id: string
+  org_id: string
+  work_date: ColumnType<string, string | undefined, string>
+  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction'
+  requested_in_at: NullableTimestamp
+  requested_out_at: NullableTimestamp
+  reason: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  approval_instance_id: string | null
+  resolved_by: string | null
+  resolved_at: NullableTimestamp
+  metadata: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRulesTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  timezone: string
+  work_start_time: string
+  work_end_time: string
+  late_grace_minutes: number
+  early_grace_minutes: number
+  rounding_minutes: number
+  working_days: JSONColumnType<number[] | null>
+  is_default: boolean
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

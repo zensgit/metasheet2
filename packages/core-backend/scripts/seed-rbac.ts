@@ -17,17 +17,21 @@ async function main() {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const perms: Array<[string, string | null]> = [
-      ['demo:read', 'Demo read permission for CI'],
-      ['permissions:read', 'List permissions'],
-      ['permissions:write', 'Grant/Revoke permissions'],
-      ['roles:read', 'List roles'],
-      ['roles:write', 'Manage roles'],
+    const perms: Array<{ code: string; name: string; description: string | null }> = [
+      { code: 'demo:read', name: 'Demo Read', description: 'Demo read permission for CI' },
+      { code: 'permissions:read', name: 'Permissions Read', description: 'List permissions' },
+      { code: 'permissions:write', name: 'Permissions Write', description: 'Grant/Revoke permissions' },
+      { code: 'roles:read', name: 'Roles Read', description: 'List roles' },
+      { code: 'roles:write', name: 'Roles Write', description: 'Manage roles' },
+      { code: 'attendance:read', name: 'Attendance Read', description: 'Read attendance data' },
+      { code: 'attendance:write', name: 'Attendance Write', description: 'Create attendance punches and requests' },
+      { code: 'attendance:approve', name: 'Attendance Approve', description: 'Approve attendance adjustment requests' },
+      { code: 'attendance:admin', name: 'Attendance Admin', description: 'Manage attendance rules' },
     ]
-    for (const [code, desc] of perms) {
+    for (const { code, name, description } of perms) {
       await client.query(
-        'INSERT INTO permissions(code, description) VALUES ($1,$2) ON CONFLICT (code) DO NOTHING',
-        [code, desc]
+        'INSERT INTO permissions(code, name, description) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING',
+        [code, name, description]
       )
     }
     await client.query('COMMIT')
@@ -43,4 +47,3 @@ async function main() {
 }
 
 main()
-

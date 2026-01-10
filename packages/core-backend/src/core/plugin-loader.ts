@@ -333,43 +333,82 @@ export class PluginLoader {
    */
   async discover(): Promise<string[]> {
     const discoveredPlugins: string[] = []
+    const seen = new Set<string>()
+    const scannedRoots = new Set<string>()
+
+    const hasManifest = (dir: string) => {
+      const pluginJsonPath = path.join(dir, 'plugin.json')
+      const manifestJsonPath = path.join(dir, 'manifest.json')
+      return fs.existsSync(pluginJsonPath) || fs.existsSync(manifestJsonPath)
+    }
+
+    const addPlugin = (dir: string) => {
+      const resolved = path.resolve(dir)
+      if (seen.has(resolved)) return
+      seen.add(resolved)
+      discoveredPlugins.push(resolved)
+    }
+
+    const scanContainer = (root: string) => {
+      const resolvedRoot = path.resolve(root)
+      if (scannedRoots.has(resolvedRoot)) return
+      scannedRoots.add(resolvedRoot)
+
+      if (!fs.existsSync(resolvedRoot)) {
+        this.logger.warn(`Plugin directory not found: ${resolvedRoot}`)
+        return
+      }
+
+      const entries = fs.readdirSync(resolvedRoot, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const candidate = path.join(resolvedRoot, entry.name)
+        if (hasManifest(candidate)) {
+          addPlugin(candidate)
+        }
+      }
+    }
+
+    const scanPath = (dir: string) => {
+      const resolved = path.resolve(dir)
+      if (scannedRoots.has(resolved)) return
+      scannedRoots.add(resolved)
+
+      if (!fs.existsSync(resolved)) {
+        this.logger.warn(`Plugin directory not found: ${resolved}`)
+        return
+      }
+
+      if (hasManifest(resolved)) {
+        addPlugin(resolved)
+        return
+      }
+
+      scanContainer(resolved)
+    }
 
     try {
       if (this.pluginDirs && this.pluginDirs.length > 0) {
         for (const dir of this.pluginDirs) {
-          const fullDir = path.resolve(dir)
-          if (!fs.existsSync(fullDir)) {
-            this.logger.warn(`Plugin directory not found: ${fullDir}`)
-            continue
-          }
-          const pluginJsonPath = path.join(fullDir, 'plugin.json')
-          const manifestJsonPath = path.join(fullDir, 'manifest.json')
-          if (fs.existsSync(pluginJsonPath) || fs.existsSync(manifestJsonPath)) {
-            discoveredPlugins.push(fullDir)
-          } else {
-            this.logger.warn(`Plugin manifest not found in ${fullDir}`)
-          }
+          scanPath(dir)
         }
         return discoveredPlugins
       }
 
       if (!fs.existsSync(this.basePath)) {
         fs.mkdirSync(this.basePath, { recursive: true })
-        return []
       }
 
-      const entries = fs.readdirSync(this.basePath, { withFileTypes: true })
+      scanContainer(this.basePath)
 
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          // Check for plugin.json (V2) or manifest.json (V1)
-          const pluginJsonPath = path.join(this.basePath, entry.name, 'plugin.json')
-          const manifestJsonPath = path.join(this.basePath, entry.name, 'manifest.json')
-
-          if (fs.existsSync(pluginJsonPath) || fs.existsSync(manifestJsonPath)) {
-            discoveredPlugins.push(entry.name)
-          }
-        }
+      const fallbackRoots = [
+        path.resolve(process.cwd(), 'plugins'),
+        path.resolve(process.cwd(), '..', 'plugins'),
+        path.resolve(process.cwd(), '..', '..', 'plugins'),
+      ]
+      for (const root of fallbackRoots) {
+        if (path.resolve(root) === path.resolve(this.basePath)) continue
+        scanContainer(root)
       }
     } catch (error) {
       this.logger.error('Failed to discover plugins:', error instanceof Error ? error : undefined)
