@@ -8,9 +8,15 @@
         <div v-if="activeSheetId && activeSheetId !== viewId" class="univer-poc__sheet-id">
           sheetId: {{ activeSheetId }}
         </div>
-        <label v-if="sourceIsMeta" class="univer-poc__view-picker">
+        <label v-if="sourceIsMeta" class="univer-poc__view-picker" for="univer-grid-view-select">
           <span>视图</span>
-          <select v-model="selectedViewId" class="univer-poc__select" @change="handleViewChange">
+          <select
+            id="univer-grid-view-select"
+            name="selectedViewId"
+            v-model="selectedViewId"
+            class="univer-poc__select"
+            @change="handleViewChange"
+          >
             <option value="">(当前 Sheet)</option>
             <option v-for="view in availableViews" :key="view.id" :value="view.id">
               {{ view.name || view.id }} ({{ view.type }})
@@ -53,6 +59,17 @@
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
         <button type="button" class="univer-poc__meta-btn" @click="reloadView">重算</button>
+        <button
+          v-if="hasConflict"
+          type="button"
+          class="univer-poc__meta-btn univer-poc__meta-btn--danger"
+          @click="reloadView"
+        >
+          重新加载
+        </button>
+        <span v-if="hasConflict && conflictServerVersion !== null" class="univer-poc__conflict">
+          serverVersion {{ conflictServerVersion }}
+        </span>
         <div v-if="statusText" :class="statusKind === 'error' ? 'univer-poc__status univer-poc__status--error' : 'univer-poc__status'">
           {{ statusText }}
         </div>
@@ -90,6 +107,34 @@
             <span class="univer-poc__readonly-tag">{{ item.tag }}</span>
           </button>
         </div>
+        <details v-if="sourceIsMeta && fieldVisibilityOptions.length" class="univer-poc__visibility">
+          <summary class="univer-poc__visibility-summary">
+            字段可见性
+            <span v-if="viewHiddenFieldIds.length" class="univer-poc__visibility-count">
+              hidden {{ viewHiddenFieldIds.length }}
+            </span>
+          </summary>
+          <div class="univer-poc__visibility-list">
+            <label
+              v-for="field in fieldVisibilityOptions"
+              :key="field.id"
+              class="univer-poc__visibility-item"
+              :for="`univer-grid-field-visible-${field.id}`"
+            >
+              <input
+                type="checkbox"
+                :id="`univer-grid-field-visible-${field.id}`"
+                :name="`fieldVisible-${field.id}`"
+                :checked="!isFieldHidden(field.id)"
+                :disabled="viewConfigSaving"
+                @change="toggleFieldVisibility(field.id, $event)"
+              />
+              <span class="univer-poc__visibility-name">{{ field.name }}</span>
+              <span class="univer-poc__visibility-type">{{ field.type }}</span>
+            </label>
+          </div>
+          <div v-if="viewConfigStatus" class="univer-poc__visibility-status">{{ viewConfigStatus }}</div>
+        </details>
       </div>
     </div>
     <div class="univer-poc__body" :class="{ 'univer-poc__body--with-comments': commentsEnabled }">
@@ -245,7 +290,15 @@ const page = ref<UniverMockView['page'] | null>(null)
 const loadedCount = ref<number>(0)
 const baseOffset = ref<number>(0)
 const loadingMore = ref<boolean>(false)
+const hasConflict = ref<boolean>(false)
+const conflictServerVersion = ref<number | null>(null)
 const readonlyFields = ref<ReadonlyFieldEntry[]>([])
+const viewConfigId = ref<string>('')
+const viewHiddenFieldIds = ref<string[]>([])
+const stableHiddenFieldIds = ref<string[]>([])
+const viewFields = ref<UniverMockField[]>([])
+const viewConfigStatus = ref<string>('')
+const viewConfigSaving = ref<boolean>(false)
 const readonlyHeaderIcons = ref<ReadonlyHeaderIcon[]>([])
 const headerTooltip = ref<ReadonlyHeaderTooltip | null>(null)
 const readonlyMetrics = ref<ReadonlyMetrics>({
@@ -273,6 +326,7 @@ const selectedFieldLabel = computed(() => {
 const commentSummary = ref<Record<string, { total: number; open: number }>>({})
 const commentBadges = ref<Array<{ recordId: string; left: number; top: number; text: string; title: string }>>([])
 let commentSummaryTimer = 0
+let viewConfigTimer = 0
 
 const route = useRoute()
 const router = useRouter()
@@ -827,6 +881,110 @@ function buildDiagnostics(view: UniverMockView): DiagnosticsItem[] {
   return items
 }
 
+type FieldVisibilityOption = {
+  id: string
+  name: string
+  type: string
+}
+
+const fieldVisibilityOptions = computed<FieldVisibilityOption[]>(() => {
+  if (!sourceIsMeta.value) return []
+  const fields = viewFields.value
+  if (!fields.length) return []
+  const order = mapping.fieldIdToColIndex
+  return fields
+    .map((field) => ({
+      id: field.id,
+      name: field.name?.trim() || field.id,
+      type: field.type,
+    }))
+    .sort((a, b) => (order[a.id] ?? 0) - (order[b.id] ?? 0))
+})
+
+function isFieldHidden(fieldId: string): boolean {
+  return viewHiddenFieldIds.value.includes(fieldId)
+}
+
+function applyHiddenFieldsToSheet(nextHiddenIds: string[]) {
+  const sheet = univerAPI?.getActiveWorkbook?.()?.getActiveSheet?.()
+  if (!sheet) return
+  const hiddenSet = new Set(nextHiddenIds)
+  for (const [fieldId, colIndex] of Object.entries(mapping.fieldIdToColIndex)) {
+    if (!Number.isFinite(colIndex)) continue
+    try {
+      if (hiddenSet.has(fieldId)) {
+        sheet.hideColumns(colIndex, 1)
+      } else if (typeof sheet.showColumns === 'function') {
+        sheet.showColumns(colIndex, 1)
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function setHiddenFieldIds(nextHiddenIds: string[], options: { persist?: boolean } = {}) {
+  viewHiddenFieldIds.value = nextHiddenIds
+  viewSummary.value = viewSummary.value
+    ? { ...viewSummary.value, hiddenCount: nextHiddenIds.length }
+    : viewSummary.value
+  applyHiddenFieldsToSheet(nextHiddenIds)
+  if (options.persist !== false) {
+    scheduleViewConfigSave()
+  }
+}
+
+function scheduleViewConfigSave() {
+  if (viewConfigTimer) window.clearTimeout(viewConfigTimer)
+  viewConfigTimer = window.setTimeout(() => {
+    viewConfigTimer = 0
+    void persistHiddenFieldIds(viewHiddenFieldIds.value)
+  }, 300)
+}
+
+async function persistHiddenFieldIds(nextHiddenIds: string[]) {
+  if (!sourceIsMeta.value || !viewConfigId.value) return
+  viewConfigSaving.value = true
+  viewConfigStatus.value = 'Saving view config...'
+  try {
+    const res = await apiFetch(`/api/univer-meta/views/${encodeURIComponent(viewConfigId.value)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ hiddenFieldIds: nextHiddenIds }),
+    })
+    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: { message?: string } }
+    if (!res.ok || !json.ok) {
+      const message = json.error?.message || `Failed to save view (${res.status})`
+      viewConfigStatus.value = message
+      setHiddenFieldIds(stableHiddenFieldIds.value.slice(), { persist: false })
+      return
+    }
+    stableHiddenFieldIds.value = nextHiddenIds.slice()
+    viewConfigStatus.value = 'View config saved'
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    viewConfigStatus.value = `Save failed: ${message}`
+    setHiddenFieldIds(stableHiddenFieldIds.value.slice(), { persist: false })
+  } finally {
+    viewConfigSaving.value = false
+    if (viewConfigStatus.value) {
+      window.setTimeout(() => {
+        if (!viewConfigSaving.value) viewConfigStatus.value = ''
+      }, 2000)
+    }
+  }
+}
+
+function toggleFieldVisibility(fieldId: string, event: Event) {
+  const checked = (event.target as HTMLInputElement | null)?.checked ?? true
+  const next = new Set(viewHiddenFieldIds.value)
+  if (checked) {
+    next.delete(fieldId)
+  } else {
+    next.add(fieldId)
+  }
+  setHiddenFieldIds(Array.from(next))
+}
+
 watch(
   () => [route.query.source, route.query.sheetId, route.query.viewId],
   () => {
@@ -1153,6 +1311,8 @@ function handleRelatedRecords(records: RelatedRecord[]) {
 
 async function reloadView() {
   relatedUpdates.value = []
+  hasConflict.value = false
+  conflictServerVersion.value = null
   await loadView()
 }
 
@@ -1458,6 +1618,12 @@ onMounted(() => {
     },
     onRecords: applyComputedRecords,
     onRelatedRecords: handleRelatedRecords,
+    onConflict: (serverVersion) => {
+      hasConflict.value = true
+      conflictServerVersion.value = serverVersion
+      statusText.value = 'Version conflict'
+      statusKind.value = 'error'
+    },
     flushDelayMs: 120,
   })
 
@@ -1611,15 +1777,19 @@ onMounted(() => {
           mapping.recordIdToData[recordId][fieldId] = value as any
         }
 
-        patchQueue.stageChange(recordId, fieldId, value)
+        patchQueue?.stageChange(recordId, fieldId, value)
       }
     }
 
-    patchQueue.requestFlush(120)
+    patchQueue?.requestFlush(120)
   })
 
   const start = async () => {
     try {
+      viewConfigStatus.value = ''
+      viewConfigSaving.value = false
+      hasConflict.value = false
+      conflictServerVersion.value = null
       const qs = getQueryString()
       const response = await apiGet<UniverMockViewResponse>(`${getApiPrefix()}/view${qs}`)
       if (!response.ok || !response.data) {
@@ -1660,9 +1830,13 @@ onMounted(() => {
           .map((f) => [f.id, f.name?.trim() || String(f.id)] as const),
       ) as Record<string, string>
       syncReadonlyFields(response.data.fields)
+      viewFields.value = response.data.fields
+      viewConfigId.value = response.data.view?.id ?? ''
       const hiddenFieldIds = Array.isArray(response.data.view?.hiddenFieldIds)
         ? response.data.view!.hiddenFieldIds!.map((v) => (typeof v === 'string' ? v.trim() : '')).filter((v) => v.length > 0)
         : []
+      viewHiddenFieldIds.value = hiddenFieldIds
+      stableHiddenFieldIds.value = hiddenFieldIds.slice()
       univerAPI!.createWorkbook(transformed.workbook)
       requestReadonlyHeaderUpdate()
       queueCommentSummaryRefresh()
@@ -1714,6 +1888,10 @@ onMounted(() => {
       loadedCount.value = 0
       baseOffset.value = 0
       viewWarnings.value = []
+      viewFields.value = []
+      viewConfigId.value = ''
+      viewHiddenFieldIds.value = []
+      stableHiddenFieldIds.value = []
       const hint = buildMissingSheetHint(err)
       if (hint) {
         statusText.value = hint.title
@@ -1740,7 +1918,7 @@ onMounted(() => {
     commentSummaryTimer = 0
     commentBadges.value = []
     commentSummary.value = {}
-    patchQueue.dispose()
+    patchQueue?.dispose()
     disposable.dispose()
     embed.dispose()
   }
@@ -1953,6 +2131,63 @@ onUnmounted(() => {
   color: #8c6d1f;
 }
 
+.univer-poc__visibility {
+  margin-top: 6px;
+  border: 1px dashed #d1d5db;
+  border-radius: 10px;
+  padding: 6px 10px;
+  background: #fafafa;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.univer-poc__visibility-summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.univer-poc__visibility-count {
+  font-weight: 500;
+  color: #8c6d1f;
+}
+
+.univer-poc__visibility-list {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.univer-poc__visibility-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+}
+
+.univer-poc__visibility-name {
+  font-weight: 500;
+  color: #111827;
+}
+
+.univer-poc__visibility-type {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.univer-poc__visibility-status {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
 .univer-poc__meta-btn {
   border: 1px solid rgba(0, 0, 0, 0.12);
   background: #fff;
@@ -1964,9 +2199,20 @@ onUnmounted(() => {
   line-height: 18px;
 }
 
+.univer-poc__meta-btn--danger {
+  border-color: #ffccc7;
+  background: #fff1f0;
+  color: #cf1322;
+}
+
 .univer-poc__meta-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.univer-poc__conflict {
+  font-size: 12px;
+  color: #cf1322;
 }
 
 .univer-poc__container {

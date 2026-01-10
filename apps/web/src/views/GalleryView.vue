@@ -10,8 +10,14 @@
       <div class="header-right">
         <!-- Layout Controls -->
         <div class="layout-controls">
-          <label class="control-label">布局:</label>
-          <select v-model="localConfig.layout.columns" @change="updateConfig" class="columns-select">
+          <label class="control-label" for="gallery-layout-columns">布局:</label>
+          <select
+            id="gallery-layout-columns"
+            name="layoutColumns"
+            v-model="localConfig.layout.columns"
+            @change="updateConfig"
+            class="columns-select"
+          >
             <option :value="2">2列</option>
             <option :value="3">3列</option>
             <option :value="4">4列</option>
@@ -19,7 +25,13 @@
             <option :value="6">6列</option>
           </select>
 
-          <select v-model="localConfig.layout.cardSize" @change="updateConfig" class="size-select">
+          <select
+            id="gallery-layout-card-size"
+            name="layoutCardSize"
+            v-model="localConfig.layout.cardSize"
+            @change="updateConfig"
+            class="size-select"
+          >
             <option value="small">小</option>
             <option value="medium">中</option>
             <option value="large">大</option>
@@ -29,6 +41,8 @@
         <!-- Search -->
         <div class="search-box">
           <input
+            id="gallery-search"
+            name="searchQuery"
             v-model="searchQuery"
             @input="handleSearch"
             type="text"
@@ -206,8 +220,8 @@
           <div class="config-section">
             <h3>卡片模板</h3>
             <div class="form-group">
-              <label>标题字段:</label>
-              <select v-model="localConfig.cardTemplate.titleField">
+              <label for="gallery-template-title">标题字段:</label>
+              <select id="gallery-template-title" name="templateTitleField" v-model="localConfig.cardTemplate.titleField">
                 <option v-for="field in availableFields" :key="field" :value="field">
                   {{ field }}
                 </option>
@@ -215,8 +229,8 @@
             </div>
 
             <div class="form-group">
-              <label>图片字段:</label>
-              <select v-model="localConfig.cardTemplate.imageField">
+              <label for="gallery-template-image">图片字段:</label>
+              <select id="gallery-template-image" name="templateImageField" v-model="localConfig.cardTemplate.imageField">
                 <option value="">无</option>
                 <option v-for="field in availableFields" :key="field" :value="field">
                   {{ field }}
@@ -229,20 +243,20 @@
           <div class="config-section">
             <h3>显示选项</h3>
             <div class="checkbox-group">
-              <label>
-                <input type="checkbox" v-model="localConfig.display.showTitle" />
+              <label for="gallery-display-title">
+                <input id="gallery-display-title" name="displayShowTitle" type="checkbox" v-model="localConfig.display.showTitle" />
                 显示标题
               </label>
-              <label>
-                <input type="checkbox" v-model="localConfig.display.showContent" />
+              <label for="gallery-display-content">
+                <input id="gallery-display-content" name="displayShowContent" type="checkbox" v-model="localConfig.display.showContent" />
                 显示内容
               </label>
-              <label>
-                <input type="checkbox" v-model="localConfig.display.showImage" />
+              <label for="gallery-display-image">
+                <input id="gallery-display-image" name="displayShowImage" type="checkbox" v-model="localConfig.display.showImage" />
                 显示图片
               </label>
-              <label>
-                <input type="checkbox" v-model="localConfig.display.showTags" />
+              <label for="gallery-display-tags">
+                <input id="gallery-display-tags" name="displayShowTags" type="checkbox" v-model="localConfig.display.showTags" />
                 显示标签
               </label>
             </div>

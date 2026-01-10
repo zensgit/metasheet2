@@ -12,7 +12,7 @@
       </div>
 
       <div class="form-grid">
-        <label>
+        <label for="plm-search-query">
           关键词
           <input
             id="plm-search-query"
@@ -21,7 +21,7 @@
             placeholder="可留空，返回最新记录"
           />
         </label>
-        <label>
+        <label for="plm-search-item-type">
           Item Type
           <input
             id="plm-search-item-type"
@@ -30,7 +30,7 @@
             placeholder="Part"
           />
         </label>
-        <label>
+        <label for="plm-search-limit">
           Limit
           <input
             id="plm-search-limit"
@@ -80,12 +80,18 @@
           <h1>PLM 产品详情</h1>
           <p class="subtext">联邦接口：产品详情、BOM、where-used、BOM 对比、替代件</p>
           <div class="auth-status">
-            <span class="auth-label">鉴权状态</span>
+            <span class="auth-label">MetaSheet</span>
             <span class="auth-pill" :class="authStateClass">{{ authStateText }}</span>
             <span v-if="authExpiryText" class="auth-expiry">{{ authExpiryText }}</span>
             <button class="btn ghost" @click="refreshAuthStatus">刷新状态</button>
           </div>
+          <div class="auth-status secondary">
+            <span class="auth-label">PLM Token</span>
+            <span class="auth-pill" :class="plmAuthStateClass">{{ plmAuthStateText }}</span>
+            <span v-if="plmAuthExpiryText" class="auth-expiry">{{ plmAuthExpiryText }}</span>
+          </div>
           <p v-if="authHint" class="hint">{{ authHint }}</p>
+          <p v-if="plmAuthHint" class="hint">{{ plmAuthHint }}</p>
           <p v-if="authError" class="status error">{{ authError }}</p>
           <p v-if="deepLinkStatus" class="status">{{ deepLinkStatus }}</p>
           <p v-if="deepLinkError" class="status error">{{ deepLinkError }}</p>
@@ -98,9 +104,15 @@
 
       <div class="deep-link-scope">
         <span class="deep-link-label">深链接范围</span>
-        <label class="deep-link-option">
+        <label class="deep-link-option" for="plm-deeplink-preset">
           <span>预设</span>
-          <select class="deep-link-select" v-model="deepLinkPreset" @change="applyDeepLinkPreset">
+          <select
+            id="plm-deeplink-preset"
+            name="plmDeepLinkPreset"
+            class="deep-link-select"
+            v-model="deepLinkPreset"
+            @change="applyDeepLinkPreset"
+          >
             <option value="">自动</option>
             <option v-for="preset in deepLinkPresets" :key="preset.key" :value="preset.key">
               {{ preset.label }}
@@ -121,14 +133,27 @@
         >
           下移
         </button>
-        <label v-for="option in deepLinkPanelOptions" :key="option.key" class="deep-link-option">
-          <input type="checkbox" :value="option.key" v-model="deepLinkScope" />
+        <label
+          v-for="option in deepLinkPanelOptions"
+          :key="option.key"
+          class="deep-link-option"
+          :for="`plm-deeplink-scope-${option.key}`"
+        >
+          <input
+            :id="`plm-deeplink-scope-${option.key}`"
+            name="plmDeepLinkScope"
+            type="checkbox"
+            :value="option.key"
+            v-model="deepLinkScope"
+          />
           <span>{{ option.label }}</span>
         </label>
         <button class="btn ghost" @click="clearDeepLinkScope">自动</button>
-        <label class="deep-link-option">
+        <label class="deep-link-option" for="plm-deeplink-preset-name">
           <span>保存为</span>
           <input
+            id="plm-deeplink-preset-name"
+            name="plmDeepLinkPresetName"
             class="deep-link-input"
             v-model.trim="customPresetName"
             placeholder="输入名称"
@@ -148,9 +173,11 @@
         >
           删除预设
         </button>
-        <label class="deep-link-option">
+        <label class="deep-link-option" for="plm-deeplink-preset-rename">
           <span>重命名</span>
           <input
+            id="plm-deeplink-preset-rename"
+            name="plmDeepLinkPresetRename"
             class="deep-link-input"
             v-model.trim="editingPresetLabel"
             :disabled="!deepLinkPreset.startsWith('custom:')"
@@ -165,9 +192,11 @@
           </button>
         </label>
         <button class="btn ghost" @click="exportCustomPresets">导出预设</button>
-        <label class="deep-link-option">
+        <label class="deep-link-option" for="plm-deeplink-preset-import">
           <span>导入</span>
           <input
+            id="plm-deeplink-preset-import"
+            name="plmDeepLinkPresetImport"
             class="deep-link-input"
             v-model.trim="importPresetText"
             placeholder="粘贴 JSON"
@@ -179,6 +208,8 @@
         <button class="btn ghost" @click="triggerPresetFileImport">选择文件</button>
         <input
           ref="importFileInput"
+          id="plm-deeplink-preset-file"
+          name="plmDeepLinkPresetFile"
           class="deep-link-file"
           type="file"
           accept=".json,application/json"
@@ -197,7 +228,7 @@
       </div>
 
       <div class="form-grid">
-        <label>
+        <label for="plm-product-id">
           产品 ID
           <input
             id="plm-product-id"
@@ -206,7 +237,16 @@
             placeholder="输入 PLM 产品 ID"
           />
         </label>
-        <label>
+        <label for="plm-item-number">
+          Item Number
+          <input
+            id="plm-item-number"
+            v-model.trim="productItemNumber"
+            name="plmItemNumber"
+            placeholder="输入 item_number（可选）"
+          />
+        </label>
+        <label for="plm-item-type">
           Item Type
           <input
             id="plm-item-type"
@@ -215,7 +255,7 @@
             placeholder="Part"
           />
         </label>
-        <button class="btn primary" :disabled="!productId || productLoading" @click="loadProduct">
+        <button class="btn primary" :disabled="(!productId && !productItemNumber) || productLoading" @click="loadProduct">
           {{ productLoading ? '加载中...' : '加载产品' }}
         </button>
       </div>
@@ -332,7 +372,7 @@
         </div>
       </div>
       <div class="form-grid compact">
-        <label>
+        <label for="plm-document-role">
           文档角色
           <input
             id="plm-document-role"
@@ -341,7 +381,7 @@
             placeholder="primary / secondary"
           />
         </label>
-        <label>
+        <label for="plm-document-filter">
           过滤
           <input
             id="plm-document-filter"
@@ -350,7 +390,7 @@
             placeholder="名称/类型/MIME"
           />
         </label>
-        <label>
+        <label for="plm-document-sort">
           排序
           <select id="plm-document-sort" v-model="documentSortKey" name="plmDocumentSort">
             <option value="updated">更新时间</option>
@@ -362,7 +402,7 @@
             <option value="size">大小</option>
           </select>
         </label>
-        <label>
+        <label for="plm-document-sort-dir">
           顺序
           <select id="plm-document-sort-dir" v-model="documentSortDir" name="plmDocumentSortDir">
             <option value="desc">降序</option>
@@ -372,8 +412,13 @@
       </div>
       <div class="toggle-grid">
         <span class="toggle-label">显示列</span>
-        <label v-for="col in documentColumnOptions" :key="col.key" class="checkbox-field">
-          <input type="checkbox" v-model="documentColumns[col.key]" />
+        <label v-for="col in documentColumnOptions" :key="col.key" class="checkbox-field" :for="`plm-document-column-${col.key}`">
+          <input
+            :id="`plm-document-column-${col.key}`"
+            :name="`plmDocumentColumn-${col.key}`"
+            type="checkbox"
+            v-model="documentColumns[col.key]"
+          />
           <span>{{ col.label }}</span>
         </label>
       </div>
@@ -459,7 +504,7 @@
         </div>
       </div>
       <div class="form-grid compact">
-        <label>
+        <label for="plm-approvals-status">
           状态
           <select id="plm-approvals-status" v-model="approvalsStatus" name="plmApprovalsStatus">
             <option value="all">全部</option>
@@ -468,7 +513,7 @@
             <option value="rejected">已拒绝</option>
           </select>
         </label>
-        <label>
+        <label for="plm-approvals-filter">
           过滤
           <input
             id="plm-approvals-filter"
@@ -477,7 +522,7 @@
             placeholder="标题/发起人/产品"
           />
         </label>
-        <label>
+        <label for="plm-approvals-sort">
           排序
           <select id="plm-approvals-sort" v-model="approvalSortKey" name="plmApprovalsSort">
             <option value="created">创建时间</option>
@@ -487,7 +532,7 @@
             <option value="product">产品</option>
           </select>
         </label>
-        <label>
+        <label for="plm-approvals-sort-dir">
           顺序
           <select id="plm-approvals-sort-dir" v-model="approvalSortDir" name="plmApprovalsSortDir">
             <option value="desc">降序</option>
@@ -497,8 +542,13 @@
       </div>
       <div class="toggle-grid">
         <span class="toggle-label">显示列</span>
-        <label v-for="col in approvalColumnOptions" :key="col.key" class="checkbox-field">
-          <input type="checkbox" v-model="approvalColumns[col.key]" />
+        <label v-for="col in approvalColumnOptions" :key="col.key" class="checkbox-field" :for="`plm-approval-column-${col.key}`">
+          <input
+            :id="`plm-approval-column-${col.key}`"
+            :name="`plmApprovalColumn-${col.key}`"
+            type="checkbox"
+            v-model="approvalColumns[col.key]"
+          />
           <span>{{ col.label }}</span>
         </label>
       </div>
@@ -576,7 +626,7 @@
         </div>
       </div>
       <div class="form-grid compact">
-        <label>
+        <label for="plm-where-used-item-id">
           子件 ID
           <input
             id="plm-where-used-item-id"
@@ -585,7 +635,7 @@
             placeholder="输入子件 ID"
           />
         </label>
-        <label>
+        <label for="plm-where-used-recursive">
           递归
           <select
             id="plm-where-used-recursive"
@@ -596,7 +646,7 @@
             <option :value="false">否</option>
           </select>
         </label>
-        <label>
+        <label for="plm-where-used-max-levels">
           最大层级
           <input
             id="plm-where-used-max-levels"
@@ -607,7 +657,7 @@
             max="20"
           />
         </label>
-        <label>
+        <label for="plm-where-used-filter">
           过滤
           <input
             id="plm-where-used-filter"
@@ -690,7 +740,7 @@
         </div>
       </div>
       <div class="form-grid">
-        <label>
+        <label for="plm-compare-left-id">
           左侧 ID
           <input
             id="plm-compare-left-id"
@@ -699,7 +749,7 @@
             placeholder="左侧 item/version ID"
           />
         </label>
-        <label>
+        <label for="plm-compare-right-id">
           右侧 ID
           <input
             id="plm-compare-right-id"
@@ -708,7 +758,7 @@
             placeholder="右侧 item/version ID"
           />
         </label>
-        <label>
+        <label for="plm-compare-max-levels">
           最大层级
           <input
             id="plm-compare-max-levels"
@@ -719,7 +769,7 @@
             max="20"
           />
         </label>
-        <label>
+        <label for="plm-compare-line-key">
           Line Key
           <select id="plm-compare-line-key" v-model="compareLineKey" name="plmCompareLineKey">
             <option value="child_config">child_config</option>
@@ -730,7 +780,7 @@
             <option value="line_full">line_full</option>
           </select>
         </label>
-        <label>
+        <label for="plm-compare-mode">
           Compare Mode
           <input
             id="plm-compare-mode"
@@ -739,7 +789,7 @@
             placeholder="only_product / summarized / num_qty"
           />
         </label>
-        <label>
+        <label for="plm-compare-effective-at">
           生效时间
           <input
             id="plm-compare-effective-at"
@@ -748,7 +798,7 @@
             type="datetime-local"
           />
         </label>
-        <label>
+        <label for="plm-compare-rel-props">
           关系字段
           <input
             id="plm-compare-rel-props"
@@ -757,7 +807,7 @@
             placeholder="quantity,uom,find_num,refdes"
           />
         </label>
-        <label>
+        <label for="plm-compare-filter">
           过滤
           <input
             id="plm-compare-filter"
@@ -766,17 +816,32 @@
             placeholder="编号/名称/Line ID"
           />
         </label>
-        <label class="checkbox-field">
+        <label class="checkbox-field" for="plm-compare-include-child">
           <span>包含父/子字段</span>
-          <input id="plm-compare-include-child" v-model="compareIncludeChildFields" type="checkbox" />
+          <input
+            id="plm-compare-include-child"
+            name="plmCompareIncludeChild"
+            v-model="compareIncludeChildFields"
+            type="checkbox"
+          />
         </label>
-        <label class="checkbox-field">
+        <label class="checkbox-field" for="plm-compare-include-subs">
           <span>包含替代件</span>
-          <input id="plm-compare-include-subs" v-model="compareIncludeSubstitutes" type="checkbox" />
+          <input
+            id="plm-compare-include-subs"
+            name="plmCompareIncludeSubs"
+            v-model="compareIncludeSubstitutes"
+            type="checkbox"
+          />
         </label>
-        <label class="checkbox-field">
+        <label class="checkbox-field" for="plm-compare-include-effectivity">
           <span>包含生效性</span>
-          <input id="plm-compare-include-effectivity" v-model="compareIncludeEffectivity" type="checkbox" />
+          <input
+            id="plm-compare-include-effectivity"
+            name="plmCompareIncludeEffectivity"
+            v-model="compareIncludeEffectivity"
+            type="checkbox"
+          />
         </label>
       </div>
       <p v-if="compareError" class="status error">{{ compareError }}</p>
@@ -981,7 +1046,7 @@
         </div>
       </div>
       <div class="form-grid compact">
-        <label>
+        <label for="plm-bom-line-id">
           BOM Line ID
           <input
             id="plm-bom-line-id"
@@ -990,7 +1055,7 @@
             placeholder="输入 BOM 行 ID"
           />
         </label>
-        <label>
+        <label for="plm-substitutes-filter">
           过滤
           <input
             id="plm-substitutes-filter"
@@ -1001,7 +1066,7 @@
         </label>
       </div>
       <div class="form-grid compact">
-        <label>
+        <label for="plm-substitute-item-id">
           替代件 ID
           <input
             id="plm-substitute-item-id"
@@ -1010,7 +1075,7 @@
             placeholder="输入替代件 Item ID"
           />
         </label>
-        <label>
+        <label for="plm-substitute-rank">
           优先级
           <input
             id="plm-substitute-rank"
@@ -1019,7 +1084,7 @@
             placeholder="可选"
           />
         </label>
-        <label>
+        <label for="plm-substitute-note">
           备注
           <input
             id="plm-substitute-note"
@@ -1116,6 +1181,9 @@ type AuthState = 'missing' | 'invalid' | 'expired' | 'expiring' | 'valid'
 
 const authState = ref<AuthState>('missing')
 const authExpiresAt = ref<number | null>(null)
+const plmAuthState = ref<AuthState>('missing')
+const plmAuthExpiresAt = ref<number | null>(null)
+const plmAuthLegacy = ref(false)
 const authError = ref('')
 let authTimer: number | undefined
 const deepLinkStatus = ref('')
@@ -1134,6 +1202,7 @@ let presetDropDepth = 0
 const customDeepLinkPresets = ref<Array<{ key: string; label: string; panels: string[] }>>([])
 
 const productId = ref('')
+const productItemNumber = ref('')
 const itemType = ref(DEFAULT_ITEM_TYPE)
 const product = ref<any | null>(null)
 const productLoading = ref(false)
@@ -1624,16 +1693,59 @@ const authExpiryText = computed(() => {
 
 const authHint = computed(() => {
   if (authState.value === 'missing') {
-    return '未检测到 auth_token，请在 localStorage 写入后刷新。'
+    return '未检测到 auth_token（MetaSheet token），请在 localStorage 写入后刷新。'
   }
   if (authState.value === 'invalid') {
-    return 'Token 解析失败，请重新获取并写入 auth_token。'
+    return 'MetaSheet Token 解析失败，请重新获取并写入 auth_token。'
   }
   if (authState.value === 'expired') {
-    return 'Token 已过期，请重新登录或刷新 Token。'
+    return 'MetaSheet Token 已过期，请重新登录或刷新 Token。'
   }
   if (authState.value === 'expiring') {
-    return 'Token 即将过期，建议提前刷新。'
+    return 'MetaSheet Token 即将过期，建议提前刷新。'
+  }
+  return ''
+})
+
+const plmAuthStateText = computed(() => {
+  switch (plmAuthState.value) {
+    case 'valid':
+      return '已登录'
+    case 'expiring':
+      return '即将过期'
+    case 'expired':
+      return '已过期'
+    case 'invalid':
+      return '无效 Token'
+    default:
+      return '未设置'
+  }
+})
+
+const plmAuthStateClass = computed(() => `auth-${plmAuthState.value}`)
+
+const plmAuthExpiryText = computed(() => {
+  if (!plmAuthExpiresAt.value) return ''
+  const date = new Date(plmAuthExpiresAt.value)
+  if (Number.isNaN(date.getTime())) return ''
+  return `有效至 ${date.toLocaleString()}`
+})
+
+const plmAuthHint = computed(() => {
+  if (plmAuthLegacy.value) {
+    return '检测到旧字段 jwt，建议迁移为 plm_token。'
+  }
+  if (plmAuthState.value === 'missing') {
+    return '未检测到 plm_token（可选，仅用于显示 PLM Token 状态）。'
+  }
+  if (plmAuthState.value === 'invalid') {
+    return 'PLM Token 解析失败，请重新获取并写入 plm_token。'
+  }
+  if (plmAuthState.value === 'expired') {
+    return 'PLM Token 已过期，请重新登录或刷新 Token。'
+  }
+  if (plmAuthState.value === 'expiring') {
+    return 'PLM Token 即将过期，建议提前刷新。'
   }
   return ''
 })
@@ -1677,6 +1789,7 @@ function formatBytes(value?: number): string {
 
 function resetAll() {
   productId.value = ''
+  productItemNumber.value = ''
   product.value = null
   productError.value = ''
   authError.value = ''
@@ -1745,6 +1858,7 @@ function resetAll() {
     searchItemType: '',
     searchLimit: undefined,
     productId: '',
+    itemNumber: '',
     itemType: '',
     documentRole: '',
     documentFilter: '',
@@ -1785,32 +1899,38 @@ function decodeJwtPayload(token: string): { exp?: number } | null {
   }
 }
 
-function refreshAuthStatus() {
-  const token = localStorage.getItem('auth_token') || localStorage.getItem('jwt') || ''
+function resolveTokenStatus(token: string): { state: AuthState; expiresAt: number | null } {
   if (!token) {
-    authState.value = 'missing'
-    authExpiresAt.value = null
-    return
+    return { state: 'missing', expiresAt: null }
   }
   const payload = decodeJwtPayload(token)
   const expSeconds = payload?.exp
   if (!expSeconds) {
-    authState.value = 'invalid'
-    authExpiresAt.value = null
-    return
+    return { state: 'invalid', expiresAt: null }
   }
   const expMs = expSeconds * 1000
-  authExpiresAt.value = expMs
   const timeLeftMs = expMs - Date.now()
   if (timeLeftMs <= 0) {
-    authState.value = 'expired'
-    return
+    return { state: 'expired', expiresAt: expMs }
   }
   if (timeLeftMs <= 10 * 60 * 1000) {
-    authState.value = 'expiring'
-    return
+    return { state: 'expiring', expiresAt: expMs }
   }
-  authState.value = 'valid'
+  return { state: 'valid', expiresAt: expMs }
+}
+
+function refreshAuthStatus() {
+  const metaToken = localStorage.getItem('auth_token') || ''
+  const metaStatus = resolveTokenStatus(metaToken)
+  authState.value = metaStatus.state
+  authExpiresAt.value = metaStatus.expiresAt
+
+  const plmToken = localStorage.getItem('plm_token') || ''
+  const legacyToken = localStorage.getItem('jwt') || ''
+  plmAuthLegacy.value = !plmToken && Boolean(legacyToken)
+  const plmStatus = resolveTokenStatus(plmToken || legacyToken)
+  plmAuthState.value = plmStatus.state
+  plmAuthExpiresAt.value = plmStatus.expiresAt
 }
 
 function handleAuthError(error: any) {
@@ -1855,6 +1975,7 @@ async function searchProducts() {
 async function applySearchItem(item: any) {
   if (!item?.id) return
   productId.value = item.id
+  productItemNumber.value = item.partNumber || item.code || ''
   if (item.itemType) {
     itemType.value = item.itemType
   }
@@ -1862,18 +1983,30 @@ async function applySearchItem(item: any) {
 }
 
 async function loadProduct() {
-  if (!productId.value) return
-  syncQueryParams({ productId: productId.value, itemType: itemType.value })
+  const resolvedId = productId.value || productItemNumber.value
+  if (!resolvedId) return
+  syncQueryParams({ productId: productId.value, itemNumber: productItemNumber.value, itemType: itemType.value })
   productLoading.value = true
   productError.value = ''
   try {
+    const params = new URLSearchParams()
+    if (itemType.value) {
+      params.set('itemType', itemType.value)
+    }
+    if (productItemNumber.value) {
+      params.set('itemNumber', productItemNumber.value)
+    }
     const result = await apiGet<{ ok: boolean; data: any; error?: { message?: string } }>(
-      `/api/federation/plm/products/${encodeURIComponent(productId.value)}?itemType=${encodeURIComponent(itemType.value)}`
+      `/api/federation/plm/products/${encodeURIComponent(resolvedId)}?${params.toString()}`
     )
     if (!result.ok) {
       throw new Error(result.error?.message || '加载产品失败')
     }
     product.value = result.data
+    if (result.data?.id && result.data.id !== productId.value) {
+      productId.value = String(result.data.id)
+      syncQueryParams({ productId: productId.value })
+    }
     await Promise.all([loadBom(), loadDocuments(), loadApprovals()])
   } catch (error: any) {
     handleAuthError(error)
@@ -2501,7 +2634,7 @@ function formatDeepLinkTargets(panel?: string): string {
   }
   const targets = []
   if (searchQuery.value) targets.push(deepLinkPanelLabels.search)
-  if (productId.value) targets.push(deepLinkPanelLabels.product)
+  if (productId.value || productItemNumber.value) targets.push(deepLinkPanelLabels.product)
   if (whereUsedItemId.value) targets.push(deepLinkPanelLabels['where-used'])
   if (compareLeftId.value && compareRightId.value) targets.push(deepLinkPanelLabels.compare)
   if (bomLineId.value) targets.push(deepLinkPanelLabels.substitutes)
@@ -2519,6 +2652,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('searchItemType', searchItemType.value !== DEFAULT_ITEM_TYPE ? searchItemType.value : undefined)
   append('searchLimit', searchLimit.value !== DEFAULT_SEARCH_LIMIT ? searchLimit.value : undefined)
   append('productId', productId.value)
+  append('itemNumber', productItemNumber.value)
   append('itemType', itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : undefined)
   append('documentRole', documentRole.value)
   append('documentFilter', documentFilter.value)
@@ -2547,7 +2681,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
 
   if (includeAutoload) {
     const shouldAutoload =
-      Boolean(productId.value) ||
+      Boolean(productId.value || productItemNumber.value) ||
       Boolean(whereUsedItemId.value) ||
       Boolean(compareLeftId.value && compareRightId.value) ||
       Boolean(bomLineId.value) ||
@@ -2605,6 +2739,10 @@ async function applyQueryState() {
   const productParam = readQueryParam('productId')
   if (productParam !== undefined) {
     productId.value = productParam
+  }
+  const itemNumberParam = readQueryParam('itemNumber')
+  if (itemNumberParam !== undefined) {
+    productItemNumber.value = itemNumberParam
   }
   const itemTypeParam = readQueryParam('itemType')
   if (itemTypeParam !== undefined) {
@@ -3338,6 +3476,10 @@ watch(
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+.auth-status.secondary {
+  margin-top: 4px;
 }
 
 .auth-label {

@@ -24,12 +24,14 @@
 
     <div class="meta-fields__create">
       <input
+        id="meta-fields-create-name"
+        name="createName"
         v-model="createName"
         class="meta-fields__input"
         placeholder="新字段名称"
         @keydown.enter.prevent="createField"
       />
-      <select v-model="createType" class="meta-fields__select">
+      <select id="meta-fields-create-type" name="createType" v-model="createType" class="meta-fields__select">
         <option value="string">string</option>
         <option value="number">number</option>
         <option value="boolean">boolean</option>
@@ -47,13 +49,21 @@
       >
         {{ createLoading ? '创建中…' : '创建' }}
       </button>
-      <label class="meta-fields__checkbox">
-        <input v-model="createReadonly" type="checkbox" :disabled="createReadonlyForced" />
+      <label class="meta-fields__checkbox" for="meta-fields-create-readonly">
+        <input
+          id="meta-fields-create-readonly"
+          name="createReadonly"
+          v-model="createReadonly"
+          type="checkbox"
+          :disabled="createReadonlyForced"
+        />
         只读
         <span v-if="createReadonlyForced" class="meta-fields__muted">（lookup/rollup 自动只读）</span>
       </label>
       <div v-if="createType === 'select'" class="meta-fields__options">
         <textarea
+          id="meta-fields-create-options"
+          name="createOptionsText"
           v-model="createOptionsText"
           class="meta-fields__textarea"
           rows="3"
@@ -62,11 +72,15 @@
       </div>
       <div v-if="createType === 'link'" class="meta-fields__options meta-fields__link-options">
         <input
+          id="meta-fields-create-link-foreign-sheet-id"
+          name="createLinkForeignSheetId"
           v-model="createLinkForeignSheetId"
           class="meta-fields__input"
           placeholder="foreignDatasheetId（关联目标 sheetId，可空=普通字符串 link）"
         />
         <input
+          id="meta-fields-create-link-display-field-id"
+          name="createLinkDisplayFieldId"
           v-model="createLinkDisplayFieldId"
           class="meta-fields__input"
           list="link-display-fields-create"
@@ -84,13 +98,23 @@
         <div v-if="createLinkForeignError" class="meta-fields__muted">
           外表字段加载失败：{{ createLinkForeignError }}
         </div>
-        <label class="meta-fields__checkbox">
-          <input v-model="createLinkLimitSingleRecord" type="checkbox" />
+        <label class="meta-fields__checkbox" for="meta-fields-create-link-limit-single-record">
+          <input
+            id="meta-fields-create-link-limit-single-record"
+            name="createLinkLimitSingleRecord"
+            v-model="createLinkLimitSingleRecord"
+            type="checkbox"
+          />
           limitSingleRecord
         </label>
       </div>
       <div v-if="createType === 'lookup'" class="meta-fields__options meta-fields__link-options">
-        <select v-model="createLookupLinkFieldId" class="meta-fields__select">
+        <select
+          id="meta-fields-create-lookup-link-field-id"
+          name="createLookupLinkFieldId"
+          v-model="createLookupLinkFieldId"
+          class="meta-fields__select"
+        >
           <option value="">选择 Link 字段</option>
           <option
             v-for="field in linkFieldOptions"
@@ -104,6 +128,8 @@
           外表 sheetId：{{ createLookupForeignSheetId || '未配置' }}
         </div>
         <input
+          id="meta-fields-create-lookup-target-field-id"
+          name="createLookupTargetFieldId"
           v-model="createLookupTargetFieldId"
           class="meta-fields__input"
           list="lookup-target-fields-create"
@@ -123,7 +149,12 @@
         </div>
       </div>
       <div v-if="createType === 'rollup'" class="meta-fields__options meta-fields__link-options">
-        <select v-model="createRollupLinkFieldId" class="meta-fields__select">
+        <select
+          id="meta-fields-create-rollup-link-field-id"
+          name="createRollupLinkFieldId"
+          v-model="createRollupLinkFieldId"
+          class="meta-fields__select"
+        >
           <option value="">选择 Link 字段</option>
           <option
             v-for="field in linkFieldOptions"
@@ -137,6 +168,8 @@
           外表 sheetId：{{ createRollupForeignSheetId || '未配置' }}
         </div>
         <input
+          id="meta-fields-create-rollup-target-field-id"
+          name="createRollupTargetFieldId"
           v-model="createRollupTargetFieldId"
           class="meta-fields__input"
           list="rollup-target-fields-create"
@@ -154,7 +187,12 @@
         <div v-if="createRollupForeignError" class="meta-fields__muted">
           外表字段加载失败：{{ createRollupForeignError }}
         </div>
-        <select v-model="createRollupAgg" class="meta-fields__select">
+        <select
+          id="meta-fields-create-rollup-agg"
+          name="createRollupAgg"
+          v-model="createRollupAgg"
+          class="meta-fields__select"
+        >
           <option value="count">count</option>
           <option value="sum">sum</option>
           <option value="avg">avg</option>
@@ -189,7 +227,12 @@
           <td class="meta-fields__mono">{{ field.order ?? 0 }}</td>
           <td>
             <template v-if="editingId === field.id">
-              <input v-model="editName" class="meta-fields__input meta-fields__input--inline" />
+              <input
+                :id="`meta-fields-edit-name-${field.id}`"
+                :name="`editName-${field.id}`"
+                v-model="editName"
+                class="meta-fields__input meta-fields__input--inline"
+              />
             </template>
             <template v-else>
               {{ field.name }}
@@ -198,7 +241,12 @@
           <td class="meta-fields__mono">{{ field.id }}</td>
           <td>
             <template v-if="editingId === field.id">
-              <select v-model="editType" class="meta-fields__select meta-fields__select--inline">
+              <select
+                :id="`meta-fields-edit-type-${field.id}`"
+                :name="`editType-${field.id}`"
+                v-model="editType"
+                class="meta-fields__select meta-fields__select--inline"
+              >
                 <option value="string">string</option>
                 <option value="number">number</option>
                 <option value="boolean">boolean</option>
@@ -217,6 +265,8 @@
             <template v-if="editingId === field.id">
               <textarea
                 v-if="editType === 'select'"
+                :id="`meta-fields-edit-options-${field.id}`"
+                :name="`editOptionsText-${field.id}`"
                 v-model="editOptionsText"
                 class="meta-fields__textarea meta-fields__textarea--inline"
                 rows="3"
@@ -224,11 +274,15 @@
               />
               <div v-else-if="editType === 'link'" class="meta-fields__link-editor">
                 <input
+                  :id="`meta-fields-edit-link-foreign-sheet-id-${field.id}`"
+                  :name="`editLinkForeignSheetId-${field.id}`"
                   v-model="editLinkForeignSheetId"
                   class="meta-fields__input meta-fields__input--inline"
                   placeholder="foreignDatasheetId"
                 />
                 <input
+                  :id="`meta-fields-edit-link-display-field-id-${field.id}`"
+                  :name="`editLinkDisplayFieldId-${field.id}`"
                   v-model="editLinkDisplayFieldId"
                   class="meta-fields__input meta-fields__input--inline"
                   list="link-display-fields-edit"
@@ -246,13 +300,23 @@
                 <div v-if="editLinkForeignError" class="meta-fields__muted">
                   外表字段加载失败：{{ editLinkForeignError }}
                 </div>
-                <label class="meta-fields__checkbox">
-                  <input v-model="editLinkLimitSingleRecord" type="checkbox" />
+                <label class="meta-fields__checkbox" :for="`meta-fields-edit-link-limit-single-${field.id}`">
+                  <input
+                    :id="`meta-fields-edit-link-limit-single-${field.id}`"
+                    :name="`editLinkLimitSingleRecord-${field.id}`"
+                    v-model="editLinkLimitSingleRecord"
+                    type="checkbox"
+                  />
                   limitSingleRecord
                 </label>
               </div>
               <div v-else-if="editType === 'lookup'" class="meta-fields__link-editor">
-                <select v-model="editLookupLinkFieldId" class="meta-fields__select meta-fields__select--inline">
+                <select
+                  :id="`meta-fields-edit-lookup-link-field-id-${field.id}`"
+                  :name="`editLookupLinkFieldId-${field.id}`"
+                  v-model="editLookupLinkFieldId"
+                  class="meta-fields__select meta-fields__select--inline"
+                >
                   <option value="">选择 Link 字段</option>
                   <option
                     v-for="field in linkFieldOptions"
@@ -266,6 +330,8 @@
                   外表 sheetId：{{ editLookupForeignSheetId || '未配置' }}
                 </div>
                 <input
+                  :id="`meta-fields-edit-lookup-target-field-id-${field.id}`"
+                  :name="`editLookupTargetFieldId-${field.id}`"
                   v-model="editLookupTargetFieldId"
                   class="meta-fields__input meta-fields__input--inline"
                   list="lookup-target-fields-edit"
@@ -285,7 +351,12 @@
                 </div>
               </div>
               <div v-else-if="editType === 'rollup'" class="meta-fields__link-editor">
-                <select v-model="editRollupLinkFieldId" class="meta-fields__select meta-fields__select--inline">
+                <select
+                  :id="`meta-fields-edit-rollup-link-field-id-${field.id}`"
+                  :name="`editRollupLinkFieldId-${field.id}`"
+                  v-model="editRollupLinkFieldId"
+                  class="meta-fields__select meta-fields__select--inline"
+                >
                   <option value="">选择 Link 字段</option>
                   <option
                     v-for="field in linkFieldOptions"
@@ -299,6 +370,8 @@
                   外表 sheetId：{{ editRollupForeignSheetId || '未配置' }}
                 </div>
                 <input
+                  :id="`meta-fields-edit-rollup-target-field-id-${field.id}`"
+                  :name="`editRollupTargetFieldId-${field.id}`"
                   v-model="editRollupTargetFieldId"
                   class="meta-fields__input meta-fields__input--inline"
                   list="rollup-target-fields-edit"
@@ -316,7 +389,12 @@
                 <div v-if="editRollupForeignError" class="meta-fields__muted">
                   外表字段加载失败：{{ editRollupForeignError }}
                 </div>
-                <select v-model="editRollupAgg" class="meta-fields__select meta-fields__select--inline">
+                <select
+                  :id="`meta-fields-edit-rollup-agg-${field.id}`"
+                  :name="`editRollupAgg-${field.id}`"
+                  v-model="editRollupAgg"
+                  class="meta-fields__select meta-fields__select--inline"
+                >
                   <option value="count">count</option>
                   <option value="sum">sum</option>
                   <option value="avg">avg</option>
@@ -326,8 +404,14 @@
                 <div class="meta-fields__muted">Rollup 建议选择 number 字段</div>
               </div>
               <span v-else class="meta-fields__muted">-</span>
-              <label class="meta-fields__checkbox meta-fields__checkbox--inline">
-                <input v-model="editReadonly" type="checkbox" :disabled="editReadonlyForced" />
+              <label class="meta-fields__checkbox meta-fields__checkbox--inline" :for="`meta-fields-edit-readonly-${field.id}`">
+                <input
+                  :id="`meta-fields-edit-readonly-${field.id}`"
+                  :name="`editReadonly-${field.id}`"
+                  v-model="editReadonly"
+                  type="checkbox"
+                  :disabled="editReadonlyForced"
+                />
                 只读
                 <span v-if="editReadonlyForced" class="meta-fields__muted">（lookup/rollup 自动只读）</span>
               </label>

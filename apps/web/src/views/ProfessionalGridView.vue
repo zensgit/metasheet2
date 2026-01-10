@@ -72,6 +72,8 @@
       <span class="formula-label">{{ selectedCell || 'A1' }}</span>
       <span class="formula-fx">ƒx</span>
       <input
+        id="professional-grid-formula"
+        name="formulaBarValue"
         v-model="formulaBarValue"
         @keyup.enter="applyFormula"
         @focus="formulaBarFocused = true"
@@ -110,6 +112,8 @@
         <div class="modal-body">
           <div class="import-zone" @drop="handleDrop" @dragover.prevent @dragenter.prevent>
             <input
+              id="professional-grid-import-file"
+              name="importFile"
               type="file"
               ref="fileInput"
               @change="handleFileSelect"

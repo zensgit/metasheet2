@@ -37,8 +37,8 @@
 
       <div class="toolbar-right">
         <span class="info-text">{{ rows }}行 × {{ cols }}列 | {{ getCurrentMode() }}</span>
-        <label class="auto-save-toggle">
-          <input type="checkbox" v-model="autoSaveEnabled" />
+        <label class="auto-save-toggle" for="grid-auto-save">
+          <input id="grid-auto-save" name="autoSaveEnabled" type="checkbox" v-model="autoSaveEnabled" />
           <span>自动保存</span>
         </label>
         <button v-if="currentVersion" @click="exitVersionView" class="btn warning">
@@ -52,6 +52,8 @@
       <span class="cell-label">{{ getCurrentCellLabel() }}</span>
       <div class="formula-input-wrapper">
         <input
+          id="grid-formula-input"
+          name="formulaBarValue"
           v-model="formulaBarValue"
           @keyup.enter="applyFormula"
           @blur="applyFormula"
@@ -100,6 +102,8 @@
                 >
                   <input
                     v-if="isEditing(row - 1, col - 1)"
+                    :id="`grid-cell-${row - 1}-${col - 1}`"
+                    :name="`cell-${row - 1}-${col - 1}`"
                     v-model="editingValue"
                     @blur="finishEdit"
                     @keyup.enter="finishEdit"

@@ -62,7 +62,12 @@
             { hidden: !isFieldVisible(field) }
           ]"
         >
-          <label v-if="field.label" class="field-label" :class="{ required: field.required }">
+          <label
+            v-if="field.label"
+            class="field-label"
+            :class="{ required: field.required }"
+            :for="`form-field-${field.name}`"
+          >
             {{ field.label }}
             <span v-if="field.description" class="field-description">{{ field.description }}</span>
           </label>
@@ -70,6 +75,8 @@
           <!-- Text Input -->
           <input
             v-if="field.type === 'text'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="text"
             :placeholder="field.placeholder"
@@ -81,6 +88,8 @@
           <!-- Textarea -->
           <textarea
             v-else-if="field.type === 'textarea'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             :placeholder="field.placeholder"
             :required="field.required"
@@ -92,6 +101,8 @@
           <!-- Number Input -->
           <input
             v-else-if="field.type === 'number'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model.number="formData[field.name]"
             type="number"
             :placeholder="field.placeholder"
@@ -105,6 +116,8 @@
           <!-- Email Input -->
           <input
             v-else-if="field.type === 'email'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="email"
             :placeholder="field.placeholder"
@@ -116,6 +129,8 @@
           <!-- URL Input -->
           <input
             v-else-if="field.type === 'url'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="url"
             :placeholder="field.placeholder"
@@ -127,6 +142,8 @@
           <!-- Phone Input -->
           <input
             v-else-if="field.type === 'phone'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="tel"
             :placeholder="field.placeholder"
@@ -138,6 +155,8 @@
           <!-- Date Input -->
           <input
             v-else-if="field.type === 'date'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="date"
             :required="field.required"
@@ -148,6 +167,8 @@
           <!-- DateTime Input -->
           <input
             v-else-if="field.type === 'datetime'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="datetime-local"
             :required="field.required"
@@ -158,6 +179,8 @@
           <!-- Time Input -->
           <input
             v-else-if="field.type === 'time'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="time"
             :required="field.required"
@@ -168,6 +191,8 @@
           <!-- Select -->
           <select
             v-else-if="field.type === 'select'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             :required="field.required"
             :disabled="submitting"
@@ -190,9 +215,11 @@
               :key="option.value"
               class="checkbox-option"
             >
-              <label class="checkbox-label">
+              <label class="checkbox-label" :for="`form-field-${field.name}-${option.value}`">
                 <input
                   type="checkbox"
+                  :id="`form-field-${field.name}-${option.value}`"
+                  :name="field.name"
                   :value="option.value"
                   v-model="formData[field.name]"
                   :disabled="submitting"
@@ -209,9 +236,10 @@
               :key="option.value"
               class="radio-option"
             >
-              <label class="radio-label">
+              <label class="radio-label" :for="`form-field-${field.name}-${option.value}`">
                 <input
                   type="radio"
+                  :id="`form-field-${field.name}-${option.value}`"
                   :name="field.name"
                   :value="option.value"
                   v-model="formData[field.name]"
@@ -224,8 +252,10 @@
           </div>
 
           <!-- Checkbox (single) -->
-          <label v-else-if="field.type === 'checkbox'" class="checkbox-label">
+          <label v-else-if="field.type === 'checkbox'" class="checkbox-label" :for="`form-field-${field.name}`">
             <input
+              :id="`form-field-${field.name}`"
+              :name="field.name"
               type="checkbox"
               v-model="formData[field.name]"
               :required="field.required"
@@ -237,6 +267,8 @@
           <!-- File Upload -->
           <input
             v-else-if="field.type === 'file'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             type="file"
             @change="handleFileUpload($event, field)"
             :required="field.required"
@@ -247,6 +279,8 @@
           <!-- Image Upload -->
           <div v-else-if="field.type === 'image'" class="field-image">
             <input
+              :id="`form-field-${field.name}`"
+              :name="field.name"
               type="file"
               accept="image/*"
               @change="handleImageUpload($event, field)"
@@ -279,6 +313,8 @@
           <div v-else-if="field.type === 'slider'" class="field-slider">
             <input
               type="range"
+              :id="`form-field-${field.name}`"
+              :name="field.name"
               v-model.number="formData[field.name]"
               :min="field.validation?.min || 0"
               :max="field.validation?.max || 100"
@@ -291,6 +327,8 @@
           <!-- Color -->
           <input
             v-else-if="field.type === 'color'"
+            :id="`form-field-${field.name}`"
+            :name="field.name"
             v-model="formData[field.name]"
             type="color"
             :required="field.required"
@@ -342,21 +380,31 @@
           <div class="tab-content">
             <!-- Basic Settings -->
             <div v-if="activeConfigTab === 'basic'" class="config-section">
-              <div class="form-group">
-                <label>表单标题:</label>
-                <input v-model="localConfig.settings.title" type="text" />
+            <div class="form-group">
+              <label for="form-config-title">表单标题:</label>
+                <input id="form-config-title" name="configTitle" v-model="localConfig.settings.title" type="text" />
               </div>
               <div class="form-group">
-                <label>表单描述:</label>
-                <textarea v-model="localConfig.settings.description" rows="3"></textarea>
+                <label for="form-config-description">表单描述:</label>
+                <textarea id="form-config-description" name="configDescription" v-model="localConfig.settings.description" rows="3"></textarea>
               </div>
               <div class="form-group">
-                <label>提交按钮文字:</label>
-                <input v-model="localConfig.settings.submitButtonText" type="text" />
+                <label for="form-config-submit-text">提交按钮文字:</label>
+                <input
+                  id="form-config-submit-text"
+                  name="configSubmitButtonText"
+                  v-model="localConfig.settings.submitButtonText"
+                  type="text"
+                />
               </div>
               <div class="form-group">
-                <label>成功提示信息:</label>
-                <textarea v-model="localConfig.settings.successMessage" rows="2"></textarea>
+                <label for="form-config-success-message">成功提示信息:</label>
+                <textarea
+                  id="form-config-success-message"
+                  name="configSuccessMessage"
+                  v-model="localConfig.settings.successMessage"
+                  rows="2"
+                ></textarea>
               </div>
             </div>
 
@@ -385,20 +433,40 @@
             <!-- Access Settings -->
             <div v-if="activeConfigTab === 'access'" class="config-section">
               <div class="checkbox-group">
-                <label>
-                  <input type="checkbox" v-model="localConfig.settings.allowMultiple" />
+                <label for="form-config-allow-multiple">
+                  <input
+                    id="form-config-allow-multiple"
+                    name="configAllowMultiple"
+                    type="checkbox"
+                    v-model="localConfig.settings.allowMultiple"
+                  />
                   允许多次提交
                 </label>
-                <label>
-                  <input type="checkbox" v-model="localConfig.settings.requireAuth" />
+                <label for="form-config-require-auth">
+                  <input
+                    id="form-config-require-auth"
+                    name="configRequireAuth"
+                    type="checkbox"
+                    v-model="localConfig.settings.requireAuth"
+                  />
                   需要登录
                 </label>
-                <label>
-                  <input type="checkbox" v-model="localConfig.settings.enablePublicAccess" />
+                <label for="form-config-public-access">
+                  <input
+                    id="form-config-public-access"
+                    name="configEnablePublicAccess"
+                    type="checkbox"
+                    v-model="localConfig.settings.enablePublicAccess"
+                  />
                   允许公开访问
                 </label>
-                <label>
-                  <input type="checkbox" v-model="localConfig.settings.notifyOnSubmission" />
+                <label for="form-config-notify">
+                  <input
+                    id="form-config-notify"
+                    name="configNotifyOnSubmission"
+                    type="checkbox"
+                    v-model="localConfig.settings.notifyOnSubmission"
+                  />
                   提交时通知
                 </label>
               </div>

@@ -194,7 +194,7 @@
       <!-- List View -->
       <div v-else-if="viewMode === 'list'" class="list-view">
         <div class="list-controls">
-          <select v-model="listRange" class="range-select">
+          <select id="calendar-list-range" name="listRange" v-model="listRange" class="range-select">
             <option value="week">本周</option>
             <option value="month">本月</option>
             <option value="quarter">本季度</option>
@@ -312,8 +312,8 @@
             <h3>显示设置</h3>
 
             <div class="form-group">
-              <label>默认视图:</label>
-              <select v-model="config.defaultView">
+              <label for="calendar-config-default-view">默认视图:</label>
+              <select id="calendar-config-default-view" name="configDefaultView" v-model="config.defaultView">
                 <option value="month">月视图</option>
                 <option value="week">周视图</option>
                 <option value="day">日视图</option>
@@ -322,16 +322,16 @@
             </div>
 
             <div class="form-group">
-              <label>每周起始日:</label>
-              <select v-model="config.weekStartsOn">
+              <label for="calendar-config-week-starts">每周起始日:</label>
+              <select id="calendar-config-week-starts" name="configWeekStartsOn" v-model="config.weekStartsOn">
                 <option :value="0">周日</option>
                 <option :value="1">周一</option>
               </select>
             </div>
 
             <div class="form-group">
-              <label>时间格式:</label>
-              <select v-model="config.timeFormat">
+              <label for="calendar-config-time-format">时间格式:</label>
+              <select id="calendar-config-time-format" name="configTimeFormat" v-model="config.timeFormat">
                 <option value="12">12小时制</option>
                 <option value="24">24小时制</option>
               </select>
@@ -342,8 +342,8 @@
             <h3>数据映射</h3>
 
             <div class="form-group">
-              <label>标题字段:</label>
-              <select v-model="config.fields.title">
+              <label for="calendar-config-field-title">标题字段:</label>
+              <select id="calendar-config-field-title" name="configFieldTitle" v-model="config.fields.title">
                 <option v-for="field in availableFields" :key="field" :value="field">
                   {{ field }}
                 </option>
@@ -351,8 +351,8 @@
             </div>
 
             <div class="form-group">
-              <label>开始时间字段:</label>
-              <select v-model="config.fields.startDate">
+              <label for="calendar-config-field-start">开始时间字段:</label>
+              <select id="calendar-config-field-start" name="configFieldStart" v-model="config.fields.startDate">
                 <option v-for="field in dateFields" :key="field" :value="field">
                   {{ field }}
                 </option>
@@ -360,8 +360,8 @@
             </div>
 
             <div class="form-group">
-              <label>结束时间字段:</label>
-              <select v-model="config.fields.endDate">
+              <label for="calendar-config-field-end">结束时间字段:</label>
+              <select id="calendar-config-field-end" name="configFieldEnd" v-model="config.fields.endDate">
                 <option v-for="field in dateFields" :key="field" :value="field">
                   {{ field }}
                 </option>
@@ -369,8 +369,8 @@
             </div>
 
             <div class="form-group">
-              <label>分类字段:</label>
-              <select v-model="config.fields.category">
+              <label for="calendar-config-field-category">分类字段:</label>
+              <select id="calendar-config-field-category" name="configFieldCategory" v-model="config.fields.category">
                 <option value="">无</option>
                 <option v-for="field in categoryFields" :key="field" :value="field">
                   {{ field }}
@@ -388,13 +388,27 @@
                 :key="index"
                 class="color-rule"
               >
-                <select v-model="rule.field">
+                <select
+                  :id="`calendar-color-field-${index}`"
+                  :name="`colorRuleField-${index}`"
+                  v-model="rule.field"
+                >
                   <option v-for="field in availableFields" :key="field" :value="field">
                     {{ field }}
                   </option>
                 </select>
-                <input v-model="rule.value" placeholder="值" />
-                <input v-model="rule.color" type="color" />
+                <input
+                  :id="`calendar-color-value-${index}`"
+                  :name="`colorRuleValue-${index}`"
+                  v-model="rule.value"
+                  placeholder="值"
+                />
+                <input
+                  :id="`calendar-color-color-${index}`"
+                  :name="`colorRuleColor-${index}`"
+                  v-model="rule.color"
+                  type="color"
+                />
                 <button @click="removeColorRule(index)" class="remove-rule">×</button>
               </div>
             </div>
