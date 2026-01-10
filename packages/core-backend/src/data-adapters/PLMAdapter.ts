@@ -194,6 +194,13 @@ export interface BOMSubstitutesResponse {
   substitutes: BOMSubstituteEntry[]
 }
 
+export interface BOMSubstituteMutationResponse {
+  ok: boolean
+  substitute_id: string
+  bom_line_id?: string
+  substitute_item_id?: string
+}
+
 export interface PLMDocument {
   id: string
   name: string
@@ -210,6 +217,62 @@ export interface PLMDocument {
   metadata?: Record<string, unknown>
   created_at: string
   updated_at: string
+}
+
+export interface CadPropertiesResponse {
+  file_id: string
+  properties: Record<string, unknown>
+  updated_at?: string | null
+  source?: string | null
+  cad_document_schema_version?: number | null
+}
+
+export interface CadEntityNote {
+  entity_id: number
+  note: string
+  color?: string | null
+}
+
+export interface CadViewStateResponse {
+  file_id: string
+  hidden_entity_ids: number[]
+  notes: CadEntityNote[]
+  updated_at?: string | null
+  source?: string | null
+  cad_document_schema_version?: number | null
+}
+
+export interface CadReviewResponse {
+  file_id: string
+  state?: string | null
+  note?: string | null
+  reviewed_at?: string | null
+  reviewed_by_id?: number | null
+}
+
+export interface CadDiffResponse {
+  file_id: string
+  other_file_id: string
+  properties: Record<string, unknown>
+  cad_document_schema_version: Record<string, number | null>
+}
+
+export interface CadChangeLogEntry {
+  id: string
+  action: string
+  payload: Record<string, unknown>
+  created_at: string
+  user_id?: number | null
+}
+
+export interface CadChangeLogResponse {
+  file_id: string
+  entries: CadChangeLogEntry[]
+}
+
+export interface CadMeshStatsResponse {
+  file_id: string
+  stats: Record<string, unknown>
 }
 
 interface PLMDocumentRaw {
@@ -1154,6 +1217,256 @@ export class PLMAdapter extends HTTPAdapter {
     }
 
     return this.query<BOMSubstitutesResponse>(`/api/v1/bom/${bomLineId}/substitutes`)
+  }
+
+  async addBomSubstitute(
+    bomLineId: string,
+    substituteItemId: string,
+    properties?: Record<string, unknown>
+  ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          ok: true,
+          substitute_id: `mock-${Date.now()}`,
+          bom_line_id: bomLineId,
+          substitute_item_id: substituteItemId,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
+    }
+
+    const payload: Record<string, unknown> = { substitute_item_id: substituteItemId }
+    if (properties && Object.keys(properties).length) {
+      payload.properties = properties
+    }
+
+    return this.insert<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, payload)
+  }
+
+  async removeBomSubstitute(
+    bomLineId: string,
+    substituteId: string
+  ): Promise<QueryResult<BOMSubstituteMutationResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          ok: true,
+          substitute_id: substituteId,
+          bom_line_id: bomLineId,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
+    }
+
+    return this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, { id: substituteId })
+  }
+
+  async getCadProperties(fileId: string): Promise<QueryResult<CadPropertiesResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          properties: { material: 'AL-6061', finish: 'anodized' },
+          updated_at: new Date().toISOString(),
+          source: 'mock',
+          cad_document_schema_version: 1,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD properties are not supported for this PLM API mode') }
+    }
+
+    return this.query<CadPropertiesResponse>(`/api/v1/cad/files/${fileId}/properties`)
+  }
+
+  async updateCadProperties(
+    fileId: string,
+    payload: Record<string, unknown>
+  ): Promise<QueryResult<CadPropertiesResponse>> {
+    if (this.mockMode) {
+      const properties = (payload.properties && typeof payload.properties === 'object')
+        ? payload.properties as Record<string, unknown>
+        : payload
+      return {
+        data: [{
+          file_id: fileId,
+          properties,
+          updated_at: new Date().toISOString(),
+          source: 'mock',
+          cad_document_schema_version: 1,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD properties are not supported for this PLM API mode') }
+    }
+
+    return this.select<CadPropertiesResponse>(`/api/v1/cad/files/${fileId}/properties`, {
+      method: 'PATCH',
+      data: payload,
+    })
+  }
+
+  async getCadViewState(fileId: string): Promise<QueryResult<CadViewStateResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          hidden_entity_ids: [12, 19],
+          notes: [{ entity_id: 12, note: 'check hole position', color: '#FFB020' }],
+          updated_at: new Date().toISOString(),
+          source: 'mock',
+          cad_document_schema_version: 1,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD view state is not supported for this PLM API mode') }
+    }
+
+    return this.query<CadViewStateResponse>(`/api/v1/cad/files/${fileId}/view-state`)
+  }
+
+  async updateCadViewState(
+    fileId: string,
+    payload: Record<string, unknown>
+  ): Promise<QueryResult<CadViewStateResponse>> {
+    if (this.mockMode) {
+      const hidden = Array.isArray(payload.hidden_entity_ids) ? payload.hidden_entity_ids as number[] : []
+      const notes = Array.isArray(payload.notes) ? payload.notes as CadEntityNote[] : []
+      return {
+        data: [{
+          file_id: fileId,
+          hidden_entity_ids: hidden,
+          notes,
+          updated_at: new Date().toISOString(),
+          source: 'mock',
+          cad_document_schema_version: 1,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD view state is not supported for this PLM API mode') }
+    }
+
+    return this.select<CadViewStateResponse>(`/api/v1/cad/files/${fileId}/view-state`, {
+      method: 'PATCH',
+      data: payload,
+    })
+  }
+
+  async getCadReview(fileId: string): Promise<QueryResult<CadReviewResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          state: 'approved',
+          note: 'dimensions ok',
+          reviewed_at: new Date().toISOString(),
+          reviewed_by_id: 42,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD review is not supported for this PLM API mode') }
+    }
+
+    return this.query<CadReviewResponse>(`/api/v1/cad/files/${fileId}/review`)
+  }
+
+  async updateCadReview(
+    fileId: string,
+    payload: Record<string, unknown>
+  ): Promise<QueryResult<CadReviewResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          state: typeof payload.state === 'string' ? payload.state : 'approved',
+          note: typeof payload.note === 'string' ? payload.note : null,
+          reviewed_at: new Date().toISOString(),
+          reviewed_by_id: 42,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD review is not supported for this PLM API mode') }
+    }
+
+    return this.insert<CadReviewResponse>(`/api/v1/cad/files/${fileId}/review`, payload)
+  }
+
+  async getCadHistory(fileId: string): Promise<QueryResult<CadChangeLogResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          entries: [
+            { id: 'chg-1', action: 'properties_updated', payload: { material: 'AL-6061' }, created_at: new Date().toISOString() },
+          ],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD history is not supported for this PLM API mode') }
+    }
+
+    return this.query<CadChangeLogResponse>(`/api/v1/cad/files/${fileId}/history`)
+  }
+
+  async getCadDiff(fileId: string, otherFileId: string): Promise<QueryResult<CadDiffResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          other_file_id: otherFileId,
+          properties: {
+            added: { finish: 'anodized' },
+            removed: { coating: 'none' },
+            changed: { weight_kg: { from: 1.1, to: 1.2 } },
+          },
+          cad_document_schema_version: { left: 1, right: 2 },
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD diff is not supported for this PLM API mode') }
+    }
+
+    return this.query<CadDiffResponse>(`/api/v1/cad/files/${fileId}/diff`, [{ other_file_id: otherFileId }])
+  }
+
+  async getCadMeshStats(fileId: string): Promise<QueryResult<CadMeshStatsResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          file_id: fileId,
+          stats: { triangles: 102400, vertices: 51200, watertight: true },
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('CAD mesh stats are not supported for this PLM API mode') }
+    }
+
+    return this.query<CadMeshStatsResponse>(`/api/v1/cad/files/${fileId}/mesh-stats`)
   }
 
   private flattenYuantusBomTree(root: YuantusBomNode, rootId: string): BOMItem[] {

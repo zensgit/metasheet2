@@ -90,6 +90,30 @@ curl http://localhost:8900/metrics/prom | head -20
 curl http://localhost:8900/api/plugins | jq
 ```
 
+## PLM POC (Yuantus)
+
+```bash
+# 启动 core + Web，并填充默认 Yuantus PLM 环境变量
+PLM_ENV=yuantus BACKEND_MODE=core bash scripts/start-univer-poc.sh
+
+# 可选：显式指定 PLM 环境
+PLM_BASE_URL=http://127.0.0.1:7910 \
+PLM_TENANT_ID=tenant-1 \
+PLM_ORG_ID=org-1 \
+PLM_USERNAME=admin \
+PLM_PASSWORD=admin \
+RBAC_BYPASS=true \
+BACKEND_MODE=core \
+bash scripts/start-univer-poc.sh
+```
+
+浏览器访问：`http://localhost:8899/plm`
+
+如需确保 Yuantus 身份库在 Postgres 且 admin 已创建，可运行：
+```bash
+bash scripts/start-yuantus-plm.sh
+```
+
 ## 下一步
 
 - 🔭 启动本地观测栈: `./scripts/observability-stack.sh up`
