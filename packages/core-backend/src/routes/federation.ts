@@ -126,10 +126,26 @@ const UpdateSystemSchema = z.object({
 type FederatedCredentials = z.infer<typeof RegisterSystemSchema>['credentials']
 
 const PLMQuerySchema = z.object({
-  operation: z.enum(['products', 'bom', 'documents', 'approvals', 'bom_compare', 'substitutes', 'where_used']),
+  operation: z.enum([
+    'products',
+    'bom',
+    'documents',
+    'approvals',
+    'bom_compare',
+    'substitutes',
+    'where_used',
+    'cad_properties',
+    'cad_view_state',
+    'cad_review',
+    'cad_history',
+    'cad_diff',
+    'cad_mesh_stats',
+  ]),
   productId: z.string().optional(),
   itemId: z.string().optional(),
   bomLineId: z.string().optional(),
+  fileId: z.string().optional(),
+  otherFileId: z.string().optional(),
   leftId: z.string().optional(),
   rightId: z.string().optional(),
   leftType: z.enum(['item', 'version']).optional(),
@@ -150,10 +166,18 @@ const PLMQuerySchema = z.object({
 })
 
 const PLMMutationSchema = z.object({
-  operation: z.enum(['substitutes_add', 'substitutes_remove']),
+  operation: z.enum([
+    'substitutes_add',
+    'substitutes_remove',
+    'cad_properties_update',
+    'cad_view_state_update',
+    'cad_review_update',
+  ]),
   bomLineId: z.string().optional(),
   substituteItemId: z.string().optional(),
   substituteId: z.string().optional(),
+  fileId: z.string().optional(),
+  payload: z.record(z.unknown()).optional(),
   properties: z.record(z.unknown()).optional(),
   filters: z.record(z.unknown()).optional(),
 })
@@ -903,6 +927,8 @@ export function federationRouter(injector?: Injector): Router {
           productId,
           itemId,
           bomLineId,
+          fileId,
+          otherFileId,
           leftId,
           rightId,
           leftType,
@@ -976,6 +1002,185 @@ export function federationRouter(injector?: Injector): Router {
                 productId,
                 items: result.data,
                 total: result.metadata?.totalCount ?? result.data.length,
+              },
+            })
+          }
+
+          if (operation === 'cad_properties') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            if (!resolvedFileId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId is required for cad_properties',
+                },
+              })
+            }
+
+            const result = await adapter.getCadProperties(resolvedFileId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                properties: {},
+              },
+            })
+          }
+
+          if (operation === 'cad_view_state') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            if (!resolvedFileId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId is required for cad_view_state',
+                },
+              })
+            }
+
+            const result = await adapter.getCadViewState(resolvedFileId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                hidden_entity_ids: [],
+                notes: [],
+              },
+            })
+          }
+
+          if (operation === 'cad_review') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            if (!resolvedFileId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId is required for cad_review',
+                },
+              })
+            }
+
+            const result = await adapter.getCadReview(resolvedFileId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                state: null,
+              },
+            })
+          }
+
+          if (operation === 'cad_history') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            if (!resolvedFileId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId is required for cad_history',
+                },
+              })
+            }
+
+            const result = await adapter.getCadHistory(resolvedFileId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                entries: [],
+              },
+            })
+          }
+
+          if (operation === 'cad_diff') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            const resolvedOtherId = otherFileId
+              || toStringParam(filterParams.other_id ?? filterParams.otherId ?? filterParams.other_file_id ?? filterParams.otherFileId)
+            if (!resolvedFileId || !resolvedOtherId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId and otherFileId are required for cad_diff',
+                },
+              })
+            }
+
+            const result = await adapter.getCadDiff(resolvedFileId, resolvedOtherId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                other_file_id: resolvedOtherId,
+                properties: {},
+                cad_document_schema_version: {},
+              },
+            })
+          }
+
+          if (operation === 'cad_mesh_stats') {
+            const resolvedFileId = fileId
+              || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+            if (!resolvedFileId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'fileId is required for cad_mesh_stats',
+                },
+              })
+            }
+
+            const result = await adapter.getCadMeshStats(resolvedFileId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                file_id: resolvedFileId,
+                stats: {},
               },
             })
           }
@@ -1122,6 +1327,8 @@ export function federationRouter(injector?: Injector): Router {
         const mockData = getMockPLMData(operation, productId, pagination, {
           itemId,
           bomLineId,
+          fileId,
+          otherFileId,
           leftId,
           rightId,
         })
@@ -1176,6 +1383,8 @@ export function federationRouter(injector?: Injector): Router {
           bomLineId,
           substituteItemId,
           substituteId,
+          fileId,
+          payload,
           properties,
           filters,
         } = parse.data
@@ -1189,6 +1398,121 @@ export function federationRouter(injector?: Injector): Router {
               code: 'PLM_UNAVAILABLE',
               message: 'PLM adapter not configured',
             },
+          })
+        }
+
+        if (operation === 'cad_properties_update') {
+          const resolvedFileId = fileId
+            || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+          if (!resolvedFileId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'fileId is required for cad_properties_update',
+              },
+            })
+          }
+          const resolvedPayload = payload && typeof payload === 'object' ? payload : null
+          if (!resolvedPayload) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'payload is required for cad_properties_update',
+              },
+            })
+          }
+
+          const result = await adapter.updateCadProperties(resolvedFileId, resolvedPayload)
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? {
+              file_id: resolvedFileId,
+              properties: {},
+            },
+          })
+        }
+
+        if (operation === 'cad_view_state_update') {
+          const resolvedFileId = fileId
+            || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+          if (!resolvedFileId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'fileId is required for cad_view_state_update',
+              },
+            })
+          }
+          const resolvedPayload = payload && typeof payload === 'object' ? payload : null
+          if (!resolvedPayload) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'payload is required for cad_view_state_update',
+              },
+            })
+          }
+
+          const result = await adapter.updateCadViewState(resolvedFileId, resolvedPayload)
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? {
+              file_id: resolvedFileId,
+              hidden_entity_ids: [],
+              notes: [],
+            },
+          })
+        }
+
+        if (operation === 'cad_review_update') {
+          const resolvedFileId = fileId
+            || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)
+          if (!resolvedFileId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'fileId is required for cad_review_update',
+              },
+            })
+          }
+          const resolvedPayload = payload && typeof payload === 'object' ? payload : null
+          if (!resolvedPayload) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'payload is required for cad_review_update',
+              },
+            })
+          }
+
+          const result = await adapter.updateCadReview(resolvedFileId, resolvedPayload)
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? { file_id: resolvedFileId },
           })
         }
 
@@ -1900,6 +2224,15 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'substitutes',
       'substitutes_add',
       'substitutes_remove',
+      'cad_properties',
+      'cad_view_state',
+      'cad_review',
+      'cad_history',
+      'cad_diff',
+      'cad_mesh_stats',
+      'cad_properties_update',
+      'cad_view_state_update',
+      'cad_review_update',
     ]
   }
   return ['documents', 'search', 'preview', 'versions', 'workflow', 'collaboration']
@@ -2034,7 +2367,7 @@ function getMockPLMData(
   operation: string,
   productId?: string,
   pagination?: { limit: number; offset: number },
-  options?: { itemId?: string; bomLineId?: string; leftId?: string; rightId?: string }
+  options?: { itemId?: string; bomLineId?: string; fileId?: string; otherFileId?: string; leftId?: string; rightId?: string }
 ): unknown {
   const limit = pagination?.limit || 10
   const offset = pagination?.offset || 0
@@ -2108,6 +2441,65 @@ function getMockPLMData(
           { id: 'apr-1', productId: 'prod-1', status: 'pending', requester: 'user1' },
         ],
         total: 1,
+      }
+    case 'cad_properties':
+      return {
+        file_id: options?.fileId || 'file-001',
+        properties: {
+          material: 'AL-6061',
+          finish: 'anodized',
+          weight_kg: 1.2,
+        },
+        updated_at: new Date().toISOString(),
+        source: 'mock',
+      }
+    case 'cad_view_state':
+      return {
+        file_id: options?.fileId || 'file-001',
+        hidden_entity_ids: [12, 19],
+        notes: [
+          { entity_id: 12, note: 'check hole position', color: '#FFB020' },
+        ],
+        updated_at: new Date().toISOString(),
+        source: 'mock',
+      }
+    case 'cad_review':
+      return {
+        file_id: options?.fileId || 'file-001',
+        state: 'approved',
+        note: 'dimensions ok',
+        reviewed_at: new Date().toISOString(),
+        reviewed_by_id: 42,
+      }
+    case 'cad_history':
+      return {
+        file_id: options?.fileId || 'file-001',
+        entries: [
+          { id: 'chg-1', action: 'properties_updated', payload: { material: 'AL-6061' }, created_at: new Date().toISOString() },
+        ],
+      }
+    case 'cad_diff':
+      return {
+        file_id: options?.fileId || 'file-001',
+        other_file_id: options?.otherFileId || 'file-002',
+        properties: {
+          added: { finish: 'anodized' },
+          removed: { coating: 'none' },
+          changed: { weight_kg: { from: 1.1, to: 1.2 } },
+        },
+        cad_document_schema_version: {
+          left: 1,
+          right: 2,
+        },
+      }
+    case 'cad_mesh_stats':
+      return {
+        file_id: options?.fileId || 'file-001',
+        stats: {
+          triangles: 102400,
+          vertices: 51200,
+          watertight: true,
+        },
       }
     default:
       return { items: [], total: 0 }

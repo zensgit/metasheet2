@@ -21,6 +21,7 @@
     "verify:labs-gating": "NODE_PATH=apps/web-react/node_modules node scripts/verify-labs-gating-ui.cjs",
     "verify:smoke:all": "RUN_UNIVER_UI_SMOKE=true bash scripts/verify-smoke.sh",
     "verify:plm-ui-regression": "bash scripts/verify-plm-ui-regression.sh",
+    "verify:plm-ui-full": "bash scripts/verify-plm-ui-full.sh",
     "verify:plm-regression": "bash scripts/verify-plm-regression.sh",
     "verify:attendance-ui": "node scripts/verify-attendance-ui.mjs",
     "verify:attendance-ui:optional": "bash -c 'if [ \"${RUN_ATTENDANCE_UI_SMOKE}\" = \"true\" ]; then node scripts/verify-attendance-ui.mjs; else echo \"skip attendance ui (set RUN_ATTENDANCE_UI_SMOKE=true)\"; fi'",

@@ -444,6 +444,7 @@
             <th v-if="documentColumns.updated">更新时间</th>
             <th v-if="documentColumns.preview">预览</th>
             <th v-if="documentColumns.download">下载</th>
+            <th v-if="documentColumns.cad">CAD</th>
           </tr>
         </thead>
         <tbody>
@@ -464,6 +465,12 @@
             <td v-if="documentColumns.download">
               <a v-if="doc.download_url" :href="doc.download_url" target="_blank" rel="noopener">下载</a>
               <span v-else>-</span>
+            </td>
+            <td v-if="documentColumns.cad">
+              <div class="inline-actions">
+                <button class="btn ghost mini" @click="selectCadFile(doc, 'primary')">主</button>
+                <button class="btn ghost mini" @click="selectCadFile(doc, 'other')">对比</button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -489,6 +496,172 @@
           </tbody>
         </table>
       </details>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>CAD 元数据</h2>
+        <div class="panel-actions">
+          <button class="btn ghost" @click="copyDeepLink('cad')">复制深链接</button>
+          <button class="btn" :disabled="!cadFileId || cadLoading" @click="loadCadMetadata">
+            {{ cadLoading ? '加载中...' : '刷新 CAD' }}
+          </button>
+        </div>
+      </div>
+      <div class="form-grid compact">
+        <label for="plm-cad-file-id">
+          CAD File ID
+          <input
+            id="plm-cad-file-id"
+            v-model.trim="cadFileId"
+            name="plmCadFileId"
+            placeholder="从文档选择或输入 file_id"
+          />
+        </label>
+        <label for="plm-cad-other-file-id">
+          对比 File ID
+          <input
+            id="plm-cad-other-file-id"
+            v-model.trim="cadOtherFileId"
+            name="plmCadOtherFileId"
+            placeholder="可选，用于差异对比"
+          />
+        </label>
+      </div>
+      <p v-if="cadStatus" class="status">{{ cadStatus }}</p>
+      <p v-if="cadError" class="status error">{{ cadError }}</p>
+      <p v-if="cadActionStatus" class="status">{{ cadActionStatus }}</p>
+      <p v-if="cadActionError" class="status error">{{ cadActionError }}</p>
+      <div class="cad-grid">
+        <div class="cad-card">
+          <div class="cad-card-header">
+            <h3>属性</h3>
+            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadProperties">
+              {{ cadUpdating ? '处理中...' : '更新' }}
+            </button>
+          </div>
+          <textarea
+            v-model="cadPropertiesDraft"
+            class="cad-textarea"
+            rows="6"
+            placeholder='{"properties": {"material": "AL-6061"}, "source": "metasheet"}'
+          ></textarea>
+          <details class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadProperties) }}</pre>
+          </details>
+        </div>
+        <div class="cad-card">
+          <div class="cad-card-header">
+            <h3>视图状态</h3>
+            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadViewState">
+              {{ cadUpdating ? '处理中...' : '更新' }}
+            </button>
+          </div>
+          <textarea
+            v-model="cadViewStateDraft"
+            class="cad-textarea"
+            rows="6"
+            placeholder='{"hidden_entity_ids": [12, 15], "notes": [{"entity_id": 12, "note": "check hole"}]}'
+          ></textarea>
+          <details class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadViewState) }}</pre>
+          </details>
+        </div>
+        <div class="cad-card">
+          <div class="cad-card-header">
+            <h3>评审</h3>
+            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadReview">
+              {{ cadUpdating ? '处理中...' : '提交' }}
+            </button>
+          </div>
+          <div class="form-grid compact cad-review-form">
+            <label for="plm-cad-review-state">
+              状态
+              <input
+                id="plm-cad-review-state"
+                v-model.trim="cadReviewState"
+                name="plmCadReviewState"
+                placeholder="approved / rejected"
+              />
+            </label>
+            <label for="plm-cad-review-note">
+              备注
+              <input
+                id="plm-cad-review-note"
+                v-model.trim="cadReviewNote"
+                name="plmCadReviewNote"
+                placeholder="可选"
+              />
+            </label>
+          </div>
+          <details class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadReview) }}</pre>
+          </details>
+        </div>
+        <div class="cad-card cad-span">
+          <div class="cad-card-header">
+            <h3>变更历史</h3>
+          </div>
+          <div v-if="!cadHistoryEntries.length" class="empty">暂无历史</div>
+          <table v-else class="data-table">
+            <thead>
+              <tr>
+                <th>动作</th>
+                <th>时间</th>
+                <th>用户</th>
+                <th>Payload</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="entry in cadHistoryEntries" :key="entry.id">
+                <td>{{ entry.action }}</td>
+                <td>{{ formatTime(entry.created_at) }}</td>
+                <td>{{ entry.user_id ?? '-' }}</td>
+                <td>
+                  <details class="inline-details">
+                    <summary>查看</summary>
+                    <pre class="inline-pre">{{ formatJson(entry.payload) }}</pre>
+                  </details>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <details class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadHistory) }}</pre>
+          </details>
+        </div>
+        <div class="cad-card">
+          <div class="cad-card-header">
+            <h3>差异</h3>
+            <button
+              class="btn ghost mini"
+              :disabled="!cadFileId || !cadOtherFileId || cadDiffLoading"
+              @click="loadCadDiff"
+            >
+              {{ cadDiffLoading ? '对比中...' : '加载' }}
+            </button>
+          </div>
+          <div v-if="!cadDiff" class="empty">暂无差异数据</div>
+          <details v-else class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadDiff) }}</pre>
+          </details>
+        </div>
+        <div class="cad-card">
+          <div class="cad-card-header">
+            <h3>网格统计</h3>
+          </div>
+          <div v-if="!cadMeshStats" class="empty">暂无网格统计</div>
+          <details v-else class="json-block">
+            <summary>原始数据</summary>
+            <pre>{{ formatJson(cadMeshStats) }}</pre>
+          </details>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -881,12 +1054,12 @@
               <tr v-for="entry in compareAddedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
-                  <div>{{ getItemNumber(entry.parent) }}</div>
-                  <div class="muted">{{ getItemName(entry.parent) }}</div>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
                 </td>
                 <td>
-                  <div>{{ getItemNumber(entry.child) }}</div>
-                  <div class="muted">{{ getItemName(entry.child) }}</div>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
                 </td>
                 <td>{{ getCompareProp(entry, 'quantity') }}</td>
                 <td>{{ getCompareProp(entry, 'uom') }}</td>
@@ -924,12 +1097,12 @@
               <tr v-for="entry in compareRemovedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
-                  <div>{{ getItemNumber(entry.parent) }}</div>
-                  <div class="muted">{{ getItemName(entry.parent) }}</div>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
                 </td>
                 <td>
-                  <div>{{ getItemNumber(entry.child) }}</div>
-                  <div class="muted">{{ getItemName(entry.child) }}</div>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
                 </td>
                 <td>{{ getCompareProp(entry, 'quantity') }}</td>
                 <td>{{ getCompareProp(entry, 'uom') }}</td>
@@ -965,12 +1138,12 @@
               <tr v-for="entry in compareChangedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
-                  <div>{{ getItemNumber(entry.parent) }}</div>
-                  <div class="muted">{{ getItemName(entry.parent) }}</div>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
                 </td>
                 <td>
-                  <div>{{ getItemNumber(entry.child) }}</div>
-                  <div class="muted">{{ getItemName(entry.child) }}</div>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
                 </td>
                 <td>
                   <span class="tag" :class="severityClass(entry.severity)">{{ entry.severity || 'info' }}</span>
@@ -1225,6 +1398,7 @@ const defaultDocumentColumns = {
   updated: true,
   preview: true,
   download: true,
+  cad: true,
 }
 const documentColumns = ref({ ...defaultDocumentColumns })
 const documentColumnOptions = [
@@ -1236,10 +1410,31 @@ const documentColumnOptions = [
   { key: 'updated', label: '更新时间' },
   { key: 'preview', label: '预览' },
   { key: 'download', label: '下载' },
+  { key: 'cad', label: 'CAD' },
 ]
 const documents = ref<any[]>([])
 const documentsLoading = ref(false)
 const documentsError = ref('')
+
+const cadFileId = ref('')
+const cadOtherFileId = ref('')
+const cadProperties = ref<any | null>(null)
+const cadViewState = ref<any | null>(null)
+const cadReview = ref<any | null>(null)
+const cadHistory = ref<any | null>(null)
+const cadDiff = ref<any | null>(null)
+const cadMeshStats = ref<any | null>(null)
+const cadPropertiesDraft = ref('')
+const cadViewStateDraft = ref('')
+const cadReviewState = ref('')
+const cadReviewNote = ref('')
+const cadLoading = ref(false)
+const cadDiffLoading = ref(false)
+const cadUpdating = ref(false)
+const cadStatus = ref('')
+const cadError = ref('')
+const cadActionStatus = ref('')
+const cadActionError = ref('')
 
 const approvals = ref<any[]>([])
 const approvalsStatus = ref<'all' | 'pending' | 'approved' | 'rejected'>(DEFAULT_APPROVAL_STATUS)
@@ -1611,6 +1806,8 @@ const documentsSorted = computed(() =>
   sortRows(documentsFiltered.value, documentSortKey.value, documentSortDir.value, documentSortConfig)
 )
 
+const cadHistoryEntries = computed(() => cadHistory.value?.entries || [])
+
 const approvalsFiltered = computed(() => {
   const needle = approvalsFilter.value.trim().toLowerCase()
   if (!needle) return approvals.value
@@ -1756,11 +1953,13 @@ const DEEP_LINK_PRESETS_STORAGE_KEY = 'plm_deep_link_presets'
 const deepLinkPanelOptions = [
   { key: 'search', label: '搜索' },
   { key: 'product', label: '产品' },
+  { key: 'cad', label: 'CAD 元数据' },
   { key: 'where-used', label: 'Where-Used' },
   { key: 'compare', label: 'BOM 对比' },
   { key: 'substitutes', label: '替代件' },
 ]
 const builtInDeepLinkPresets = [
+  { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
   { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
   { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
   { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
@@ -1817,6 +2016,25 @@ function resetAll() {
   documentsError.value = ''
   documentFilter.value = ''
   documentColumns.value = { ...defaultDocumentColumns }
+  cadFileId.value = ''
+  cadOtherFileId.value = ''
+  cadProperties.value = null
+  cadViewState.value = null
+  cadReview.value = null
+  cadHistory.value = null
+  cadDiff.value = null
+  cadMeshStats.value = null
+  cadPropertiesDraft.value = ''
+  cadViewStateDraft.value = ''
+  cadReviewState.value = ''
+  cadReviewNote.value = ''
+  cadLoading.value = false
+  cadDiffLoading.value = false
+  cadUpdating.value = false
+  cadStatus.value = ''
+  cadError.value = ''
+  cadActionStatus.value = ''
+  cadActionError.value = ''
   approvals.value = []
   approvalsStatus.value = DEFAULT_APPROVAL_STATUS
   approvalSortKey.value = 'created'
@@ -1860,6 +2078,8 @@ function resetAll() {
     productId: '',
     itemNumber: '',
     itemType: '',
+    cadFileId: '',
+    cadOtherFileId: '',
     documentRole: '',
     documentFilter: '',
     approvalsStatus: '',
@@ -2061,6 +2281,249 @@ async function loadDocuments() {
     documentsError.value = error?.message || '加载文档失败'
   } finally {
     documentsLoading.value = false
+  }
+}
+
+function resolveCadFileId(doc: any): string {
+  const fileId = doc?.id || doc?.file_id
+  return fileId ? String(fileId) : ''
+}
+
+function selectCadFile(doc: any, target: 'primary' | 'other' = 'primary') {
+  const fileId = resolveCadFileId(doc)
+  if (!fileId) return
+  if (target === 'other') {
+    cadOtherFileId.value = fileId
+    cadStatus.value = '已设置对比 CAD 文件'
+  } else {
+    cadFileId.value = fileId
+    cadStatus.value = '已设置 CAD 文件'
+  }
+  scheduleQuerySync({
+    cadFileId: cadFileId.value || undefined,
+    cadOtherFileId: cadOtherFileId.value || undefined,
+  })
+}
+
+function resolveErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  return fallback
+}
+
+async function queryCad<T>(operation: string, payload: Record<string, unknown>, fallback: string): Promise<T> {
+  const result = await apiPost<{ ok: boolean; data: T; error?: { message?: string } }>(
+    '/api/federation/plm/query',
+    { operation, ...payload }
+  )
+  if (!result.ok) {
+    throw new Error(result.error?.message || fallback)
+  }
+  return result.data
+}
+
+async function loadCadMetadata() {
+  if (!cadFileId.value) return
+  syncQueryParams({ cadFileId: cadFileId.value, cadOtherFileId: cadOtherFileId.value })
+  cadLoading.value = true
+  cadError.value = ''
+  cadStatus.value = ''
+  const payload = { fileId: cadFileId.value }
+  const tasks = [
+    {
+      label: '属性',
+      run: () => queryCad<any>('cad_properties', payload, '加载属性失败'),
+      apply: (data: any) => {
+        cadProperties.value = data
+        cadPropertiesDraft.value = JSON.stringify({ properties: data?.properties ?? {} }, null, 2)
+      },
+    },
+    {
+      label: '视图状态',
+      run: () => queryCad<any>('cad_view_state', payload, '加载视图状态失败'),
+      apply: (data: any) => {
+        cadViewState.value = data
+        cadViewStateDraft.value = JSON.stringify({
+          hidden_entity_ids: data?.hidden_entity_ids ?? [],
+          notes: data?.notes ?? [],
+        }, null, 2)
+      },
+    },
+    {
+      label: '评审',
+      run: () => queryCad<any>('cad_review', payload, '加载评审失败'),
+      apply: (data: any) => {
+        cadReview.value = data
+        cadReviewState.value = data?.state || ''
+        cadReviewNote.value = data?.note || ''
+      },
+    },
+    {
+      label: '历史',
+      run: () => queryCad<any>('cad_history', payload, '加载历史失败'),
+      apply: (data: any) => {
+        cadHistory.value = data
+      },
+    },
+    {
+      label: '网格统计',
+      run: () => queryCad<any>('cad_mesh_stats', payload, '加载网格统计失败'),
+      apply: (data: any) => {
+        cadMeshStats.value = data
+      },
+    },
+  ]
+  const results = await Promise.allSettled(tasks.map((task) => task.run()))
+  const errors: string[] = []
+  results.forEach((result, index) => {
+    const task = tasks[index]
+    if (result.status === 'fulfilled') {
+      task.apply(result.value)
+      return
+    }
+    handleAuthError(result.reason)
+    errors.push(`${task.label}: ${resolveErrorMessage(result.reason, '请求失败')}`)
+  })
+  cadError.value = errors.join('；')
+  if (!errors.length) {
+    cadStatus.value = 'CAD 元数据已加载'
+  }
+  cadLoading.value = false
+}
+
+async function loadCadDiff() {
+  if (!cadFileId.value || !cadOtherFileId.value) return
+  syncQueryParams({ cadFileId: cadFileId.value, cadOtherFileId: cadOtherFileId.value })
+  cadDiffLoading.value = true
+  cadError.value = ''
+  try {
+    cadDiff.value = await queryCad<any>(
+      'cad_diff',
+      { fileId: cadFileId.value, otherFileId: cadOtherFileId.value },
+      '加载差异失败'
+    )
+    cadStatus.value = 'CAD 差异已加载'
+  } catch (error: any) {
+    handleAuthError(error)
+    cadError.value = error?.message || '加载差异失败'
+  } finally {
+    cadDiffLoading.value = false
+  }
+}
+
+function parseJsonObject(value: string, label: string): Record<string, unknown> | null {
+  const trimmed = value.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${label} 需要是 JSON 对象`)
+    }
+    return parsed as Record<string, unknown>
+  } catch (error: any) {
+    cadActionError.value = error?.message || `${label} JSON 解析失败`
+    return null
+  }
+}
+
+async function updateCadProperties() {
+  if (!cadFileId.value) return
+  cadUpdating.value = true
+  cadActionError.value = ''
+  cadActionStatus.value = ''
+  try {
+    const payload = parseJsonObject(cadPropertiesDraft.value, '属性')
+    if (!payload) return
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'cad_properties_update',
+        fileId: cadFileId.value,
+        payload,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '更新属性失败')
+    }
+    cadProperties.value = result.data
+    cadPropertiesDraft.value = JSON.stringify({ properties: result.data?.properties ?? {} }, null, 2)
+    cadActionStatus.value = '已更新属性'
+  } catch (error: any) {
+    handleAuthError(error)
+    cadActionError.value = error?.message || '更新属性失败'
+  } finally {
+    cadUpdating.value = false
+  }
+}
+
+async function updateCadViewState() {
+  if (!cadFileId.value) return
+  cadUpdating.value = true
+  cadActionError.value = ''
+  cadActionStatus.value = ''
+  try {
+    const payload = parseJsonObject(cadViewStateDraft.value, '视图状态')
+    if (!payload) return
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'cad_view_state_update',
+        fileId: cadFileId.value,
+        payload,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '更新视图状态失败')
+    }
+    cadViewState.value = result.data
+    cadViewStateDraft.value = JSON.stringify({
+      hidden_entity_ids: result.data?.hidden_entity_ids ?? [],
+      notes: result.data?.notes ?? [],
+    }, null, 2)
+    cadActionStatus.value = '已更新视图状态'
+  } catch (error: any) {
+    handleAuthError(error)
+    cadActionError.value = error?.message || '更新视图状态失败'
+  } finally {
+    cadUpdating.value = false
+  }
+}
+
+async function updateCadReview() {
+  if (!cadFileId.value) return
+  const state = cadReviewState.value.trim()
+  if (!state) {
+    cadActionError.value = '请填写评审状态'
+    return
+  }
+  cadUpdating.value = true
+  cadActionError.value = ''
+  cadActionStatus.value = ''
+  try {
+    const payload: Record<string, unknown> = { state }
+    if (cadReviewNote.value.trim()) {
+      payload.note = cadReviewNote.value.trim()
+    }
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'cad_review_update',
+        fileId: cadFileId.value,
+        payload,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '提交评审失败')
+    }
+    cadReview.value = result.data
+    cadReviewState.value = result.data?.state || state
+    cadReviewNote.value = result.data?.note || cadReviewNote.value
+    cadActionStatus.value = '评审已提交'
+  } catch (error: any) {
+    handleAuthError(error)
+    cadActionError.value = error?.message || '提交评审失败'
+  } finally {
+    cadUpdating.value = false
   }
 }
 
@@ -2291,6 +2754,26 @@ function getItemName(item?: Record<string, any> | null): string {
   return item.name || item.label || item.title || '-'
 }
 
+function getCompareParent(entry?: Record<string, any> | null): Record<string, any> | null {
+  if (!entry) return null
+  if (entry.parent) return entry.parent
+  const path = entry.path
+  if (Array.isArray(path) && path.length) {
+    return path[0] || null
+  }
+  return null
+}
+
+function getCompareChild(entry?: Record<string, any> | null): Record<string, any> | null {
+  if (!entry) return null
+  if (entry.child) return entry.child
+  const path = entry.path
+  if (Array.isArray(path) && path.length > 1) {
+    return path[path.length - 1] || null
+  }
+  return null
+}
+
 function getCompareProp(entry: Record<string, any>, key: string): string {
   const props = entry?.properties || entry?.relationship || {}
   const value = props[key]
@@ -2390,6 +2873,7 @@ const deepLinkPanelLabels: Record<string, string> = {
   all: '全部',
   search: '搜索',
   product: '产品',
+  cad: 'CAD 元数据',
   'where-used': 'Where-Used',
   compare: 'BOM 对比',
   substitutes: '替代件',
@@ -2635,6 +3119,7 @@ function formatDeepLinkTargets(panel?: string): string {
   const targets = []
   if (searchQuery.value) targets.push(deepLinkPanelLabels.search)
   if (productId.value || productItemNumber.value) targets.push(deepLinkPanelLabels.product)
+  if (cadFileId.value) targets.push(deepLinkPanelLabels.cad)
   if (whereUsedItemId.value) targets.push(deepLinkPanelLabels['where-used'])
   if (compareLeftId.value && compareRightId.value) targets.push(deepLinkPanelLabels.compare)
   if (bomLineId.value) targets.push(deepLinkPanelLabels.substitutes)
@@ -2654,6 +3139,8 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('productId', productId.value)
   append('itemNumber', productItemNumber.value)
   append('itemType', itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : undefined)
+  append('cadFileId', cadFileId.value)
+  append('cadOtherFileId', cadOtherFileId.value)
   append('documentRole', documentRole.value)
   append('documentFilter', documentFilter.value)
   append('approvalsStatus', approvalsStatus.value !== DEFAULT_APPROVAL_STATUS ? approvalsStatus.value : undefined)
@@ -2682,6 +3169,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   if (includeAutoload) {
     const shouldAutoload =
       Boolean(productId.value || productItemNumber.value) ||
+      Boolean(cadFileId.value) ||
       Boolean(whereUsedItemId.value) ||
       Boolean(compareLeftId.value && compareRightId.value) ||
       Boolean(bomLineId.value) ||
@@ -2768,6 +3256,14 @@ async function applyQueryState() {
   const documentFilterParam = readQueryParam('documentFilter')
   if (documentFilterParam !== undefined) {
     documentFilter.value = documentFilterParam
+  }
+  const cadFileParam = readQueryParam('cadFileId')
+  if (cadFileParam !== undefined) {
+    cadFileId.value = cadFileParam
+  }
+  const cadOtherParam = readQueryParam('cadOtherFileId')
+  if (cadOtherParam !== undefined) {
+    cadOtherFileId.value = cadOtherParam
   }
   const approvalsStatusParam = readQueryParam('approvalsStatus')
   if (approvalsStatusParam !== undefined) {
@@ -2865,9 +3361,11 @@ async function applyQueryState() {
   const tasks: Array<Promise<void>> = []
   if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
   if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
+  if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
   if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
   if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
   if (allowsPanel('substitutes') && bomLineId.value) tasks.push(loadSubstitutes())
+  if (allowsPanel('cad') && cadFileId.value && cadOtherFileId.value) tasks.push(loadCadDiff())
   if (tasks.length) {
     await Promise.all(tasks)
   }
@@ -3281,6 +3779,8 @@ watch(
   () => [
     productId.value,
     itemType.value,
+    cadFileId.value,
+    cadOtherFileId.value,
     whereUsedItemId.value,
     whereUsedRecursive.value,
     whereUsedMaxLevels.value,
@@ -3299,6 +3799,8 @@ watch(
   ([
     productValue,
     itemTypeValue,
+    cadFileValue,
+    cadOtherValue,
     whereUsedValue,
     whereUsedRecursiveValue,
     whereUsedLevelsValue,
@@ -3317,6 +3819,8 @@ watch(
     scheduleQuerySync({
       productId: productValue || undefined,
       itemType: itemTypeValue !== DEFAULT_ITEM_TYPE ? itemTypeValue : undefined,
+      cadFileId: cadFileValue || undefined,
+      cadOtherFileId: cadOtherValue || undefined,
       whereUsedItemId: whereUsedValue || undefined,
       whereUsedRecursive: whereUsedRecursiveValue !== true ? whereUsedRecursiveValue : undefined,
       whereUsedMaxLevels:
@@ -3563,7 +4067,7 @@ label {
   color: #374151;
 }
 
-input, select {
+input, select, textarea {
   border: 1px solid #d0d7de;
   border-radius: 6px;
   padding: 8px 10px;
@@ -3571,7 +4075,7 @@ input, select {
   background: #fff;
 }
 
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: #1976d2;
   box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.15);
@@ -3595,6 +4099,17 @@ input:focus, select:focus {
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.btn.mini {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.inline-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .detail-grid {
@@ -3800,6 +4315,47 @@ input:focus, select:focus {
   cursor: pointer;
   font-size: 12px;
   color: #1f2937;
+}
+
+.inline-pre {
+  margin: 6px 0 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: #1f2937;
+}
+
+.cad-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin-top: 12px;
+}
+
+.cad-card {
+  border: 1px solid #eef0f2;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fdfdfd;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cad-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cad-textarea {
+  min-height: 120px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.cad-span {
+  grid-column: 1 / -1;
 }
 
 .path-list {

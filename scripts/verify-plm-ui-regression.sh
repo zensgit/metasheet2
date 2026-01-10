@@ -277,9 +277,9 @@ if (!screenshotPath) {
   process.exit(1);
 }
 
-async function waitOptional(page, text) {
+async function waitOptional(scope, text) {
   if (!text) return;
-  await page.getByText(text, { exact: false }).first().waitFor({ timeout: 60000 });
+  await scope.getByText(text, { exact: false }).first().waitFor({ timeout: 60000 });
 }
 
 (async () => {
@@ -293,28 +293,41 @@ async function waitOptional(page, text) {
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.reload({ waitUntil: 'networkidle' });
 
+  const searchSection = page.locator('section:has-text("产品搜索")');
   await page.fill('#plm-search-query', searchQuery);
   await page.click('button:has-text("搜索")');
-  const targetRow = page.locator('table tbody tr', { hasText: searchQuery });
-  await targetRow.waitFor({ timeout: 60000 });
+  const rows = searchSection.locator('table tbody tr');
+  await rows.first().waitFor({ timeout: 60000 });
+  const rowCount = await rows.count();
+  let targetRow = null;
+  for (let i = 0; i < rowCount; i += 1) {
+    const text = await rows.nth(i).textContent();
+    if (text && text.includes(searchQuery)) {
+      targetRow = rows.nth(i);
+      break;
+    }
+  }
+  if (!targetRow) {
+    throw new Error(`Search result row not found for query: ${searchQuery}`);
+  }
   await targetRow.locator('button:has-text("使用")').click();
-  await page.getByText(searchQuery, { exact: false }).first().waitFor({ timeout: 60000 });
+  await waitOptional(searchSection, searchQuery);
 
   const whereUsedSection = page.locator('section:has-text("Where-Used")');
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
   await whereUsedSection.locator('button:has-text("查询")').click();
-  await waitOptional(page, whereUsedExpect);
+  await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
 
   const compareSection = page.locator('section:has-text("BOM 对比")');
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
   await compareSection.locator('button:has-text("对比")').click();
-  await waitOptional(page, compareExpect);
+  await waitOptional(compareSection.locator('table'), compareExpect);
 
   const substitutesSection = page.locator('section:has-text("替代件")');
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
   await substitutesSection.locator('button:has-text("查询")').click();
-  await waitOptional(page, substituteExpect);
+  await waitOptional(substitutesSection.locator('table'), substituteExpect);
 
   await page.waitForTimeout(1000);
   await page.screenshot({ path: screenshotPath, fullPage: true });

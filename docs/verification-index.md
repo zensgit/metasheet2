@@ -144,6 +144,12 @@ Entry points:
   - Artifact: `artifacts/plm-bom-tools-20260108_151809.json`
   - Report: `artifacts/plm-bom-tools-20260108_152816.md`
   - Artifact: `artifacts/plm-bom-tools-20260108_152816.json`
+  - Report: `artifacts/plm-bom-tools-20260110_1521.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_1521.json`
+  - Report: `artifacts/plm-bom-tools-20260110_160733.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_160733.json`
+  - Report: `artifacts/plm-bom-tools-20260110_170622.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_170622.json`
 - PLM UI BOM tools:
   - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
   - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
@@ -195,6 +201,24 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260108_134247.png`
   - Report: `docs/verification-plm-ui-regression-20260108_141810.md`
   - Artifact: `artifacts/plm-ui-regression-20260108_141810.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_170622.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_170622.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_175338.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_175338.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_181245.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_181245.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_191218.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_191218.png`
+- PLM CAD UI (metadata panel):
+  - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
+  - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
+  - Report: `docs/verification-plm-cad-ui-20260110_1946.md`
+  - Artifact: `artifacts/plm-cad-ui-20260110_1946.png`
+- PLM UI full regression (BOM tools + UI regression):
+  - Script: `scripts/verify-plm-ui-full.sh`
+  - Report: `docs/verification-plm-ui-full-20260110_170622.md`
+  - Report: `docs/verification-plm-ui-full-20260110_181245.md`
+  - Report: `docs/verification-plm-ui-full-20260110_191218.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`

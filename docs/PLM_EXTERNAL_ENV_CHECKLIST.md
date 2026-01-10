@@ -36,6 +36,17 @@ export PLM_PASSWORD=admin
 # export PLM_API_TOKEN=...
 ```
 
+## Local Yuantus helper
+Use the wrapper to ensure the identity DB is on Postgres and admin is seeded:
+```bash
+PLM_BASE_URL=http://127.0.0.1:7910 \
+PLM_TENANT_ID=tenant-1 \
+PLM_ORG_ID=org-1 \
+PLM_USERNAME=admin \
+PLM_PASSWORD=admin \
+bash scripts/start-yuantus-plm.sh
+```
+
 ## Verification Scripts
 Read-only (preferred for shared envs):
 - `scripts/verify-yuantus-plm.sh`
