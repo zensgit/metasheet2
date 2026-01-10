@@ -12,6 +12,15 @@
 - PLM BOM tools seed data (identity DB fix): `artifacts/plm-bom-tools-20260110_170622.md`
 - PLM UI regression (identity DB fix): `docs/verification-plm-ui-regression-20260110_170622.md`
 - PLM UI full regression wrapper (identity DB fix): `docs/verification-plm-ui-full-20260110_170622.md`
+- PLM BOM tools seed data (post-restart): `artifacts/plm-bom-tools-20260110_200411.md`
+- PLM UI regression (post-restart): `docs/verification-plm-ui-regression-20260110_200411.md`
+- PLM UI full regression wrapper (post-restart): `docs/verification-plm-ui-full-20260110_200411.md`
+- PLM BOM tools seed data (post-script restore): `artifacts/plm-bom-tools-20260110_205054.md`
+- PLM UI regression (post-script restore): `docs/verification-plm-ui-regression-20260110_205054.md`
+- PLM UI full regression wrapper (post-script restore): `docs/verification-plm-ui-full-20260110_205054.md`
+- PLM BOM tools seed data (post-script restore rerun): `artifacts/plm-bom-tools-20260110_205738.md`
+- PLM UI regression (post-script restore rerun): `docs/verification-plm-ui-regression-20260110_205738.md`
+- PLM UI full regression wrapper (post-script restore rerun): `docs/verification-plm-ui-full-20260110_205738.md`
 
 ## Environment Notes
 - Backend restarted with Yuantus PLM env vars and `RBAC_BYPASS=true` for verification.

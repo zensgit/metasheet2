@@ -150,6 +150,12 @@ Entry points:
   - Artifact: `artifacts/plm-bom-tools-20260110_160733.json`
   - Report: `artifacts/plm-bom-tools-20260110_170622.md`
   - Artifact: `artifacts/plm-bom-tools-20260110_170622.json`
+  - Report: `artifacts/plm-bom-tools-20260110_200411.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_200411.json`
+  - Report: `artifacts/plm-bom-tools-20260110_205054.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_205054.json`
+  - Report: `artifacts/plm-bom-tools-20260110_205738.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_205738.json`
 - PLM UI BOM tools:
   - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
   - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
@@ -209,6 +215,12 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260110_181245.png`
   - Report: `docs/verification-plm-ui-regression-20260110_191218.md`
   - Artifact: `artifacts/plm-ui-regression-20260110_191218.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_200411.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_200411.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_205054.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_205054.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_205738.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_205738.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -219,6 +231,9 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260110_170622.md`
   - Report: `docs/verification-plm-ui-full-20260110_181245.md`
   - Report: `docs/verification-plm-ui-full-20260110_191218.md`
+  - Report: `docs/verification-plm-ui-full-20260110_200411.md`
+  - Report: `docs/verification-plm-ui-full-20260110_205054.md`
+  - Report: `docs/verification-plm-ui-full-20260110_205738.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`
