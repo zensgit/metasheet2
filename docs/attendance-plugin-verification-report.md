@@ -8,6 +8,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 ## Commands Executed
 - `pnpm validate:plugins`
 - `pnpm --filter @metasheet/core-backend exec vitest run tests/plugin-loader.failures.test.ts`
+- `pnpm --filter @metasheet/core-backend test`
 - `pnpm --filter @metasheet/core-backend test:unit`
 - `pnpm --filter @metasheet/web exec vitest run --watch=false`
 - `pnpm --filter @metasheet/core-backend migrate`
@@ -17,6 +18,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 - `AUTH_TOKEN=<generated> WEB_URL=http://localhost:8902/attendance node scripts/verify-attendance-ui.mjs`
 
 ## Results
+- Backend full test suite: Passed (`pnpm --filter @metasheet/core-backend test`).
 - Backend unit tests: Passed (logs include expected error cases and a warning about sample plugin ESM entry in `tests/unit/server-lifecycle.test.ts`).
 - Frontend unit tests: Passed.
 - Plugin manifest validation: Passed (warnings only for missing license/wildcard permissions).

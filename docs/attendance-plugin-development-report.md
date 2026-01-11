@@ -85,3 +85,4 @@ The attendance module has been finalized as an optional plugin with org-aware da
 - Scoped plugin discovery fallback to the default `./plugins` path so explicit non-existent directories do not scan repo-level plugins.
 - Updated RBAC CI traffic scripts to call `/api/permissions/me` so cache metrics increment during observability workflows.
 - Added root `tsx` dev dependency to unblock `pnpm validate:plugins` in CI.
+- Stabilized rate-limiting stress test expectations to avoid single-token timing jitter in CI.
