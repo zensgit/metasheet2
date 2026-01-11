@@ -158,6 +158,7 @@ export class PluginLoader {
   private loadedPlugins = new Map<string, LoadedPlugin>()
   private basePath: string
   private pluginDirs: string[] | null = null
+  private allowFallback = false
 
   constructor(basePathOrCoreAPI: string | unknown = './plugins', options?: { pluginDirs?: string[] }) {
     // Accept either a string path or a CoreAPI object (for backwards compatibility)
@@ -171,6 +172,10 @@ export class PluginLoader {
     if (options?.pluginDirs?.length) {
       this.pluginDirs = options.pluginDirs
     }
+
+    const resolvedBasePath = path.resolve(this.basePath)
+    const defaultBasePath = path.resolve(process.cwd(), 'plugins')
+    this.allowFallback = resolvedBasePath === defaultBasePath
   }
 
   /**
@@ -372,19 +377,25 @@ export class PluginLoader {
       }
 
       if (!fs.existsSync(this.basePath)) {
+        if (!this.allowFallback) {
+          this.logger.warn(`Plugin directory not found: ${path.resolve(this.basePath)}`)
+          return discoveredPlugins
+        }
         fs.mkdirSync(this.basePath, { recursive: true })
       }
 
       scanContainer(this.basePath)
 
-      const fallbackRoots = [
-        path.resolve(process.cwd(), 'plugins'),
-        path.resolve(process.cwd(), '..', 'plugins'),
-        path.resolve(process.cwd(), '..', '..', 'plugins'),
-      ]
-      for (const root of fallbackRoots) {
-        if (path.resolve(root) === path.resolve(this.basePath)) continue
-        scanContainer(root)
+      if (this.allowFallback) {
+        const fallbackRoots = [
+          path.resolve(process.cwd(), 'plugins'),
+          path.resolve(process.cwd(), '..', 'plugins'),
+          path.resolve(process.cwd(), '..', '..', 'plugins'),
+        ]
+        for (const root of fallbackRoots) {
+          if (path.resolve(root) === path.resolve(this.basePath)) continue
+          scanContainer(root)
+        }
       }
     } catch (error) {
       this.logger.error('Failed to discover plugins:', error instanceof Error ? error : undefined)

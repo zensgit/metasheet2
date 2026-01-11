@@ -3,9 +3,11 @@
 Date: 2026-01-11
 
 ## Verification Summary
-Completed unit test verification for backend and frontend after adding attendance scheduling (shifts, assignments, holidays). Migration and UI smoke checks were rerun against a clean dev database and succeeded.
+Completed unit test verification for backend and frontend after adding attendance scheduling (shifts, assignments, holidays). Migration and UI smoke checks were rerun against a clean dev database and succeeded. Follow-up CI fixes were validated with plugin manifest validation plus the plugin loader failure suite.
 
 ## Commands Executed
+- `pnpm validate:plugins`
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/plugin-loader.failures.test.ts`
 - `pnpm --filter @metasheet/core-backend test:unit`
 - `pnpm --filter @metasheet/web exec vitest run --watch=false`
 - `pnpm --filter @metasheet/core-backend migrate`
@@ -17,6 +19,8 @@ Completed unit test verification for backend and frontend after adding attendanc
 ## Results
 - Backend unit tests: Passed (logs include expected error cases and a warning about sample plugin ESM entry in `tests/unit/server-lifecycle.test.ts`).
 - Frontend unit tests: Passed.
+- Plugin manifest validation: Passed (warnings only for missing license/wildcard permissions).
+- Plugin loader failure suite: Passed.
 - Migration: Passed on clean dev database (`metasheet_attendance`).
 - Backend dev server: Started on `http://localhost:8920` with attendance routes registered.
 - Frontend dev server: Started on `http://localhost:8902` (8899-8901 in use).

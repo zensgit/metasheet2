@@ -82,3 +82,6 @@ The attendance module has been finalized as an optional plugin with org-aware da
 - Added `verify:attendance-ui:optional` and chained it in `verify:smoke` (guarded by `RUN_ATTENDANCE_UI_SMOKE=true`).
 - Updated attendance settings save handling to avoid treating empty geo-fence fields as zero values.
 - Extended the Playwright smoke flow to set `minPunchIntervalMinutes`, punch check-in/out, export CSV, and restore the prior interval when needed.
+- Scoped plugin discovery fallback to the default `./plugins` path so explicit non-existent directories do not scan repo-level plugins.
+- Updated RBAC CI traffic scripts to call `/api/permissions/me` so cache metrics increment during observability workflows.
+- Added root `tsx` dev dependency to unblock `pnpm validate:plugins` in CI.
