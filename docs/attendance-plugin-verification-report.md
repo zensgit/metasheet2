@@ -8,6 +8,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 ## Commands Executed
 - `pnpm validate:plugins`
 - `pnpm --filter @metasheet/core-backend exec vitest run tests/plugin-loader.failures.test.ts`
+- `pnpm --filter @metasheet/core-backend exec vitest run src/tests/rate-limiting.test.ts`
 - `pnpm --filter @metasheet/core-backend test`
 - `pnpm --filter @metasheet/core-backend test:unit`
 - `pnpm --filter @metasheet/web exec vitest run --watch=false`
@@ -20,6 +21,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 
 ## Results
 - Backend full test suite: Passed (`pnpm --filter @metasheet/core-backend test`).
+- Rate limiting suite: Passed (`pnpm --filter @metasheet/core-backend exec vitest run src/tests/rate-limiting.test.ts`).
 - Backend unit tests: Passed (logs include expected error cases and a warning about sample plugin ESM entry in `tests/unit/server-lifecycle.test.ts`).
 - Frontend unit tests: Passed.
 - Frontend build: Passed (`pnpm --filter @metasheet/web build`).
