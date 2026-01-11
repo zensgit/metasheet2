@@ -11,6 +11,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 - `pnpm --filter @metasheet/core-backend test`
 - `pnpm --filter @metasheet/core-backend test:unit`
 - `pnpm --filter @metasheet/web exec vitest run --watch=false`
+- `pnpm --filter @metasheet/web build`
 - `pnpm --filter @metasheet/core-backend migrate`
 - `RBAC_BYPASS=true JWT_SECRET=fallback-development-secret-change-in-production PORT=8920 pnpm --filter @metasheet/core-backend dev`
 - `VITE_API_URL=http://127.0.0.1:8920 pnpm --filter @metasheet/web dev -- --host 127.0.0.1 --port 8899`
@@ -21,6 +22,7 @@ Completed unit test verification for backend and frontend after adding attendanc
 - Backend full test suite: Passed (`pnpm --filter @metasheet/core-backend test`).
 - Backend unit tests: Passed (logs include expected error cases and a warning about sample plugin ESM entry in `tests/unit/server-lifecycle.test.ts`).
 - Frontend unit tests: Passed.
+- Frontend build: Passed (`pnpm --filter @metasheet/web build`).
 - Plugin manifest validation: Passed (warnings only for missing license/wildcard permissions).
 - Plugin loader failure suite: Passed.
 - Migration: Passed on clean dev database (`metasheet_attendance`).
