@@ -22,6 +22,8 @@ Entry points:
 - Smoke verification:
   - Report: `docs/verification-smoke-20260106_2041.md`
   - Artifact: `artifacts/smoke/smoke-report-20260106_2041.json`
+  - Report: `docs/verification-smoke-20260112_160557.md`
+  - Artifact: `artifacts/smoke/smoke-report-20260112_160557.json`
 
 - Core backend typecheck + runtime attempt:
   - Report: `docs/verification-core-backend-typecheck-20260105_1553.md`
@@ -173,6 +175,18 @@ Entry points:
   - Artifact: `artifacts/smoke/plm-ui-regression-20260110_223640.png`
   - Report: `docs/verification-plm-ui-regression-20260111_220519.md`
   - Artifact: `artifacts/smoke/plm-ui-regression-20260111_220519.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_133307.md`
+  - Artifact: `artifacts/plm-ui-regression-20260112_133307.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_134447.md`
+  - Artifact: `artifacts/plm-ui-regression-20260112_134447.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_140709.md`
+  - Artifact: `artifacts/plm-ui-regression-20260112_140709.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_152705.md`
+  - Artifact: `artifacts/plm-ui-regression-20260112_152705.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_154350.md`
+  - Artifact: `artifacts/plm-ui-regression-20260112_154350.png`
+  - Report: `docs/verification-plm-ui-regression-20260112_160557.md`
+  - Artifact: `artifacts/smoke/plm-ui-regression-20260112_160557.png`
   - Archived: `docs/archive/verification/index.md`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
@@ -188,6 +202,11 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260110_220120.md`
   - Report: `docs/verification-plm-ui-full-20260110_223640.md`
   - Report: `docs/verification-plm-ui-full-20260111_220519.md`
+  - Report: `docs/verification-plm-ui-full-20260112_134447.md`
+  - Report: `docs/verification-plm-ui-full-20260112_140709.md`
+  - Report: `docs/verification-plm-ui-full-20260112_152705.md`
+  - Report: `docs/verification-plm-ui-full-20260112_154350.md`
+  - Report: `docs/verification-plm-ui-full-20260112_160557.md`
   - Archived: `docs/archive/verification/index.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`

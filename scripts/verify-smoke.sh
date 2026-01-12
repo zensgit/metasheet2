@@ -9,6 +9,7 @@ WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 SMOKE_DATABASE_URL="${SMOKE_DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}"
 RBAC_BYPASS="${RBAC_BYPASS:-true}"
 SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB:-false}"
+SMOKE_SKIP_MIGRATE="${SMOKE_SKIP_MIGRATE:-false}"
 RUN_UNIVER_UI_SMOKE="${RUN_UNIVER_UI_SMOKE:-false}"
 RUN_PLM_UI_REGRESSION="${RUN_PLM_UI_REGRESSION:-false}"
 RUN_PLM_UI_READONLY="${RUN_PLM_UI_READONLY:-false}"
@@ -30,6 +31,7 @@ echo "- WEB_BASE: ${WEB_BASE}"
 echo "- SMOKE_DATABASE_URL: ${SMOKE_DATABASE_URL}"
 echo "- RBAC_BYPASS: ${RBAC_BYPASS}"
 echo "- SMOKE_SKIP_WEB: ${SMOKE_SKIP_WEB}"
+echo "- SMOKE_SKIP_MIGRATE: ${SMOKE_SKIP_MIGRATE}"
 echo "- RUN_UNIVER_UI_SMOKE: ${RUN_UNIVER_UI_SMOKE}"
 echo "- RUN_PLM_UI_REGRESSION: ${RUN_PLM_UI_REGRESSION}"
 echo "- RUN_PLM_UI_READONLY: ${RUN_PLM_UI_READONLY}"
@@ -46,8 +48,12 @@ if ! command -v pnpm >/dev/null 2>&1; then
 fi
 
 if ! curl -fsS "${API_BASE}/health" >/dev/null 2>&1; then
-  echo "[1/3] Preparing database..."
-  DATABASE_URL="${SMOKE_DATABASE_URL}" pnpm --filter @metasheet/core-backend migrate >/dev/null
+  if [[ "${SMOKE_SKIP_MIGRATE}" != "true" ]]; then
+    echo "[1/3] Preparing database..."
+    DATABASE_URL="${SMOKE_DATABASE_URL}" pnpm --filter @metasheet/core-backend migrate >/dev/null
+  else
+    echo "[1/3] Skipping database migration (SMOKE_SKIP_MIGRATE=true)"
+  fi
 
   echo "[2/3] Starting backend..."
   PORT="$(python3 - <<'PY'
@@ -145,6 +151,6 @@ if [[ "${RUN_PLM_UI_READONLY}" == "true" ]]; then
     echo "Missing PLM_BOM_TOOLS_JSON and no artifacts/plm-bom-tools-*.json found." >&2
     exit 1
   fi
-  OUTPUT_DIR="${OUTPUT_DIR}" PLM_BOM_TOOLS_JSON="${PLM_BOM_TOOLS_JSON}" AUTO_START=false \
+  API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" PLM_BOM_TOOLS_JSON="${PLM_BOM_TOOLS_JSON}" AUTO_START=false \
     bash scripts/verify-plm-ui-readonly.sh
 fi
