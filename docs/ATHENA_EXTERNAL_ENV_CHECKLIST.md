@@ -32,7 +32,8 @@ bash scripts/verify-athena-auth.sh
 
 ## Optional Overrides
 - `ATHENA_HEALTH_PATH` (default: `/actuator/health`)
-- `ATHENA_PING_PATH` (default: `/api/v1/health`)
+- `ATHENA_PING_PATH` (default: `/api/v1/categories`)
+  - Use a read-only authenticated GET; `/api/v1/health` is not exposed on ECM core.
   - Set to empty if the endpoint is not exposed: `ATHENA_PING_PATH=`
 
 ## Common Failures

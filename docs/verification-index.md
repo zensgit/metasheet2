@@ -352,6 +352,7 @@ Entry points:
   - Report: `docs/verification-athena-auth-20260111_231205.md`
   - Report: `docs/verification-athena-auth-20260112_084744.md`
   - Report: `docs/verification-athena-auth-20260112_100035.md`
+  - Report: `docs/verification-athena-auth-20260112_100713.md`
 
 - Athena real API verification:
   - Report: `docs/verification-athena-real-20251231_1810.md`

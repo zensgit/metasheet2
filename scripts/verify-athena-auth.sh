@@ -13,7 +13,7 @@ KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-admin}"
 
 ATHENA_BASE_URL="${ATHENA_BASE_URL:-http://localhost:8081}"
 ATHENA_HEALTH_PATH="${ATHENA_HEALTH_PATH:-/actuator/health}"
-ATHENA_PING_PATH="${ATHENA_PING_PATH:-/api/v1/health}"
+ATHENA_PING_PATH="${ATHENA_PING_PATH:-/api/v1/categories}"
 
 REPORT_DIR="${REPORT_DIR:-docs}"
 STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
