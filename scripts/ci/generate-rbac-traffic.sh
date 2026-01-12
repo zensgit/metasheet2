@@ -28,11 +28,10 @@ for i in $(seq 1 $REAL); do
   if (( i % 3 == 0 )); then
     curl -fsS -H "$AUTH_HEADER" "$BASE_URL/api/approvals/demo-1" >/dev/null 2>&1 && real_ok=$((real_ok+1)) || echo "[RBAC_TRAFFIC] warn: approve call $i failed"
   else
-    curl -fsS -H "$AUTH_HEADER" "$BASE_URL/api/permissions?userId=u$i" >/dev/null 2>&1 && real_ok=$((real_ok+1)) || echo "[RBAC_TRAFFIC] warn: perm call $i failed"
+    curl -fsS -H "$AUTH_HEADER" "$BASE_URL/api/permissions/me" >/dev/null 2>&1 && real_ok=$((real_ok+1)) || echo "[RBAC_TRAFFIC] warn: perm call $i failed"
   fi
 done
 
 echo "[RBAC_TRAFFIC] Summary synthetic_ok=$syn_ok/$SYN real_ok=$real_ok/$REAL"
 echo "RBAC_TRAFFIC_RESULT synthetic_ok=$syn_ok synthetic_total=$SYN real_ok=$real_ok real_total=$REAL"
 exit 0
-

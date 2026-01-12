@@ -1,0 +1,18 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-attendance",
+  "version": "0.1.0",
+  "displayName": "Attendance",
+  "description": "Optional attendance module with punches, summaries, and adjustment approvals.",
+  "author": { "name": "MetaSheet" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.cjs",
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "database.transaction",
+    "http.addRoute",
+    "events.emit"
+  ]
+}

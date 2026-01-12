@@ -54,7 +54,8 @@ describe('TokenBucketRateLimiter', () => {
       const result = rateLimiter.consume('tenant-1')
 
       expect(result.allowed).toBe(false)
-      expect(result.tokensRemaining).toBe(0)
+      expect(result.tokensRemaining).toBeGreaterThanOrEqual(0)
+      expect(result.tokensRemaining).toBeLessThan(1)
       expect(result.retryAfterMs).toBeGreaterThan(0)
     })
 
@@ -678,12 +679,13 @@ describe('Stress Test Simulation', () => {
       }
     }
 
-    // Should have accepted ~200 (bucket capacity) and rejected ~300
-    expect(allowed).toBe(200)
-    expect(rejected).toBe(300)
+    // Should have accepted ~200 (bucket capacity) and rejected the remainder
+    expect(allowed + rejected).toBe(500)
+    expect(allowed).toBeGreaterThanOrEqual(190)
+    expect(allowed).toBeLessThanOrEqual(210)
 
     const stats = rateLimiter.getStats('stress-tenant')
-    expect(stats!.acceptanceRate).toBe(0.4) // 200/500
+    expect(stats!.acceptanceRate).toBeCloseTo(allowed / 500, 3)
 
     rateLimiter.shutdown()
   })

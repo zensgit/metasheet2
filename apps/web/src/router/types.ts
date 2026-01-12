@@ -65,6 +65,9 @@ export const AppRouteNames = {
   APPROVAL_PENDING: 'approval-pending',
   APPROVAL_HISTORY: 'approval-history',
 
+  // Attendance routes
+  ATTENDANCE: 'attendance',
+
   // User routes
   USER_PROFILE: 'user-profile',
   USER_SETTINGS: 'user-settings',
@@ -128,6 +131,7 @@ export interface AppRouteParams {
   'approval-create': Record<string, never>
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
+  'attendance': Record<string, never>
   'user-settings': Record<string, never>
   'user-management': Record<string, never>
   'permission-management': Record<string, never>
@@ -352,6 +356,9 @@ export const ROUTE_PATHS = {
   APPROVAL_CREATE: '/approvals/create',
   APPROVAL_PENDING: '/approvals/pending',
   APPROVAL_HISTORY: '/approvals/history',
+
+  // Attendance
+  ATTENDANCE: '/attendance',
 
   // User
   USER_PROFILE: '/profile/:id?',

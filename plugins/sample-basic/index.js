@@ -10,6 +10,10 @@ module.exports = {
     ctx.logger.info('[sample-basic] activated')
   },
   deactivate(ctx) {
-    ctx.logger.info('[sample-basic] deactivated')
+    if (ctx?.logger?.info) {
+      ctx.logger.info('[sample-basic] deactivated')
+      return
+    }
+    console.log('[sample-basic] deactivated')
   }
 }

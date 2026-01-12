@@ -40,9 +40,22 @@ if [ -n "$TOKEN" ]; then
   AUTH="Authorization: Bearer $TOKEN"
   echo "[rbac-activity] Using authentication token (length: ${#TOKEN})"
 
+  echo "[rbac-activity] Warming RBAC cache via /api/permissions/me"
+  for i in {1..3}; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" -H "$AUTH" "$API/api/permissions/me" 2>&1)
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
+    if [ "$HTTP_CODE" = "200" ]; then
+      echo "[rbac-activity] Cache warmup $i succeeded"
+    else
+      echo "[rbac-activity] Cache warmup $i failed (HTTP $HTTP_CODE)"
+      echo "[rbac-activity]   Response: $BODY"
+    fi
+  done
+
   # Direct permission queries (real traffic)
   for i in {1..15}; do
-    RESPONSE=$(curl -s -w "\n%{http_code}" -H "$AUTH" "$API/api/permissions?userId=u$i" 2>&1)
+    RESPONSE=$(curl -s -w "\n%{http_code}" -H "$AUTH" "$API/api/permissions/me" 2>&1)
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
     BODY=$(echo "$RESPONSE" | sed '$d')
     if [ "$HTTP_CODE" = "200" ]; then

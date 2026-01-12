@@ -1,9 +1,12 @@
 {
+  "manifestVersion": "2.0.0",
   "name": "sample-basic",
   "version": "0.1.0",
-  "author": "system",
-  "description": "Sample basic plugin registering a test route and metric",
-  "main": "index.js",
   "displayName": "Sample Basic",
-  "permissions": {"http": {"internal": true}}
+  "description": "Sample basic plugin registering a test route and metric",
+  "author": { "name": "system" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.js",
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "permissions": { "http": { "internal": true } }
 }

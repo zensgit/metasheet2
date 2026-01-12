@@ -3,6 +3,7 @@
  */
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
+import type { RouteRecordRaw } from 'vue-router'
 import App from './App.vue'
 import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
 
@@ -13,9 +14,9 @@ import CalendarView from './views/CalendarView.vue'
 import GalleryView from './views/GalleryView.vue'
 import FormView from './views/FormView.vue'
 import PlmProductView from './views/PlmProductView.vue'
+import AttendanceView from './views/AttendanceView.vue'
 
-// Define routes
-const routes = [
+const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
@@ -50,6 +51,12 @@ const routes = [
     name: 'form',
     component: FormView,
     meta: { title: 'Form View' }
+  },
+  {
+    path: '/attendance',
+    name: 'attendance',
+    component: AttendanceView,
+    meta: { title: 'Attendance' }
   },
   {
     path: '/plm',

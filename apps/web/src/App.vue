@@ -10,6 +10,7 @@
         <router-link to="/calendar" class="nav-link">Calendar</router-link>
         <router-link to="/gallery" class="nav-link">Gallery</router-link>
         <router-link to="/form" class="nav-link">Form</router-link>
+        <router-link v-if="showAttendance" to="/attendance" class="nav-link">Attendance</router-link>
         <router-link to="/plm" class="nav-link">PLM</router-link>
       </div>
     </nav>
@@ -20,13 +21,27 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { usePlugins } from './composables/usePlugins'
 
 const route = useRoute()
+const { plugins, fetchPlugins } = usePlugins()
+const pluginsLoaded = ref(false)
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
+})
+
+const attendancePluginNames = new Set(['plugin-attendance', '@metasheet/plugin-attendance'])
+const showAttendance = computed(() => {
+  if (!pluginsLoaded.value) return false
+  return plugins.value.some(plugin => attendancePluginNames.has(plugin.name) && plugin.status === 'active')
+})
+
+onMounted(async () => {
+  await fetchPlugins()
+  pluginsLoaded.value = true
 })
 </script>
 
