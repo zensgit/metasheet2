@@ -11,6 +11,7 @@ BOM_STAMP="${BOM_STAMP:-$RUN_STAMP}"
 UI_STAMP="${UI_STAMP:-$RUN_STAMP}"
 
 PLM_CLEANUP="${PLM_CLEANUP:-false}"
+VERIFY_READONLY="${VERIFY_READONLY:-false}"
 PLM_BASE_URL="${PLM_BASE_URL:-http://127.0.0.1:7910}"
 PLM_TENANT_ID="${PLM_TENANT_ID:-tenant-1}"
 PLM_ORG_ID="${PLM_ORG_ID:-org-1}"
@@ -27,8 +28,17 @@ FULL_REPORT="$REPORT_DIR/verification-plm-ui-full-${RUN_STAMP}.md"
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 
 echo "[1/2] Running PLM BOM tools seed..."
-STAMP="$BOM_STAMP" OUTPUT_DIR="$OUTPUT_DIR" OUTPUT_BASENAME="plm-bom-tools" PLM_CLEANUP="false" \
-  bash scripts/verify-plm-bom-tools.sh
+if [[ "$VERIFY_READONLY" == "true" ]]; then
+  BOM_JSON="${PLM_BOM_TOOLS_JSON:-$(ls -t "$OUTPUT_DIR"/plm-bom-tools-*.json 2>/dev/null | head -n1 || true)}"
+  if [[ -z "$BOM_JSON" ]]; then
+    echo "VERIFY_READONLY=true requires PLM_BOM_TOOLS_JSON or existing artifacts/plm-bom-tools-*.json" >&2
+    exit 1
+  fi
+  BOM_MD="${PLM_BOM_TOOLS_MD:-${BOM_JSON%.json}.md}"
+else
+  STAMP="$BOM_STAMP" OUTPUT_DIR="$OUTPUT_DIR" OUTPUT_BASENAME="plm-bom-tools" PLM_CLEANUP="false" \
+    bash scripts/verify-plm-bom-tools.sh
+fi
 
 if [[ ! -f "$BOM_JSON" ]]; then
   echo "Expected BOM tools JSON not found: $BOM_JSON" >&2
@@ -45,7 +55,9 @@ STAMP="$UI_STAMP" OUTPUT_DIR="$OUTPUT_DIR" REPORT_DIR="$REPORT_DIR" PLM_BOM_TOOL
   bash scripts/verify-plm-ui-regression.sh
 
 cleanup_status="skipped"
-if [[ "$PLM_CLEANUP" == "true" ]]; then
+if [[ "$VERIFY_READONLY" == "true" ]]; then
+  cleanup_status="skipped (readonly)"
+elif [[ "$PLM_CLEANUP" == "true" ]]; then
   echo "Cleaning up PLM fixtures..."
   PLM_TOKEN="${PLM_API_TOKEN:-${PLM_AUTH_TOKEN:-${PLM_TOKEN:-}}}"
   if [[ -z "$PLM_TOKEN" ]]; then
@@ -166,6 +178,7 @@ Run BOM tools seed + PLM UI regression in a single workflow.
    - Screenshot: ${UI_SCREENSHOT}
 
 ## Cleanup
+- VERIFY_READONLY: ${VERIFY_READONLY}
 - PLM_CLEANUP: ${PLM_CLEANUP}
 - Status: ${cleanup_status}
 REPORT_EOF

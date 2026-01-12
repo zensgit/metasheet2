@@ -9,8 +9,8 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2026-01-08.md`
-  - Previous: `docs/verification-summary-2026-01-07.md`
+  - Report: `docs/verification-summary-2026-01-12.md`
+  - Previous: `docs/verification-summary-2026-01-11.md`
 
 - Univer POC runtime start (core mode):
   - Report: `docs/verification-univer-poc-runtime-20260106_1207.md`
@@ -150,65 +150,30 @@ Entry points:
   - Artifact: `artifacts/plm-bom-tools-20260110_160733.json`
   - Report: `artifacts/plm-bom-tools-20260110_170622.md`
   - Artifact: `artifacts/plm-bom-tools-20260110_170622.json`
+  - Report: `artifacts/plm-bom-tools-20260110_200411.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_200411.json`
+  - Report: `artifacts/plm-bom-tools-20260110_205054.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_205054.json`
+  - Report: `artifacts/plm-bom-tools-20260110_205738.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_205738.json`
+  - Report: `artifacts/plm-bom-tools-20260110_212458.md`
+  - Artifact: `artifacts/plm-bom-tools-20260110_212458.json`
 - PLM UI BOM tools:
   - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
   - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
 - PLM UI regression (search → detail → BOM tools):
   - Script: `scripts/verify-plm-ui-regression.sh`
-  - Report: `docs/verification-plm-ui-regression-20260105_175324.md`
-  - Artifact: `artifacts/plm-ui-regression-20260105_175324.png`
-  - Report: `docs/verification-plm-ui-regression-20260105_181443.md`
-  - Artifact: `artifacts/plm-ui-regression-20260105_181443.png`
-  - Report: `docs/verification-plm-ui-regression-20260105_212131.md`
-  - Artifact: `artifacts/smoke/plm-ui-regression-20260105_212131.png`
-  - Report: `docs/verification-plm-ui-regression-20260106_232444.md`
-  - Artifact: `artifacts/plm-ui-regression-20260106_232444.png`
-  - Report: `docs/verification-plm-ui-regression-20260106_233239.md`
-  - Artifact: `artifacts/plm-ui-regression-20260106_233239.png`
-  - Report: `docs/verification-plm-ui-regression-20260106_234159.md`
-  - Artifact: `artifacts/plm-ui-regression-20260106_234159.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_081948.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_081948.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_083647.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_083647.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_095120.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_095120.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_114729.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_114729.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_121733.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_121733.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_134716.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_134716.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_135236.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_135236.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_140207.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_140207.png`
-  - Report: `docs/verification-plm-ui-regression-20260107_140512.md`
-  - Artifact: `artifacts/plm-ui-regression-20260107_140512.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_082156.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_082156.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_082656.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_082656.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_083007.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_083007.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_084135.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_084135.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_085551.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_085551.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_130225.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_130225.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_134247.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_134247.png`
-  - Report: `docs/verification-plm-ui-regression-20260108_141810.md`
-  - Artifact: `artifacts/plm-ui-regression-20260108_141810.png`
-  - Report: `docs/verification-plm-ui-regression-20260110_170622.md`
-  - Artifact: `artifacts/plm-ui-regression-20260110_170622.png`
-  - Report: `docs/verification-plm-ui-regression-20260110_175338.md`
-  - Artifact: `artifacts/plm-ui-regression-20260110_175338.png`
   - Report: `docs/verification-plm-ui-regression-20260110_181245.md`
   - Artifact: `artifacts/plm-ui-regression-20260110_181245.png`
   - Report: `docs/verification-plm-ui-regression-20260110_191218.md`
   - Artifact: `artifacts/plm-ui-regression-20260110_191218.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_220120.md`
+  - Artifact: `artifacts/plm-ui-regression-20260110_220120.png`
+  - Report: `docs/verification-plm-ui-regression-20260110_223640.md`
+  - Artifact: `artifacts/smoke/plm-ui-regression-20260110_223640.png`
+  - Report: `docs/verification-plm-ui-regression-20260111_220519.md`
+  - Artifact: `artifacts/smoke/plm-ui-regression-20260111_220519.png`
+  - Archived: `docs/archive/verification/index.md`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -216,9 +181,14 @@ Entry points:
   - Artifact: `artifacts/plm-cad-ui-20260110_1946.png`
 - PLM UI full regression (BOM tools + UI regression):
   - Script: `scripts/verify-plm-ui-full.sh`
-  - Report: `docs/verification-plm-ui-full-20260110_170622.md`
+  - Script: `scripts/verify-plm-ui-readonly.sh`
+  - Archive script: `scripts/archive-plm-ui-reports.sh`
   - Report: `docs/verification-plm-ui-full-20260110_181245.md`
   - Report: `docs/verification-plm-ui-full-20260110_191218.md`
+  - Report: `docs/verification-plm-ui-full-20260110_220120.md`
+  - Report: `docs/verification-plm-ui-full-20260110_223640.md`
+  - Report: `docs/verification-plm-ui-full-20260111_220519.md`
+  - Archived: `docs/archive/verification/index.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`
@@ -377,7 +347,11 @@ Entry points:
   - Report: `docs/verification-token-refresh-20251229_1827.md`
 
 - Athena Keycloak auth smoke:
+  - Script: `scripts/verify-athena-auth.sh`
   - Report: `docs/verification-athena-keycloak-20251231_1740.md`
+  - Report: `docs/verification-athena-auth-20260111_231205.md`
+  - Report: `docs/verification-athena-auth-20260112_084744.md`
+  - Report: `docs/verification-athena-auth-20260112_100035.md`
 
 - Athena real API verification:
   - Report: `docs/verification-athena-real-20251231_1810.md`

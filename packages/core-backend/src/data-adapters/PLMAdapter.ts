@@ -580,6 +580,45 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private formatYuantusErrorDetail(detail: unknown): string {
+    if (typeof detail === 'string') {
+      return detail.trim()
+    }
+    if (Array.isArray(detail)) {
+      const messages = detail.map((entry) => {
+        if (typeof entry === 'string') return entry
+        if (entry && typeof entry === 'object' && 'msg' in entry && typeof (entry as { msg?: unknown }).msg === 'string') {
+          return String((entry as { msg?: unknown }).msg)
+        }
+        return JSON.stringify(entry)
+      }).filter(Boolean)
+      return messages.join('; ')
+    }
+    if (detail && typeof detail === 'object' && 'msg' in detail && typeof (detail as { msg?: unknown }).msg === 'string') {
+      return String((detail as { msg?: unknown }).msg)
+    }
+    if (detail && typeof detail === 'object') {
+      return JSON.stringify(detail)
+    }
+    return ''
+  }
+
+  private extractYuantusError(payload: unknown, context: string): Error | null {
+    if (!payload || typeof payload !== 'object') {
+      return null
+    }
+    const record = payload as Record<string, unknown>
+    const detail = record.detail ?? record.error
+    if (!detail) {
+      return null
+    }
+    const message = this.formatYuantusErrorDetail(detail)
+    if (!message) {
+      return null
+    }
+    return new Error(`PLM Yuantus ${context} failed: ${message}`)
+  }
+
   private cacheAuthToken(token: string): void {
     this.authToken = token
     this.authTokenExpiresAt = this.getTokenExpiry(token)
@@ -730,7 +769,15 @@ export class PLMAdapter extends HTTPAdapter {
     }
 
     const result = await this.query<YuantusSearchResponse>('/api/v1/search/', [params])
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
     const payload = result.data[0]
+    const payloadError = this.extractYuantusError(payload, 'search')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
     if (payload && typeof payload === 'object' && 'detail' in payload) {
       this.logger.warn('PLM Yuantus search returned detail; ensure /api/v1/search is called with GET query params.')
     }
@@ -871,7 +918,15 @@ export class PLMAdapter extends HTTPAdapter {
 
     try {
       const result = await this.query<YuantusSearchResponse>('/api/v1/search/', [params])
+      if (result.error) {
+        return null
+      }
       const payload = result.data[0]
+      const payloadError = this.extractYuantusError(payload, 'search')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return null
+      }
       const hits = payload?.hits ?? []
       const match = hits.find((hit) => String(hit.id) === String(itemId))
       return match || null
@@ -981,7 +1036,16 @@ export class PLMAdapter extends HTTPAdapter {
     if (!fileId) return null
     try {
       const result = await this.query<YuantusFileMetadata>(`/api/v1/file/${fileId}`)
-      return result.data[0] ?? null
+      if (result.error) {
+        return null
+      }
+      const payload = result.data[0]
+      const payloadError = this.extractYuantusError(payload, 'file metadata')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return null
+      }
+      return payload ?? null
     } catch (_err) {
       return null
     }
@@ -998,7 +1062,16 @@ export class PLMAdapter extends HTTPAdapter {
         method: 'POST',
         data: { type: itemType, action: 'get', id },
       })
+      if (result.error) {
+        this.logger.warn(`PLM Yuantus item detail failed: ${result.error.message}`)
+        return null
+      }
       const item = result.data[0]
+      const payloadError = this.extractYuantusError(item, 'item detail')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return null
+      }
       if (!item) return null
       const mapped = this.mapYuantusItemFields(item)
       if (mapped.created_at && mapped.updated_at) {
@@ -1035,6 +1108,14 @@ export class PLMAdapter extends HTTPAdapter {
       if (options?.role) params.role = options.role
 
       const result = await this.query<YuantusItemFile>(`/api/v1/file/item/${productId}`, [params])
+      if (result.error) {
+        return { data: [], metadata: { totalCount: 0 }, error: result.error }
+      }
+      const payloadError = this.extractYuantusError(result.data[0], 'documents')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+      }
       const includeMetadata = options?.includeMetadata !== false
       const mapped = await Promise.all(
         result.data.map(async (entry) => {
@@ -1079,6 +1160,14 @@ export class PLMAdapter extends HTTPAdapter {
     }
     if (this.apiMode === 'yuantus') {
       const result = await this.query<YuantusBomNode>(`/api/v1/bom/${productId}/tree`, [{ depth: 2 }])
+      if (result.error) {
+        return { data: [], metadata: { totalCount: 0 }, error: result.error }
+      }
+      const payloadError = this.extractYuantusError(result.data[0], 'bom tree')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+      }
       const root = result.data[0]
       if (!root) {
         return { data: [], metadata: { totalCount: 0 }, error: result.error }
@@ -1105,6 +1194,14 @@ export class PLMAdapter extends HTTPAdapter {
       if (options?.offset) params.offset = options.offset
 
       const result = await this.query<YuantusEco>('/api/v1/eco', [params])
+      if (result.error) {
+        return { data: [], metadata: { totalCount: 0 }, error: result.error }
+      }
+      const payloadError = this.extractYuantusError(result.data[0], 'approvals')
+      if (payloadError) {
+        this.logger.warn(payloadError.message)
+        return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+      }
       const filtered = options?.status
         ? result.data.filter((eco) => this.mapYuantusApprovalStatus(eco.state) === options.status)
         : result.data
@@ -1152,7 +1249,16 @@ export class PLMAdapter extends HTTPAdapter {
       params.max_levels = options.maxLevels
     }
 
-    return this.query<WhereUsedResponse>(`/api/v1/bom/${itemId}/where-used`, [params])
+    const result = await this.query<WhereUsedResponse>(`/api/v1/bom/${itemId}/where-used`, [params])
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
+    const payloadError = this.extractYuantusError(result.data[0], 'where-used')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
+    return result
   }
 
   async getBomCompare(params: BOMCompareParams): Promise<QueryResult<BOMCompareResponse>> {
@@ -1198,7 +1304,16 @@ export class PLMAdapter extends HTTPAdapter {
     }
     if (params.effectiveAt) queryParams.effective_at = params.effectiveAt
 
-    return this.query<BOMCompareResponse>('/api/v1/bom/compare', [queryParams])
+    const result = await this.query<BOMCompareResponse>('/api/v1/bom/compare', [queryParams])
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
+    const payloadError = this.extractYuantusError(result.data[0], 'bom compare')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
+    return result
   }
 
   async getBomSubstitutes(bomLineId: string): Promise<QueryResult<BOMSubstitutesResponse>> {
@@ -1216,7 +1331,16 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
     }
 
-    return this.query<BOMSubstitutesResponse>(`/api/v1/bom/${bomLineId}/substitutes`)
+    const result = await this.query<BOMSubstitutesResponse>(`/api/v1/bom/${bomLineId}/substitutes`)
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
+    const payloadError = this.extractYuantusError(result.data[0], 'bom substitutes')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
+    return result
   }
 
   async addBomSubstitute(
@@ -1244,7 +1368,16 @@ export class PLMAdapter extends HTTPAdapter {
       payload.properties = properties
     }
 
-    return this.insert<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, payload)
+    const result = await this.insert<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, payload)
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
+    const payloadError = this.extractYuantusError(result.data[0], 'bom substitute add')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
+    return result
   }
 
   async removeBomSubstitute(
@@ -1265,7 +1398,16 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
     }
 
-    return this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, { id: substituteId })
+    const result = await this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, { id: substituteId })
+    if (result.error) {
+      return { data: [], metadata: { totalCount: 0 }, error: result.error }
+    }
+    const payloadError = this.extractYuantusError(result.data[0], 'bom substitute remove')
+    if (payloadError) {
+      this.logger.warn(payloadError.message)
+      return { data: [], metadata: { totalCount: 0 }, error: payloadError }
+    }
+    return result
   }
 
   async getCadProperties(fileId: string): Promise<QueryResult<CadPropertiesResponse>> {

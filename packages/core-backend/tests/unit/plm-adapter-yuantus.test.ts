@@ -157,3 +157,33 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
     expect(all.data.map((entry) => entry.status)).toEqual(['approved', 'rejected', 'pending'])
   })
 })
+
+describe('PLMAdapter Yuantus error handling', () => {
+  it('returns error when search payload includes detail', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{ detail: 'invalid query' }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getProducts({ search: 'bad-query' })
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error?.message).toContain('invalid query')
+  })
+
+  it('returns error when document payload includes detail', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{ detail: 'document lookup failed' }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getProductDocuments('item-404')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error?.message).toContain('document lookup failed')
+  })
+})

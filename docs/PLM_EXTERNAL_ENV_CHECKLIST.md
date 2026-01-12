@@ -62,11 +62,30 @@ Write-enabled (creates sample parts/BOM/substitutes):
 
 UI regression (requires seeded data from BOM tools or manual IDs):
 - `scripts/verify-plm-ui-regression.sh`
+- `scripts/verify-plm-ui-readonly.sh`
 - `scripts/verify-plm-ui-deeplink.sh`
 - `scripts/verify-plm-ui-substitutes-mutation.sh`
 
 Unified regression:
 - `scripts/verify-plm-regression.sh`
+- `pnpm verify:smoke:plm-readonly` (readonly smoke wrapper)
+
+## Daily smoke toggle
+If you want the default `pnpm verify:smoke` run to include PLM readonly checks:
+```bash
+RUN_PLM_UI_READONLY=true pnpm verify:smoke
+```
+
+## Read-only default fixture
+If you want a stable read-only fixture for CI or team use, promote the latest BOM seed to a fixed name:
+```bash
+pnpm plm:fixture:latest
+```
+Then point smoke/readonly runs at it:
+```bash
+export PLM_BOM_TOOLS_LATEST=artifacts/plm-bom-tools-latest.json
+pnpm verify:smoke:plm-readonly
+```
 
 ## CI Notes
 - GitHub Actions `smoke-verify` can run PLM regression without external secrets.

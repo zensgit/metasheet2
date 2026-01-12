@@ -21,6 +21,11 @@
           <el-icon><Setting /></el-icon>
           属性面板
         </el-button>
+        <el-button :type="autoRefresh ? 'success' : 'default'" :disabled="!workflowId" @click="toggleAutoRefresh">
+          <el-icon><Refresh /></el-icon>
+          自动刷新
+        </el-button>
+        <el-tag v-if="autoRefreshPaused" type="warning" size="small">自动刷新暂停（未保存）</el-tag>
         <el-button @click="validateWorkflow">
           <el-icon><CircleCheck /></el-icon>
           验证
@@ -236,6 +241,7 @@ import {
   Promotion,
   CircleCheck,
   CircleCheckFilled,
+  Refresh,
   VideoPlay,
   VideoPause,
   User,
@@ -299,6 +305,10 @@ const isDirty = ref(false)
 const saving = ref(false)
 const deploying = ref(false)
 const lastSaved = ref<Date | null>(null)
+const autoRefresh = ref(false)
+const autoRefreshPaused = computed(() => autoRefresh.value && isDirty.value)
+const AUTO_REFRESH_INTERVAL_MS = 30_000
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 const zoomLevel = ref(1)
 const showProperties = ref(true)
@@ -397,6 +407,7 @@ onBeforeUnmount(() => {
   if (modeler) {
     modeler.destroy()
   }
+  stopAutoRefresh()
 })
 
 // Initialize BPMN Modeler
@@ -448,6 +459,33 @@ async function initModeler() {
   canvas.zoom('fit-viewport', 'auto')
   zoomLevel.value = canvas.zoom()
 }
+
+function toggleAutoRefresh() {
+  autoRefresh.value = !autoRefresh.value
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh()
+  if (!workflowId.value) return
+  autoRefreshTimer = setInterval(() => {
+    if (!workflowId.value || isDirty.value) return
+    void loadWorkflow(workflowId.value, { silent: true })
+  }, AUTO_REFRESH_INTERVAL_MS)
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+}
+
+watch([autoRefresh, workflowId, isDirty], () => {
+  stopAutoRefresh()
+  if (autoRefresh.value && workflowId.value && !isDirty.value) {
+    startAutoRefresh()
+  }
+})
 
 // Load element properties into form
 function loadElementProperties() {
@@ -591,7 +629,7 @@ async function createNewWorkflow() {
 }
 
 // Load workflow from backend
-async function loadWorkflow(id: string) {
+async function loadWorkflow(id: string, options: { silent?: boolean } = {}) {
   try {
     const response = await fetch(`/api/workflow-designer/workflows/${id}`)
     if (!response.ok) throw new Error('Failed to load workflow')
@@ -609,11 +647,17 @@ async function loadWorkflow(id: string) {
     }
 
     isDirty.value = false
-    ElMessage.success('工作流加载成功')
+    if (!options.silent) {
+      ElMessage.success('工作流加载成功')
+    }
   } catch (err) {
     console.error('Failed to load workflow:', err)
-    ElMessage.error('加载工作流失败')
-    await createNewWorkflow()
+    if (!options.silent) {
+      ElMessage.error('加载工作流失败')
+    }
+    if (!options.silent) {
+      await createNewWorkflow()
+    }
   }
 }
 
