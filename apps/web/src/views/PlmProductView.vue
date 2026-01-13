@@ -1792,7 +1792,7 @@ const documentsFiltered = computed(() => {
   })
 })
 
-const documentSortConfig = {
+const documentSortConfig: SortConfig = {
   name: { type: 'string', accessor: (doc: any) => doc.name },
   type: { type: 'string', accessor: (doc: any) => doc.document_type },
   revision: { type: 'string', accessor: (doc: any) => doc.engineering_revision },
@@ -1824,7 +1824,7 @@ const approvalsFiltered = computed(() => {
   })
 })
 
-const approvalSortConfig = {
+const approvalSortConfig: SortConfig = {
   created: { type: 'date', accessor: (entry: any) => entry.created_at },
   title: { type: 'string', accessor: (entry: any) => entry.title },
   status: { type: 'string', accessor: (entry: any) => entry.status },
@@ -2821,7 +2821,7 @@ function parseQueryNumber(value?: string): number | undefined {
 }
 
 function syncQueryParams(patch: Record<string, string | number | boolean | undefined>) {
-  const nextQuery: Record<string, string | string[] | undefined> = { ...route.query }
+  const nextQuery: Record<string, string | string[] | null | undefined> = { ...route.query }
   let changed = false
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined || value === null || value === '') {
@@ -2995,10 +2995,13 @@ function mergeImportedPresets(entries: unknown[]): number {
   const existing = new Map(customDeepLinkPresets.value.map((entry) => [entry.key, entry]))
   let importedCount = 0
   for (const entry of entries) {
-    const label = String(entry?.label || '').trim()
-    const panels = sanitizePresetPanels(entry?.panels)
+    const record = entry && typeof entry === 'object'
+      ? (entry as Record<string, unknown>)
+      : {}
+    const label = String(record.label ?? '').trim()
+    const panels = sanitizePresetPanels(record.panels)
     if (!label || !panels.length) continue
-    const key = String(entry?.key || '').trim() || `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const key = String(record.key ?? '').trim() || `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`
     if (existing.has(key)) continue
     existing.set(key, { key, label, panels })
     importedCount += 1
@@ -3375,7 +3378,7 @@ type SortDirection = 'asc' | 'desc'
 type SortType = 'string' | 'number' | 'date'
 type SortConfig = Record<string, { type: SortType; accessor: (row: any) => unknown }>
 
-function loadStoredColumns(key: string, defaults: Record<string, boolean>): Record<string, boolean> {
+function loadStoredColumns<T extends Record<string, boolean>>(key: string, defaults: T): T {
   if (typeof localStorage === 'undefined') {
     return { ...defaults }
   }
@@ -3384,7 +3387,7 @@ function loadStoredColumns(key: string, defaults: Record<string, boolean>): Reco
     if (!raw) return { ...defaults }
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return { ...defaults }
-    const merged = { ...defaults }
+    const merged = { ...defaults } as T
     for (const [column, enabled] of Object.entries(parsed as Record<string, unknown>)) {
       if (column in defaults) {
         merged[column] = Boolean(enabled)
