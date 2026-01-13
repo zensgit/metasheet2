@@ -19,6 +19,7 @@ export SKIP_PLUGINS=false       # 允许plugins，但容错
 export FEATURE_CACHE=false      # 简化缓存，减少依赖
 export LOG_LEVEL=warn           # 减少日志噪声
 export STARTUP_TIMEOUT=30       # 30秒启动超时
+export DATABASE_URL="${DATABASE_URL:-postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2}"
 
 # 启动优化的后端
 echo "[DevOptimized] Starting with optimized settings..."

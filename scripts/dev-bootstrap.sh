@@ -29,8 +29,8 @@ NC='\033[0m'
 # Configuration
 POSTGRES_PORT=5433
 POSTGRES_USER=metasheet
-POSTGRES_PASSWORD=metasheet
-POSTGRES_DB=metasheet
+POSTGRES_PASSWORD=metasheet123
+POSTGRES_DB=metasheet_v2
 BACKEND_PORT=8900
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
