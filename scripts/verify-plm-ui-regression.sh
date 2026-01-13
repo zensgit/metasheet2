@@ -15,6 +15,7 @@ PLM_PASSWORD="${PLM_PASSWORD:-admin}"
 SMOKE_DATABASE_URL="${SMOKE_DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}"
 AUTO_START="${AUTO_START:-false}"
 RBAC_BYPASS="${RBAC_BYPASS:-true}"
+RBAC_TOKEN_TRUST="${RBAC_TOKEN_TRUST:-1}"
 JWT_SECRET_VALUE="${JWT_SECRET:-fallback-development-secret-change-in-production}"
 METASHEET_AUTH_TOKEN="${METASHEET_AUTH_TOKEN:-}"
 TSX_BIN="${TSX_BIN:-$ROOT_DIR/node_modules/.bin/tsx}"
@@ -164,7 +165,8 @@ u=urlparse(os.environ.get("API_BASE","http://127.0.0.1:7778"))
 print(u.port or 7778)
 PY
   )"
-  PORT="$PORT" DATABASE_URL="$SMOKE_DATABASE_URL" RBAC_BYPASS="$RBAC_BYPASS" JWT_SECRET="$JWT_SECRET_VALUE" \
+  PORT="$PORT" DATABASE_URL="$SMOKE_DATABASE_URL" RBAC_BYPASS="$RBAC_BYPASS" RBAC_TOKEN_TRUST="$RBAC_TOKEN_TRUST" \
+    JWT_SECRET="$JWT_SECRET_VALUE" \
     PLM_BASE_URL="$PLM_BASE_URL" PLM_API_MODE="yuantus" PLM_TENANT_ID="$PLM_TENANT_ID" PLM_ORG_ID="$PLM_ORG_ID" \
     PLM_USERNAME="$PLM_USERNAME" PLM_PASSWORD="$PLM_PASSWORD" \
     pnpm --filter @metasheet/core-backend dev:core > "$OUTPUT_DIR/plm-ui-regression-backend.log" 2>&1 &
@@ -225,7 +227,7 @@ trap cleanup EXIT INT TERM
 
 METASHEET_TOKEN="$METASHEET_AUTH_TOKEN"
 if [[ -z "$METASHEET_TOKEN" ]]; then
-  METASHEET_TOKEN=$(curl -sS "${API_BASE}/api/auth/dev-token" \
+  METASHEET_TOKEN=$(curl -sS "${API_BASE}/api/auth/dev-token?roles=admin&perms=federation:read,federation:write" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' || true)
 fi
 
@@ -233,7 +235,7 @@ if [[ -z "$METASHEET_TOKEN" ]]; then
   token_json="$OUTPUT_DIR/plm-ui-regression-token.json"
   token_err="$OUTPUT_DIR/plm-ui-regression-token.err"
   JWT_SECRET="$JWT_SECRET_VALUE" "$TSX_BIN" packages/core-backend/scripts/gen-dev-token.ts \
-    --user admin --roles admin --expiresIn 1h >"$token_json" 2>"$token_err" || true
+    --user admin --roles admin --perms federation:read,federation:write --expiresIn 1h >"$token_json" 2>"$token_err" || true
   if [[ ! -s "$token_json" ]]; then
     echo "Failed to generate MetaSheet auth token (see $token_err)." >&2
     exit 1

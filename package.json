@@ -17,7 +17,7 @@
     "verify:readonly-start": "bash scripts/start-univer-verify-readonly.sh",
     "verify:comments": "NODE_PATH=apps/web-react/node_modules node scripts/verify-comments-summary.mjs && NODE_PATH=apps/web-react/node_modules node scripts/verify-comments-ui.cjs",
     "verify:editable-demo": "NODE_PATH=apps/web-react/node_modules node scripts/verify-editable-demo-ui.cjs",
-    "verify:smoke": "pnpm verify:comments && pnpm verify:editable-demo && pnpm verify:labs-gating && pnpm verify:attendance-ui:optional && bash -c 'if [ \"${RUN_PLM_UI_READONLY}\" = \"true\" ]; then pnpm verify:smoke:plm-readonly; else echo \"skip plm readonly (set RUN_PLM_UI_READONLY=true)\"; fi'",
+    "verify:smoke": "bash scripts/verify-smoke.sh",
     "verify:labs-gating": "NODE_PATH=apps/web-react/node_modules node scripts/verify-labs-gating-ui.cjs",
     "verify:smoke:all": "RUN_UNIVER_UI_SMOKE=true bash scripts/verify-smoke.sh",
     "verify:smoke:plm-readonly": "RUN_PLM_UI_READONLY=true bash scripts/verify-smoke.sh",
