@@ -1328,7 +1328,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
 
 const route = useRoute()
@@ -1389,7 +1389,7 @@ const documentRole = ref('')
 const documentFilter = ref('')
 const documentSortKey = ref<'updated' | 'name' | 'type' | 'revision' | 'role' | 'mime' | 'size'>('updated')
 const documentSortDir = ref<'asc' | 'desc'>('desc')
-const defaultDocumentColumns = {
+const defaultDocumentColumns: Record<string, boolean> = {
   type: true,
   revision: true,
   role: true,
@@ -1400,7 +1400,7 @@ const defaultDocumentColumns = {
   download: true,
   cad: true,
 }
-const documentColumns = ref({ ...defaultDocumentColumns })
+const documentColumns = ref<Record<string, boolean>>({ ...defaultDocumentColumns })
 const documentColumnOptions = [
   { key: 'type', label: '类型' },
   { key: 'revision', label: '版本' },
@@ -1443,14 +1443,14 @@ const approvalsError = ref('')
 const approvalsFilter = ref('')
 const approvalSortKey = ref<'created' | 'title' | 'status' | 'requester' | 'product'>('created')
 const approvalSortDir = ref<'asc' | 'desc'>('desc')
-const defaultApprovalColumns = {
+const defaultApprovalColumns: Record<string, boolean> = {
   status: true,
   type: true,
   requester: true,
   created: true,
   product: true,
 }
-const approvalColumns = ref({ ...defaultApprovalColumns })
+const approvalColumns = ref<Record<string, boolean>>({ ...defaultApprovalColumns })
 const approvalColumnOptions = [
   { key: 'status', label: '状态' },
   { key: 'type', label: '类型' },
@@ -2821,7 +2821,7 @@ function parseQueryNumber(value?: string): number | undefined {
 }
 
 function syncQueryParams(patch: Record<string, string | number | boolean | undefined>) {
-  const nextQuery: Record<string, string | string[] | null | undefined> = { ...route.query }
+  const nextQuery: Record<string, LocationQueryValue | LocationQueryValue[] | undefined> = { ...route.query }
   let changed = false
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined || value === null || value === '') {
@@ -3388,9 +3388,10 @@ function loadStoredColumns<T extends Record<string, boolean>>(key: string, defau
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return { ...defaults }
     const merged = { ...defaults } as T
+    const mergedRecord = merged as Record<string, boolean>
     for (const [column, enabled] of Object.entries(parsed as Record<string, unknown>)) {
       if (column in defaults) {
-        merged[column] = Boolean(enabled)
+        mergedRecord[column] = Boolean(enabled)
       }
     }
     return merged
