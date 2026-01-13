@@ -7,14 +7,23 @@ import {
 import { db } from './db'
 
 async function migrateToLatest() {
+  const baseProvider = new FileMigrationProvider({
+    fs,
+    path,
+    // This needs to point to the absolute path of the migrations folder
+    migrationFolder: path.join(__dirname, 'migrations'),
+  })
+
   const migrator = new Migrator({
     db,
-    provider: new FileMigrationProvider({
-      fs,
-      path,
-      // This needs to point to the absolute path of the migrations folder
-      migrationFolder: path.join(__dirname, 'migrations'),
-    }),
+    provider: {
+      async getMigrations() {
+        const migrations = await baseProvider.getMigrations()
+        return Object.fromEntries(
+          Object.entries(migrations).filter(([name]) => !name.startsWith('_'))
+        )
+      }
+    },
   })
 
   const { error, results } = await migrator.migrateToLatest()
