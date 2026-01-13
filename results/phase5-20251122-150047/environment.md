@@ -6,7 +6,7 @@ Captured: 2025-11-22T15:27:34+08:00
 - psql (PostgreSQL) 14.18 (Homebrew)
 \n## Key Env Vars
 - PORT=
-- DATABASE_URL=postgresql://postgres:postgres@localhost:5433/jive_money
+- DATABASE_URL=postgresql://metasheet:metasheet123@localhost:5432/metasheet_v2
 - JWT_SECRET=
 - NODE_ENV=
 - FEATURE_CACHE=
