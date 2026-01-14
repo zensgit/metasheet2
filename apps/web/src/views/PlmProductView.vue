@@ -884,9 +884,9 @@
                 </details>
                 <span v-else>-</span>
               </td>
-              <td>{{ entry.relationship?.quantity ?? '-' }}</td>
-              <td>{{ entry.relationship?.uom ?? '-' }}</td>
-              <td>{{ entry.relationship?.find_num ?? '-' }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
               <td>{{ getWhereUsedRefdes(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
             </tr>
@@ -945,12 +945,9 @@
         <label for="plm-compare-line-key">
           Line Key
           <select id="plm-compare-line-key" v-model="compareLineKey" name="plmCompareLineKey">
-            <option value="child_config">child_config</option>
-            <option value="child_id">child_id</option>
-            <option value="relationship_id">relationship_id</option>
-            <option value="child_config_find_num">child_config_find_num</option>
-            <option value="child_id_find_num">child_id_find_num</option>
-            <option value="line_full">line_full</option>
+            <option v-for="option in compareLineKeyOptions" :key="option" :value="option">
+              {{ option }}
+            </option>
           </select>
         </label>
         <label for="plm-compare-mode">
@@ -959,8 +956,14 @@
             id="plm-compare-mode"
             v-model.trim="compareMode"
             name="plmCompareMode"
+            list="plm-compare-mode-options"
             placeholder="only_product / summarized / num_qty"
           />
+          <datalist id="plm-compare-mode-options">
+            <option v-for="mode in compareModeOptions" :key="mode.mode" :value="mode.mode">
+              {{ mode.description || mode.mode }}
+            </option>
+          </datalist>
         </label>
         <label for="plm-compare-effective-at">
           生效时间
@@ -1017,6 +1020,8 @@
           />
         </label>
       </div>
+      <p v-if="compareSchemaLoading" class="status">对比字段加载中...</p>
+      <p v-else-if="compareSchemaError" class="status error">{{ compareSchemaError }}（已回退默认字段）</p>
       <p v-if="compareError" class="status error">{{ compareError }}</p>
       <div v-if="!bomCompare" class="empty">
         暂无对比数据
@@ -1341,6 +1346,20 @@ const DEFAULT_COMPARE_MAX_LEVELS = 10
 const DEFAULT_COMPARE_LINE_KEY = 'child_config'
 const DEFAULT_COMPARE_REL_PROPS = 'quantity,uom,find_num,refdes'
 const DEFAULT_APPROVAL_STATUS = 'pending'
+const DEFAULT_COMPARE_LINE_KEYS = [
+  'child_config',
+  'child_id',
+  'relationship_id',
+  'child_config_find_num',
+  'child_config_refdes',
+  'child_config_find_refdes',
+  'child_id_find_num',
+  'child_id_refdes',
+  'child_id_find_refdes',
+  'child_config_find_num_qty',
+  'child_id_find_num_qty',
+  'line_full',
+]
 
 const searchQuery = ref('')
 const searchItemType = ref(DEFAULT_ITEM_TYPE)
@@ -1351,6 +1370,29 @@ const searchLoading = ref(false)
 const searchError = ref('')
 
 type AuthState = 'missing' | 'invalid' | 'expired' | 'expiring' | 'valid'
+
+type CompareSchemaField = {
+  field: string
+  severity: string
+  normalized: string
+  description?: string
+}
+
+type CompareSchemaMode = {
+  mode: string
+  line_key?: string
+  include_relationship_props?: string[]
+  aggregate_quantities?: boolean
+  aliases?: string[]
+  description?: string
+}
+
+type CompareSchemaPayload = {
+  line_fields: CompareSchemaField[]
+  compare_modes: CompareSchemaMode[]
+  line_key_options: string[]
+  defaults?: Record<string, unknown>
+}
 
 const authState = ref<AuthState>('missing')
 const authExpiresAt = ref<number | null>(null)
@@ -1548,6 +1590,9 @@ const compareRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
 const bomCompare = ref<any | null>(null)
 const compareLoading = ref(false)
 const compareError = ref('')
+const compareSchema = ref<CompareSchemaPayload | null>(null)
+const compareSchemaLoading = ref(false)
+const compareSchemaError = ref('')
 const productFieldCatalog = [
   {
     key: 'name',
@@ -1704,65 +1749,93 @@ const approvalFieldCatalog = [
     fallback: '-',
   },
 ]
-const compareFieldCatalog = [
+const compareFieldLabels: Record<string, string> = {
+  quantity: '数量',
+  uom: '单位',
+  find_num: 'Find #',
+  refdes: 'Refdes',
+  effectivity_from: '生效起',
+  effectivity_to: '生效止',
+  effectivities: '生效性',
+  substitutes: '替代件',
+}
+const defaultCompareFieldCatalog = [
   {
     key: 'quantity',
-    label: '数量',
+    label: compareFieldLabels.quantity,
     source: 'relationship.properties.quantity',
     severity: 'major',
     normalized: 'float',
   },
   {
     key: 'uom',
-    label: '单位',
+    label: compareFieldLabels.uom,
     source: 'relationship.properties.uom',
     severity: 'major',
     normalized: 'uppercase',
   },
   {
     key: 'find_num',
-    label: 'Find #',
+    label: compareFieldLabels.find_num,
     source: 'relationship.properties.find_num',
     severity: 'minor',
     normalized: 'trim',
   },
   {
     key: 'refdes',
-    label: 'Refdes',
+    label: compareFieldLabels.refdes,
     source: 'relationship.properties.refdes',
     severity: 'minor',
     normalized: 'list/uppercase',
   },
   {
     key: 'effectivity_from',
-    label: '生效起',
+    label: compareFieldLabels.effectivity_from,
     source: 'relationship.properties.effectivity_from',
     severity: 'major',
     normalized: 'iso datetime',
   },
   {
     key: 'effectivity_to',
-    label: '生效止',
+    label: compareFieldLabels.effectivity_to,
     source: 'relationship.properties.effectivity_to',
     severity: 'major',
     normalized: 'iso datetime',
   },
   {
     key: 'effectivities',
-    label: '生效性',
+    label: compareFieldLabels.effectivities,
     source: 'effectivity records (includeEffectivity)',
     severity: 'major',
     normalized: 'sorted tuples',
   },
   {
     key: 'substitutes',
-    label: '替代件',
+    label: compareFieldLabels.substitutes,
     source: 'substitutes (includeSubstitutes)',
     severity: 'minor',
     normalized: 'sorted tuples',
   },
 ]
-const compareFieldLabelMap = new Map(compareFieldCatalog.map((entry) => [entry.key, entry.label]))
+const compareFieldCatalog = computed(() => {
+  const fields = compareSchema.value?.line_fields || []
+  if (!fields.length) return defaultCompareFieldCatalog
+  return fields.map((entry) => ({
+    key: entry.field,
+    label: compareFieldLabels[entry.field] || entry.field,
+    source: entry.description || '-',
+    severity: entry.severity || 'info',
+    normalized: entry.normalized || '-',
+  }))
+})
+const compareFieldLabelMap = computed(
+  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry.label]))
+)
+const compareLineKeyOptions = computed(() => {
+  const options = compareSchema.value?.line_key_options
+  return options && options.length ? options : DEFAULT_COMPARE_LINE_KEYS
+})
+const compareModeOptions = computed(() => compareSchema.value?.compare_modes || [])
 
 const bomLineId = ref('')
 const substitutes = ref<any | null>(null)
@@ -2060,6 +2133,8 @@ function resetAll() {
   compareRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
   bomCompare.value = null
   compareError.value = ''
+  compareSchemaError.value = ''
+  compareSchemaLoading.value = false
   bomLineId.value = ''
   substitutes.value = null
   substitutesError.value = ''
@@ -2587,6 +2662,52 @@ async function loadWhereUsed() {
   }
 }
 
+function applyCompareSchemaDefaults(schema: CompareSchemaPayload | null) {
+  if (!schema) return
+  const defaults = schema.defaults || {}
+  const defaultMaxLevels = Number(defaults.max_levels)
+  if (Number.isFinite(defaultMaxLevels) && compareMaxLevels.value === DEFAULT_COMPARE_MAX_LEVELS) {
+    compareMaxLevels.value = defaultMaxLevels
+  }
+  const defaultLineKey = typeof defaults.line_key === 'string' ? defaults.line_key.trim() : ''
+  if (defaultLineKey && (compareLineKey.value === DEFAULT_COMPARE_LINE_KEY || !compareLineKey.value)) {
+    compareLineKey.value = defaultLineKey
+  }
+  if (
+    typeof defaults.include_substitutes === 'boolean' &&
+    compareIncludeSubstitutes.value === false
+  ) {
+    compareIncludeSubstitutes.value = defaults.include_substitutes
+  }
+  if (
+    typeof defaults.include_effectivity === 'boolean' &&
+    compareIncludeEffectivity.value === false
+  ) {
+    compareIncludeEffectivity.value = defaults.include_effectivity
+  }
+}
+
+async function loadBomCompareSchema() {
+  compareSchemaLoading.value = true
+  compareSchemaError.value = ''
+  try {
+    const result = await apiPost<{ ok: boolean; data: CompareSchemaPayload; error?: { message?: string } }>(
+      '/api/federation/plm/query',
+      { operation: 'bom_compare_schema' }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '加载 BOM 对比字段失败')
+    }
+    compareSchema.value = result.data
+    applyCompareSchemaDefaults(result.data)
+  } catch (error: any) {
+    handleAuthError(error)
+    compareSchemaError.value = error?.message || '加载 BOM 对比字段失败'
+  } finally {
+    compareSchemaLoading.value = false
+  }
+}
+
 async function loadBomCompare() {
   if (!compareLeftId.value || !compareRightId.value) return
   syncQueryParams({
@@ -2775,15 +2896,22 @@ function getCompareChild(entry?: Record<string, any> | null): Record<string, any
 }
 
 function getCompareProp(entry: Record<string, any>, key: string): string {
-  const props = entry?.properties || entry?.relationship || {}
+  const props = entry?.line || entry?.properties || entry?.relationship || {}
   const value = props[key]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
 function getWhereUsedRefdes(entry: Record<string, any>): string {
-  const rel = entry?.relationship || {}
-  const value = rel.refdes ?? rel.properties?.refdes ?? rel.properties?.ref_des
+  const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
+  const value = line.refdes ?? line.ref_des
+  if (value === undefined || value === null || value === '') return '-'
+  return String(value)
+}
+
+function getWhereUsedLineValue(entry: Record<string, any>, key: string): string {
+  const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
+  const value = line[key]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
@@ -3491,7 +3619,7 @@ function formatEffectivity(entry: Record<string, any>): string {
 }
 
 function formatSubstituteCount(entry: Record<string, any>): string {
-  const props = entry?.properties || entry?.relationship || {}
+  const props = entry?.line || entry?.properties || entry?.relationship || {}
   const subs = props.substitutes || entry?.substitutes
   if (Array.isArray(subs)) {
     return subs.length ? String(subs.length) : '-'
@@ -3545,9 +3673,18 @@ function exportWhereUsedCsv() {
     getItemNumber(entry.parent),
     getItemName(entry.parent),
     entry.pathLabel || '',
-    String(entry.relationship?.quantity ?? ''),
-    String(entry.relationship?.uom ?? ''),
-    String(entry.relationship?.find_num ?? ''),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'quantity')
+      return value === '-' ? '' : value
+    })(),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'uom')
+      return value === '-' ? '' : value
+    })(),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'find_num')
+      return value === '-' ? '' : value
+    })(),
     (() => {
       const refdes = getWhereUsedRefdes(entry)
       return refdes === '-' ? '' : refdes
@@ -3664,7 +3801,7 @@ function approvalStatusClass(value?: string): string {
 }
 
 function getCompareFieldLabel(field: string): string {
-  return compareFieldLabelMap.get(field) || field
+  return compareFieldLabelMap.value.get(field) || field
 }
 
 function formatDiffValue(value: unknown): string {
@@ -3686,6 +3823,9 @@ onMounted(() => {
   documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
   approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
   customDeepLinkPresets.value = loadStoredPresets()
+  if (['valid', 'expiring'].includes(authState.value)) {
+    void loadBomCompareSchema()
+  }
   void applyQueryState()
 })
 
@@ -3778,6 +3918,12 @@ watch(
     })
   }
 )
+
+watch(authState, (value) => {
+  if (!compareSchema.value && !compareSchemaLoading.value && ['valid', 'expiring'].includes(value)) {
+    void loadBomCompareSchema()
+  }
+})
 
 watch(
   () => [
