@@ -168,6 +168,29 @@ export interface BOMCompareResponse {
   changed: BOMCompareChangedEntry[]
 }
 
+export interface BOMCompareFieldSpec {
+  field: string
+  severity: string
+  normalized: string
+  description?: string
+}
+
+export interface BOMCompareModeSpec {
+  mode: string
+  line_key?: string
+  include_relationship_props?: string[]
+  aggregate_quantities?: boolean
+  aliases?: string[]
+  description?: string
+}
+
+export interface BOMCompareSchemaResponse {
+  line_fields: BOMCompareFieldSpec[]
+  compare_modes: BOMCompareModeSpec[]
+  line_key_options: string[]
+  defaults?: Record<string, unknown>
+}
+
 export interface WhereUsedEntry {
   relationship: Record<string, unknown>
   parent: Record<string, unknown>
@@ -1199,6 +1222,58 @@ export class PLMAdapter extends HTTPAdapter {
     if (params.effectiveAt) queryParams.effective_at = params.effectiveAt
 
     return this.query<BOMCompareResponse>('/api/v1/bom/compare', [queryParams])
+  }
+
+  async getBomCompareSchema(): Promise<QueryResult<BOMCompareSchemaResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          line_fields: [
+            { field: 'quantity', severity: 'major', normalized: 'float', description: 'BOM quantity on the relationship line.' },
+            { field: 'uom', severity: 'major', normalized: 'upper-case string', description: 'Unit of measure for the BOM quantity.' },
+            { field: 'find_num', severity: 'minor', normalized: 'trimmed string', description: 'BOM position/find number.' },
+            { field: 'refdes', severity: 'minor', normalized: 'sorted unique list', description: 'Reference designator(s) for BOM line.' },
+            { field: 'effectivity_from', severity: 'major', normalized: 'ISO datetime string', description: 'Effectivity start datetime (ISO).' },
+            { field: 'effectivity_to', severity: 'major', normalized: 'ISO datetime string', description: 'Effectivity end datetime (ISO).' },
+            { field: 'effectivities', severity: 'major', normalized: 'sorted tuples (type,start,end,payload)', description: 'Expanded effectivity records attached to the line.' },
+            { field: 'substitutes', severity: 'minor', normalized: 'sorted tuples (item_id,rank,note)', description: 'Substitute items for the BOM line.' },
+          ],
+          compare_modes: [
+            { mode: 'only_product', line_key: 'child_config', include_relationship_props: [], aggregate_quantities: false, aliases: ['only'], description: 'Compare by parent/child config only.' },
+            { mode: 'summarized', line_key: 'child_config', include_relationship_props: ['quantity', 'uom'], aggregate_quantities: true, aliases: ['summary'], description: 'Aggregate quantities for identical children.' },
+            { mode: 'num_qty', line_key: 'child_config_find_num_qty', include_relationship_props: ['quantity', 'uom', 'find_num'], aggregate_quantities: false, aliases: ['numqty'], description: 'Compare by child config + find_num + quantity.' },
+            { mode: 'by_position', line_key: 'child_config_find_num', include_relationship_props: ['quantity', 'uom', 'find_num'], aggregate_quantities: false, aliases: ['by_pos', 'position'], description: 'Compare by child config + find_num.' },
+            { mode: 'by_reference', line_key: 'child_config_refdes', include_relationship_props: ['quantity', 'uom', 'refdes'], aggregate_quantities: false, aliases: ['by_ref', 'reference'], description: 'Compare by child config + refdes.' },
+          ],
+          line_key_options: [
+            'child_config',
+            'child_id',
+            'relationship_id',
+            'child_config_find_num',
+            'child_config_refdes',
+            'child_config_find_refdes',
+            'child_id_find_num',
+            'child_id_refdes',
+            'child_id_find_refdes',
+            'child_config_find_num_qty',
+            'child_id_find_num_qty',
+            'line_full',
+          ],
+          defaults: {
+            max_levels: 10,
+            line_key: 'child_config',
+            include_substitutes: false,
+            include_effectivity: false,
+          },
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM compare schema is not supported for this PLM API mode') }
+    }
+
+    return this.query<BOMCompareSchemaResponse>('/api/v1/bom/compare/schema')
   }
 
   async getBomSubstitutes(bomLineId: string): Promise<QueryResult<BOMSubstitutesResponse>> {

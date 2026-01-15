@@ -261,39 +261,45 @@
       </div>
 
       <p v-if="productError" class="status error">{{ productError }}</p>
+      <p v-else-if="productLoading" class="status">产品加载中...</p>
 
       <div v-if="product" class="detail-grid">
         <div>
           <span>名称</span>
-          <strong>{{ product.name || '-' }}</strong>
+          <strong>{{ productView.name }}</strong>
         </div>
         <div>
           <span>料号</span>
-          <strong>{{ product.partNumber || product.code || '-' }}</strong>
+          <strong>{{ productView.partNumber }}</strong>
         </div>
         <div>
           <span>版本</span>
-          <strong>{{ product.revision || product.version || '-' }}</strong>
+          <strong>{{ productView.revision }}</strong>
         </div>
         <div>
           <span>状态</span>
-          <strong>{{ product.status || '-' }}</strong>
+          <strong>{{ productView.status }}</strong>
         </div>
         <div>
           <span>类型</span>
-          <strong>{{ product.itemType || '-' }}</strong>
+          <strong>{{ productView.itemType }}</strong>
         </div>
         <div>
           <span>更新时间</span>
-          <strong>{{ formatTime(product.updatedAt || product.updated_at || product.createdAt || product.created_at) }}</strong>
+          <strong>{{ formatTime(productView.updatedAt) }}</strong>
         </div>
         <div>
           <span>创建时间</span>
-          <strong>{{ formatTime(product.createdAt || product.created_at) }}</strong>
+          <strong>{{ formatTime(productView.createdAt) }}</strong>
         </div>
       </div>
+      <div v-else class="empty">
+        暂无产品详情
+        <span class="empty-hint">（输入产品 ID 或 item number 后加载）</span>
+      </div>
 
-      <p v-if="product?.description" class="description">{{ product.description }}</p>
+      <p v-if="productView.description" class="description">{{ productView.description }}</p>
+      <p v-else-if="product" class="muted">暂无描述</p>
 
       <details v-if="product" class="field-map">
         <summary>字段对照清单</summary>
@@ -344,16 +350,43 @@
             <th>数量</th>
             <th>单位</th>
             <th>序号</th>
+            <th>BOM 行 ID</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="item in bomItems" :key="item.id">
             <td>{{ item.level }}</td>
-            <td>{{ item.component_code || item.component_id }}</td>
+            <td>
+              <div>{{ item.component_code || item.component_id }}</div>
+              <div v-if="item.component_id" class="muted mono">{{ item.component_id }}</div>
+            </td>
             <td>{{ item.component_name }}</td>
             <td>{{ item.quantity }}</td>
             <td>{{ item.unit }}</td>
             <td>{{ item.sequence }}</td>
+            <td>
+              <div class="mono">{{ item.id || '-' }}</div>
+              <div v-if="item.parent_item_id" class="muted">父: {{ item.parent_item_id }}</div>
+            </td>
+            <td>
+              <div class="inline-actions">
+                <button
+                  class="btn ghost mini"
+                  :disabled="!item.component_id || whereUsedLoading"
+                  @click="applyWhereUsedFromBom(item)"
+                >
+                  Where-Used
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!item.id || substitutesLoading"
+                  @click="applySubstitutesFromBom(item)"
+                >
+                  替代件
+                </button>
+              </div>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -449,21 +482,31 @@
         </thead>
         <tbody>
           <tr v-for="doc in documentsSorted" :key="doc.id">
-            <td>{{ doc.name }}</td>
-            <td v-if="documentColumns.type">{{ doc.document_type || '-' }}</td>
-            <td v-if="documentColumns.revision">{{ doc.engineering_revision || '-' }}</td>
+            <td>{{ getDocumentName(doc) }}</td>
+            <td v-if="documentColumns.type">{{ getDocumentType(doc) }}</td>
+            <td v-if="documentColumns.revision">{{ getDocumentRevision(doc) }}</td>
             <td v-if="documentColumns.role">
-              <span class="tag status-neutral">{{ doc.engineering_state || '-' }}</span>
+              <span class="tag status-neutral">{{ getDocumentRole(doc) }}</span>
             </td>
-            <td v-if="documentColumns.mime">{{ doc.mime_type || '-' }}</td>
-            <td v-if="documentColumns.size">{{ formatBytes(doc.file_size) }}</td>
-            <td v-if="documentColumns.updated">{{ formatTime(doc.updated_at || doc.created_at) }}</td>
+            <td v-if="documentColumns.mime">{{ getDocumentMime(doc) }}</td>
+            <td v-if="documentColumns.size">{{ formatBytes(getDocumentSize(doc)) }}</td>
+            <td v-if="documentColumns.updated">{{ formatTime(getDocumentUpdatedAt(doc)) }}</td>
             <td v-if="documentColumns.preview">
-              <a v-if="doc.preview_url" :href="doc.preview_url" target="_blank" rel="noopener">查看</a>
+              <a
+                v-if="getDocumentPreviewUrl(doc)"
+                :href="getDocumentPreviewUrl(doc)"
+                target="_blank"
+                rel="noopener"
+              >查看</a>
               <span v-else>-</span>
             </td>
             <td v-if="documentColumns.download">
-              <a v-if="doc.download_url" :href="doc.download_url" target="_blank" rel="noopener">下载</a>
+              <a
+                v-if="getDocumentDownloadUrl(doc)"
+                :href="getDocumentDownloadUrl(doc)"
+                target="_blank"
+                rel="noopener"
+              >下载</a>
               <span v-else>-</span>
             </td>
             <td v-if="documentColumns.cad">
@@ -748,16 +791,18 @@
         </thead>
         <tbody>
           <tr v-for="approval in approvalsSorted" :key="approval.id">
-            <td>{{ approval.title }}</td>
+            <td>{{ getApprovalTitle(approval) }}</td>
             <td v-if="approvalColumns.status">
-              <span class="tag" :class="approvalStatusClass(approval.status)">{{ approval.status }}</span>
+              <span class="tag" :class="approvalStatusClass(getApprovalStatus(approval))">
+                {{ getApprovalStatus(approval) }}
+              </span>
             </td>
-            <td v-if="approvalColumns.type">{{ approval.request_type }}</td>
-            <td v-if="approvalColumns.requester">{{ approval.requester_name || approval.requester_id || '-' }}</td>
-            <td v-if="approvalColumns.created">{{ formatTime(approval.created_at) }}</td>
+            <td v-if="approvalColumns.type">{{ getApprovalType(approval) }}</td>
+            <td v-if="approvalColumns.requester">{{ getApprovalRequester(approval) }}</td>
+            <td v-if="approvalColumns.created">{{ formatTime(getApprovalCreatedAt(approval)) }}</td>
             <td v-if="approvalColumns.product">
-              <div>{{ approval.product_number || approval.product_id || '-' }}</div>
-              <div class="muted">{{ approval.product_name || '-' }}</div>
+              <div>{{ getApprovalProductNumber(approval) }}</div>
+              <div class="muted">{{ getApprovalProductName(approval) }}</div>
             </td>
           </tr>
         </tbody>
@@ -830,6 +875,13 @@
             max="20"
           />
         </label>
+        <label for="plm-where-used-view">
+          视图
+          <select id="plm-where-used-view" v-model="whereUsedView" name="plmWhereUsedView">
+            <option value="table">表格</option>
+            <option value="tree">树形</option>
+          </select>
+        </label>
         <label for="plm-where-used-filter">
           过滤
           <input
@@ -850,6 +902,35 @@
         <div v-if="!whereUsedFilteredRows.length" class="empty">
           暂无匹配项
           <span class="empty-hint">（可清空过滤条件）</span>
+        </div>
+        <div v-else-if="whereUsedView === 'tree'" class="where-used-tree">
+          <div class="tree-row tree-header">
+            <div class="tree-cell">节点</div>
+            <div class="tree-cell">名称</div>
+            <div class="tree-cell">数量</div>
+            <div class="tree-cell">单位</div>
+            <div class="tree-cell">Find #</div>
+            <div class="tree-cell">Refdes</div>
+            <div class="tree-cell">关系 ID</div>
+          </div>
+          <div
+            v-for="row in whereUsedTreeRows"
+            :key="row.key"
+            class="tree-row"
+            :class="{ 'tree-root': row.depth === 0 }"
+          >
+            <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
+              <span class="tree-dot" :class="{ leaf: !row.hasChildren }"></span>
+              <span class="mono">{{ row.label || row.id }}</span>
+              <span v-if="row.entryCount > 1" class="tree-multi">×{{ row.entryCount }}</span>
+            </div>
+            <div class="tree-cell">{{ row.name || '-' }}</div>
+            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'quantity') }}</div>
+            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'uom') }}</div>
+            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'find_num') }}</div>
+            <div class="tree-cell">{{ getWhereUsedTreeRefdes(row) }}</div>
+            <div class="tree-cell">{{ getWhereUsedTreeRelationship(row) }}</div>
+          </div>
         </div>
         <table v-else class="data-table">
           <thead>
@@ -884,9 +965,9 @@
                 </details>
                 <span v-else>-</span>
               </td>
-              <td>{{ entry.relationship?.quantity ?? '-' }}</td>
-              <td>{{ entry.relationship?.uom ?? '-' }}</td>
-              <td>{{ entry.relationship?.find_num ?? '-' }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
               <td>{{ getWhereUsedRefdes(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
             </tr>
@@ -945,12 +1026,9 @@
         <label for="plm-compare-line-key">
           Line Key
           <select id="plm-compare-line-key" v-model="compareLineKey" name="plmCompareLineKey">
-            <option value="child_config">child_config</option>
-            <option value="child_id">child_id</option>
-            <option value="relationship_id">relationship_id</option>
-            <option value="child_config_find_num">child_config_find_num</option>
-            <option value="child_id_find_num">child_id_find_num</option>
-            <option value="line_full">line_full</option>
+            <option v-for="option in compareLineKeyOptions" :key="option" :value="option">
+              {{ option }}
+            </option>
           </select>
         </label>
         <label for="plm-compare-mode">
@@ -959,8 +1037,14 @@
             id="plm-compare-mode"
             v-model.trim="compareMode"
             name="plmCompareMode"
+            list="plm-compare-mode-options"
             placeholder="only_product / summarized / num_qty"
           />
+          <datalist id="plm-compare-mode-options">
+            <option v-for="mode in compareModeOptions" :key="mode.mode" :value="mode.mode">
+              {{ mode.description || mode.mode }}
+            </option>
+          </datalist>
         </label>
         <label for="plm-compare-effective-at">
           生效时间
@@ -1017,6 +1101,8 @@
           />
         </label>
       </div>
+      <p v-if="compareSchemaLoading" class="status">对比字段加载中...</p>
+      <p v-else-if="compareSchemaError" class="status error">{{ compareSchemaError }}（已回退默认字段）</p>
       <p v-if="compareError" class="status error">{{ compareError }}</p>
       <div v-if="!bomCompare" class="empty">
         暂无对比数据
@@ -1146,19 +1232,28 @@
                   <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
                 </td>
                 <td>
-                  <span class="tag" :class="severityClass(entry.severity)">{{ entry.severity || 'info' }}</span>
+                  <span class="tag" :class="severityClass(getCompareEntrySeverity(entry))">
+                    {{ getCompareEntrySeverity(entry) }}
+                  </span>
                 </td>
                 <td>
                   <div v-if="entry.changes?.length" class="diff-list">
-                    <div v-for="change in entry.changes" :key="change.field" class="diff-row">
-                      <span class="tag" :class="severityClass(change.severity)">{{ change.severity || 'info' }}</span>
-                      <span class="diff-field">
-                        {{ getCompareFieldLabel(change.field) }}
+                    <div v-for="change in getCompareChangeRows(entry)" :key="change.key" class="diff-row">
+                      <span class="tag" :class="severityClass(change.severity)">{{ change.severity }}</span>
+                      <span class="diff-field" :title="change.description || ''">
+                        {{ change.label }}
                         <span v-if="compareFieldLabelMap.has(change.field)" class="diff-field-code">
                           ({{ change.field }})
                         </span>
+                        <span v-if="change.normalized && change.normalized !== '-'" class="diff-field-meta">
+                          {{ change.normalized }}
+                        </span>
                       </span>
-                      <span class="diff-value">{{ formatDiffValue(change.left) }} → {{ formatDiffValue(change.right) }}</span>
+                      <span class="diff-value">
+                        <span class="diff-value-left">{{ formatDiffValue(change.left) }}</span>
+                        <span class="diff-arrow">→</span>
+                        <span class="diff-value-right">{{ formatDiffValue(change.right) }}</span>
+                      </span>
                     </div>
                   </div>
                   <span v-else class="muted">-</span>
@@ -1292,9 +1387,11 @@
         <table v-else class="data-table">
           <thead>
             <tr>
-              <th>替代件 ID</th>
-              <th>名称</th>
-              <th>原件 ID</th>
+              <th>替代件编号</th>
+              <th>替代件名称</th>
+              <th>状态</th>
+              <th>原件编号</th>
+              <th>原件名称</th>
               <th>优先级</th>
               <th>备注</th>
               <th>关系 ID</th>
@@ -1302,16 +1399,32 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="entry in substitutesRows" :key="entry.id">
-              <td>{{ entry.substitute_part?.id || entry.substitute_part?.item_number || entry.id }}</td>
-              <td>{{ entry.substitute_part?.name || '-' }}</td>
-              <td>{{ entry.part?.id || entry.part?.item_number || '-' }}</td>
-              <td>{{ entry.rank ?? entry.relationship?.properties?.rank ?? '-' }}</td>
-              <td>{{ entry.relationship?.properties?.note || entry.relationship?.properties?.comment || '-' }}</td>
+            <tr v-for="entry in substitutesRows" :key="entry.relationship?.id || entry.id">
+              <td>
+                <div>{{ getSubstituteNumber(entry) }}</div>
+                <div class="muted">{{ getSubstituteId(entry) }}</div>
+              </td>
+              <td>{{ getSubstituteName(entry) }}</td>
+              <td>
+                <span class="tag" :class="itemStatusClass(getSubstituteStatus(entry))">
+                  {{ getSubstituteStatus(entry) }}
+                </span>
+              </td>
+              <td>
+                <div>{{ getItemNumber(entry.part) }}</div>
+                <div class="muted">{{ entry.part?.id || '-' }}</div>
+              </td>
+              <td>{{ getItemName(entry.part) }}</td>
+              <td>{{ formatSubstituteRank(entry) }}</td>
+              <td>{{ formatSubstituteNote(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
               <td>
-                <button class="btn ghost" :disabled="substitutesMutating" @click="removeSubstitute(entry)">
-                  删除
+                <button
+                  class="btn ghost"
+                  :disabled="substitutesMutating || substitutesDeletingId === (entry.relationship?.id || entry.id)"
+                  @click="removeSubstitute(entry)"
+                >
+                  {{ substitutesDeletingId === (entry.relationship?.id || entry.id) ? '删除中...' : '删除' }}
                 </button>
               </td>
             </tr>
@@ -1341,6 +1454,20 @@ const DEFAULT_COMPARE_MAX_LEVELS = 10
 const DEFAULT_COMPARE_LINE_KEY = 'child_config'
 const DEFAULT_COMPARE_REL_PROPS = 'quantity,uom,find_num,refdes'
 const DEFAULT_APPROVAL_STATUS = 'pending'
+const DEFAULT_COMPARE_LINE_KEYS = [
+  'child_config',
+  'child_id',
+  'relationship_id',
+  'child_config_find_num',
+  'child_config_refdes',
+  'child_config_find_refdes',
+  'child_id_find_num',
+  'child_id_refdes',
+  'child_id_find_refdes',
+  'child_config_find_num_qty',
+  'child_id_find_num_qty',
+  'line_full',
+]
 
 const searchQuery = ref('')
 const searchItemType = ref(DEFAULT_ITEM_TYPE)
@@ -1351,6 +1478,48 @@ const searchLoading = ref(false)
 const searchError = ref('')
 
 type AuthState = 'missing' | 'invalid' | 'expired' | 'expiring' | 'valid'
+
+type CompareSchemaField = {
+  field: string
+  severity: string
+  normalized: string
+  description?: string
+}
+
+type CompareSchemaMode = {
+  mode: string
+  line_key?: string
+  include_relationship_props?: string[]
+  aggregate_quantities?: boolean
+  aliases?: string[]
+  description?: string
+}
+
+type CompareSchemaPayload = {
+  line_fields: CompareSchemaField[]
+  compare_modes: CompareSchemaMode[]
+  line_key_options: string[]
+  defaults?: Record<string, unknown>
+}
+
+type WhereUsedTreeNode = {
+  id: string
+  label: string
+  name: string
+  children: WhereUsedTreeNode[]
+  entries: any[]
+}
+
+type WhereUsedTreeRow = {
+  key: string
+  id: string
+  label: string
+  name: string
+  depth: number
+  hasChildren: boolean
+  entries: any[]
+  entryCount: number
+}
 
 const authState = ref<AuthState>('missing')
 const authExpiresAt = ref<number | null>(null)
@@ -1380,6 +1549,75 @@ const itemType = ref(DEFAULT_ITEM_TYPE)
 const product = ref<any | null>(null)
 const productLoading = ref(false)
 const productError = ref('')
+const productView = computed(() => {
+  const data = product.value || {}
+  const props = data.properties || {}
+  const name =
+    data.name ||
+    props.name ||
+    props.item_name ||
+    props.title ||
+    props.label ||
+    data.id ||
+    '-'
+  const partNumber =
+    data.partNumber ||
+    data.code ||
+    props.item_number ||
+    props.part_number ||
+    props.number ||
+    props.code ||
+    props.internal_reference ||
+    '-'
+  const revision =
+    data.revision ||
+    data.version ||
+    props.revision ||
+    props.version ||
+    props.rev ||
+    props.version_label ||
+    '-'
+  const status =
+    data.status ||
+    props.state ||
+    props.status ||
+    props.lifecycle_state ||
+    '-'
+  const itemType =
+    data.itemType ||
+    data.type ||
+    props.item_type ||
+    props.itemType ||
+    props.type ||
+    DEFAULT_ITEM_TYPE
+  const description = data.description || props.description || props.desc || ''
+  const createdAt =
+    data.createdAt ||
+    data.created_at ||
+    props.created_at ||
+    props.created_on ||
+    props.create_date ||
+    ''
+  const updatedAt =
+    data.updatedAt ||
+    data.updated_at ||
+    props.updated_at ||
+    props.modified_on ||
+    props.write_date ||
+    createdAt ||
+    ''
+  return {
+    id: String(data.id || ''),
+    name,
+    partNumber,
+    revision,
+    status,
+    itemType,
+    description,
+    createdAt,
+    updatedAt,
+  }
+})
 
 const bomItems = ref<any[]>([])
 const bomLoading = ref(false)
@@ -1462,6 +1700,7 @@ const approvalColumnOptions = [
 const whereUsedItemId = ref('')
 const whereUsedRecursive = ref(true)
 const whereUsedMaxLevels = ref(DEFAULT_WHERE_USED_MAX_LEVELS)
+const whereUsedView = ref<'table' | 'tree'>('table')
 const whereUsedFilter = ref('')
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
@@ -1534,6 +1773,86 @@ const whereUsedFilteredRows = computed(() => {
   })
 })
 
+const whereUsedTree = computed<WhereUsedTreeNode | null>(() => {
+  const rows = whereUsedFilteredRows.value
+  if (!rows.length) return null
+
+  const firstPathNode = rows[0]?.pathNodes?.[0] || {}
+  const fallbackRootId = whereUsed.value?.item_id || whereUsedItemId.value || ''
+  const rootId = firstPathNode.id || fallbackRootId || firstPathNode.label || 'root'
+  const rootLabel = firstPathNode.label || rootId
+  const rootName = firstPathNode.name || ''
+  const root: WhereUsedTreeNode = {
+    id: rootId,
+    label: rootLabel,
+    name: rootName,
+    children: [],
+    entries: [],
+  }
+
+  const isRootNode = (node: any) => {
+    const nodeId = node?.id || ''
+    const nodeLabel = node?.label || ''
+    return (nodeId && nodeId === root.id) || (nodeLabel && nodeLabel === root.label)
+  }
+
+  const getNodeId = (node: any) => {
+    const nodeId = node?.id || node?.label || ''
+    return nodeId || 'unknown'
+  }
+
+  const getNodeLabel = (node: any, id: string) => node?.label || node?.id || id
+
+  for (const entry of rows) {
+    const pathNodes = Array.isArray(entry.pathNodes) ? entry.pathNodes : []
+    if (!pathNodes.length) {
+      root.entries.push(entry)
+      continue
+    }
+    let current = root
+    const startIndex = isRootNode(pathNodes[0]) ? 1 : 0
+    for (let i = startIndex; i < pathNodes.length; i += 1) {
+      const info = pathNodes[i]
+      const nodeId = getNodeId(info)
+      const nodeLabel = getNodeLabel(info, nodeId)
+      const nodeName = info?.name || ''
+      let child = current.children.find((item) => item.id === nodeId && item.label === nodeLabel)
+      if (!child) {
+        child = { id: nodeId, label: nodeLabel, name: nodeName, children: [], entries: [] }
+        current.children.push(child)
+      }
+      current = child
+    }
+    current.entries.push(entry)
+  }
+
+  return root
+})
+
+const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
+  const root = whereUsedTree.value
+  if (!root) return []
+  const rows: WhereUsedTreeRow[] = []
+  const walk = (node: WhereUsedTreeNode, depth: number, path: string) => {
+    const key = path ? `${path}/${node.id}` : node.id
+    rows.push({
+      key,
+      id: node.id,
+      label: node.label,
+      name: node.name,
+      depth,
+      hasChildren: node.children.length > 0,
+      entries: node.entries,
+      entryCount: node.entries.length,
+    })
+    for (const child of node.children) {
+      walk(child, depth + 1, key)
+    }
+  }
+  walk(root, 0, '')
+  return rows
+})
+
 const compareLeftId = ref('')
 const compareRightId = ref('')
 const compareMode = ref('')
@@ -1548,47 +1867,50 @@ const compareRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
 const bomCompare = ref<any | null>(null)
 const compareLoading = ref(false)
 const compareError = ref('')
+const compareSchema = ref<CompareSchemaPayload | null>(null)
+const compareSchemaLoading = ref(false)
+const compareSchemaError = ref('')
 const productFieldCatalog = [
   {
     key: 'name',
     label: '名称',
-    source: 'properties.name / item.name',
-    fallback: 'item.id',
+    source: 'name / properties.name / properties.item_name / properties.title',
+    fallback: 'id',
   },
   {
     key: 'partNumber',
     label: '料号',
-    source: 'item_number / code',
-    fallback: 'product.code',
+    source: 'partNumber / item_number / part_number / number / code',
+    fallback: 'properties.internal_reference',
   },
   {
     key: 'revision',
     label: '版本',
-    source: 'properties.version / revision',
-    fallback: 'product.version',
+    source: 'revision / version / properties.revision / properties.version / properties.version_label',
+    fallback: '-',
   },
   {
     key: 'status',
     label: '状态',
-    source: 'item.state / properties.state',
+    source: 'status / state / properties.state / properties.status',
     fallback: '-',
   },
   {
     key: 'itemType',
     label: '类型',
-    source: 'item.type / item_type_id',
+    source: 'itemType / item.type / properties.item_type',
     fallback: 'Part',
   },
   {
     key: 'createdAt',
     label: '创建时间',
-    source: 'created_on / properties.created_on / created_at',
+    source: 'created_at / created_on / properties.created_at / properties.created_on',
     fallback: 'search hit created_at',
   },
   {
     key: 'updatedAt',
     label: '更新时间',
-    source: 'modified_on / properties.modified_on / updated_at',
+    source: 'updated_at / modified_on / properties.updated_at / properties.modified_on',
     fallback: 'search hit updated_at',
   },
 ]
@@ -1596,61 +1918,61 @@ const documentFieldCatalog = [
   {
     key: 'name',
     label: '名称',
-    source: 'file metadata filename',
-    fallback: 'file_id',
+    source: 'name / metadata.filename / filename',
+    fallback: 'id',
   },
   {
     key: 'document_type',
     label: '类型',
-    source: 'metadata.document_type / entry.document_type',
+    source: 'document_type / metadata.document_type / file_type',
     fallback: 'other',
   },
   {
     key: 'engineering_revision',
     label: '版本',
-    source: 'metadata.document_version / entry.document_version',
+    source: 'engineering_revision / document_version / metadata.document_version',
     fallback: '-',
   },
   {
     key: 'file_size',
     label: '大小',
-    source: 'metadata.file_size / entry.file_size',
+    source: 'file_size / metadata.file_size',
     fallback: '0',
   },
   {
     key: 'mime_type',
     label: 'MIME',
-    source: 'metadata.mime_type / entry.file_type',
+    source: 'mime_type / metadata.mime_type / file_type',
     fallback: '-',
   },
   {
     key: 'preview_url',
     label: '预览链接',
-    source: 'file preview url',
+    source: 'preview_url / metadata.preview_url',
     fallback: '-',
   },
   {
     key: 'download_url',
     label: '下载链接',
-    source: 'file download url',
+    source: 'download_url / metadata.download_url',
     fallback: '-',
   },
   {
     key: 'engineering_state',
     label: '文档角色',
-    source: 'file_role / entry.engineering_state',
+    source: 'engineering_state / file_role / metadata.file_role',
     fallback: 'unknown',
   },
   {
     key: 'created_at',
     label: '创建时间',
-    source: 'metadata.created_at',
+    source: 'created_at / metadata.created_at',
     fallback: '-',
   },
   {
     key: 'updated_at',
     label: '更新时间',
-    source: 'metadata.updated_at',
+    source: 'updated_at / metadata.updated_at',
     fallback: '-',
   },
 ]
@@ -1658,31 +1980,31 @@ const approvalFieldCatalog = [
   {
     key: 'title',
     label: '标题',
-    source: 'eco.name',
-    fallback: 'eco.id',
+    source: 'title / eco.name',
+    fallback: 'id',
   },
   {
     key: 'status',
     label: '状态',
-    source: 'eco.state',
+    source: 'status / eco.state',
     fallback: 'pending',
   },
   {
     key: 'request_type',
     label: '类型',
-    source: 'eco.eco_type',
+    source: 'request_type / eco.eco_type',
     fallback: 'eco',
   },
   {
     key: 'requester_name',
     label: '发起人',
-    source: 'eco.created_by_name / created_by_id',
+    source: 'requester_name / created_by_name / created_by_id',
     fallback: 'unknown',
   },
   {
     key: 'created_at',
     label: '创建时间',
-    source: 'eco.created_at',
+    source: 'created_at / updated_at',
     fallback: '-',
   },
   {
@@ -1694,75 +2016,106 @@ const approvalFieldCatalog = [
   {
     key: 'product_number',
     label: '产品编号',
-    source: 'eco.product_number',
+    source: 'product_number / product.partNumber / product.code',
     fallback: '-',
   },
   {
     key: 'product_name',
     label: '产品名称',
-    source: 'eco.product_name',
+    source: 'product_name / product.name',
     fallback: '-',
   },
 ]
-const compareFieldCatalog = [
+const compareFieldLabels: Record<string, string> = {
+  quantity: '数量',
+  uom: '单位',
+  find_num: 'Find #',
+  refdes: 'Refdes',
+  effectivity_from: '生效起',
+  effectivity_to: '生效止',
+  effectivities: '生效性',
+  substitutes: '替代件',
+}
+const defaultCompareFieldCatalog = [
   {
     key: 'quantity',
-    label: '数量',
+    label: compareFieldLabels.quantity,
     source: 'relationship.properties.quantity',
     severity: 'major',
     normalized: 'float',
   },
   {
     key: 'uom',
-    label: '单位',
+    label: compareFieldLabels.uom,
     source: 'relationship.properties.uom',
     severity: 'major',
     normalized: 'uppercase',
   },
   {
     key: 'find_num',
-    label: 'Find #',
+    label: compareFieldLabels.find_num,
     source: 'relationship.properties.find_num',
     severity: 'minor',
     normalized: 'trim',
   },
   {
     key: 'refdes',
-    label: 'Refdes',
+    label: compareFieldLabels.refdes,
     source: 'relationship.properties.refdes',
     severity: 'minor',
     normalized: 'list/uppercase',
   },
   {
     key: 'effectivity_from',
-    label: '生效起',
+    label: compareFieldLabels.effectivity_from,
     source: 'relationship.properties.effectivity_from',
     severity: 'major',
     normalized: 'iso datetime',
   },
   {
     key: 'effectivity_to',
-    label: '生效止',
+    label: compareFieldLabels.effectivity_to,
     source: 'relationship.properties.effectivity_to',
     severity: 'major',
     normalized: 'iso datetime',
   },
   {
     key: 'effectivities',
-    label: '生效性',
+    label: compareFieldLabels.effectivities,
     source: 'effectivity records (includeEffectivity)',
     severity: 'major',
     normalized: 'sorted tuples',
   },
   {
     key: 'substitutes',
-    label: '替代件',
+    label: compareFieldLabels.substitutes,
     source: 'substitutes (includeSubstitutes)',
     severity: 'minor',
     normalized: 'sorted tuples',
   },
 ]
-const compareFieldLabelMap = new Map(compareFieldCatalog.map((entry) => [entry.key, entry.label]))
+const compareFieldCatalog = computed(() => {
+  const fields = compareSchema.value?.line_fields || []
+  if (!fields.length) return defaultCompareFieldCatalog
+  return fields.map((entry) => ({
+    key: entry.field,
+    label: compareFieldLabels[entry.field] || entry.field,
+    source: entry.description || '-',
+    severity: entry.severity || 'info',
+    normalized: entry.normalized || '-',
+  }))
+})
+const compareFieldLabelMap = computed(
+  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry.label]))
+)
+const compareFieldMetaMap = computed(
+  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry]))
+)
+const compareLineKeyOptions = computed(() => {
+  const options = compareSchema.value?.line_key_options
+  return options && options.length ? options : DEFAULT_COMPARE_LINE_KEYS
+})
+const compareModeOptions = computed(() => compareSchema.value?.compare_modes || [])
 
 const bomLineId = ref('')
 const substitutes = ref<any | null>(null)
@@ -1775,31 +2128,33 @@ const substituteNote = ref('')
 const substitutesActionStatus = ref('')
 const substitutesActionError = ref('')
 const substitutesMutating = ref(false)
+const substitutesDeletingId = ref<string | null>(null)
 
 const documentsFiltered = computed(() => {
   const needle = documentFilter.value.trim().toLowerCase()
   if (!needle) return documents.value
   return documents.value.filter((doc: any) => {
     const tokens = [
-      doc.name,
-      doc.document_type,
-      doc.engineering_revision,
-      doc.engineering_state,
-      doc.mime_type,
+      getDocumentName(doc),
+      getDocumentType(doc),
+      getDocumentRevision(doc),
+      getDocumentRole(doc),
+      getDocumentMime(doc),
       doc.id,
+      doc.file_id,
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
 })
 
 const documentSortConfig: SortConfig = {
-  name: { type: 'string', accessor: (doc: any) => doc.name },
-  type: { type: 'string', accessor: (doc: any) => doc.document_type },
-  revision: { type: 'string', accessor: (doc: any) => doc.engineering_revision },
-  role: { type: 'string', accessor: (doc: any) => doc.engineering_state },
-  mime: { type: 'string', accessor: (doc: any) => doc.mime_type },
-  size: { type: 'number', accessor: (doc: any) => doc.file_size },
-  updated: { type: 'date', accessor: (doc: any) => doc.updated_at || doc.created_at },
+  name: { type: 'string', accessor: (doc: any) => getDocumentName(doc) },
+  type: { type: 'string', accessor: (doc: any) => getDocumentType(doc) },
+  revision: { type: 'string', accessor: (doc: any) => getDocumentRevision(doc) },
+  role: { type: 'string', accessor: (doc: any) => getDocumentRole(doc) },
+  mime: { type: 'string', accessor: (doc: any) => getDocumentMime(doc) },
+  size: { type: 'number', accessor: (doc: any) => getDocumentSize(doc) ?? 0 },
+  updated: { type: 'date', accessor: (doc: any) => getDocumentUpdatedAt(doc) },
 }
 
 const documentsSorted = computed(() =>
@@ -1813,23 +2168,23 @@ const approvalsFiltered = computed(() => {
   if (!needle) return approvals.value
   return approvals.value.filter((entry: any) => {
     const tokens = [
-      entry.title,
-      entry.requester_name,
-      entry.requester_id,
-      entry.product_name,
-      entry.product_number,
+      getApprovalTitle(entry),
+      getApprovalRequester(entry),
+      getApprovalProductName(entry),
+      getApprovalProductNumber(entry),
       entry.product_id,
+      entry.id,
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
 })
 
 const approvalSortConfig: SortConfig = {
-  created: { type: 'date', accessor: (entry: any) => entry.created_at },
-  title: { type: 'string', accessor: (entry: any) => entry.title },
-  status: { type: 'string', accessor: (entry: any) => entry.status },
-  requester: { type: 'string', accessor: (entry: any) => entry.requester_name || entry.requester_id },
-  product: { type: 'string', accessor: (entry: any) => entry.product_number || entry.product_id },
+  created: { type: 'date', accessor: (entry: any) => getApprovalCreatedAt(entry) },
+  title: { type: 'string', accessor: (entry: any) => getApprovalTitle(entry) },
+  status: { type: 'string', accessor: (entry: any) => getApprovalStatus(entry) },
+  requester: { type: 'string', accessor: (entry: any) => getApprovalRequester(entry) },
+  product: { type: 'string', accessor: (entry: any) => getApprovalProductNumber(entry) },
 }
 
 const approvalsSorted = computed(() =>
@@ -1853,10 +2208,13 @@ const substitutesRows = computed(() => {
   if (!needle) return list
   return list.filter((entry: any) => {
     const tokens = [
-      entry?.substitute_part?.item_number,
-      entry?.substitute_part?.name,
-      entry?.part?.item_number,
-      entry?.part?.name,
+      getSubstituteNumber(entry),
+      getSubstituteName(entry),
+      getSubstituteStatus(entry),
+      getItemNumber(entry.part),
+      getItemName(entry.part),
+      formatSubstituteRank(entry),
+      formatSubstituteNote(entry),
       entry?.id,
       entry?.relationship?.id,
     ]
@@ -2045,6 +2403,7 @@ function resetAll() {
   whereUsedItemId.value = ''
   whereUsedRecursive.value = true
   whereUsedMaxLevels.value = DEFAULT_WHERE_USED_MAX_LEVELS
+  whereUsedView.value = 'table'
   whereUsed.value = null
   whereUsedError.value = ''
   compareLeftId.value = ''
@@ -2060,6 +2419,8 @@ function resetAll() {
   compareRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
   bomCompare.value = null
   compareError.value = ''
+  compareSchemaError.value = ''
+  compareSchemaLoading.value = false
   bomLineId.value = ''
   substitutes.value = null
   substitutesError.value = ''
@@ -2070,6 +2431,7 @@ function resetAll() {
   substitutesActionStatus.value = ''
   substitutesActionError.value = ''
   substitutesMutating.value = false
+  substitutesDeletingId.value = null
   whereUsedFilter.value = ''
   syncQueryParams({
     searchQuery: '',
@@ -2223,6 +2585,12 @@ async function loadProduct() {
       throw new Error(result.error?.message || '加载产品失败')
     }
     product.value = result.data
+    if (productView.value.partNumber && !productItemNumber.value) {
+      productItemNumber.value = productView.value.partNumber === '-' ? '' : productView.value.partNumber
+    }
+    if (productView.value.itemType && (itemType.value === DEFAULT_ITEM_TYPE || !itemType.value)) {
+      itemType.value = productView.value.itemType
+    }
     if (result.data?.id && result.data.id !== productId.value) {
       productId.value = String(result.data.id)
       syncQueryParams({ productId: productId.value })
@@ -2253,6 +2621,48 @@ async function loadBom() {
     bomError.value = error?.message || '加载 BOM 失败'
   } finally {
     bomLoading.value = false
+  }
+}
+
+function resolveBomChildId(item: any): string {
+  const value = item?.component_id ?? item?.componentId ?? item?.child_id ?? item?.childId
+  return value ? String(value) : ''
+}
+
+function resolveBomLineId(item: any): string {
+  const value = item?.id ?? item?.bom_line_id ?? item?.relationship_id ?? item?.relationshipId
+  return value ? String(value) : ''
+}
+
+function applyWhereUsedFromBom(item: any) {
+  const childId = resolveBomChildId(item)
+  if (!childId) {
+    setDeepLinkMessage('BOM 行缺少子件 ID', true)
+    return
+  }
+  whereUsedItemId.value = childId
+  whereUsedError.value = ''
+  scheduleQuerySync({ whereUsedItemId: childId })
+  setDeepLinkMessage(`已填入 Where-Used 子件 ID：${childId}`)
+  if (!whereUsedLoading.value) {
+    void loadWhereUsed()
+  }
+}
+
+function applySubstitutesFromBom(item: any) {
+  const lineId = resolveBomLineId(item)
+  if (!lineId) {
+    setDeepLinkMessage('BOM 行缺少行 ID', true)
+    return
+  }
+  bomLineId.value = lineId
+  substitutesError.value = ''
+  substitutesActionStatus.value = ''
+  substitutesActionError.value = ''
+  scheduleQuerySync({ bomLineId: lineId })
+  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${lineId}`)
+  if (!substitutesLoading.value) {
+    void loadSubstitutes()
   }
 }
 
@@ -2587,6 +2997,52 @@ async function loadWhereUsed() {
   }
 }
 
+function applyCompareSchemaDefaults(schema: CompareSchemaPayload | null) {
+  if (!schema) return
+  const defaults = schema.defaults || {}
+  const defaultMaxLevels = Number(defaults.max_levels)
+  if (Number.isFinite(defaultMaxLevels) && compareMaxLevels.value === DEFAULT_COMPARE_MAX_LEVELS) {
+    compareMaxLevels.value = defaultMaxLevels
+  }
+  const defaultLineKey = typeof defaults.line_key === 'string' ? defaults.line_key.trim() : ''
+  if (defaultLineKey && (compareLineKey.value === DEFAULT_COMPARE_LINE_KEY || !compareLineKey.value)) {
+    compareLineKey.value = defaultLineKey
+  }
+  if (
+    typeof defaults.include_substitutes === 'boolean' &&
+    compareIncludeSubstitutes.value === false
+  ) {
+    compareIncludeSubstitutes.value = defaults.include_substitutes
+  }
+  if (
+    typeof defaults.include_effectivity === 'boolean' &&
+    compareIncludeEffectivity.value === false
+  ) {
+    compareIncludeEffectivity.value = defaults.include_effectivity
+  }
+}
+
+async function loadBomCompareSchema() {
+  compareSchemaLoading.value = true
+  compareSchemaError.value = ''
+  try {
+    const result = await apiPost<{ ok: boolean; data: CompareSchemaPayload; error?: { message?: string } }>(
+      '/api/federation/plm/query',
+      { operation: 'bom_compare_schema' }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '加载 BOM 对比字段失败')
+    }
+    compareSchema.value = result.data
+    applyCompareSchemaDefaults(result.data)
+  } catch (error: any) {
+    handleAuthError(error)
+    compareSchemaError.value = error?.message || '加载 BOM 对比字段失败'
+  } finally {
+    compareSchemaLoading.value = false
+  }
+}
+
 async function loadBomCompare() {
   if (!compareLeftId.value || !compareRightId.value) return
   syncQueryParams({
@@ -2680,6 +3136,7 @@ function buildSubstituteProperties(): Record<string, unknown> | undefined {
 
 async function addSubstitute() {
   if (!bomLineId.value || !substituteItemId.value) return
+  const requestedId = substituteItemId.value
   substitutesMutating.value = true
   substitutesActionError.value = ''
   substitutesActionStatus.value = ''
@@ -2696,7 +3153,11 @@ async function addSubstitute() {
     if (!result.ok) {
       throw new Error(result.error?.message || '新增替代件失败')
     }
-    substitutesActionStatus.value = '已新增替代件'
+    const relationId = result.data?.substitute_id
+    const itemId = result.data?.substitute_item_id || requestedId
+    substitutesActionStatus.value = relationId
+      ? `已新增替代件 ${itemId}（关系 ${relationId}）`
+      : `已新增替代件 ${itemId}`
     substituteItemId.value = ''
     substituteRank.value = ''
     substituteNote.value = ''
@@ -2719,6 +3180,7 @@ async function removeSubstitute(entry: any) {
   if (!window.confirm('确认删除该替代件？')) {
     return
   }
+  substitutesDeletingId.value = substituteId
   substitutesMutating.value = true
   substitutesActionError.value = ''
   substitutesActionStatus.value = ''
@@ -2734,13 +3196,14 @@ async function removeSubstitute(entry: any) {
     if (!result.ok) {
       throw new Error(result.error?.message || '删除替代件失败')
     }
-    substitutesActionStatus.value = '已删除替代件'
+    substitutesActionStatus.value = `已删除替代件 ${substituteId}`
     await loadSubstitutes()
   } catch (error: any) {
     handleAuthError(error)
     substitutesActionError.value = error?.message || '删除替代件失败'
   } finally {
     substitutesMutating.value = false
+    substitutesDeletingId.value = null
   }
 }
 
@@ -2752,6 +3215,162 @@ function getItemNumber(item?: Record<string, any> | null): string {
 function getItemName(item?: Record<string, any> | null): string {
   if (!item) return '-'
   return item.name || item.label || item.title || '-'
+}
+
+function normalizeText(value: unknown, fallback = '-'): string {
+  if (value === undefined || value === null || value === '') return fallback
+  return String(value)
+}
+
+function getDocumentMetadata(doc: Record<string, any>): Record<string, any> {
+  return doc?.metadata || {}
+}
+
+function getDocumentName(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(
+    doc?.name ||
+      metadata.filename ||
+      doc?.filename ||
+      metadata.file_name ||
+      doc?.file_name ||
+      doc?.id,
+    '-',
+  )
+}
+
+function getDocumentType(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(
+    doc?.document_type || metadata.document_type || doc?.file_type || metadata.file_type,
+    '-',
+  )
+}
+
+function getDocumentRevision(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(
+    doc?.engineering_revision ||
+      doc?.revision ||
+      metadata.document_version ||
+      doc?.document_version,
+    '-',
+  )
+}
+
+function getDocumentRole(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(
+    doc?.engineering_state || metadata.file_role || doc?.file_role || metadata.role,
+    '-',
+  )
+}
+
+function getDocumentMime(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.mime_type || metadata.mime_type || doc?.file_type, '-')
+}
+
+function getDocumentSize(doc: Record<string, any>): number | undefined {
+  const metadata = getDocumentMetadata(doc)
+  const raw = doc?.file_size ?? metadata.file_size ?? doc?.size
+  if (raw === undefined || raw === null || raw === '') return undefined
+  const size = Number(raw)
+  return Number.isFinite(size) ? size : undefined
+}
+
+function getDocumentUpdatedAt(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(
+    doc?.updated_at || doc?.created_at || metadata.updated_at || metadata.created_at,
+    '',
+  )
+}
+
+function getDocumentPreviewUrl(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.preview_url || metadata.preview_url, '')
+}
+
+function getDocumentDownloadUrl(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.download_url || metadata.download_url, '')
+}
+
+function getApprovalTitle(entry: Record<string, any>): string {
+  return normalizeText(entry?.title || entry?.name || entry?.id, '-')
+}
+
+function getApprovalStatus(entry: Record<string, any>): string {
+  return normalizeText(entry?.status || entry?.state, '-')
+}
+
+function getApprovalType(entry: Record<string, any>): string {
+  return normalizeText(entry?.request_type || entry?.type || entry?.eco_type, '-')
+}
+
+function getApprovalRequester(entry: Record<string, any>): string {
+  return normalizeText(
+    entry?.requester_name ||
+      entry?.created_by_name ||
+      entry?.requester_id ||
+      entry?.created_by_id,
+    '-',
+  )
+}
+
+function getApprovalCreatedAt(entry: Record<string, any>): string {
+  return normalizeText(entry?.created_at || entry?.createdAt || entry?.updated_at, '')
+}
+
+function getApprovalProductNumber(entry: Record<string, any>): string {
+  return normalizeText(
+    entry?.product_number ||
+      entry?.productNumber ||
+      entry?.product_code ||
+      entry?.product_id,
+    '-',
+  )
+}
+
+function getApprovalProductName(entry: Record<string, any>): string {
+  return normalizeText(entry?.product_name || entry?.productName, '-')
+}
+
+function getSubstitutePart(entry: Record<string, any>): Record<string, any> {
+  return entry?.substitute_part || entry?.substitutePart || {}
+}
+
+function getSubstituteNumber(entry: Record<string, any>): string {
+  const part = getSubstitutePart(entry)
+  return part.item_number || part.itemNumber || part.code || part.id || entry.id || '-'
+}
+
+function getSubstituteId(entry: Record<string, any>): string {
+  const part = getSubstitutePart(entry)
+  return part.id || entry.id || '-'
+}
+
+function getSubstituteName(entry: Record<string, any>): string {
+  const part = getSubstitutePart(entry)
+  return part.name || part.label || part.title || '-'
+}
+
+function getSubstituteStatus(entry: Record<string, any>): string {
+  const part = getSubstitutePart(entry)
+  return part.state || part.status || part.lifecycle_state || '-'
+}
+
+function formatSubstituteRank(entry: Record<string, any>): string {
+  const value = entry?.rank ?? entry?.relationship?.properties?.rank
+  if (value === undefined || value === null || value === '') return '-'
+  return String(value)
+}
+
+function formatSubstituteNote(entry: Record<string, any>): string {
+  const value = entry?.relationship?.properties?.note || entry?.relationship?.properties?.comment
+  if (value === undefined || value === null || value === '') return '-'
+  return String(value)
 }
 
 function getCompareParent(entry?: Record<string, any> | null): Record<string, any> | null {
@@ -2775,17 +3394,45 @@ function getCompareChild(entry?: Record<string, any> | null): Record<string, any
 }
 
 function getCompareProp(entry: Record<string, any>, key: string): string {
-  const props = entry?.properties || entry?.relationship || {}
+  const props = entry?.line || entry?.properties || entry?.relationship || {}
   const value = props[key]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
 function getWhereUsedRefdes(entry: Record<string, any>): string {
-  const rel = entry?.relationship || {}
-  const value = rel.refdes ?? rel.properties?.refdes ?? rel.properties?.ref_des
+  const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
+  const value = line.refdes ?? line.ref_des
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
+}
+
+function getWhereUsedLineValue(entry: Record<string, any>, key: string): string {
+  const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
+  const value = line[key]
+  if (value === undefined || value === null || value === '') return '-'
+  return String(value)
+}
+
+function getWhereUsedTreeEntry(row: WhereUsedTreeRow): Record<string, any> | null {
+  return row.entries.length ? row.entries[0] : null
+}
+
+function getWhereUsedTreeLineValue(row: WhereUsedTreeRow, key: string): string {
+  const entry = getWhereUsedTreeEntry(row)
+  if (!entry) return '-'
+  return getWhereUsedLineValue(entry, key)
+}
+
+function getWhereUsedTreeRefdes(row: WhereUsedTreeRow): string {
+  const entry = getWhereUsedTreeEntry(row)
+  if (!entry) return '-'
+  return getWhereUsedRefdes(entry)
+}
+
+function getWhereUsedTreeRelationship(row: WhereUsedTreeRow): string {
+  const entry = getWhereUsedTreeEntry(row)
+  return entry?.relationship?.id || '-'
 }
 
 function normalizeEffectiveAt(value: string): string | undefined {
@@ -3491,7 +4138,7 @@ function formatEffectivity(entry: Record<string, any>): string {
 }
 
 function formatSubstituteCount(entry: Record<string, any>): string {
-  const props = entry?.properties || entry?.relationship || {}
+  const props = entry?.line || entry?.properties || entry?.relationship || {}
   const subs = props.substitutes || entry?.substitutes
   if (Array.isArray(subs)) {
     return subs.length ? String(subs.length) : '-'
@@ -3545,9 +4192,18 @@ function exportWhereUsedCsv() {
     getItemNumber(entry.parent),
     getItemName(entry.parent),
     entry.pathLabel || '',
-    String(entry.relationship?.quantity ?? ''),
-    String(entry.relationship?.uom ?? ''),
-    String(entry.relationship?.find_num ?? ''),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'quantity')
+      return value === '-' ? '' : value
+    })(),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'uom')
+      return value === '-' ? '' : value
+    })(),
+    (() => {
+      const value = getWhereUsedLineValue(entry, 'find_num')
+      return value === '-' ? '' : value
+    })(),
     (() => {
       const refdes = getWhereUsedRefdes(entry)
       return refdes === '-' ? '' : refdes
@@ -3607,17 +4263,33 @@ function exportBomCompareCsv() {
 }
 
 function exportSubstitutesCsv() {
-  const headers = ['bom_line_id', 'substitute_id', 'substitute_number', 'substitute_name', 'part_id', 'part_number', 'part_name', 'rank', 'note', 'relationship_id']
+  const normalize = (value: string) => (value === '-' ? '' : value)
+  const headers = [
+    'bom_line_id',
+    'substitute_id',
+    'substitute_number',
+    'substitute_name',
+    'substitute_status',
+    'part_id',
+    'part_number',
+    'part_name',
+    'part_status',
+    'rank',
+    'note',
+    'relationship_id',
+  ]
   const rows = substitutesRows.value.map((entry: any) => [
     String(substitutes.value?.bom_line_id || ''),
-    String(entry.substitute_part?.id || entry.id || ''),
-    String(entry.substitute_part?.item_number || ''),
-    String(entry.substitute_part?.name || ''),
+    normalize(String(getSubstituteId(entry) || '')),
+    normalize(String(getSubstituteNumber(entry) || '')),
+    normalize(String(getSubstituteName(entry) || '')),
+    normalize(String(getSubstituteStatus(entry) || '')),
     String(entry.part?.id || ''),
     String(entry.part?.item_number || ''),
     String(entry.part?.name || ''),
-    String(entry.rank ?? entry.relationship?.properties?.rank ?? ''),
-    String(entry.relationship?.properties?.note || entry.relationship?.properties?.comment || ''),
+    String(entry.part?.state || entry.part?.status || ''),
+    normalize(String(formatSubstituteRank(entry) || '')),
+    normalize(String(formatSubstituteNote(entry) || '')),
     String(entry.relationship?.id || ''),
   ])
   downloadCsv(`plm-substitutes-${Date.now()}.csv`, headers, rows)
@@ -3627,15 +4299,15 @@ function exportDocumentsCsv() {
   const headers = ['id', 'name', 'document_type', 'revision', 'role', 'mime_type', 'file_size', 'updated_at', 'preview_url', 'download_url']
   const rows = documentsSorted.value.map((doc: any) => [
     String(doc.id || ''),
-    String(doc.name || ''),
-    String(doc.document_type || ''),
-    String(doc.engineering_revision || ''),
-    String(doc.engineering_state || ''),
-    String(doc.mime_type || ''),
-    String(doc.file_size ?? ''),
-    String(doc.updated_at || doc.created_at || ''),
-    String(doc.preview_url || ''),
-    String(doc.download_url || ''),
+    String(getDocumentName(doc) || ''),
+    String(getDocumentType(doc) || ''),
+    String(getDocumentRevision(doc) || ''),
+    String(getDocumentRole(doc) || ''),
+    String(getDocumentMime(doc) || ''),
+    String(getDocumentSize(doc) ?? ''),
+    String(getDocumentUpdatedAt(doc) || ''),
+    String(getDocumentPreviewUrl(doc) || ''),
+    String(getDocumentDownloadUrl(doc) || ''),
   ])
   downloadCsv(`plm-documents-${Date.now()}.csv`, headers, rows)
 }
@@ -3644,13 +4316,13 @@ function exportApprovalsCsv() {
   const headers = ['id', 'title', 'status', 'type', 'requester', 'created_at', 'product_number', 'product_name', 'product_id']
   const rows = approvalsSorted.value.map((entry: any) => [
     String(entry.id || ''),
-    String(entry.title || ''),
-    String(entry.status || ''),
-    String(entry.request_type || ''),
-    String(entry.requester_name || entry.requester_id || ''),
-    String(entry.created_at || ''),
-    String(entry.product_number || ''),
-    String(entry.product_name || ''),
+    String(getApprovalTitle(entry) || ''),
+    String(getApprovalStatus(entry) || ''),
+    String(getApprovalType(entry) || ''),
+    String(getApprovalRequester(entry) || ''),
+    String(getApprovalCreatedAt(entry) || ''),
+    String(getApprovalProductNumber(entry) || ''),
+    String(getApprovalProductName(entry) || ''),
     String(entry.product_id || ''),
   ])
   downloadCsv(`plm-approvals-${Date.now()}.csv`, headers, rows)
@@ -3663,8 +4335,74 @@ function approvalStatusClass(value?: string): string {
   return 'status-pending'
 }
 
+function itemStatusClass(value?: string): string {
+  const normalized = (value || '').toLowerCase()
+  if (!normalized || normalized === '-') return 'status-neutral'
+  if (['released', 'active', 'approved', 'valid'].includes(normalized)) return 'status-approved'
+  if (['obsolete', 'rejected', 'inactive', 'invalid'].includes(normalized)) return 'status-rejected'
+  if (['draft', 'inwork', 'pending', 'review', 'wip'].includes(normalized)) return 'status-pending'
+  return 'status-neutral'
+}
+
 function getCompareFieldLabel(field: string): string {
-  return compareFieldLabelMap.get(field) || field
+  return compareFieldLabelMap.value.get(field) || field
+}
+
+function normalizeCompareSeverity(value?: string): string {
+  const normalized = (value || '').toLowerCase()
+  if (normalized === 'major') return 'major'
+  if (normalized === 'minor') return 'minor'
+  return 'info'
+}
+
+function compareSeverityRank(value?: string): number {
+  const normalized = normalizeCompareSeverity(value)
+  if (normalized === 'major') return 3
+  if (normalized === 'minor') return 2
+  return 1
+}
+
+function getCompareEntrySeverity(entry: Record<string, any>): string {
+  const explicit = entry?.severity
+  if (explicit) return normalizeCompareSeverity(explicit)
+  const changes = Array.isArray(entry?.changes) ? entry.changes : []
+  if (!changes.length) return 'info'
+  let best = 'info'
+  let bestRank = 0
+  for (const change of changes) {
+    const meta = compareFieldMetaMap.value.get(change.field)
+    const resolved = normalizeCompareSeverity(change.severity || meta?.severity)
+    const rank = compareSeverityRank(resolved)
+    if (rank > bestRank) {
+      best = resolved
+      bestRank = rank
+    }
+  }
+  return best
+}
+
+function getCompareChangeRows(entry: Record<string, any>) {
+  const changes = Array.isArray(entry?.changes) ? entry.changes : []
+  const rows = changes.map((change: any, idx: number) => {
+    const meta = compareFieldMetaMap.value.get(change.field)
+    const severity = normalizeCompareSeverity(change.severity || meta?.severity)
+    return {
+      key: `${change.field || 'field'}-${idx}`,
+      field: change.field,
+      label: meta?.label || change.field || '-',
+      description: meta?.source || '',
+      normalized: meta?.normalized || '',
+      severity,
+      left: change.left,
+      right: change.right,
+    }
+  })
+  rows.sort((a: any, b: any) => {
+    const rankDiff = compareSeverityRank(b.severity) - compareSeverityRank(a.severity)
+    if (rankDiff) return rankDiff
+    return String(a.label).localeCompare(String(b.label))
+  })
+  return rows
 }
 
 function formatDiffValue(value: unknown): string {
@@ -3686,6 +4424,9 @@ onMounted(() => {
   documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
   approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
   customDeepLinkPresets.value = loadStoredPresets()
+  if (['valid', 'expiring'].includes(authState.value)) {
+    void loadBomCompareSchema()
+  }
   void applyQueryState()
 })
 
@@ -3778,6 +4519,12 @@ watch(
     })
   }
 )
+
+watch(authState, (value) => {
+  if (!compareSchema.value && !compareSchemaLoading.value && ['valid', 'expiring'].includes(value)) {
+    void loadBomCompareSchema()
+  }
+})
 
 watch(
   () => [
@@ -4169,6 +4916,66 @@ input:focus, select:focus, textarea:focus {
   text-align: left;
 }
 
+.where-used-tree {
+  border: 1px solid #eef0f2;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.tree-row {
+  display: grid;
+  grid-template-columns: 1.6fr 1.2fr repeat(4, 0.6fr) 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef0f2;
+  font-size: 12px;
+}
+
+.tree-row:last-child {
+  border-bottom: none;
+}
+
+.tree-header {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #374151;
+}
+
+.tree-cell {
+  min-width: 0;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tree-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex-shrink: 0;
+}
+
+.tree-dot.leaf {
+  background: #60a5fa;
+}
+
+.tree-root .tree-dot {
+  background: #111827;
+}
+
+.tree-multi {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
 .summary-row {
   display: flex;
   gap: 16px;
@@ -4293,9 +5100,26 @@ input:focus, select:focus, textarea:focus {
   margin-left: 4px;
 }
 
+.diff-field-meta {
+  display: inline-flex;
+  margin-left: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
 .diff-value {
   font-size: 12px;
   color: #111827;
+}
+
+.diff-value-left,
+.diff-value-right {
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-arrow {
+  margin: 0 6px;
+  color: #9ca3af;
 }
 
 .field-map {
