@@ -1169,6 +1169,15 @@
                 <td>
                   <div class="mono">{{ entry.line_key || '-' }}</div>
                   <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
+                      @click="applySubstitutesFromCompare(entry)"
+                    >
+                      替代件
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -1212,6 +1221,15 @@
                 <td>
                   <div class="mono">{{ entry.line_key || '-' }}</div>
                   <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
+                      @click="applySubstitutesFromCompare(entry)"
+                    >
+                      替代件
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -1276,6 +1294,15 @@
                 <td>
                   <div class="mono">{{ entry.line_key || '-' }}</div>
                   <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
+                      @click="applySubstitutesFromCompare(entry)"
+                    >
+                      替代件
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -2675,6 +2702,17 @@ function resolveBomLineId(item: any): string {
   return value ? String(value) : ''
 }
 
+function resolveCompareLineId(entry: any): string {
+  const value =
+    entry?.relationship_id ??
+    entry?.relationship?.id ??
+    entry?.line?.relationship_id ??
+    entry?.line?.id ??
+    entry?.line_id ??
+    ''
+  return value ? String(value) : ''
+}
+
 function applyWhereUsedFromBom(item: any) {
   const childId = resolveBomChildId(item)
   if (!childId) {
@@ -2694,6 +2732,23 @@ function applySubstitutesFromBom(item: any) {
   const lineId = resolveBomLineId(item)
   if (!lineId) {
     setDeepLinkMessage('BOM 行缺少行 ID', true)
+    return
+  }
+  bomLineId.value = lineId
+  substitutesError.value = ''
+  substitutesActionStatus.value = ''
+  substitutesActionError.value = ''
+  scheduleQuerySync({ bomLineId: lineId })
+  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${lineId}`)
+  if (!substitutesLoading.value) {
+    void loadSubstitutes()
+  }
+}
+
+function applySubstitutesFromCompare(entry: any) {
+  const lineId = resolveCompareLineId(entry)
+  if (!lineId) {
+    setDeepLinkMessage('对比行缺少关系 ID', true)
     return
   }
   bomLineId.value = lineId
