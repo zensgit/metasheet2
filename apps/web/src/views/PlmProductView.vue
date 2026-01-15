@@ -912,6 +912,7 @@
             <div class="tree-cell">Find #</div>
             <div class="tree-cell">Refdes</div>
             <div class="tree-cell">关系 ID</div>
+            <div class="tree-cell">操作</div>
           </div>
           <div
             v-for="row in whereUsedTreeRows"
@@ -930,6 +931,15 @@
             <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'find_num') }}</div>
             <div class="tree-cell">{{ getWhereUsedTreeRefdes(row) }}</div>
             <div class="tree-cell">{{ getWhereUsedTreeRelationship(row) }}</div>
+            <div class="tree-cell">
+              <button
+                class="btn ghost mini"
+                :disabled="!row.id || productLoading"
+                @click="applyProductFromWhereUsedRow(row)"
+              >
+                产品
+              </button>
+            </div>
           </div>
         </div>
         <table v-else class="data-table">
@@ -2793,6 +2803,15 @@ function applyProductFromWhereUsed(entry: any) {
   productError.value = ''
   setDeepLinkMessage(`已切换到产品：${parentId}`)
   void loadProduct()
+}
+
+function applyProductFromWhereUsedRow(row: WhereUsedTreeRow) {
+  const parentId = row?.id
+  if (!parentId) {
+    setDeepLinkMessage('缺少父件 ID', true)
+    return
+  }
+  applyProductFromWhereUsed({ parent: { id: parentId } })
 }
 
 function applyCompareFromProduct(side: 'left' | 'right') {
@@ -5104,7 +5123,7 @@ input:focus, select:focus, textarea:focus {
 
 .tree-row {
   display: grid;
-  grid-template-columns: 1.6fr 1.2fr repeat(4, 0.6fr) 1fr;
+  grid-template-columns: 1.6fr 1.2fr repeat(4, 0.6fr) 1fr 0.8fr;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
