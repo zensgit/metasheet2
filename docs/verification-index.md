@@ -227,6 +227,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260115_144649.png`
   - Report: `docs/verification-plm-ui-regression-20260115_144649.md`
   - Artifact: `artifacts/plm-ui-regression-20260115_144649.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_164310.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_164310.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -239,6 +241,7 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260110_191218.md`
   - Report: `docs/verification-plm-ui-full-20260115_142128.md`
   - Report: `docs/verification-plm-ui-full-20260115_144649.md`
+  - Report: `docs/verification-plm-ui-full-20260115_164310.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`

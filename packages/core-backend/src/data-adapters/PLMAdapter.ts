@@ -9,6 +9,8 @@ export interface PLMProduct {
   code: string
   version: string
   status: string
+  partNumber?: string
+  revision?: string
   description?: string
   itemType?: string
   properties?: Record<string, unknown>
@@ -48,6 +50,7 @@ export interface ApprovalRequest {
   status: 'pending' | 'approved' | 'rejected'
   created_at: string
   product_id?: string
+  product_number?: string
   product_name?: string
 }
 
@@ -384,25 +387,40 @@ interface YuantusItemFile {
   id?: string
   file_id?: string
   filename?: string
+  file_name?: string
   file_role?: string
   description?: string
-  file_type?: string
-  file_size?: number
-  document_type?: string
-  document_version?: string
-  preview_url?: string
-  download_url?: string
-}
-
-interface YuantusFileMetadata {
-  id?: string
-  filename?: string
   file_type?: string
   mime_type?: string
   file_size?: number
   document_type?: string
   document_version?: string
+  preview_url?: string
+  download_url?: string
+  author?: string
+  source_system?: string
+  source_version?: string
   created_at?: string
+  updated_at?: string
+}
+
+interface YuantusFileMetadata {
+  id?: string
+  filename?: string
+  file_name?: string
+  file_role?: string
+  file_type?: string
+  mime_type?: string
+  file_size?: number
+  document_type?: string
+  document_version?: string
+  preview_url?: string
+  download_url?: string
+  created_at?: string
+  updated_at?: string
+  author?: string
+  source_system?: string
+  source_version?: string
 }
 
 interface YuantusEco {
@@ -410,8 +428,13 @@ interface YuantusEco {
   name?: string
   eco_type?: string
   product_id?: string
+  product_number?: string
+  product_name?: string
   state?: string
   created_by_id?: string | number
+  created_by_name?: string
+  requester_id?: string | number
+  requester_name?: string
   created_at?: string
   updated_at?: string
 }
@@ -804,13 +827,17 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   private mapProductFields(raw: PLMProductRaw): PLMProduct {
+    const code = raw.internal_reference || raw.code || ''
+    const version = raw.version || '1.0'
     return {
       id: String(raw.id),
       name: raw.name || '',
-      code: raw.internal_reference || raw.code || '',
-      version: raw.version || '1.0',
+      code,
+      version,
       status: raw.engineering_state || raw.status || 'draft',
       description: raw.description,
+      partNumber: code || undefined,
+      revision: version || undefined,
       created_at: raw.created_at || raw.create_date || new Date().toISOString(),
       updated_at: raw.updated_at || raw.write_date || new Date().toISOString()
     }
@@ -835,21 +862,35 @@ export class PLMAdapter extends HTTPAdapter {
 
   private mapYuantusProductFields(hit: YuantusSearchHit): PLMProduct {
     const props = hit.properties || {}
-    const name = String(hit.name || props.name || props.item_name || '')
-    const code = String(hit.item_number || props.item_number || props.code || props.internal_reference || '')
-    const version = String(props.version || props.revision || props.rev || '')
-    const status = String(hit.state || props.state || '')
+    const name = String(hit.name || props.name || props.item_name || props.title || '')
+    const partNumber = String(
+      hit.item_number ||
+        props.item_number ||
+        props.part_number ||
+        props.number ||
+        props.code ||
+        props.internal_reference ||
+        ''
+    )
+    const revision = String(props.revision || props.version || props.rev || props.version_label || '')
+    const status = String(hit.state || props.state || props.status || '')
     const description = (hit.description || props.description) ? String(hit.description || props.description) : undefined
     const createdAt = this.toIsoString(hit.created_at)
     const updatedAt = this.toIsoString(hit.updated_at) || createdAt
 
+    const itemType = hit.item_type_id || (props.item_type as string | undefined) || (props.itemType as string | undefined) || (props.type as string | undefined)
+
     return {
       id: String(hit.id),
       name: name || String(hit.id),
-      code,
-      version,
+      code: partNumber,
+      version: revision,
       status,
       description,
+      partNumber: partNumber || undefined,
+      revision: revision || undefined,
+      itemType: itemType ? String(itemType) : undefined,
+      properties: props,
       created_at: createdAt,
       updated_at: updatedAt,
     }
@@ -858,21 +899,26 @@ export class PLMAdapter extends HTTPAdapter {
   private mapYuantusItemFields(item: YuantusItem): PLMProduct {
     const props = item.properties || {}
     const name = String(props.name || props.item_name || props.title || '')
-    const code = String(props.item_number || props.number || props.code || props.internal_reference || '')
-    const version = String(props.version || props.revision || props.rev || '')
+    const partNumber = String(
+      props.item_number || props.part_number || props.number || props.code || props.internal_reference || ''
+    )
+    const revision = String(props.revision || props.version || props.rev || props.version_label || '')
     const status = String(item.state || props.state || '')
     const description = props.description ? String(props.description) : undefined
     const createdAt = this.toIsoString(item.created_on || props.created_at || props.created_on || props.create_date)
     const updatedAt = this.toIsoString(item.modified_on || props.updated_at || props.modified_on || props.write_date) || createdAt
+    const itemType = item.type || (props.item_type as string | undefined) || (props.itemType as string | undefined) || (props.type as string | undefined)
 
     return {
       id: String(item.id),
       name: name || String(item.id),
-      code,
-      version,
+      code: partNumber,
+      version: revision,
       status,
       description,
-      itemType: item.type,
+      partNumber: partNumber || undefined,
+      revision: revision || undefined,
+      itemType: itemType ? String(itemType) : undefined,
       properties: props,
       created_at: createdAt,
       updated_at: updatedAt,
@@ -913,16 +959,27 @@ export class PLMAdapter extends HTTPAdapter {
     const baseNameIsId = base.name === base.id
     const hitName = hit.name || hitProps.name || hitProps.item_name
     const name = (!base.name || baseNameIsId) && hitName ? String(hitName) : base.name
-    const code = base.code || String(
-      hit.item_number || hitProps.item_number || hitProps.code || hitProps.internal_reference || ''
+    const partNumber = base.partNumber || String(
+      hit.item_number ||
+        hitProps.item_number ||
+        hitProps.part_number ||
+        hitProps.number ||
+        hitProps.code ||
+        hitProps.internal_reference ||
+        ''
     )
-    const version = base.version || String(hitProps.version || hitProps.revision || hitProps.rev || '')
+    const revision = base.revision || String(
+      hitProps.revision || hitProps.version || hitProps.rev || hitProps.version_label || ''
+    )
+    const code = base.code || partNumber
+    const version = base.version || revision
     const status = base.status || String(hit.state || hitProps.state || '')
     const description = base.description ?? (
       hit.description || hitProps.description ? String(hit.description || hitProps.description) : undefined
     )
     const createdAt = base.created_at ? base.created_at : this.toIsoString(hit.created_at)
     const updatedAt = base.updated_at ? base.updated_at : (this.toIsoString(hit.updated_at) || createdAt)
+    const itemType = base.itemType || hit.item_type_id
 
     return {
       ...base,
@@ -931,7 +988,9 @@ export class PLMAdapter extends HTTPAdapter {
       version: version || base.version,
       status: status || base.status,
       description,
-      itemType: base.itemType || hit.item_type_id,
+      partNumber: partNumber || base.partNumber,
+      revision: revision || base.revision,
+      itemType: itemType || base.itemType,
       properties: mergedProps,
       created_at: createdAt,
       updated_at: updatedAt,
@@ -940,15 +999,19 @@ export class PLMAdapter extends HTTPAdapter {
 
   private mapYuantusDocumentFields(entry: YuantusItemFile, metadata?: YuantusFileMetadata | null): PLMDocument {
     const fileId = String(entry.file_id || entry.id || '')
-    const filename = metadata?.filename || entry.filename || fileId
+    const filename = metadata?.filename || metadata?.file_name || entry.filename || entry.file_name || fileId
     const documentType = String(metadata?.document_type || entry.document_type || entry.file_type || 'other')
     const documentVersion = metadata?.document_version || entry.document_version
     const fileSize = this.toNumber(metadata?.file_size ?? entry.file_size, 0)
-    const mimeType = metadata?.mime_type || entry.file_type
-    const createdAt = this.toIsoString(metadata?.created_at) || new Date().toISOString()
-    const fileRole = entry.file_role ? String(entry.file_role) : ''
-    const previewUrl = this.resolveUrl(entry.preview_url)
-    const downloadUrl = this.resolveUrl(entry.download_url)
+    const mimeType = metadata?.mime_type || entry.mime_type || entry.file_type
+    const createdAt = this.toIsoString(metadata?.created_at || entry.created_at) || new Date().toISOString()
+    const updatedAt = this.toIsoString(metadata?.updated_at || entry.updated_at || entry.created_at) || createdAt
+    const fileRole = String(metadata?.file_role || entry.file_role || '')
+    const author = metadata?.author || entry.author
+    const sourceSystem = metadata?.source_system || entry.source_system
+    const sourceVersion = metadata?.source_version || entry.source_version
+    const previewUrl = this.resolveUrl(metadata?.preview_url || entry.preview_url)
+    const downloadUrl = this.resolveUrl(metadata?.download_url || entry.download_url)
 
     return {
       id: fileId || String(entry.id || ''),
@@ -965,13 +1028,22 @@ export class PLMAdapter extends HTTPAdapter {
       download_url: downloadUrl,
       metadata: {
         file_id: fileId || entry.id,
+        filename: filename || undefined,
         file_role: fileRole || undefined,
+        document_type: documentType || undefined,
         document_version: documentVersion || undefined,
+        file_size: fileSize,
+        mime_type: mimeType || undefined,
         preview_url: previewUrl,
         download_url: downloadUrl,
+        created_at: createdAt,
+        updated_at: updatedAt,
+        author: author || undefined,
+        source_system: sourceSystem || undefined,
+        source_version: sourceVersion || undefined,
       },
       created_at: createdAt,
-      updated_at: createdAt,
+      updated_at: updatedAt,
     }
   }
 
@@ -986,17 +1058,27 @@ export class PLMAdapter extends HTTPAdapter {
     return 'pending'
   }
 
-  private mapYuantusEcoApproval(eco: YuantusEco): ApprovalRequest {
-    const requesterId = eco.created_by_id ? String(eco.created_by_id) : 'unknown'
+  private mapYuantusEcoApproval(eco: YuantusEco, product?: PLMProduct): ApprovalRequest {
+    const requesterId = eco.requester_id
+      ? String(eco.requester_id)
+      : eco.created_by_id
+        ? String(eco.created_by_id)
+        : 'unknown'
+    const requesterName = eco.requester_name || eco.created_by_name || requesterId
+    const productId = eco.product_id ? String(eco.product_id) : undefined
+    const productNumber = eco.product_number || product?.partNumber || product?.code
+    const productName = eco.product_name || product?.name
     return {
       id: eco.id,
       request_type: eco.eco_type || 'eco',
       title: eco.name || eco.id,
       requester_id: requesterId,
-      requester_name: requesterId,
+      requester_name: requesterName,
       status: this.mapYuantusApprovalStatus(eco.state),
-      created_at: this.toIsoString(eco.created_at) || new Date().toISOString(),
-      product_id: eco.product_id,
+      created_at: this.toIsoString(eco.created_at || eco.updated_at) || new Date().toISOString(),
+      product_id: productId,
+      product_number: productNumber,
+      product_name: productName,
     }
   }
 
@@ -1131,7 +1213,33 @@ export class PLMAdapter extends HTTPAdapter {
       const filtered = options?.status
         ? result.data.filter((eco) => this.mapYuantusApprovalStatus(eco.state) === options.status)
         : result.data
-      const mapped = filtered.map((eco) => this.mapYuantusEcoApproval(eco))
+      const productIds = new Set<string>()
+      for (const eco of filtered) {
+        if (eco.product_id) {
+          productIds.add(String(eco.product_id))
+        }
+      }
+
+      const productMap = new Map<string, PLMProduct>()
+      if (productIds.size > 0) {
+        await Promise.all(
+          Array.from(productIds).map(async (productId) => {
+            try {
+              const product = await this.getProductById(productId)
+              if (product) {
+                productMap.set(productId, product)
+              }
+            } catch (_err) {
+              // Ignore product lookup failures to keep approvals responsive.
+            }
+          })
+        )
+      }
+
+      const mapped = filtered.map((eco) => {
+        const product = eco.product_id ? productMap.get(String(eco.product_id)) : undefined
+        return this.mapYuantusEcoApproval(eco, product)
+      })
 
       return {
         data: mapped,
