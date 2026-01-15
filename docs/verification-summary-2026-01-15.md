@@ -9,7 +9,11 @@
 - PLM BOM tools seed: `artifacts/plm-bom-tools-20260115_144649.md`
 - PLM UI regression: `docs/verification-plm-ui-regression-20260115_144649.md`
 - PLM UI full regression: `docs/verification-plm-ui-full-20260115_144649.md`
+- PLM BOM tools seed: `artifacts/plm-bom-tools-20260115_164310.md`
+- PLM UI regression: `docs/verification-plm-ui-regression-20260115_164310.md`
+- PLM UI full regression: `docs/verification-plm-ui-full-20260115_164310.md`
 
 ## Environment Notes
-- Yuantus PLM ran on `http://127.0.0.1:7911`.
+- Yuantus PLM ran on `http://127.0.0.1:7910`.
+- MetaSheet API ran on `http://127.0.0.1:7788` and UI on `http://127.0.0.1:8899`.
 - `PLM_URL` set to the same base to avoid stale defaults.
