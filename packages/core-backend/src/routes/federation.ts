@@ -1007,6 +1007,80 @@ export function federationRouter(injector?: Injector): Router {
             })
           }
 
+          if (operation === 'documents') {
+            const resolvedProductId = productId
+              || toStringParam(filterParams.product_id ?? filterParams.productId)
+            if (!resolvedProductId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'productId is required for documents',
+                },
+              })
+            }
+
+            const role = toStringParam(filterParams.role ?? filterParams.file_role ?? filterParams.fileRole)
+            const includeMetadata =
+              toBoolParam(filterParams.include_metadata ?? filterParams.includeMetadata)
+              ?? true
+
+            const result = await adapter.getProductDocuments(resolvedProductId, {
+              limit: pagination?.limit,
+              offset: pagination?.offset,
+              role,
+              includeMetadata,
+            })
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: {
+                productId: resolvedProductId,
+                items: result.data,
+                total: result.metadata?.totalCount ?? result.data.length,
+                limit: pagination?.limit ?? 100,
+                offset: pagination?.offset ?? 0,
+              },
+            })
+          }
+
+          if (operation === 'approvals') {
+            const resolvedProductId = productId
+              || toStringParam(filterParams.product_id ?? filterParams.productId)
+            const status = toStringParam(filterParams.status ?? filterParams.state)
+            const requesterId = toStringParam(
+              filterParams.requester_id ?? filterParams.requesterId ?? filterParams.created_by_id ?? filterParams.createdById
+            )
+
+            const result = await adapter.getApprovals({
+              productId: resolvedProductId,
+              status,
+              requesterId,
+              limit: pagination?.limit,
+              offset: pagination?.offset,
+            })
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: {
+                items: result.data,
+                total: result.metadata?.totalCount ?? result.data.length,
+                limit: pagination?.limit ?? 100,
+                offset: pagination?.offset ?? 0,
+              },
+            })
+          }
+
           if (operation === 'cad_properties') {
             const resolvedFileId = fileId
               || toStringParam(filterParams.file_id ?? filterParams.fileId ?? filterParams.document_id ?? filterParams.documentId ?? filterParams.id)

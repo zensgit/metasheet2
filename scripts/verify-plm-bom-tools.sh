@@ -178,12 +178,19 @@ PY
 }
 
 TS="$(date +%s)"
-PARENT_A=$(create_part "UI-CMP-A-$TS" "UI Compare A")
-PARENT_B=$(create_part "UI-CMP-B-$TS" "UI Compare B")
-CHILD_X=$(create_part "UI-CMP-X-$TS" "UI Child X")
-CHILD_Y=$(create_part "UI-CMP-Y-$TS" "UI Child Y")
-CHILD_Z=$(create_part "UI-CMP-Z-$TS" "UI Child Z")
-SUB_PART=$(create_part "UI-CMP-S-$TS" "UI Substitute")
+PARENT_A_NUMBER="UI-CMP-A-$TS"
+PARENT_B_NUMBER="UI-CMP-B-$TS"
+CHILD_X_NUMBER="UI-CMP-X-$TS"
+CHILD_Y_NUMBER="UI-CMP-Y-$TS"
+CHILD_Z_NUMBER="UI-CMP-Z-$TS"
+SUB_PART_NUMBER="UI-CMP-S-$TS"
+
+PARENT_A=$(create_part "$PARENT_A_NUMBER" "UI Compare A")
+PARENT_B=$(create_part "$PARENT_B_NUMBER" "UI Compare B")
+CHILD_X=$(create_part "$CHILD_X_NUMBER" "UI Child X")
+CHILD_Y=$(create_part "$CHILD_Y_NUMBER" "UI Child Y")
+CHILD_Z=$(create_part "$CHILD_Z_NUMBER" "UI Child Z")
+SUB_PART=$(create_part "$SUB_PART_NUMBER" "UI Substitute")
 
 if [[ -z "$PARENT_A" || -z "$PARENT_B" || -z "$CHILD_X" || -z "$CHILD_Y" || -z "$CHILD_Z" || -z "$SUB_PART" ]]; then
   echo "Failed to create sample items in PLM." >&2
@@ -208,6 +215,46 @@ SUB_RESP=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/bom/$BOM_LINE_X/substitutes" "
 SUB_REL_ID=$(echo "$SUB_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("substitute_id",""))')
 if [[ -z "$SUB_REL_ID" ]]; then
   echo "Failed to add substitute: $SUB_RESP" >&2
+  exit 1
+fi
+
+DOC_ROLE="drawing"
+DOC_VERSION="A"
+DOC_FILENAME="UI-DOC-$TS.txt"
+DOC_PATH="$OUTPUT_DIR/$DOC_FILENAME"
+printf "UI document %s\n" "$TS" > "$DOC_PATH"
+
+DOC_UPLOAD=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/file/upload" "${HEADERS[@]}" \
+  -F "file=@${DOC_PATH};filename=${DOC_FILENAME}" \
+  -F "author=metasheet-ui" \
+  -F "source_system=metasheet" \
+  -F "source_version=ui-regression" \
+  -F "document_version=${DOC_VERSION}")
+DOC_FILE_ID=$(echo "$DOC_UPLOAD" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+if [[ -z "$DOC_FILE_ID" ]]; then
+  echo "Failed to upload document: $DOC_UPLOAD" >&2
+  exit 1
+fi
+
+ATTACH_RESP=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/file/attach" "${HEADERS[@]}" \
+  -H 'content-type: application/json' \
+  -d "{\"item_id\":\"$PARENT_A\",\"file_id\":\"$DOC_FILE_ID\",\"file_role\":\"$DOC_ROLE\",\"description\":\"UI regression document\"}")
+DOC_ATTACHMENT_ID=$(echo "$ATTACH_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+if [[ -z "$DOC_ATTACHMENT_ID" ]]; then
+  echo "Failed to attach document: $ATTACH_RESP" >&2
+  exit 1
+fi
+
+rm -f "$DOC_PATH"
+
+ECO_NAME="UI ECO $TS"
+ECO_RESP=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/eco" "${HEADERS[@]}" \
+  -H 'content-type: application/json' \
+  -d "{\"name\":\"$ECO_NAME\",\"eco_type\":\"bom\",\"product_id\":\"$PARENT_A\",\"description\":\"UI approval test\",\"priority\":\"normal\"}")
+ECO_ID=$(echo "$ECO_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+ECO_STATE=$(echo "$ECO_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))')
+if [[ -z "$ECO_ID" ]]; then
+  echo "Failed to create ECO: $ECO_RESP" >&2
   exit 1
 fi
 
@@ -284,9 +331,12 @@ resp_subs=$(curl -sS -X POST "${API_BASE}/api/federation/plm/query" \
   -H "Authorization: Bearer $METASHEET_TOKEN" \
   -d "$payload_subs")
 
-python3 - <<'PY' "$resp_where" "$resp_compare" "$resp_subs" "$report_json"
+python3 - <<'PY' "$resp_where" "$resp_compare" "$resp_subs" "$report_json" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A" "$PARENT_A_NUMBER" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$SUB_REL_ID"
 import json,sys
 where_raw, compare_raw, subs_raw, out = sys.argv[1:5]
+doc_file_id, doc_filename, doc_role, doc_version, doc_attachment_id = sys.argv[5:10]
+eco_id, eco_name, eco_state, product_id, product_number = sys.argv[10:15]
+parent_b, child_x, child_y, child_z, sub_part, bom_line, sub_rel_id = sys.argv[15:22]
 def load(raw):
     try:
         return json.loads(raw)
@@ -296,6 +346,34 @@ data = {
   "where_used": load(where_raw),
   "bom_compare": load(compare_raw),
   "substitutes": load(subs_raw),
+  "documents": {
+    "item_id": product_id,
+    "file_id": doc_file_id,
+    "filename": doc_filename,
+    "file_role": doc_role,
+    "document_version": doc_version,
+    "attachment_id": doc_attachment_id,
+  },
+  "approvals": {
+    "eco_id": eco_id,
+    "eco_name": eco_name,
+    "eco_state": eco_state,
+    "product_id": product_id,
+    "product_number": product_number,
+  },
+  "fixtures": {
+    "parent_a": product_id,
+    "parent_b": parent_b,
+    "child_x": child_x,
+    "child_y": child_y,
+    "child_z": child_z,
+    "substitute": sub_part,
+    "bom_line_id": bom_line,
+    "substitute_rel_id": sub_rel_id,
+    "doc_file_id": doc_file_id,
+    "doc_attachment_id": doc_attachment_id,
+    "eco_id": eco_id,
+  },
 }
 with open(out, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -322,10 +400,11 @@ if not subs:
 print("PLM BOM tools verification: OK")
 PY
 
-python3 - <<'PY' "$report_json" "$report_md" "$API_BASE" "$PLM_BASE_URL" "$PARENT_A" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X"
+python3 - <<'PY' "$report_json" "$report_md" "$API_BASE" "$PLM_BASE_URL" "$PARENT_A" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A_NUMBER"
 import json,sys
 report_json, report_md, api_base, plm_base = sys.argv[1:5]
 parent_a, parent_b, child_x, child_y, child_z, sub_part, bom_line = sys.argv[5:12]
+doc_file_id, doc_filename, doc_role, doc_version, doc_attachment_id, eco_id, eco_name, eco_state, parent_a_number = sys.argv[12:21]
 
 data=json.load(open(report_json, encoding="utf-8"))
 where_data = (data.get("where_used") or {}).get("data") or {}
@@ -353,6 +432,15 @@ lines = [
     f"- Child Z: {child_z}",
     f"- Substitute Part: {sub_part}",
     f"- BOM Line ID (Child X): {bom_line}",
+    f"- Parent A Number: {parent_a_number}",
+    f"- Document File ID: {doc_file_id}",
+    f"- Document Name: {doc_filename}",
+    f"- Document Role: {doc_role}",
+    f"- Document Version: {doc_version}",
+    f"- Document Attachment ID: {doc_attachment_id}",
+    f"- ECO ID: {eco_id}",
+    f"- ECO Name: {eco_name}",
+    f"- ECO State: {eco_state}",
     "",
     "## Results",
     f"- Where-Used count: {where_count}",

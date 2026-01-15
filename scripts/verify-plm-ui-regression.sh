@@ -35,6 +35,11 @@ PLM_COMPARE_RIGHT_ID="${PLM_COMPARE_RIGHT_ID:-}"
 PLM_COMPARE_EXPECT="${PLM_COMPARE_EXPECT:-}"
 PLM_BOM_LINE_ID="${PLM_BOM_LINE_ID:-}"
 PLM_SUBSTITUTE_EXPECT="${PLM_SUBSTITUTE_EXPECT:-}"
+PLM_DOCUMENT_NAME="${PLM_DOCUMENT_NAME:-}"
+PLM_DOCUMENT_ROLE="${PLM_DOCUMENT_ROLE:-}"
+PLM_DOCUMENT_REVISION="${PLM_DOCUMENT_REVISION:-}"
+PLM_APPROVAL_TITLE="${PLM_APPROVAL_TITLE:-}"
+PLM_APPROVAL_PRODUCT_NUMBER="${PLM_APPROVAL_PRODUCT_NUMBER:-}"
 
 if [[ ! -x "$TSX_BIN" ]]; then
   TSX_BIN="tsx"
@@ -126,8 +131,19 @@ if subs:
     part = (subs[0].get("substitute_part") or subs[0].get("part") or {})
     sub_expect = part.get("name") or part.get("item_number") or ""
 
-print(search_query)
-print(product_id)
+documents = data.get("documents") or {}
+doc_name = documents.get("filename") or documents.get("name") or ""
+doc_role = documents.get("file_role") or ""
+doc_revision = documents.get("document_version") or ""
+
+approvals = data.get("approvals") or {}
+approval_title = approvals.get("eco_name") or approvals.get("title") or ""
+approval_product_number = approvals.get("product_number") or ""
+preferred_product_id = approvals.get("product_id") or documents.get("item_id") or product_id
+preferred_search_query = approval_product_number or search_query
+
+print(preferred_search_query)
+print(preferred_product_id)
 print(where_used.get("item_id") or "")
 print(where_used_expect)
 print(compare_left)
@@ -135,6 +151,11 @@ print(compare_right)
 print(compare_expect)
 print(bom_line_id)
 print(sub_expect)
+print(doc_name)
+print(doc_role)
+print(doc_revision)
+print(approval_title)
+print(approval_product_number)
 PY
   )
 
@@ -147,10 +168,15 @@ PY
   if [[ -z "$PLM_COMPARE_EXPECT" ]]; then PLM_COMPARE_EXPECT="${values[6]:-}"; fi
   if [[ -z "$PLM_BOM_LINE_ID" ]]; then PLM_BOM_LINE_ID="${values[7]:-}"; fi
   if [[ -z "$PLM_SUBSTITUTE_EXPECT" ]]; then PLM_SUBSTITUTE_EXPECT="${values[8]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_NAME" ]]; then PLM_DOCUMENT_NAME="${values[9]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_ROLE" ]]; then PLM_DOCUMENT_ROLE="${values[10]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_REVISION" ]]; then PLM_DOCUMENT_REVISION="${values[11]:-}"; fi
+  if [[ -z "$PLM_APPROVAL_TITLE" ]]; then PLM_APPROVAL_TITLE="${values[12]:-}"; fi
+  if [[ -z "$PLM_APPROVAL_PRODUCT_NUMBER" ]]; then PLM_APPROVAL_PRODUCT_NUMBER="${values[13]:-}"; fi
 fi
 
-if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" ]]; then
-  echo "Missing required PLM IDs; set PLM_SEARCH_QUERY/PLM_PRODUCT_ID/PLM_WHERE_USED_ID/PLM_COMPARE_LEFT_ID/PLM_COMPARE_RIGHT_ID/PLM_BOM_LINE_ID." >&2
+if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" || -z "$PLM_DOCUMENT_NAME" || -z "$PLM_DOCUMENT_ROLE" || -z "$PLM_APPROVAL_TITLE" ]]; then
+  echo "Missing required PLM inputs; set PLM_SEARCH_QUERY/PLM_PRODUCT_ID/PLM_WHERE_USED_ID/PLM_COMPARE_LEFT_ID/PLM_COMPARE_RIGHT_ID/PLM_BOM_LINE_ID/PLM_DOCUMENT_NAME/PLM_DOCUMENT_ROLE/PLM_APPROVAL_TITLE." >&2
   exit 1
 fi
 
@@ -268,11 +294,16 @@ const compareRightId = process.env.PLM_COMPARE_RIGHT_ID;
 const compareExpect = process.env.PLM_COMPARE_EXPECT || '';
 const bomLineId = process.env.PLM_BOM_LINE_ID;
 const substituteExpect = process.env.PLM_SUBSTITUTE_EXPECT || '';
+const docName = process.env.PLM_DOCUMENT_NAME;
+const docRole = process.env.PLM_DOCUMENT_ROLE;
+const docRevision = process.env.PLM_DOCUMENT_REVISION;
+const approvalTitle = process.env.PLM_APPROVAL_TITLE;
+const approvalProductNumber = process.env.PLM_APPROVAL_PRODUCT_NUMBER || '';
 const url = process.env.UI_BASE || 'http://localhost:8899/plm';
 const screenshotPath = process.env.SCREENSHOT_PATH;
 const headless = process.env.HEADLESS !== 'false';
 
-if (!token || !searchQuery || !productId || !whereUsedId || !compareLeftId || !compareRightId || !bomLineId) {
+if (!token || !searchQuery || !productId || !whereUsedId || !compareLeftId || !compareRightId || !bomLineId || !docName || !docRole || !approvalTitle) {
   console.error('Missing required inputs.');
   process.exit(1);
 }
@@ -333,6 +364,21 @@ async function waitOptional(scope, text) {
   await substitutesSection.locator('button:has-text("查询")').click();
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
 
+  const documentsSection = page.locator('section:has-text("关联文档")');
+  await documentsSection.locator('button:has-text("刷新文档")').click();
+  const docRows = documentsSection.locator('table tbody tr');
+  await docRows.first().waitFor({ timeout: 60000 });
+  await waitOptional(documentsSection.locator('table'), docName);
+  await waitOptional(documentsSection.locator('table'), docRole);
+  await waitOptional(documentsSection.locator('table'), docRevision || '');
+
+  const approvalsSection = page.locator('section:has-text("审批")');
+  await approvalsSection.locator('button:has-text("刷新审批")').click();
+  const approvalRows = approvalsSection.locator('table tbody tr');
+  await approvalRows.first().waitFor({ timeout: 60000 });
+  await waitOptional(approvalsSection.locator('table'), approvalTitle);
+  await waitOptional(approvalsSection.locator('table'), approvalProductNumber);
+
   await page.waitForTimeout(1000);
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await browser.close();
@@ -350,6 +396,11 @@ PLM_COMPARE_RIGHT_ID="$PLM_COMPARE_RIGHT_ID" \
 PLM_COMPARE_EXPECT="$PLM_COMPARE_EXPECT" \
 PLM_BOM_LINE_ID="$PLM_BOM_LINE_ID" \
 PLM_SUBSTITUTE_EXPECT="$PLM_SUBSTITUTE_EXPECT" \
+PLM_DOCUMENT_NAME="$PLM_DOCUMENT_NAME" \
+PLM_DOCUMENT_ROLE="$PLM_DOCUMENT_ROLE" \
+PLM_DOCUMENT_REVISION="$PLM_DOCUMENT_REVISION" \
+PLM_APPROVAL_TITLE="$PLM_APPROVAL_TITLE" \
+PLM_APPROVAL_PRODUCT_NUMBER="$PLM_APPROVAL_PRODUCT_NUMBER" \
 UI_BASE="$UI_BASE" \
 SCREENSHOT_PATH="$SCREENSHOT_PATH" \
 HEADLESS="$HEADLESS" \
@@ -359,7 +410,7 @@ cat > "$REPORT_PATH" <<REPORT_EOF
 # Verification: PLM UI Regression (Search -> Detail -> BOM Tools) - ${STAMP}
 
 ## Goal
-Verify the end-to-end PLM UI flow: search -> select -> load product -> where-used -> BOM compare -> substitutes.
+Verify the end-to-end PLM UI flow: search -> select -> load product -> where-used -> BOM compare -> substitutes -> documents -> approvals.
 
 ## Environment
 - UI: ${UI_BASE}
@@ -378,12 +429,19 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - BOM compare expect: ${PLM_COMPARE_EXPECT:-n/a}
 - Substitute BOM line: ${PLM_BOM_LINE_ID}
 - Substitute expect: ${PLM_SUBSTITUTE_EXPECT:-n/a}
+- Document name: ${PLM_DOCUMENT_NAME}
+- Document role: ${PLM_DOCUMENT_ROLE}
+- Document revision: ${PLM_DOCUMENT_REVISION:-n/a}
+- Approval title: ${PLM_APPROVAL_TITLE}
+- Approval product number: ${PLM_APPROVAL_PRODUCT_NUMBER:-n/a}
 
 ## Results
 - Search returns matching row and selection loads product detail.
 - Where-used query completes.
 - BOM compare completes.
 - Substitutes query completes.
+- Documents table loads with expected document metadata.
+- Approvals table loads with expected approval record.
 - Screenshot: ${SCREENSHOT_PATH}
 REPORT_EOF
 
