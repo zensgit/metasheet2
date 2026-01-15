@@ -15,6 +15,7 @@
 - PLM BOM tools seed: `artifacts/plm-bom-tools-20260115_173732.md`
 - PLM UI regression: `docs/verification-plm-ui-regression-20260115_173732.md`
 - PLM UI full regression: `docs/verification-plm-ui-full-20260115_173732.md`
+- PLM UI BOM compare field mapping: `docs/verification-plm-ui-bom-compare-fieldmap-20260115_1759.md`
 
 ## Environment Notes
 - Yuantus PLM ran on `http://127.0.0.1:7910`.
