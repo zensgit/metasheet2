@@ -10,6 +10,7 @@ SMOKE_DATABASE_URL="${SMOKE_DATABASE_URL:-postgresql://metasheet:metasheet@127.0
 RBAC_BYPASS="${RBAC_BYPASS:-true}"
 SMOKE_SKIP_WEB="${SMOKE_SKIP_WEB:-false}"
 RUN_UNIVER_UI_SMOKE="${RUN_UNIVER_UI_SMOKE:-false}"
+RUN_WEB_REACT_UNIVER_SMOKE="${RUN_WEB_REACT_UNIVER_SMOKE:-false}"
 RUN_PLM_UI_REGRESSION="${RUN_PLM_UI_REGRESSION:-false}"
 PLM_BASE_URL="${PLM_BASE_URL:-http://127.0.0.1:7910}"
 PLM_URL="${PLM_URL:-$PLM_BASE_URL}"
@@ -29,6 +30,7 @@ echo "- SMOKE_DATABASE_URL: ${SMOKE_DATABASE_URL}"
 echo "- RBAC_BYPASS: ${RBAC_BYPASS}"
 echo "- SMOKE_SKIP_WEB: ${SMOKE_SKIP_WEB}"
 echo "- RUN_UNIVER_UI_SMOKE: ${RUN_UNIVER_UI_SMOKE}"
+echo "- RUN_WEB_REACT_UNIVER_SMOKE: ${RUN_WEB_REACT_UNIVER_SMOKE}"
 echo "- RUN_PLM_UI_REGRESSION: ${RUN_PLM_UI_REGRESSION}"
 echo "- PLM_BASE_URL: ${PLM_BASE_URL}"
 echo "- PLM_URL: ${PLM_URL}"
@@ -122,6 +124,13 @@ if [[ "${RUN_UNIVER_UI_SMOKE}" == "true" ]]; then
   echo "Running Univer UI smoke..."
   API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" AUTO_START=false \
     node scripts/verify-univer-ui-smoke.mjs
+fi
+
+if [[ "${RUN_WEB_REACT_UNIVER_SMOKE}" == "true" ]]; then
+  echo ""
+  echo "Running Web React Univer UI smoke..."
+  API_BASE="${API_BASE}" WEB_BASE="${WEB_BASE}" OUTPUT_DIR="${OUTPUT_DIR}" \
+    node scripts/verify-web-react-univer-smoke.mjs
 fi
 
 if [[ "${RUN_PLM_UI_REGRESSION}" == "true" ]]; then
