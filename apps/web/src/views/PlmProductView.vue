@@ -1221,6 +1221,13 @@
                     >
                       替代件
                     </button>
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry)"
+                      @click="copyCompareLineId(entry)"
+                    >
+                      复制 Line
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -1288,6 +1295,13 @@
                       @click="applySubstitutesFromCompare(entry)"
                     >
                       替代件
+                    </button>
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry)"
+                      @click="copyCompareLineId(entry)"
+                    >
+                      复制 Line
                     </button>
                   </div>
                 </td>
@@ -1377,6 +1391,13 @@
                       @click="applySubstitutesFromCompare(entry)"
                     >
                       替代件
+                    </button>
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareLineId(entry)"
+                      @click="copyCompareLineId(entry)"
+                    >
+                      复制 Line
                     </button>
                   </div>
                 </td>
@@ -2824,6 +2845,28 @@ function resolveCompareLineId(entry: any): string {
   return value ? String(value) : ''
 }
 
+async function copyToClipboard(value: string): Promise<boolean> {
+  if (!value) return false
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch (_err) {
+    // fallback below
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'absolute'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  return ok
+}
+
 function resolveWhereUsedParentId(entry: any): string {
   const value =
     entry?.parent?.id ??
@@ -2934,6 +2977,20 @@ function applyWhereUsedFromCompare(entry: any) {
   if (!whereUsedLoading.value) {
     void loadWhereUsed()
   }
+}
+
+async function copyCompareLineId(entry: any) {
+  const lineId = resolveCompareLineId(entry)
+  if (!lineId) {
+    setDeepLinkMessage('缺少 Line ID', true)
+    return
+  }
+  const ok = await copyToClipboard(lineId)
+  if (!ok) {
+    setDeepLinkMessage('复制失败，请手动复制', true)
+    return
+  }
+  setDeepLinkMessage(`已复制 Line ID：${lineId}`)
 }
 
 function applyProductFromSubstitute(entry: any, target: 'substitute' | 'part') {
