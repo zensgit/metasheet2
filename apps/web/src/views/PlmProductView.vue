@@ -3831,9 +3831,26 @@ function getCompareChild(entry?: Record<string, any> | null): Record<string, any
   return null
 }
 
+function resolveCompareLineProps(entry?: Record<string, any> | null): Record<string, any> {
+  if (!entry) return {}
+  return (
+    entry.line ||
+    entry.properties ||
+    entry.relationship?.properties ||
+    entry.relationship ||
+    {}
+  )
+}
+
+function resolveSnakeToCamel(key: string): string {
+  return key.replace(/_([a-z])/g, (_, ch) => String(ch).toUpperCase())
+}
+
 function getCompareProp(entry: Record<string, any>, key: string): string {
-  const props = entry?.line || entry?.properties || entry?.relationship || {}
-  const value = props[key]
+  const props = resolveCompareLineProps(entry)
+  const value =
+    props[key] ??
+    props[resolveSnakeToCamel(key)]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
@@ -4553,10 +4570,9 @@ function normalizeSortValue(value: unknown, type: SortType): string | number {
   return String(value ?? '').toLowerCase()
 }
 
-function formatEffectivity(entry: Record<string, any>): string {
-  const props = entry?.properties || entry?.relationship || {}
-  const from = props.effectivity_from || props.effectivityFrom
-  const to = props.effectivity_to || props.effectivityTo
+function formatEffectivityProps(props: Record<string, any>): string {
+  const from = props.effectivity_from ?? props.effectivityFrom ?? props.effectivity_from_date
+  const to = props.effectivity_to ?? props.effectivityTo ?? props.effectivity_to_date
   if (from || to) {
     return `${from || '-'} → ${to || '-'}`
   }
@@ -4575,11 +4591,51 @@ function formatEffectivity(entry: Record<string, any>): string {
   return '-'
 }
 
+function formatEffectivity(entry: Record<string, any>): string {
+  const props = resolveCompareLineProps(entry)
+  const primary = formatEffectivityProps(props)
+  if (primary !== '-') return primary
+
+  const beforeProps = entry?.before_line || entry?.before || {}
+  const afterProps = entry?.after_line || entry?.after || {}
+  const beforeText = formatEffectivityProps(beforeProps)
+  const afterText = formatEffectivityProps(afterProps)
+  if (beforeText !== '-' || afterText !== '-') {
+    if (beforeText !== afterText && beforeText !== '-' && afterText !== '-') {
+      return `${beforeText} → ${afterText}`
+    }
+    return afterText !== '-' ? afterText : beforeText
+  }
+  return '-'
+}
+
 function formatSubstituteCount(entry: Record<string, any>): string {
-  const props = entry?.line || entry?.properties || entry?.relationship || {}
-  const subs = props.substitutes || entry?.substitutes
-  if (Array.isArray(subs)) {
-    return subs.length ? String(subs.length) : '-'
+  const resolveCount = (props: Record<string, any>): number | null => {
+    const subs = props.substitutes ?? props.substitute_items
+    if (Array.isArray(subs)) return subs.length
+    const raw = props.substitute_count ?? props.substitutes_count ?? props.substituteCount
+    const count = Number(raw)
+    if (Number.isFinite(count)) return count
+    return null
+  }
+
+  const props = resolveCompareLineProps(entry)
+  const count = resolveCount(props)
+  if (count !== null) {
+    return count > 0 ? String(count) : '-'
+  }
+
+  const beforeProps = entry?.before_line || entry?.before || {}
+  const afterProps = entry?.after_line || entry?.after || {}
+  const beforeCount = resolveCount(beforeProps)
+  const afterCount = resolveCount(afterProps)
+  if (beforeCount !== null || afterCount !== null) {
+    const beforeText = beforeCount && beforeCount > 0 ? String(beforeCount) : '-'
+    const afterText = afterCount && afterCount > 0 ? String(afterCount) : '-'
+    if (beforeText !== afterText) {
+      return `${beforeText} → ${afterText}`
+    }
+    return afterText !== '-' ? afterText : beforeText
   }
   return '-'
 }
@@ -4588,6 +4644,16 @@ function filterCompareEntries(entries: any[]): any[] {
   const needle = compareFilter.value.trim().toLowerCase()
   if (!needle) return entries
   return entries.filter((entry) => {
+    const pathNodes = Array.isArray(entry?.path) ? entry.path : []
+    const pathTokens = pathNodes.flatMap((node: any) => [
+      node?.id,
+      node?.item_number,
+      node?.itemNumber,
+      node?.code,
+      node?.name,
+      node?.label,
+    ])
+    const lineProps = resolveCompareLineProps(entry)
     const tokens = [
       getItemNumber(entry.parent),
       getItemName(entry.parent),
@@ -4595,6 +4661,11 @@ function filterCompareEntries(entries: any[]): any[] {
       getItemName(entry.child),
       entry.relationship_id,
       entry.line_key,
+      lineProps.find_num ?? lineProps.findNum,
+      lineProps.refdes,
+      lineProps.quantity,
+      lineProps.uom,
+      ...pathTokens,
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
