@@ -849,6 +849,20 @@
         <h2>Where-Used</h2>
         <div class="panel-actions">
           <button class="btn ghost" @click="copyDeepLink('where-used')">复制深链接</button>
+          <button
+            class="btn ghost"
+            :disabled="whereUsedView !== 'tree' || !whereUsedHasTree"
+            @click="expandAllWhereUsed"
+          >
+            展开全部
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="whereUsedView !== 'tree' || !whereUsedHasTree"
+            @click="collapseAllWhereUsed"
+          >
+            折叠全部
+          </button>
           <button class="btn ghost" :disabled="!whereUsedFilteredRows.length" @click="exportWhereUsedCsv">
             导出 CSV
           </button>
@@ -929,13 +943,19 @@
             <div class="tree-cell">操作</div>
           </div>
           <div
-            v-for="row in whereUsedTreeRows"
+            v-for="row in whereUsedTreeVisibleRows"
             :key="row.key"
             class="tree-row"
             :class="{ 'tree-root': row.depth === 0 }"
           >
             <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
-              <span class="tree-dot" :class="{ leaf: !row.hasChildren }"></span>
+              <button
+                class="tree-toggle"
+                :disabled="!row.hasChildren"
+                @click="toggleWhereUsedNode(row.key)"
+              >
+                {{ row.hasChildren ? (isWhereUsedCollapsed(row.key) ? '▸' : '▾') : '•' }}
+              </button>
               <span class="mono">{{ row.label || row.id }}</span>
               <span v-if="row.entryCount > 1" class="tree-multi">×{{ row.entryCount }}</span>
             </div>
@@ -1332,7 +1352,11 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="entry in compareChangedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+              <tr
+                v-for="entry in compareChangedFiltered"
+                :key="entry.relationship_id || entry.line_key || entry.child_id"
+                :class="compareRowClass(entry)"
+              >
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
@@ -1694,6 +1718,7 @@ type WhereUsedTreeNode = {
 
 type WhereUsedTreeRow = {
   key: string
+  parentKey?: string
   id: string
   label: string
   name: string
@@ -1887,6 +1912,7 @@ const whereUsedFilter = ref('')
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
 const whereUsedError = ref('')
+const whereUsedCollapsed = ref<Set<string>>(new Set())
 
 const whereUsedRows = computed(() => {
   const payload = whereUsed.value
@@ -2015,10 +2041,11 @@ const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
   const root = whereUsedTree.value
   if (!root) return []
   const rows: WhereUsedTreeRow[] = []
-  const walk = (node: WhereUsedTreeNode, depth: number, path: string) => {
+  const walk = (node: WhereUsedTreeNode, depth: number, path: string, parentKey?: string) => {
     const key = path ? `${path}/${node.id}` : node.id
     rows.push({
       key,
+      parentKey,
       id: node.id,
       label: node.label,
       name: node.name,
@@ -2028,12 +2055,30 @@ const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
       entryCount: node.entries.length,
     })
     for (const child of node.children) {
-      walk(child, depth + 1, key)
+      walk(child, depth + 1, key, key)
     }
   }
-  walk(root, 0, '')
+  walk(root, 0, '', undefined)
   return rows
 })
+
+const whereUsedTreeVisibleRows = computed<WhereUsedTreeRow[]>(() => {
+  const rows = whereUsedTreeRows.value
+  if (!rows.length) return []
+  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
+  const collapsed = whereUsedCollapsed.value
+  const isHidden = (row: WhereUsedTreeRow) => {
+    let parentKey = row.parentKey
+    while (parentKey) {
+      if (collapsed.has(parentKey)) return true
+      parentKey = parentMap.get(parentKey) || ''
+    }
+    return false
+  }
+  return rows.filter((row) => !isHidden(row))
+})
+
+const whereUsedHasTree = computed(() => whereUsedTreeRows.value.some((row) => row.hasChildren))
 
 const compareLeftId = ref('')
 const compareRightId = ref('')
@@ -2969,6 +3014,34 @@ function applyProductFromWhereUsedRow(row: WhereUsedTreeRow) {
     return
   }
   applyProductFromWhereUsed({ parent: { id: parentId } })
+}
+
+function isWhereUsedCollapsed(key: string): boolean {
+  return whereUsedCollapsed.value.has(key)
+}
+
+function toggleWhereUsedNode(key: string): void {
+  const next = new Set(whereUsedCollapsed.value)
+  if (next.has(key)) {
+    next.delete(key)
+  } else {
+    next.add(key)
+  }
+  whereUsedCollapsed.value = next
+}
+
+function expandAllWhereUsed(): void {
+  whereUsedCollapsed.value = new Set()
+}
+
+function collapseAllWhereUsed(): void {
+  const next = new Set<string>()
+  for (const row of whereUsedTreeRows.value) {
+    if (row.hasChildren) {
+      next.add(row.key)
+    }
+  }
+  whereUsedCollapsed.value = next
 }
 
 function applyProductFromCompareParent(entry: any) {
@@ -4926,6 +4999,11 @@ function severityClass(value?: string): string {
   return 'severity-info'
 }
 
+function compareRowClass(entry: Record<string, any>): string {
+  const severity = getCompareEntrySeverity(entry)
+  return `compare-row compare-row-${severity}`
+}
+
 onMounted(() => {
   refreshAuthStatus()
   authTimer = window.setInterval(refreshAuthStatus, 30000)
@@ -5026,6 +5104,13 @@ watch(
       compareFilter: compareValue || undefined,
       substitutesFilter: substituteValue || undefined,
     })
+  }
+)
+
+watch(
+  whereUsed,
+  () => {
+    whereUsedCollapsed.value = new Set()
   }
 )
 
@@ -5484,20 +5569,28 @@ input:focus, select:focus, textarea:focus {
   min-width: 0;
 }
 
-.tree-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #9ca3af;
-  flex-shrink: 0;
+.tree-toggle {
+  border: none;
+  background: transparent;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.tree-dot.leaf {
-  background: #60a5fa;
+.tree-toggle:disabled {
+  cursor: default;
+  color: #cbd5f5;
 }
 
-.tree-root .tree-dot {
-  background: #111827;
+.tree-root .tree-toggle {
+  color: #111827;
 }
 
 .tree-multi {
@@ -5522,6 +5615,22 @@ input:focus, select:focus, textarea:focus {
 .compare-section h3 {
   font-size: 14px;
   margin-bottom: 6px;
+}
+
+.compare-row.compare-row-major {
+  background: #fff1f2;
+}
+
+.compare-row.compare-row-minor {
+  background: #fffbeb;
+}
+
+.compare-row.compare-row-info {
+  background: #f8fafc;
+}
+
+.compare-row:hover {
+  background: #eef2ff;
 }
 
 .json-block {
