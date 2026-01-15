@@ -1175,6 +1175,15 @@
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
                   <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareParentKey(entry) || productLoading"
+                      @click="applyProductFromCompareParent(entry)"
+                    >
+                      产品
+                    </button>
+                  </div>
                 </td>
                 <td>
                   <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
@@ -1227,6 +1236,15 @@
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
                   <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareParentKey(entry) || productLoading"
+                      @click="applyProductFromCompareParent(entry)"
+                    >
+                      产品
+                    </button>
+                  </div>
                 </td>
                 <td>
                   <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
@@ -1277,6 +1295,15 @@
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
                   <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                  <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareParentKey(entry) || productLoading"
+                      @click="applyProductFromCompareParent(entry)"
+                    >
+                      产品
+                    </button>
+                  </div>
                 </td>
                 <td>
                   <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
@@ -2814,6 +2841,20 @@ function applyProductFromWhereUsedRow(row: WhereUsedTreeRow) {
   applyProductFromWhereUsed({ parent: { id: parentId } })
 }
 
+function applyProductFromCompareParent(entry: any) {
+  const parent = getCompareParent(entry)
+  const { id, itemNumber } = resolveItemKey(parent)
+  if (!id && !itemNumber) {
+    setDeepLinkMessage('缺少父件 ID', true)
+    return
+  }
+  productId.value = id || ''
+  productItemNumber.value = id ? '' : itemNumber
+  productError.value = ''
+  setDeepLinkMessage(`已切换到产品：${id || itemNumber}`)
+  void loadProduct()
+}
+
 function applyCompareFromProduct(side: 'left' | 'right') {
   if (!productId.value) {
     setDeepLinkMessage('请先加载产品', true)
@@ -3394,6 +3435,13 @@ function getItemName(item?: Record<string, any> | null): string {
   return item.name || item.label || item.title || '-'
 }
 
+function resolveItemKey(item?: Record<string, any> | null): { id: string; itemNumber: string } {
+  if (!item) return { id: '', itemNumber: '' }
+  const id = item.id || item.item_id || item.itemId || ''
+  const itemNumber = item.item_number || item.itemNumber || item.code || ''
+  return { id: id ? String(id) : '', itemNumber: itemNumber ? String(itemNumber) : '' }
+}
+
 function normalizeText(value: unknown, fallback = '-'): string {
   if (value === undefined || value === null || value === '') return fallback
   return String(value)
@@ -3558,6 +3606,12 @@ function getCompareParent(entry?: Record<string, any> | null): Record<string, an
     return path[0] || null
   }
   return null
+}
+
+function resolveCompareParentKey(entry?: Record<string, any> | null): string {
+  const parent = getCompareParent(entry)
+  const { id, itemNumber } = resolveItemKey(parent)
+  return id || itemNumber || ''
 }
 
 function getCompareChild(entry?: Record<string, any> | null): Record<string, any> | null {
