@@ -1528,13 +1528,29 @@
               <td>{{ formatSubstituteNote(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
               <td>
-                <button
-                  class="btn ghost"
-                  :disabled="substitutesMutating || substitutesDeletingId === (entry.relationship?.id || entry.id)"
-                  @click="removeSubstitute(entry)"
-                >
-                  {{ substitutesDeletingId === (entry.relationship?.id || entry.id) ? '删除中...' : '删除' }}
-                </button>
+                <div class="inline-actions">
+                  <button
+                    class="btn ghost mini"
+                    :disabled="!resolveSubstituteTargetKey(entry, 'substitute') || productLoading"
+                    @click="applyProductFromSubstitute(entry, 'substitute')"
+                  >
+                    替代件
+                  </button>
+                  <button
+                    class="btn ghost mini"
+                    :disabled="!resolveSubstituteTargetKey(entry, 'part') || productLoading"
+                    @click="applyProductFromSubstitute(entry, 'part')"
+                  >
+                    原件
+                  </button>
+                  <button
+                    class="btn ghost"
+                    :disabled="substitutesMutating || substitutesDeletingId === (entry.relationship?.id || entry.id)"
+                    @click="removeSubstitute(entry)"
+                  >
+                    {{ substitutesDeletingId === (entry.relationship?.id || entry.id) ? '删除中...' : '删除' }}
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -2855,6 +2871,20 @@ function applyProductFromCompareParent(entry: any) {
   void loadProduct()
 }
 
+function applyProductFromSubstitute(entry: any, target: 'substitute' | 'part') {
+  const { id, itemNumber } = resolveItemKey(resolveSubstituteTarget(entry, target))
+  if (!id && !itemNumber) {
+    setDeepLinkMessage('缺少产品标识', true)
+    return
+  }
+  productId.value = id || ''
+  productItemNumber.value = id ? '' : itemNumber
+  productError.value = ''
+  const label = target === 'substitute' ? '替代件' : '原件'
+  setDeepLinkMessage(`已切换到${label}产品：${id || itemNumber}`)
+  void loadProduct()
+}
+
 function applyCompareFromProduct(side: 'left' | 'right') {
   if (!productId.value) {
     setDeepLinkMessage('请先加载产品', true)
@@ -3566,6 +3596,10 @@ function getSubstitutePart(entry: Record<string, any>): Record<string, any> {
   return entry?.substitute_part || entry?.substitutePart || {}
 }
 
+function getSubstituteSourcePart(entry: Record<string, any>): Record<string, any> {
+  return entry?.part || entry?.source_part || entry?.original_part || {}
+}
+
 function getSubstituteNumber(entry: Record<string, any>): string {
   const part = getSubstitutePart(entry)
   return part.item_number || part.itemNumber || part.code || part.id || entry.id || '-'
@@ -3584,6 +3618,15 @@ function getSubstituteName(entry: Record<string, any>): string {
 function getSubstituteStatus(entry: Record<string, any>): string {
   const part = getSubstitutePart(entry)
   return part.state || part.status || part.lifecycle_state || '-'
+}
+
+function resolveSubstituteTarget(entry: Record<string, any>, target: 'substitute' | 'part'): Record<string, any> {
+  return target === 'substitute' ? getSubstitutePart(entry) : getSubstituteSourcePart(entry)
+}
+
+function resolveSubstituteTargetKey(entry: Record<string, any>, target: 'substitute' | 'part'): string {
+  const { id, itemNumber } = resolveItemKey(resolveSubstituteTarget(entry, target))
+  return id || itemNumber || ''
 }
 
 function formatSubstituteRank(entry: Record<string, any>): string {
