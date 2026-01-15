@@ -1346,6 +1346,28 @@
           />
         </label>
       </div>
+      <div v-if="bomLineId" class="context-row">
+        <span class="context-title">BOM 行</span>
+        <span class="mono">{{ bomLineId }}</span>
+        <template v-if="bomLineContext">
+          <span class="context-divider"></span>
+          <span>
+            子件:
+            <strong>{{ bomLineContext.component_code || bomLineContext.component_id || '-' }}</strong>
+          </span>
+          <span v-if="bomLineContext.component_name" class="muted">{{ bomLineContext.component_name }}</span>
+          <span class="muted">数量: {{ bomLineContext.quantity ?? '-' }} {{ bomLineContext.unit || '' }}</span>
+          <span class="muted">Find: {{ bomLineContext.sequence ?? '-' }}</span>
+          <button
+            class="btn ghost mini"
+            :disabled="whereUsedLoading"
+            @click="applyWhereUsedFromBom(bomLineContext)"
+          >
+            Where-Used
+          </button>
+        </template>
+        <span v-else class="muted">未在当前 BOM 中找到</span>
+      </div>
       <div class="form-grid compact">
         <label for="plm-substitute-item-id">
           替代件 ID
@@ -2233,6 +2255,12 @@ const substitutesRows = computed(() => {
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
+})
+
+const bomLineContext = computed(() => {
+  const lineId = bomLineId.value.trim()
+  if (!lineId) return null
+  return bomItems.value.find((item) => String(item.id) === lineId) || null
 })
 
 const authStateText = computed(() => {
@@ -4903,6 +4931,27 @@ input:focus, select:focus, textarea:focus {
   display: inline-flex;
   gap: 6px;
   align-items: center;
+}
+
+.context-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #111827;
+}
+
+.context-title {
+  font-weight: 600;
+  color: #374151;
+}
+
+.context-divider {
+  width: 1px;
+  height: 16px;
+  background: #e5e7eb;
 }
 
 .detail-grid {
