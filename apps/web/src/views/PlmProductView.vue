@@ -984,6 +984,19 @@
       <div class="panel-header">
         <h2>BOM 对比</h2>
         <div class="panel-actions">
+          <button class="btn ghost" :disabled="!productId" @click="applyCompareFromProduct('left')">
+            左=当前产品
+          </button>
+          <button class="btn ghost" :disabled="!productId" @click="applyCompareFromProduct('right')">
+            右=当前产品
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="!compareLeftId || !compareRightId"
+            @click="swapCompareSides"
+          >
+            交换左右
+          </button>
           <button class="btn ghost" @click="copyDeepLink('compare')">复制深链接</button>
           <button class="btn ghost" :disabled="compareTotalFiltered === 0" @click="exportBomCompareCsv">
             导出 CSV
@@ -2664,6 +2677,35 @@ function applySubstitutesFromBom(item: any) {
   if (!substitutesLoading.value) {
     void loadSubstitutes()
   }
+}
+
+function applyCompareFromProduct(side: 'left' | 'right') {
+  if (!productId.value) {
+    setDeepLinkMessage('请先加载产品', true)
+    return
+  }
+  if (side === 'left') {
+    compareLeftId.value = productId.value
+  } else {
+    compareRightId.value = productId.value
+  }
+  scheduleQuerySync({
+    compareLeftId: compareLeftId.value || undefined,
+    compareRightId: compareRightId.value || undefined,
+  })
+  setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${productId.value}`)
+}
+
+function swapCompareSides() {
+  if (!compareLeftId.value || !compareRightId.value) return
+  const left = compareLeftId.value
+  compareLeftId.value = compareRightId.value
+  compareRightId.value = left
+  scheduleQuerySync({
+    compareLeftId: compareLeftId.value || undefined,
+    compareRightId: compareRightId.value || undefined,
+  })
+  setDeepLinkMessage('已交换对比左右')
 }
 
 async function loadDocuments() {
