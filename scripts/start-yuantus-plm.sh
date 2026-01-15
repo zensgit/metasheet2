@@ -6,6 +6,7 @@ YUANTUS_ROOT="${YUANTUS_ROOT:-$ROOT_DIR/../Yuantus}"
 COMPOSE_FILE="${COMPOSE_FILE:-$YUANTUS_ROOT/docker-compose.yml}"
 
 PLM_BASE_URL="${PLM_BASE_URL:-http://127.0.0.1:7910}"
+PLM_URL="${PLM_URL:-$PLM_BASE_URL}"
 PLM_TENANT_ID="${PLM_TENANT_ID:-tenant-1}"
 PLM_ORG_ID="${PLM_ORG_ID:-org-1}"
 PLM_USERNAME="${PLM_USERNAME:-admin}"
@@ -77,6 +78,7 @@ if [[ -z "$PLM_TOKEN" ]]; then
 fi
 
 echo "Yuantus PLM ready: $PLM_BASE_URL"
+echo "PLM_URL: $PLM_URL"
 if [[ "$PRINT_TOKEN" == "true" ]]; then
   echo "PLM_API_TOKEN=$PLM_TOKEN"
 fi

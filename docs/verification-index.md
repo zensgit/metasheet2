@@ -9,8 +9,8 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2026-01-08.md`
-  - Previous: `docs/verification-summary-2026-01-07.md`
+  - Report: `docs/verification-summary-2026-01-15.md`
+  - Previous: `docs/verification-summary-2026-01-10.md`
 
 - Univer POC runtime start (core mode):
   - Report: `docs/verification-univer-poc-runtime-20260106_1207.md`
@@ -209,6 +209,24 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260110_181245.png`
   - Report: `docs/verification-plm-ui-regression-20260110_191218.md`
   - Artifact: `artifacts/plm-ui-regression-20260110_191218.png`
+  - Report: `docs/verification-plm-ui-regression-20260114_132755.md`
+  - Artifact: `artifacts/plm-ui-regression-20260114_132755.png`
+  - Report: `docs/verification-plm-ui-regression-20260114_132810.md`
+  - Artifact: `artifacts/plm-ui-regression-20260114_132810.png`
+  - Report: `docs/verification-plm-ui-regression-20260114_133500.md`
+  - Artifact: `artifacts/plm-ui-regression-20260114_133500.png`
+  - Report: `docs/verification-plm-ui-regression-20260114_221321.md`
+  - Artifact: `artifacts/plm-ui-regression-20260114_221321.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_084812.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_084812.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_100152.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_100152.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_142128.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_142128.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_144649.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_144649.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_144649.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_144649.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -219,6 +237,8 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260110_170622.md`
   - Report: `docs/verification-plm-ui-full-20260110_181245.md`
   - Report: `docs/verification-plm-ui-full-20260110_191218.md`
+  - Report: `docs/verification-plm-ui-full-20260115_142128.md`
+  - Report: `docs/verification-plm-ui-full-20260115_144649.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`

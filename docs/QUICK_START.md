@@ -98,6 +98,7 @@ PLM_ENV=yuantus BACKEND_MODE=core bash scripts/start-univer-poc.sh
 
 # 可选：显式指定 PLM 环境
 PLM_BASE_URL=http://127.0.0.1:7910 \
+PLM_URL=http://127.0.0.1:7910 \
 PLM_TENANT_ID=tenant-1 \
 PLM_ORG_ID=org-1 \
 PLM_USERNAME=admin \
