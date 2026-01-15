@@ -34,6 +34,7 @@
 |------|------|
 | [DATA_SOURCE_ADAPTERS.md](./DATA_SOURCE_ADAPTERS.md) | 适配器架构 |
 | [plm-integration-design.md](./plm-integration-design.md) | PLM 集成设计 |
+| [plm-bom-compare-field-mapping.md](./plm-bom-compare-field-mapping.md) | BOM Compare 字段对照 |
 
 ---
 
