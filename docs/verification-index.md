@@ -118,8 +118,8 @@ Entry points:
   - Report: `docs/verification-plm-ui-empty-states-20260105_175520.md`
   - Artifact: `artifacts/plm-ui-empty-hints-20260105_180232.png`
 - PLM UI BOM compare field mapping:
-  - Report: `docs/verification-plm-ui-bom-compare-fieldmap-20260104_1442.md`
-  - Artifact: `artifacts/plm-ui-bom-compare-fieldmap-20260104_1442.png`
+  - Report: `docs/verification-plm-ui-bom-compare-fieldmap-20260115_1759.md`
+  - Artifact: `artifacts/plm-bom-compare-schema-20260115_1759.json`
 - PLM UI field mapping (product/doc/approval):
   - Report: `docs/verification-plm-ui-field-mapping-20260104_1520.md`
   - Artifact: `artifacts/plm-ui-field-mapping-20260104_1520.png`
