@@ -67,7 +67,15 @@
             <td>{{ item.itemType || '-' }}</td>
             <td>{{ item.updatedAt || item.updated_at || '-' }}</td>
             <td>
-              <button class="btn" @click="applySearchItem(item)">使用</button>
+              <div class="inline-actions">
+                <button class="btn" @click="applySearchItem(item)">使用</button>
+                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'left')">
+                  左对比
+                </button>
+                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'right')">
+                  右对比
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -2693,6 +2701,25 @@ async function applySearchItem(item: any) {
     itemType.value = item.itemType
   }
   await loadProduct()
+}
+
+function applyCompareFromSearch(item: any, side: 'left' | 'right') {
+  const targetId = item?.id || item?.item_id || item?.itemId
+  const targetNumber = item?.partNumber || item?.item_number || item?.code || ''
+  if (!targetId && !targetNumber) {
+    setDeepLinkMessage('搜索结果缺少 ID', true)
+    return
+  }
+  if (side === 'left') {
+    compareLeftId.value = targetId ? String(targetId) : String(targetNumber)
+  } else {
+    compareRightId.value = targetId ? String(targetId) : String(targetNumber)
+  }
+  scheduleQuerySync({
+    compareLeftId: compareLeftId.value || undefined,
+    compareRightId: compareRightId.value || undefined,
+  })
+  setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${targetId || targetNumber}`)
 }
 
 async function loadProduct() {
