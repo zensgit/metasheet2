@@ -75,6 +75,37 @@ describe('PLMAdapter Yuantus product detail mapping', () => {
     expect(product?.updated_at).toBe('2025-02-02T00:00:00.000Z')
     expect(product?.code).toBe('PN-002')
   })
+
+  it('falls back to search when AML lookup misses and matches item number', async () => {
+    const adapter = createAdapter()
+    const selectMock = vi.fn().mockResolvedValue({ data: [] })
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        total: 1,
+        hits: [{
+          id: 'item-999',
+          item_type_id: 'Part',
+          name: 'Number Part',
+          item_number: 'PN-999',
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-01-02T00:00:00.000Z',
+          properties: { item_number: 'PN-999', name: 'Number Part' },
+        }],
+      }],
+    })
+
+    ;(adapter as any).select = selectMock
+    ;(adapter as any).query = queryMock
+
+    const product = await adapter.getProductById('PN-999', { itemType: 'Part' })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/search/', [
+      expect.objectContaining({ q: 'PN-999', item_type: 'Part' }),
+    ])
+    expect(product?.id).toBe('item-999')
+    expect(product?.partNumber).toBe('PN-999')
+    expect(product?.name).toBe('Number Part')
+  })
 })
 
 describe('PLMAdapter Yuantus documents mapping', () => {

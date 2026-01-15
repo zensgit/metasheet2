@@ -58,6 +58,8 @@ Entry points:
 
 - PLM product detail mapping:
   - Report: `docs/verification-plm-product-detail-20260104_1132.md`
+- PLM product detail mapping (item number fallback):
+  - Report: `docs/verification-plm-product-detail-item-number-20260115_204327.md`
 - PLM adapter mapping (product/docs/approvals):
   - Report: `docs/verification-plm-adapter-mapping-20260104_1559.md`
 - PLM field mapping API verification:
@@ -231,6 +233,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260115_164310.png`
   - Report: `docs/verification-plm-ui-regression-20260115_173732.md`
   - Artifact: `artifacts/plm-ui-regression-20260115_173732.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_212143.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_212143.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`

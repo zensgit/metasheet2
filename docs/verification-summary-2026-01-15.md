@@ -16,6 +16,8 @@
 - PLM UI regression: `docs/verification-plm-ui-regression-20260115_173732.md`
 - PLM UI full regression: `docs/verification-plm-ui-full-20260115_173732.md`
 - PLM UI BOM compare field mapping: `docs/verification-plm-ui-bom-compare-fieldmap-20260115_1759.md`
+- PLM product detail item-number fallback: `docs/verification-plm-product-detail-item-number-20260115_204327.md`
+- PLM UI regression (item number load): `docs/verification-plm-ui-regression-20260115_212143.md`
 
 ## Environment Notes
 - Yuantus PLM ran on `http://127.0.0.1:7910`.
