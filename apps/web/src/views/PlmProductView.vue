@@ -1479,6 +1479,7 @@
       <div v-if="bomLineId" class="context-row">
         <span class="context-title">BOM 行</span>
         <span class="mono">{{ bomLineId }}</span>
+        <button class="btn ghost mini" @click="copyBomLineId()">复制 BOM 行</button>
         <template v-if="bomLineContext">
           <span class="context-divider"></span>
           <span>
@@ -3027,6 +3028,19 @@ function applyProductFromSubstitute(entry: any, target: 'substitute' | 'part') {
   const label = target === 'substitute' ? '替代件' : '原件'
   setDeepLinkMessage(`已切换到${label}产品：${id || itemNumber}`)
   void loadProduct()
+}
+
+async function copyBomLineId() {
+  if (!bomLineId.value) {
+    setDeepLinkMessage('缺少 BOM 行 ID', true)
+    return
+  }
+  const ok = await copyToClipboard(bomLineId.value)
+  if (!ok) {
+    setDeepLinkMessage('复制失败，请手动复制', true)
+    return
+  }
+  setDeepLinkMessage(`已复制 BOM 行 ID：${bomLineId.value}`)
 }
 
 function applyCompareFromProduct(side: 'left' | 'right') {
