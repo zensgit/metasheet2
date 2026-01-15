@@ -944,6 +944,7 @@
               <th>Find #</th>
               <th>Refdes</th>
               <th>关系 ID</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -970,6 +971,15 @@
               <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
               <td>{{ getWhereUsedRefdes(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
+              <td>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!resolveWhereUsedParentId(entry) || productLoading"
+                  @click="applyProductFromWhereUsed(entry)"
+                >
+                  产品
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -2713,6 +2723,16 @@ function resolveCompareLineId(entry: any): string {
   return value ? String(value) : ''
 }
 
+function resolveWhereUsedParentId(entry: any): string {
+  const value =
+    entry?.parent?.id ??
+    entry?.relationship?.source_id ??
+    entry?.relationship?.parent_id ??
+    entry?.parent_id ??
+    ''
+  return value ? String(value) : ''
+}
+
 function applyWhereUsedFromBom(item: any) {
   const childId = resolveBomChildId(item)
   if (!childId) {
@@ -2760,6 +2780,19 @@ function applySubstitutesFromCompare(entry: any) {
   if (!substitutesLoading.value) {
     void loadSubstitutes()
   }
+}
+
+function applyProductFromWhereUsed(entry: any) {
+  const parentId = resolveWhereUsedParentId(entry)
+  if (!parentId) {
+    setDeepLinkMessage('缺少父件 ID', true)
+    return
+  }
+  productId.value = parentId
+  productItemNumber.value = ''
+  productError.value = ''
+  setDeepLinkMessage(`已切换到产品：${parentId}`)
+  void loadProduct()
 }
 
 function applyCompareFromProduct(side: 'left' | 'right') {
