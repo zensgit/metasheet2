@@ -19,6 +19,7 @@
     "test:phase5": "vitest --config vitest.phase5.config.ts run",
     "test:unit": "vitest run tests/unit --reporter=dot",
     "test:integration": "vitest --config vitest.integration.config.ts run --reporter=dot",
+    "test:integration:attendance": "vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts --reporter=dot",
     "test:cache": "npm run build:cache && TEST_USE_DIST=true vitest --config vitest.cache.config.ts run --reporter=dot",
     "clean": "rimraf dist"
   },

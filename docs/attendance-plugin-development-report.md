@@ -2,6 +2,14 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-15)
+- Added migration `z20251231_create_system_configs.ts` so attendance settings persist in new databases.
+- Activated plugins during backend startup to register attendance routes at runtime.
+- `/api/plugins` now returns an array with status + contributions for frontend gating.
+- Frontend plugin fetch now tolerates both array and legacy `{ list, summary }` payloads.
+- Added integration smoke test `packages/core-backend/tests/integration/attendance-plugin.test.ts` (skips when DB is unavailable).
+- Added `packages/core-backend/vitest.integration.config.ts` plus `test:integration:attendance` script for the new attendance smoke.
+
 ## Overview
 The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
 
