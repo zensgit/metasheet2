@@ -75,6 +75,12 @@
                 <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'right')">
                   右对比
                 </button>
+                <button class="btn ghost mini" @click="copySearchValue(item, 'id')">
+                  复制 ID
+                </button>
+                <button class="btn ghost mini" @click="copySearchValue(item, 'number')">
+                  复制料号
+                </button>
               </div>
             </td>
           </tr>
@@ -2762,6 +2768,22 @@ function applyCompareFromSearch(item: any, side: 'left' | 'right') {
     compareRightId: compareRightId.value || undefined,
   })
   setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${targetId || targetNumber}`)
+}
+
+async function copySearchValue(item: any, kind: 'id' | 'number') {
+  const idValue = item?.id || item?.item_id || item?.itemId
+  const numberValue = item?.partNumber || item?.item_number || item?.code || ''
+  const value = kind === 'id' ? idValue : numberValue
+  if (!value) {
+    setDeepLinkMessage(kind === 'id' ? '缺少 ID' : '缺少料号', true)
+    return
+  }
+  const ok = await copyToClipboard(String(value))
+  if (!ok) {
+    setDeepLinkMessage('复制失败，请手动复制', true)
+    return
+  }
+  setDeepLinkMessage(`已复制${kind === 'id' ? ' ID' : '料号'}：${value}`)
 }
 
 async function loadProduct() {
