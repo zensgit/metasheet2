@@ -52,6 +52,7 @@ fi
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}.png"
 REPORT_PATH="$REPORT_DIR/verification-plm-ui-regression-${STAMP}.md"
+ITEM_NUMBER_JSON="$OUTPUT_DIR/plm-ui-regression-item-number-${STAMP}.json"
 
 if [[ -z "$PLM_BOM_TOOLS_JSON" ]]; then
   PLM_BOM_TOOLS_JSON=$(ls -t artifacts/plm-bom-tools-*.json 2>/dev/null | head -n1 || true)
@@ -299,8 +300,10 @@ const docRole = process.env.PLM_DOCUMENT_ROLE;
 const docRevision = process.env.PLM_DOCUMENT_REVISION;
 const approvalTitle = process.env.PLM_APPROVAL_TITLE;
 const approvalProductNumber = process.env.PLM_APPROVAL_PRODUCT_NUMBER || '';
+const fallbackItemNumber = process.env.PLM_ITEM_NUMBER_ONLY || approvalProductNumber || searchQuery;
 const url = process.env.UI_BASE || 'http://localhost:8899/plm';
 const screenshotPath = process.env.SCREENSHOT_PATH;
+const itemNumberPath = process.env.ITEM_NUMBER_PATH;
 const headless = process.env.HEADLESS !== 'false';
 
 if (!token || !searchQuery || !productId || !whereUsedId || !compareLeftId || !compareRightId || !bomLineId || !docName || !docRole || !approvalTitle) {
@@ -348,6 +351,25 @@ async function waitOptional(scope, text) {
   await targetRow.locator('button:has-text("使用")').click();
   await waitOptional(searchSection, searchQuery);
 
+  const detailSection = page.locator('section:has-text("PLM 产品详情")');
+  const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
+  await partNumberCell.first().waitFor({ timeout: 60000 });
+  let itemNumberValue = ((await partNumberCell.first().textContent()) || '').trim();
+  if (!itemNumberValue || itemNumberValue === '-') {
+    itemNumberValue = (fallbackItemNumber || '').trim();
+  }
+  if (!itemNumberValue) {
+    throw new Error('Missing item number for item-number-only load.');
+  }
+  await detailSection.locator('#plm-product-id').fill('');
+  await detailSection.locator('#plm-item-number').fill(itemNumberValue);
+  await detailSection.locator('button:has-text("加载产品")').click();
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#plm-product-id');
+    return el && el.value && el.value.trim().length > 0;
+  }, null, { timeout: 60000 });
+  await waitOptional(detailSection, itemNumberValue);
+
   const whereUsedSection = page.locator('section:has-text("Where-Used")');
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
   await whereUsedSection.locator('button:has-text("查询")').click();
@@ -379,6 +401,11 @@ async function waitOptional(scope, text) {
   await waitOptional(approvalsSection.locator('table'), approvalTitle);
   await waitOptional(approvalsSection.locator('table'), approvalProductNumber);
 
+  if (itemNumberPath) {
+    const fs = require('fs');
+    fs.writeFileSync(itemNumberPath, JSON.stringify({ item_number: itemNumberValue }, null, 2));
+  }
+
   await page.waitForTimeout(1000);
   await page.screenshot({ path: screenshotPath, fullPage: true });
   await browser.close();
@@ -403,8 +430,19 @@ PLM_APPROVAL_TITLE="$PLM_APPROVAL_TITLE" \
 PLM_APPROVAL_PRODUCT_NUMBER="$PLM_APPROVAL_PRODUCT_NUMBER" \
 UI_BASE="$UI_BASE" \
 SCREENSHOT_PATH="$SCREENSHOT_PATH" \
+ITEM_NUMBER_PATH="$ITEM_NUMBER_JSON" \
 HEADLESS="$HEADLESS" \
 node /tmp/plm_ui_regression.js
+
+ITEM_NUMBER_USED=""
+if [[ -s "$ITEM_NUMBER_JSON" ]]; then
+  ITEM_NUMBER_USED=$(python3 - <<'PY' "$ITEM_NUMBER_JSON"
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f).get("item_number",""))
+PY
+  )
+fi
 
 cat > "$REPORT_PATH" <<REPORT_EOF
 # Verification: PLM UI Regression (Search -> Detail -> BOM Tools) - ${STAMP}
@@ -434,15 +472,18 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Document revision: ${PLM_DOCUMENT_REVISION:-n/a}
 - Approval title: ${PLM_APPROVAL_TITLE}
 - Approval product number: ${PLM_APPROVAL_PRODUCT_NUMBER:-n/a}
+- Item number-only load: ${ITEM_NUMBER_USED:-n/a}
 
 ## Results
 - Search returns matching row and selection loads product detail.
+- Item number-only load repopulates Product ID.
 - Where-used query completes.
 - BOM compare completes.
 - Substitutes query completes.
 - Documents table loads with expected document metadata.
 - Approvals table loads with expected approval record.
 - Screenshot: ${SCREENSHOT_PATH}
+- Item number artifact: ${ITEM_NUMBER_JSON}
 REPORT_EOF
 
 python3 - <<'PY_EOF' "$REPORT_PATH" "$SCREENSHOT_PATH"

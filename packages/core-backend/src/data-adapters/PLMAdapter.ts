@@ -942,7 +942,23 @@ export class PLMAdapter extends HTTPAdapter {
       const result = await this.query<YuantusSearchResponse>('/api/v1/search/', [params])
       const payload = result.data[0]
       const hits = payload?.hits ?? []
-      const match = hits.find((hit) => String(hit.id) === String(itemId))
+      const needle = String(itemId).trim().toLowerCase()
+      const matches = (value?: unknown) => {
+        if (value === undefined || value === null) return false
+        return String(value).trim().toLowerCase() === needle
+      }
+      const match = hits.find((hit) => {
+        const props = hit.properties || {}
+        return (
+          matches(hit.id) ||
+          matches(hit.item_number) ||
+          matches(props.item_number) ||
+          matches(props.part_number) ||
+          matches(props.number) ||
+          matches(props.code) ||
+          matches(props.internal_reference)
+        )
+      })
       return match || null
     } catch (_err) {
       return null
@@ -1104,7 +1120,26 @@ export class PLMAdapter extends HTTPAdapter {
         data: { type: itemType, action: 'get', id },
       })
       const item = result.data[0]
-      if (!item) return null
+      if (!item) {
+        const hit = await this.fetchYuantusSearchHit(id, itemType)
+        if (!hit) return null
+        const mappedHit = this.mapYuantusProductFields(hit)
+        if (hit.id && String(hit.id) !== String(id)) {
+          try {
+            const detailResult = await this.select<YuantusItem>('/api/v1/aml/apply', {
+              method: 'POST',
+              data: { type: itemType, action: 'get', id: hit.id },
+            })
+            const detailItem = detailResult.data[0]
+            if (detailItem) {
+              return this.mergeYuantusProductDetail(this.mapYuantusItemFields(detailItem), hit)
+            }
+          } catch (_err) {
+            return mappedHit
+          }
+        }
+        return mappedHit
+      }
       const mapped = this.mapYuantusItemFields(item)
       if (mapped.created_at && mapped.updated_at) {
         return mapped
