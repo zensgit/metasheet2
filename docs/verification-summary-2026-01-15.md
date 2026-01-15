@@ -18,8 +18,10 @@
 - PLM UI BOM compare field mapping: `docs/verification-plm-ui-bom-compare-fieldmap-20260115_1759.md`
 - PLM product detail item-number fallback: `docs/verification-plm-product-detail-item-number-20260115_204327.md`
 - PLM UI regression (item number load): `docs/verification-plm-ui-regression-20260115_212143.md`
+- PLM BOM tools seed: `artifacts/plm-bom-tools-20260115_2201.md`
+- PLM UI regression (bom tools refresh): `docs/verification-plm-ui-regression-20260115_220146.md`
 
 ## Environment Notes
-- Yuantus PLM ran on `http://127.0.0.1:7910`.
+- Yuantus PLM ran on `http://127.0.0.1:7910` (earlier) and `http://127.0.0.1:7911` (latest).
 - MetaSheet API ran on `http://127.0.0.1:7788` and UI on `http://127.0.0.1:8899`.
 - `PLM_URL` set to the same base to avoid stale defaults.

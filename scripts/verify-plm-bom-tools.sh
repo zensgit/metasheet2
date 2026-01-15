@@ -112,14 +112,14 @@ PLM_TOKEN=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/auth/login" \
   -H "x-tenant-id: $PLM_TENANT_ID" \
   -H "x-org-id: $PLM_ORG_ID" \
   -d "{\"username\":\"$PLM_USERNAME\",\"password\":\"$PLM_PASSWORD\",\"tenant_id\":\"$PLM_TENANT_ID\",\"org_id\":\"$PLM_ORG_ID\"}" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' || true)
 
 if [[ -z "$PLM_TOKEN" ]]; then
-  echo "Failed to obtain PLM token." >&2
-  exit 1
+  echo "PLM token not available; continuing without Authorization header." >&2
+  HEADERS=(-H "x-tenant-id: $PLM_TENANT_ID" -H "x-org-id: $PLM_ORG_ID")
+else
+  HEADERS=(-H "x-tenant-id: $PLM_TENANT_ID" -H "x-org-id: $PLM_ORG_ID" -H "Authorization: Bearer $PLM_TOKEN")
 fi
-
-HEADERS=(-H "x-tenant-id: $PLM_TENANT_ID" -H "x-org-id: $PLM_ORG_ID" -H "Authorization: Bearer $PLM_TOKEN")
 
 create_part() {
   local item_number="$1"

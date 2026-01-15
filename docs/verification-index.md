@@ -152,6 +152,8 @@ Entry points:
   - Artifact: `artifacts/plm-bom-tools-20260110_160733.json`
   - Report: `artifacts/plm-bom-tools-20260110_170622.md`
   - Artifact: `artifacts/plm-bom-tools-20260110_170622.json`
+  - Report: `artifacts/plm-bom-tools-20260115_2201.md`
+  - Artifact: `artifacts/plm-bom-tools-20260115_2201.json`
 - PLM UI BOM tools:
   - Report: `docs/verification-plm-ui-bom-tools-20260105_175018.md`
   - Artifact: `artifacts/plm-ui-bom-tools-20260105_175018.png`
@@ -235,6 +237,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260115_173732.png`
   - Report: `docs/verification-plm-ui-regression-20260115_212143.md`
   - Artifact: `artifacts/plm-ui-regression-20260115_212143.png`
+  - Report: `docs/verification-plm-ui-regression-20260115_220146.md`
+  - Artifact: `artifacts/plm-ui-regression-20260115_220146.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
