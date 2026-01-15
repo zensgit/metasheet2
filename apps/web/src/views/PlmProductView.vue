@@ -1209,6 +1209,13 @@
                   <div class="inline-actions">
                     <button
                       class="btn ghost mini"
+                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
+                      @click="applyWhereUsedFromCompare(entry)"
+                    >
+                      Where-Used
+                    </button>
+                    <button
+                      class="btn ghost mini"
                       :disabled="!resolveCompareLineId(entry) || substitutesLoading"
                       @click="applySubstitutesFromCompare(entry)"
                     >
@@ -1268,6 +1275,13 @@
                   <div class="mono">{{ entry.line_key || '-' }}</div>
                   <div class="muted">{{ entry.relationship_id || '-' }}</div>
                   <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
+                      @click="applyWhereUsedFromCompare(entry)"
+                    >
+                      Where-Used
+                    </button>
                     <button
                       class="btn ghost mini"
                       :disabled="!resolveCompareLineId(entry) || substitutesLoading"
@@ -1350,6 +1364,13 @@
                   <div class="mono">{{ entry.line_key || '-' }}</div>
                   <div class="muted">{{ entry.relationship_id || '-' }}</div>
                   <div class="inline-actions">
+                    <button
+                      class="btn ghost mini"
+                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
+                      @click="applyWhereUsedFromCompare(entry)"
+                    >
+                      Where-Used
+                    </button>
                     <button
                       class="btn ghost mini"
                       :disabled="!resolveCompareLineId(entry) || substitutesLoading"
@@ -2898,6 +2919,23 @@ function applyProductFromCompareParent(entry: any) {
   void loadProduct()
 }
 
+function applyWhereUsedFromCompare(entry: any) {
+  const child = getCompareChild(entry)
+  const { id, itemNumber } = resolveItemKey(child)
+  const target = id || itemNumber
+  if (!target) {
+    setDeepLinkMessage('缺少子件 ID', true)
+    return
+  }
+  whereUsedItemId.value = target
+  whereUsedError.value = ''
+  scheduleQuerySync({ whereUsedItemId: target })
+  setDeepLinkMessage(`已切换 Where-Used 子件：${target}`)
+  if (!whereUsedLoading.value) {
+    void loadWhereUsed()
+  }
+}
+
 function applyProductFromSubstitute(entry: any, target: 'substitute' | 'part') {
   const { id, itemNumber } = resolveItemKey(resolveSubstituteTarget(entry, target))
   if (!id && !itemNumber) {
@@ -3681,6 +3719,12 @@ function getCompareParent(entry?: Record<string, any> | null): Record<string, an
 function resolveCompareParentKey(entry?: Record<string, any> | null): string {
   const parent = getCompareParent(entry)
   const { id, itemNumber } = resolveItemKey(parent)
+  return id || itemNumber || ''
+}
+
+function resolveCompareChildKey(entry?: Record<string, any> | null): string {
+  const child = getCompareChild(entry)
+  const { id, itemNumber } = resolveItemKey(child)
   return id || itemNumber || ''
 }
 
