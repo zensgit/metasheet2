@@ -2,6 +2,27 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-15)
+### Commands Executed
+- `docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -c "DROP DATABASE IF EXISTS metasheet_attendance_verify;"`
+- `docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -c "CREATE DATABASE metasheet_attendance_verify;"`
+- `DB_QUERY_TIMEOUT=120000 DB_STATEMENT_TIMEOUT=120000 DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify pnpm --filter @metasheet/core-backend migrate`
+- `PORT=8912 RBAC_BYPASS=true DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify pnpm --filter @metasheet/core-backend dev:core`
+- `curl http://127.0.0.1:8912/api/auth/dev-token?...`
+- `curl -H "Authorization: Bearer <token>" -d '{"eventType":"check_in"}' http://127.0.0.1:8912/api/attendance/punch`
+- `curl http://127.0.0.1:8912/api/plugins`
+- `DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify pnpm --filter @metasheet/core-backend test:integration:attendance`
+
+### Results
+- Migrations succeeded on `metasheet_attendance_verify`.
+- First migration attempt hit a query read timeout; rerun with `DB_QUERY_TIMEOUT/DB_STATEMENT_TIMEOUT=120000` succeeded.
+- Attendance plugin activated on startup; routes registered successfully.
+- `POST /api/attendance/punch` returned `200` with event + record payload.
+- `/api/plugins` now returns an array and includes `plugin-attendance` with `status=active`.
+- Attendance integration smoke runs via `vitest.integration.config.ts` with `test:integration:attendance`.
+- Full `test:integration` still fails in this repo due to existing snapshot-protection and plugin-failure suites (not caused by attendance changes).
+- Attendance integration smoke completed with expected BPMN missing-table warnings (workflow tables are not part of the clean DB).
+
 ## Verification Summary
 Completed unit test verification for backend and frontend after adding attendance scheduling (shifts, assignments, holidays). Migration and UI smoke checks were rerun against a clean dev database and succeeded. Follow-up CI fixes were validated with plugin manifest validation plus the plugin loader failure suite.
 

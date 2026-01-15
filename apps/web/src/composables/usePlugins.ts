@@ -27,7 +27,8 @@ export function usePlugins() {
     try {
       const res = await fetch(`${base}/api/plugins`)
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-      const data: PluginInfo[] = await res.json()
+      const payload = await res.json()
+      const data: PluginInfo[] = Array.isArray(payload) ? payload : (payload?.list || [])
       plugins.value = data
       // Aggregate views from active plugins only
       const active = data.filter(p => p.status === 'active')

@@ -13,9 +13,9 @@ import { EventEmitter } from 'eventemitter3'
 import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
-import { PluginLoader } from './core/plugin-loader'
+import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
-import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData } from './types/plugin'
+import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData, PluginContext, PluginCommunication, PluginStorage, PluginApiMethod } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { eventBus } from './integration/events/event-bus'
@@ -60,6 +60,8 @@ export class MetaSheetServer {
   private httpServer: HttpServer
   private logger: Logger
   private eventBus: EventEmitter
+  private pluginStatus = new Map<string, { status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>()
+  private pluginApis = new Map<string, Record<string, PluginApiMethod>>()
   private port: number
   private host?: string
   private portLocked: boolean
@@ -67,6 +69,7 @@ export class MetaSheetServer {
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
+  private pluginContexts = new Map<string, PluginContext>()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -575,7 +578,18 @@ export class MetaSheetServer {
     this.app.get('/api/plugins', (req, res) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
-        const list = (this.pluginLoader as unknown as Record<string, () => unknown[]>).getList?.() || []
+        const list = Array.from(this.pluginLoader.getPlugins().values()).map((loaded) => {
+          const state = this.pluginStatus.get(loaded.manifest.name)
+          return {
+            name: loaded.manifest.name,
+            version: loaded.manifest.version,
+            displayName: loaded.manifest.displayName,
+            status: state?.status ?? 'inactive',
+            error: state?.error,
+            lastAttempt: state?.lastAttempt,
+            contributes: loaded.manifest.contributes ? { views: loaded.manifest.contributes.views } : undefined,
+          }
+        })
         const summary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.() || {}
         res.json({ list, summary })
         endTimer?.({ route: '/api/plugins', method: 'GET' })(200)
@@ -613,6 +627,88 @@ export class MetaSheetServer {
     this.logger.info(`Cache: ${enabled ? 'observing' : 'disabled'} (impl: ${cacheRegistry.getStatus().implName})`)
 
     // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
+  }
+
+  private createPluginContext(loaded: LoadedPlugin, coreAPI: CoreAPI): PluginContext {
+    const storageMap = new Map<string, unknown>()
+    const storage: PluginStorage = {
+      get: async <T = unknown>(key: string): Promise<T | null> => {
+        if (!storageMap.has(key)) return null
+        return storageMap.get(key) as T
+      },
+      set: async (key: string, value: unknown): Promise<void> => {
+        storageMap.set(key, value)
+      },
+      delete: async (key: string): Promise<void> => {
+        storageMap.delete(key)
+      },
+      list: async (): Promise<string[]> => Array.from(storageMap.keys())
+    }
+
+    const communication: PluginCommunication = {
+      call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
+        const api = this.pluginApis.get(plugin)
+        const fn = api?.[method]
+        if (!fn) {
+          throw new Error(`Plugin method not found: ${plugin}.${method}`)
+        }
+        return fn(...args) as Promise<R>
+      },
+      register: (name: string, api: Record<string, PluginApiMethod>) => {
+        this.pluginApis.set(name, api)
+      },
+      on: (event: string, handler: (data: unknown) => void) => {
+        this.eventBus.on(event, handler)
+      },
+      emit: (event: string, data?: unknown) => {
+        this.eventBus.emit(event, data)
+      },
+    }
+
+    const rawAuthor = loaded.manifest.author
+    const author = typeof rawAuthor === 'string'
+      ? rawAuthor
+      : (rawAuthor && typeof rawAuthor === 'object' ? (rawAuthor as { name?: string }).name : undefined)
+
+    return {
+      metadata: {
+        name: loaded.manifest.name,
+        version: loaded.manifest.version,
+        displayName: loaded.manifest.displayName,
+        description: loaded.manifest.description,
+        author,
+        path: loaded.path,
+      },
+      api: coreAPI,
+      core: coreAPI,
+      storage,
+      config: {},
+      communication,
+      logger: new Logger(`Plugin:${loaded.manifest.name}`),
+    }
+  }
+
+  private async activateLoadedPlugins(): Promise<void> {
+    const plugins = this.pluginLoader.getPlugins()
+    const coreAPI = this.injector.get(ICoreAPI)
+    for (const [name, loaded] of plugins) {
+      const lastAttempt = new Date().toISOString()
+      if (!loaded.plugin || typeof loaded.plugin.activate !== 'function') {
+        this.pluginStatus.set(name, { status: 'inactive', lastAttempt })
+        continue
+      }
+
+      const context = this.createPluginContext(loaded, coreAPI)
+      try {
+        await loaded.plugin.activate(context)
+        this.pluginContexts.set(loaded.manifest.name, context)
+        this.pluginStatus.set(name, { status: 'active', lastAttempt })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.pluginStatus.set(name, { status: 'failed', error: message, lastAttempt })
+        this.logger.error(`Plugin activation failed: ${name}`, error as Error)
+      }
+    }
   }
 
   /**
@@ -762,6 +858,7 @@ export class MetaSheetServer {
       this.logger.info('Loading plugins...')
       try {
         await this.pluginLoader.loadPlugins()
+        await this.activateLoadedPlugins()
         this.logger.info('Plugins loaded successfully')
       } catch (e) {
         this.logger.error('Plugin loading failed; continuing startup without full plugin set', e as Error)
