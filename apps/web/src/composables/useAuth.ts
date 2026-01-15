@@ -3,7 +3,9 @@ export function useAuth() {
     try {
       return (
         (typeof localStorage !== 'undefined' &&
-          (localStorage.getItem('jwt') || localStorage.getItem('devToken'))) ||
+          (localStorage.getItem('jwt') ||
+            localStorage.getItem('devToken') ||
+            localStorage.getItem('auth_token'))) ||
         null
       )
     } catch {

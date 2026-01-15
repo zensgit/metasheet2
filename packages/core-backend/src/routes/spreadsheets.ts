@@ -8,6 +8,7 @@ import { parsePagination } from '../util/response'
 
 // 简易内存表
 const sheets = new Map<string, { id: string; name: string; deleted?: boolean }>()
+const legacySheets = new Map<string, { id: string; rows: number; cols: number; data: unknown[][] }>()
 
 export function spreadsheetsRouter(): Router {
   const r = Router()
@@ -100,6 +101,28 @@ export function spreadsheetsRouter(): Router {
     if (!before) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
     sheets.set(id, { ...before, deleted: true })
     await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'spreadsheet', resourceId: id, meta: { before } })
+    return res.json({ ok: true, data: { id } })
+  })
+
+  // Legacy GridView compatibility
+  r.get('/api/spreadsheet', rbacGuard('spreadsheets', 'read'), async (req: Request, res: Response) => {
+    const id = typeof req.query.id === 'string' && req.query.id.trim() ? req.query.id.trim() : 'default'
+    const sheet = legacySheets.get(id)
+    if (!sheet) return res.json({ ok: true, data: {} })
+    return res.json({ ok: true, data: sheet })
+  })
+
+  r.post('/api/spreadsheet', rbacGuard('spreadsheets', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      id: z.string().optional(),
+      rows: z.number().int().positive(),
+      cols: z.number().int().positive(),
+      data: z.array(z.array(z.any()))
+    })
+    const parse = schema.safeParse(req.body)
+    if (!parse.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parse.error.message } })
+    const id = parse.data.id || 'default'
+    legacySheets.set(id, { id, rows: parse.data.rows, cols: parse.data.cols, data: parse.data.data })
     return res.json({ ok: true, data: { id } })
   })
 

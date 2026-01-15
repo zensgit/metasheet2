@@ -90,7 +90,11 @@ function debounce<T extends (...args: any[]) => any>(fn: T, wait = 400) {
 // 获取看板数据
 async function fetchKanbanData() {
   try {
-    const response = await fetch('http://localhost:8900/api/kanban/board1')
+    const response = await fetch(`${getApiBase()}/api/kanban/board1`, {
+      headers: {
+        ...buildAuthHeaders()
+      }
+    })
     const result = await response.json()
 
     if (result.success && result.data) {

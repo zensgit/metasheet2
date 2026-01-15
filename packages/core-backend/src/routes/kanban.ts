@@ -55,6 +55,42 @@ function computeEtag(payload: unknown): string {
 export function kanbanRouter() {
   const router = Router()
 
+  if (process.env.NODE_ENV !== 'production') {
+    router.get('/board1', (_req, res) => {
+      return res.json({
+        success: true,
+        data: [
+          {
+            id: 'todo',
+            title: '待处理',
+            cards: [
+              { id: '1', title: '设计数据库架构', content: '设计插件系统的数据库表结构', status: 'todo' },
+              { id: '2', title: '实现权限系统', content: '实现基于角色的访问控制', status: 'todo' }
+            ],
+            order: 1
+          },
+          {
+            id: 'in_progress',
+            title: '进行中',
+            cards: [
+              { id: '3', title: '开发插件加载器', content: '实现插件的动态加载和卸载功能', status: 'in_progress' }
+            ],
+            order: 2
+          },
+          {
+            id: 'done',
+            title: '已完成',
+            cards: [
+              { id: '4', title: '项目初始化', content: '创建项目结构和基础配置', status: 'done' },
+              { id: '5', title: '微内核设计', content: '完成微内核架构设计', status: 'done' }
+            ],
+            order: 3
+          }
+        ]
+      })
+    })
+  }
+
   /**
    * GET /api/kanban/:viewId
    * Returns view config + per-user state; supports ETag/If-None-Match.
@@ -155,4 +191,3 @@ export function kanbanRouter() {
 
   return router
 }
-
