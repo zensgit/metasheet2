@@ -34,6 +34,7 @@ PLM_COMPARE_LEFT_ID="${PLM_COMPARE_LEFT_ID:-}"
 PLM_COMPARE_RIGHT_ID="${PLM_COMPARE_RIGHT_ID:-}"
 PLM_COMPARE_EXPECT="${PLM_COMPARE_EXPECT:-}"
 PLM_BOM_LINE_ID="${PLM_BOM_LINE_ID:-}"
+PLM_BOM_CHILD_ID="${PLM_BOM_CHILD_ID:-}"
 PLM_SUBSTITUTE_EXPECT="${PLM_SUBSTITUTE_EXPECT:-}"
 PLM_DOCUMENT_NAME="${PLM_DOCUMENT_NAME:-}"
 PLM_DOCUMENT_ROLE="${PLM_DOCUMENT_ROLE:-}"
@@ -77,6 +78,7 @@ if not path.exists():
 data = json.loads(path.read_text())
 where_used = (data.get("where_used") or {}).get("data") or {}
 parents = where_used.get("parents") or []
+fixtures = data.get("fixtures") or {}
 
 search_query = ""
 product_id = ""
@@ -124,6 +126,8 @@ if not compare_expect and changed:
     if len(path) > 1:
         compare_expect = path[-1].get("name") or path[-1].get("item_number") or ""
 
+bom_child_id = fixtures.get("child_z") or fixtures.get("child_x") or fixtures.get("child_y") or ""
+
 substitutes = (data.get("substitutes") or {}).get("data") or {}
 bom_line_id = substitutes.get("bom_line_id") or ""
 subs = substitutes.get("substitutes") or []
@@ -145,6 +149,7 @@ preferred_search_query = approval_product_number or search_query
 
 print(preferred_search_query)
 print(preferred_product_id)
+print(bom_child_id)
 print(where_used.get("item_id") or "")
 print(where_used_expect)
 print(compare_left)
@@ -162,23 +167,29 @@ PY
 
   if [[ -z "$PLM_SEARCH_QUERY" ]]; then PLM_SEARCH_QUERY="${values[0]:-}"; fi
   if [[ -z "$PLM_PRODUCT_ID" ]]; then PLM_PRODUCT_ID="${values[1]:-}"; fi
-  if [[ -z "$PLM_WHERE_USED_ID" ]]; then PLM_WHERE_USED_ID="${values[2]:-}"; fi
-  if [[ -z "$PLM_WHERE_USED_EXPECT" ]]; then PLM_WHERE_USED_EXPECT="${values[3]:-}"; fi
-  if [[ -z "$PLM_COMPARE_LEFT_ID" ]]; then PLM_COMPARE_LEFT_ID="${values[4]:-}"; fi
-  if [[ -z "$PLM_COMPARE_RIGHT_ID" ]]; then PLM_COMPARE_RIGHT_ID="${values[5]:-}"; fi
-  if [[ -z "$PLM_COMPARE_EXPECT" ]]; then PLM_COMPARE_EXPECT="${values[6]:-}"; fi
-  if [[ -z "$PLM_BOM_LINE_ID" ]]; then PLM_BOM_LINE_ID="${values[7]:-}"; fi
-  if [[ -z "$PLM_SUBSTITUTE_EXPECT" ]]; then PLM_SUBSTITUTE_EXPECT="${values[8]:-}"; fi
-  if [[ -z "$PLM_DOCUMENT_NAME" ]]; then PLM_DOCUMENT_NAME="${values[9]:-}"; fi
-  if [[ -z "$PLM_DOCUMENT_ROLE" ]]; then PLM_DOCUMENT_ROLE="${values[10]:-}"; fi
-  if [[ -z "$PLM_DOCUMENT_REVISION" ]]; then PLM_DOCUMENT_REVISION="${values[11]:-}"; fi
-  if [[ -z "$PLM_APPROVAL_TITLE" ]]; then PLM_APPROVAL_TITLE="${values[12]:-}"; fi
-  if [[ -z "$PLM_APPROVAL_PRODUCT_NUMBER" ]]; then PLM_APPROVAL_PRODUCT_NUMBER="${values[13]:-}"; fi
+  if [[ -z "$PLM_BOM_CHILD_ID" ]]; then PLM_BOM_CHILD_ID="${values[2]:-}"; fi
+  if [[ -z "$PLM_WHERE_USED_ID" ]]; then PLM_WHERE_USED_ID="${values[3]:-}"; fi
+  if [[ -z "$PLM_WHERE_USED_EXPECT" ]]; then PLM_WHERE_USED_EXPECT="${values[4]:-}"; fi
+  if [[ -z "$PLM_COMPARE_LEFT_ID" ]]; then PLM_COMPARE_LEFT_ID="${values[5]:-}"; fi
+  if [[ -z "$PLM_COMPARE_RIGHT_ID" ]]; then PLM_COMPARE_RIGHT_ID="${values[6]:-}"; fi
+  if [[ -z "$PLM_COMPARE_EXPECT" ]]; then PLM_COMPARE_EXPECT="${values[7]:-}"; fi
+  if [[ -z "$PLM_BOM_LINE_ID" ]]; then PLM_BOM_LINE_ID="${values[8]:-}"; fi
+  if [[ -z "$PLM_SUBSTITUTE_EXPECT" ]]; then PLM_SUBSTITUTE_EXPECT="${values[9]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_NAME" ]]; then PLM_DOCUMENT_NAME="${values[10]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_ROLE" ]]; then PLM_DOCUMENT_ROLE="${values[11]:-}"; fi
+  if [[ -z "$PLM_DOCUMENT_REVISION" ]]; then PLM_DOCUMENT_REVISION="${values[12]:-}"; fi
+  if [[ -z "$PLM_APPROVAL_TITLE" ]]; then PLM_APPROVAL_TITLE="${values[13]:-}"; fi
+  if [[ -z "$PLM_APPROVAL_PRODUCT_NUMBER" ]]; then PLM_APPROVAL_PRODUCT_NUMBER="${values[14]:-}"; fi
 fi
 
 if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" || -z "$PLM_DOCUMENT_NAME" || -z "$PLM_DOCUMENT_ROLE" || -z "$PLM_APPROVAL_TITLE" ]]; then
   echo "Missing required PLM inputs; set PLM_SEARCH_QUERY/PLM_PRODUCT_ID/PLM_WHERE_USED_ID/PLM_COMPARE_LEFT_ID/PLM_COMPARE_RIGHT_ID/PLM_BOM_LINE_ID/PLM_DOCUMENT_NAME/PLM_DOCUMENT_ROLE/PLM_APPROVAL_TITLE." >&2
   exit 1
+fi
+
+BOM_CHILD_RESULT="BOM child actions skipped (missing PLM_BOM_CHILD_ID)."
+if [[ -n "$PLM_BOM_CHILD_ID" ]]; then
+  BOM_CHILD_RESULT="BOM child actions executed (copy + switch)."
 fi
 
 BACK_PID=""
@@ -288,6 +299,7 @@ const { chromium } = require('@playwright/test');
 const token = process.env.METASHEET_TOKEN;
 const searchQuery = process.env.PLM_SEARCH_QUERY;
 const productId = process.env.PLM_PRODUCT_ID;
+const bomChildId = process.env.PLM_BOM_CHILD_ID || '';
 const whereUsedId = process.env.PLM_WHERE_USED_ID;
 const whereUsedExpect = process.env.PLM_WHERE_USED_EXPECT || '';
 const compareLeftId = process.env.PLM_COMPARE_LEFT_ID;
@@ -370,6 +382,62 @@ async function waitOptional(scope, text) {
   }, null, { timeout: 60000 });
   await waitOptional(detailSection, itemNumberValue);
 
+  const bomSection = page.locator('section:has-text("BOM 结构")');
+  const bomRows = bomSection.locator('table tbody tr');
+  await bomRows.first().waitFor({ timeout: 60000 });
+  let bomTargetRow = null;
+  if (bomChildId) {
+    const match = bomRows.filter({ hasText: bomChildId });
+    if (await match.count()) {
+      bomTargetRow = match.first();
+    } else {
+      console.warn(`BOM child ${bomChildId} not found, falling back to first row.`);
+    }
+  }
+  if (!bomTargetRow) {
+    bomTargetRow = bomRows.first();
+  }
+  const childIdCell = bomTargetRow.locator('td').nth(1).locator('.muted.mono');
+  let resolvedChildId = '';
+  if (await childIdCell.count()) {
+    resolvedChildId = ((await childIdCell.first().textContent()) || '').trim();
+  }
+  const childNumberCell = bomTargetRow.locator('td').nth(1).locator('div').first();
+  const resolvedChildNumber = ((await childNumberCell.textContent()) || '').trim();
+  const childTarget = resolvedChildId || resolvedChildNumber;
+  if (childTarget) {
+    await bomTargetRow.locator('button:has-text("复制子件")').click();
+    await detailSection.getByText('已复制子件', { exact: false }).waitFor({ timeout: 60000 });
+    await bomTargetRow.locator('button:has-text("切换产品")').click();
+    if (resolvedChildId) {
+      await page.waitForFunction((expected) => {
+        const el = document.querySelector('#plm-product-id');
+        return el && el.value && el.value.trim() === expected;
+      }, resolvedChildId, { timeout: 60000 });
+    } else if (resolvedChildNumber) {
+      await page.waitForFunction((expected) => {
+        const el = document.querySelector('#plm-item-number');
+        return el && el.value && el.value.trim() === expected;
+      }, resolvedChildNumber, { timeout: 60000 });
+    }
+    await detailSection.getByText('已切换到子件产品', { exact: false }).waitFor({ timeout: 60000 });
+    if (targetRow) {
+      await targetRow.locator('button:has-text("使用")').click();
+      await page.waitForFunction((expected) => {
+        const el = document.querySelector('#plm-item-number');
+        return el && el.value && el.value.trim() === expected;
+      }, itemNumberValue, { timeout: 60000 });
+      await page.waitForFunction(() => {
+        const el = document.querySelector('#plm-product-id');
+        return el && el.value && el.value.trim().length > 0;
+      }, null, { timeout: 60000 });
+    } else {
+      console.warn('Missing search row; unable to restore original product.');
+    }
+  } else {
+    console.warn('Skipping BOM child actions; missing child identifier.');
+  }
+
   const whereUsedSection = page.locator('section:has-text("Where-Used")');
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
   await whereUsedSection.locator('button:has-text("查询")').click();
@@ -416,6 +484,7 @@ NODE_PATH="$ROOT_DIR/node_modules" \
 METASHEET_TOKEN="$METASHEET_TOKEN" \
 PLM_SEARCH_QUERY="$PLM_SEARCH_QUERY" \
 PLM_PRODUCT_ID="$PLM_PRODUCT_ID" \
+PLM_BOM_CHILD_ID="$PLM_BOM_CHILD_ID" \
 PLM_WHERE_USED_ID="$PLM_WHERE_USED_ID" \
 PLM_WHERE_USED_EXPECT="$PLM_WHERE_USED_EXPECT" \
 PLM_COMPARE_LEFT_ID="$PLM_COMPARE_LEFT_ID" \
@@ -463,6 +532,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product ID: ${PLM_PRODUCT_ID}
 - Where-used child ID: ${PLM_WHERE_USED_ID}
 - Where-used expect: ${PLM_WHERE_USED_EXPECT:-n/a}
+- BOM child ID: ${PLM_BOM_CHILD_ID:-n/a}
 - BOM compare left/right: ${PLM_COMPARE_LEFT_ID} / ${PLM_COMPARE_RIGHT_ID}
 - BOM compare expect: ${PLM_COMPARE_EXPECT:-n/a}
 - Substitute BOM line: ${PLM_BOM_LINE_ID}
@@ -477,6 +547,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 ## Results
 - Search returns matching row and selection loads product detail.
 - Item number-only load repopulates Product ID.
+- ${BOM_CHILD_RESULT}
 - Where-used query completes.
 - BOM compare completes.
 - Substitutes query completes.
