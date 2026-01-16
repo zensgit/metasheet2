@@ -387,17 +387,31 @@
               <div class="inline-actions">
                 <button
                   class="btn ghost mini"
-                  :disabled="!item.component_id || whereUsedLoading"
+                  :disabled="(!resolveBomChildId(item) && !resolveBomChildNumber(item)) || productLoading"
+                  @click="applyProductFromBom(item)"
+                >
+                  切换产品
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!resolveBomChildId(item) || whereUsedLoading"
                   @click="applyWhereUsedFromBom(item)"
                 >
                   Where-Used
                 </button>
                 <button
                   class="btn ghost mini"
-                  :disabled="!item.id || substitutesLoading"
+                  :disabled="!resolveBomLineId(item) || substitutesLoading"
                   @click="applySubstitutesFromBom(item)"
                 >
                   替代件
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!resolveBomChildId(item) && !resolveBomChildNumber(item)"
+                  @click="copyBomChildId(item)"
+                >
+                  复制子件
                 </button>
               </div>
             </td>
@@ -2939,6 +2953,18 @@ function resolveBomChildId(item: any): string {
   return value ? String(value) : ''
 }
 
+function resolveBomChildNumber(item: any): string {
+  const value =
+    item?.component_code ??
+    item?.componentCode ??
+    item?.child_code ??
+    item?.childCode ??
+    item?.item_number ??
+    item?.itemNumber ??
+    item?.code
+  return value ? String(value) : ''
+}
+
 function resolveBomLineId(item: any): string {
   const value = item?.id ?? item?.bom_line_id ?? item?.relationship_id ?? item?.relationshipId
   return value ? String(value) : ''
@@ -3017,6 +3043,38 @@ function applySubstitutesFromBom(item: any) {
   if (!substitutesLoading.value) {
     void loadSubstitutes()
   }
+}
+
+function applyProductFromBom(item: any) {
+  const childId = resolveBomChildId(item)
+  const childNumber = resolveBomChildNumber(item)
+  const target = childId || childNumber
+  if (!target) {
+    setDeepLinkMessage('BOM 行缺少子件标识', true)
+    return
+  }
+  productId.value = childId
+  productItemNumber.value = childId ? '' : childNumber
+  productError.value = ''
+  setDeepLinkMessage(`已切换到子件产品：${target}`)
+  void loadProduct()
+}
+
+async function copyBomChildId(item: any) {
+  const childId = resolveBomChildId(item)
+  const childNumber = resolveBomChildNumber(item)
+  const target = childId || childNumber
+  if (!target) {
+    setDeepLinkMessage('BOM 行缺少子件标识', true)
+    return
+  }
+  const ok = await copyToClipboard(target)
+  if (!ok) {
+    setDeepLinkMessage('复制子件标识失败', true)
+    return
+  }
+  const label = childId ? 'ID' : '料号'
+  setDeepLinkMessage(`已复制子件${label}：${target}`)
 }
 
 function applySubstitutesFromCompare(entry: any) {
