@@ -110,10 +110,14 @@ describe('Attendance Plugin Integration', () => {
     expect(punchRes.status).not.toBe(404)
 
     const pluginsRes = await requestJson(`${baseUrl}/api/plugins`)
-    expect(Array.isArray(pluginsRes.body)).toBe(true)
-    const attendance = Array.isArray(pluginsRes.body)
-      ? pluginsRes.body.find((plugin: any) => plugin?.name === 'plugin-attendance')
-      : null
+    const payload = pluginsRes.body as { list?: unknown } | unknown
+    const list = Array.isArray(payload)
+      ? payload
+      : (payload && typeof payload === 'object' && Array.isArray((payload as { list?: unknown[] }).list)
+          ? (payload as { list: unknown[] }).list
+          : [])
+    expect(Array.isArray(list)).toBe(true)
+    const attendance = list.find((plugin: any) => plugin?.name === 'plugin-attendance')
     expect(attendance).toBeDefined()
     if (attendance) {
       expect(attendance.status).toBe('active')
