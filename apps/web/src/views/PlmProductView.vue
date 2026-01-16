@@ -325,6 +325,12 @@
         >
           复制版本
         </button>
+        <button class="btn ghost mini" :disabled="!hasProductCopyValue('type')" @click="copyProductField('type')">
+          复制类型
+        </button>
+        <button class="btn ghost mini" :disabled="!hasProductCopyValue('status')" @click="copyProductField('status')">
+          复制状态
+        </button>
       </div>
       <div v-else class="empty">
         暂无产品详情
@@ -2907,7 +2913,7 @@ async function copySearchValue(item: any, kind: 'id' | 'number') {
   setDeepLinkMessage(`已复制${kind === 'id' ? ' ID' : '料号'}：${value}`)
 }
 
-type ProductCopyKind = 'id' | 'number' | 'revision'
+type ProductCopyKind = 'id' | 'number' | 'revision' | 'type' | 'status'
 
 function normalizeProductCopyValue(value?: string): string {
   if (!value) return ''
@@ -2922,6 +2928,12 @@ function getProductCopyValue(kind: ProductCopyKind): string {
   if (kind === 'number') {
     return normalizeProductCopyValue(productView.value.partNumber)
   }
+  if (kind === 'type') {
+    return normalizeProductCopyValue(productView.value.itemType)
+  }
+  if (kind === 'status') {
+    return normalizeProductCopyValue(productView.value.status)
+  }
   return normalizeProductCopyValue(productView.value.revision)
 }
 
@@ -2932,7 +2944,16 @@ function hasProductCopyValue(kind: ProductCopyKind): boolean {
 async function copyProductField(kind: ProductCopyKind) {
   const value = getProductCopyValue(kind)
   if (!value) {
-    const label = kind === 'id' ? 'ID' : kind === 'number' ? '料号' : '版本'
+    const label =
+      kind === 'id'
+        ? 'ID'
+        : kind === 'number'
+          ? '料号'
+          : kind === 'revision'
+            ? '版本'
+            : kind === 'type'
+              ? '类型'
+              : '状态'
     setDeepLinkMessage(`产品缺少${label}`, true)
     return
   }
@@ -2941,7 +2962,16 @@ async function copyProductField(kind: ProductCopyKind) {
     setDeepLinkMessage('复制失败，请手动复制', true)
     return
   }
-  const label = kind === 'id' ? 'ID' : kind === 'number' ? '料号' : '版本'
+  const label =
+    kind === 'id'
+      ? 'ID'
+      : kind === 'number'
+        ? '料号'
+        : kind === 'revision'
+          ? '版本'
+          : kind === 'type'
+            ? '类型'
+            : '状态'
   setDeepLinkMessage(`已复制产品 ${label}：${value}`)
 }
 

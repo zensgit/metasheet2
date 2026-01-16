@@ -404,6 +404,22 @@ async function waitOptional(scope, text) {
     console.warn('Skipping product revision copy; revision not available.');
   }
 
+  const copyTypeButton = detailSection.locator('button:has-text("复制类型")');
+  if (await copyTypeButton.isEnabled()) {
+    await copyTypeButton.click();
+    await detailSection.getByText('已复制产品 类型', { exact: false }).waitFor({ timeout: 60000 });
+  } else {
+    console.warn('Skipping product type copy; type not available.');
+  }
+
+  const copyStatusButton = detailSection.locator('button:has-text("复制状态")');
+  if (await copyStatusButton.isEnabled()) {
+    await copyStatusButton.click();
+    await detailSection.getByText('已复制产品 状态', { exact: false }).waitFor({ timeout: 60000 });
+  } else {
+    console.warn('Skipping product status copy; status not available.');
+  }
+
   const bomSection = page.locator('section:has-text("BOM 结构")');
   const bomRows = bomSection.locator('table tbody tr');
   await bomRows.first().waitFor({ timeout: 60000 });

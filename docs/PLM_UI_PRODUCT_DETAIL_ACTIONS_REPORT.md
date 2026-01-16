@@ -1,12 +1,12 @@
 # PLM UI Product Detail Actions Report
 
 ## Goal
-Add quick copy actions for product ID, item number, and revision in the PLM product detail panel.
+Add quick copy actions for product ID, item number, revision, type, and status in the PLM product detail panel.
 
 ## Changes
 - `apps/web/src/views/PlmProductView.vue`
   - Added product ID row to the detail grid.
-  - Added copy buttons for product ID/number/revision.
+  - Added copy buttons for product ID/number/revision/type/status.
   - New helper methods to normalize and copy product values.
 - `scripts/verify-plm-ui-regression.sh`
   - Added assertions for product detail copy actions.
@@ -16,5 +16,5 @@ Add quick copy actions for product ID, item number, and revision in the PLM prod
 - Copy feedback surfaces via the shared status banner.
 
 ## Verification
-- UI regression: `docs/verification-plm-ui-regression-20260116_143745.md`
-- Screenshot: `artifacts/plm-ui-regression-20260116_143745.png`
+- UI regression: `docs/verification-plm-ui-regression-20260116_150725.md`
+- Screenshot: `artifacts/plm-ui-regression-20260116_150725.png`
