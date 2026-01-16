@@ -23,6 +23,15 @@ Date: 2026-01-11
 - Full `test:integration` still fails in this repo due to existing snapshot-protection and plugin-failure suites (not caused by attendance changes).
 - Attendance integration smoke completed with expected BPMN missing-table warnings (workflow tables are not part of the clean DB).
 
+## Update (2026-01-16)
+### Commands Executed
+- `pnpm install`
+- `pnpm --filter @metasheet/core-backend test:integration:attendance`
+
+### Results
+- Initial run failed due to missing dependencies; added `lodash` to `@metasheet/core-backend` and reran successfully.
+- `test:integration:attendance` passed (1 test); Vite CJS deprecation warning noted in logs.
+
 ## Verification Summary
 Completed unit test verification for backend and frontend after adding attendance scheduling (shifts, assignments, holidays). Migration and UI smoke checks were rerun against a clean dev database and succeeded. Follow-up CI fixes were validated with plugin manifest validation plus the plugin loader failure suite.
 

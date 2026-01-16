@@ -10,6 +10,9 @@ Date: 2026-01-11
 - Added integration smoke test `packages/core-backend/tests/integration/attendance-plugin.test.ts` (skips when DB is unavailable).
 - Added `packages/core-backend/vitest.integration.config.ts` plus `test:integration:attendance` script for the new attendance smoke.
 
+## Update (2026-01-16)
+- Added `lodash` to `@metasheet/core-backend` dependencies to satisfy parser imports during integration runs.
+
 ## Overview
 The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
 
