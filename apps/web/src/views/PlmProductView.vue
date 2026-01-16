@@ -410,6 +410,7 @@
       <div class="panel-header">
         <h2>关联文档</h2>
         <div class="panel-actions">
+          <button class="btn ghost" @click="copyDeepLink('documents')">复制深链接</button>
           <button class="btn ghost" :disabled="!documentsFiltered.length" @click="exportDocumentsCsv">
             导出 CSV
           </button>
@@ -492,6 +493,7 @@
             <th v-if="documentColumns.preview">预览</th>
             <th v-if="documentColumns.download">下载</th>
             <th v-if="documentColumns.cad">CAD</th>
+            <th v-if="documentColumns.actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -527,6 +529,18 @@
               <div class="inline-actions">
                 <button class="btn ghost mini" @click="selectCadFile(doc, 'primary')">主</button>
                 <button class="btn ghost mini" @click="selectCadFile(doc, 'other')">对比</button>
+              </div>
+            </td>
+            <td v-if="documentColumns.actions">
+              <div class="inline-actions">
+                <button class="btn ghost mini" @click="copyDocumentId(doc)">复制 ID</button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!getDocumentDownloadUrl(doc)"
+                  @click="copyDocumentUrl(doc, 'download')"
+                >
+                  复制下载
+                </button>
               </div>
             </td>
           </tr>
@@ -725,6 +739,7 @@
       <div class="panel-header">
         <h2>审批</h2>
         <div class="panel-actions">
+          <button class="btn ghost" @click="copyDeepLink('approvals')">复制深链接</button>
           <button class="btn ghost" :disabled="!approvalsFiltered.length" @click="exportApprovalsCsv">
             导出 CSV
           </button>
@@ -801,6 +816,7 @@
             <th v-if="approvalColumns.requester">发起人</th>
             <th v-if="approvalColumns.created">创建时间</th>
             <th v-if="approvalColumns.product">产品</th>
+            <th v-if="approvalColumns.actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -817,6 +833,12 @@
             <td v-if="approvalColumns.product">
               <div>{{ getApprovalProductNumber(approval) }}</div>
               <div class="muted">{{ getApprovalProductName(approval) }}</div>
+            </td>
+            <td v-if="approvalColumns.actions">
+              <div class="inline-actions">
+                <button class="btn ghost mini" @click="applyProductFromApproval(approval)">切换产品</button>
+                <button class="btn ghost mini" @click="copyApprovalId(approval)">复制 ID</button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -1857,6 +1879,7 @@ const defaultDocumentColumns: Record<string, boolean> = {
   preview: true,
   download: true,
   cad: true,
+  actions: true,
 }
 const documentColumns = ref<Record<string, boolean>>({ ...defaultDocumentColumns })
 const documentColumnOptions = [
@@ -1869,6 +1892,7 @@ const documentColumnOptions = [
   { key: 'preview', label: '预览' },
   { key: 'download', label: '下载' },
   { key: 'cad', label: 'CAD' },
+  { key: 'actions', label: '操作' },
 ]
 const documents = ref<any[]>([])
 const documentsLoading = ref(false)
@@ -1907,6 +1931,7 @@ const defaultApprovalColumns: Record<string, boolean> = {
   requester: true,
   created: true,
   product: true,
+  actions: true,
 }
 const approvalColumns = ref<Record<string, boolean>>({ ...defaultApprovalColumns })
 const approvalColumnOptions = [
@@ -1915,6 +1940,7 @@ const approvalColumnOptions = [
   { key: 'requester', label: '发起人' },
   { key: 'created', label: '创建时间' },
   { key: 'product', label: '产品' },
+  { key: 'actions', label: '操作' },
 ]
 
 const whereUsedItemId = ref('')
@@ -2557,6 +2583,8 @@ const DEEP_LINK_PRESETS_STORAGE_KEY = 'plm_deep_link_presets'
 const deepLinkPanelOptions = [
   { key: 'search', label: '搜索' },
   { key: 'product', label: '产品' },
+  { key: 'documents', label: '文档' },
+  { key: 'approvals', label: '审批' },
   { key: 'cad', label: 'CAD 元数据' },
   { key: 'where-used', label: 'Where-Used' },
   { key: 'compare', label: 'BOM 对比' },
@@ -2566,6 +2594,7 @@ const builtInDeepLinkPresets = [
   { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
   { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
   { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
+  { key: 'docs-approvals', label: '文档 + 审批', panels: ['documents', 'approvals'] },
   { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
 ]
 const deepLinkPresets = computed(() => [...builtInDeepLinkPresets, ...customDeepLinkPresets.value])
@@ -3725,6 +3754,11 @@ function getDocumentMetadata(doc: Record<string, any>): Record<string, any> {
   return doc?.metadata || {}
 }
 
+function getDocumentId(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return String(doc?.id || doc?.file_id || metadata.file_id || metadata.id || '')
+}
+
 function getDocumentName(doc: Record<string, any>): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
@@ -3796,6 +3830,34 @@ function getDocumentDownloadUrl(doc: Record<string, any>): string {
   return normalizeText(doc?.download_url || metadata.download_url, '')
 }
 
+async function copyDocumentId(doc: Record<string, any>) {
+  const value = getDocumentId(doc)
+  if (!value) {
+    setDeepLinkMessage('文档缺少 ID。', true)
+    return
+  }
+  const ok = await copyToClipboard(value)
+  if (!ok) {
+    setDeepLinkMessage('复制文档 ID 失败。', true)
+    return
+  }
+  setDeepLinkMessage(`已复制文档 ID：${value}`)
+}
+
+async function copyDocumentUrl(doc: Record<string, any>, kind: 'preview' | 'download') {
+  const url = kind === 'preview' ? getDocumentPreviewUrl(doc) : getDocumentDownloadUrl(doc)
+  if (!url) {
+    setDeepLinkMessage(`文档缺少${kind === 'preview' ? '预览' : '下载'}链接。`, true)
+    return
+  }
+  const ok = await copyToClipboard(url)
+  if (!ok) {
+    setDeepLinkMessage('复制链接失败。', true)
+    return
+  }
+  setDeepLinkMessage(`已复制${kind === 'preview' ? '预览' : '下载'}链接。`)
+}
+
 function getApprovalTitle(entry: Record<string, any>): string {
   return normalizeText(entry?.title || entry?.name || entry?.id, '-')
 }
@@ -3834,6 +3896,44 @@ function getApprovalProductNumber(entry: Record<string, any>): string {
 
 function getApprovalProductName(entry: Record<string, any>): string {
   return normalizeText(entry?.product_name || entry?.productName, '-')
+}
+
+function resolveApprovalProductKey(entry: Record<string, any>): { id: string; itemNumber: string } {
+  const id = entry?.product_id || entry?.productId || entry?.product?.id || ''
+  const itemNumber =
+    entry?.product_number ||
+    entry?.productNumber ||
+    entry?.product_code ||
+    entry?.product?.item_number ||
+    ''
+  return { id: id ? String(id) : '', itemNumber: itemNumber ? String(itemNumber) : '' }
+}
+
+async function applyProductFromApproval(entry: Record<string, any>) {
+  const { id, itemNumber } = resolveApprovalProductKey(entry)
+  if (!id && !itemNumber) {
+    setDeepLinkMessage('审批记录缺少产品标识。', true)
+    return
+  }
+  productId.value = id || ''
+  productItemNumber.value = id ? '' : itemNumber
+  productError.value = ''
+  setDeepLinkMessage(`已切换到产品：${id || itemNumber}`)
+  await loadProduct()
+}
+
+async function copyApprovalId(entry: Record<string, any>) {
+  const value = entry?.id ? String(entry.id) : ''
+  if (!value) {
+    setDeepLinkMessage('审批记录缺少 ID。', true)
+    return
+  }
+  const ok = await copyToClipboard(value)
+  if (!ok) {
+    setDeepLinkMessage('复制审批 ID 失败。', true)
+    return
+  }
+  setDeepLinkMessage(`已复制审批 ID：${value}`)
 }
 
 function getSubstitutePart(entry: Record<string, any>): Record<string, any> {
@@ -4061,6 +4161,8 @@ const deepLinkPanelLabels: Record<string, string> = {
   all: '全部',
   search: '搜索',
   product: '产品',
+  documents: '文档',
+  approvals: '审批',
   cad: 'CAD 元数据',
   'where-used': 'Where-Used',
   compare: 'BOM 对比',
@@ -4310,6 +4412,10 @@ function formatDeepLinkTargets(panel?: string): string {
   const targets = []
   if (searchQuery.value) targets.push(deepLinkPanelLabels.search)
   if (productId.value || productItemNumber.value) targets.push(deepLinkPanelLabels.product)
+  if (documentRole.value || documentFilter.value) targets.push(deepLinkPanelLabels.documents)
+  if (approvalsStatus.value !== DEFAULT_APPROVAL_STATUS || approvalsFilter.value) {
+    targets.push(deepLinkPanelLabels.approvals)
+  }
   if (cadFileId.value) targets.push(deepLinkPanelLabels.cad)
   if (whereUsedItemId.value) targets.push(deepLinkPanelLabels['where-used'])
   if (compareLeftId.value && compareRightId.value) targets.push(deepLinkPanelLabels.compare)
@@ -4552,6 +4658,8 @@ async function applyQueryState() {
   const tasks: Array<Promise<void>> = []
   if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
   if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
+  if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
+  if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
   if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
   if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
   if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())

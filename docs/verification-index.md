@@ -252,6 +252,10 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-item-number-20260115_231459.json`
   - Report: `docs/verification-plm-ui-regression-20260116_101817.md`
   - Artifact: `artifacts/plm-ui-regression-20260116_101817.png`
+  - Report: `docs/verification-plm-ui-regression-20260116_113652.md`
+  - Artifact: `artifacts/plm-ui-regression-20260116_113652.png`
+  - Report: `docs/verification-plm-ui-regression-20260116_113652.md`
+  - Artifact: `artifacts/plm-ui-regression-20260116_113652.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`

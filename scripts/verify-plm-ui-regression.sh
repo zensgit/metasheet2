@@ -394,7 +394,7 @@ async function waitOptional(scope, text) {
   await waitOptional(documentsSection.locator('table'), docRole);
   await waitOptional(documentsSection.locator('table'), docRevision || '');
 
-  const approvalsSection = page.locator('section:has-text("审批")');
+  const approvalsSection = page.locator('section:has(h2:has-text("审批"))');
   await approvalsSection.locator('button:has-text("刷新审批")').click();
   const approvalRows = approvalsSection.locator('table tbody tr');
   await approvalRows.first().waitFor({ timeout: 60000 });
