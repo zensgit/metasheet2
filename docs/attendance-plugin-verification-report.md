@@ -31,11 +31,13 @@ Date: 2026-01-11
 - `docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -c "CREATE DATABASE metasheet_attendance_verify_main;"`
 - `DB_QUERY_TIMEOUT=120000 DB_STATEMENT_TIMEOUT=120000 DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify_main pnpm --filter @metasheet/core-backend migrate`
 - `DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify_main pnpm --filter @metasheet/core-backend test:integration:attendance`
+- `DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_verify_main pnpm --filter @metasheet/core-backend test:integration`
 
 ### Results
 - Initial run failed due to missing dependencies; added `lodash` to `@metasheet/core-backend` and reran successfully.
 - Migrations succeeded on `metasheet_attendance_verify_main`.
 - `test:integration:attendance` passed (1 test); BPMN missing-table warnings appeared in logs but did not block execution.
+- Full `test:integration` failed due to existing plugin-failures assertions (`getFailedPlugins` missing), plugins API contract expecting array responses, and snapshot-protection test data missing required `view_id` (not caused by attendance changes).
 
 ## Verification Summary
 Completed unit test verification for backend and frontend after adding attendance scheduling (shifts, assignments, holidays). Migration and UI smoke checks were rerun against a clean dev database and succeeded. Follow-up CI fixes were validated with plugin manifest validation plus the plugin loader failure suite.
