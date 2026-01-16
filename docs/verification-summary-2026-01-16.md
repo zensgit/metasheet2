@@ -5,7 +5,7 @@
 - PLM UI regression: `docs/verification-plm-ui-regression-20260116_101817.md`
 - PLM UI full regression: `docs/verification-plm-ui-full-20260116_101817.md`
 - PLM UI regression (docs/approvals actions): `docs/verification-plm-ui-regression-20260116_113652.md`
-- PLM UI regression (BOM child actions): `docs/verification-plm-ui-regression-20260116_122014.md`
+- PLM UI regression (BOM child actions): `docs/verification-plm-ui-regression-20260116_132934.md`
 
 ## Environment Notes
 - MetaSheet API: `http://127.0.0.1:7790`
