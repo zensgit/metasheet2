@@ -2,6 +2,10 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-17)
+- Added migration `20260117090000_add_attendance_permissions.ts` to seed attendance RBAC permissions and grant them to the `admin` role.
+- Documented a minimal enablement checklist for plugin activation and RBAC setup.
+
 ## Update (2026-01-15)
 - Added migration `z20251231_create_system_configs.ts` so attendance settings persist in new databases.
 - Activated plugins during backend startup to register attendance routes at runtime.
@@ -17,6 +21,12 @@ Date: 2026-01-11
 
 ## Overview
 The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
+
+## Enablement Checklist
+- Run migrations (ensure attendance and RBAC tables exist).
+- Start backend without `SKIP_PLUGINS=true` so `plugin-attendance` activates.
+- For local smoke tests, set `RBAC_BYPASS=true` or grant `attendance:*` permissions to users/roles.
+- Populate `user_orgs` for non-default orgs so auto-absence can compute attendance.
 
 ## Backend + Plugin Changes
 - Implemented org-aware attendance routes in `plugins/plugin-attendance/index.cjs` (punch, records, summary, requests, approvals, rules, settings, export).

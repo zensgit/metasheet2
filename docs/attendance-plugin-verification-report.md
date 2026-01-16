@@ -2,6 +2,28 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-17)
+### Commands Executed
+- `if ! docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='metasheet_attendance_module_verify'" | grep -q 1; then docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -c "CREATE DATABASE metasheet_attendance_module_verify"; fi`
+- `DB_QUERY_TIMEOUT=120000 DB_STATEMENT_TIMEOUT=120000 DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_module_verify pnpm --filter @metasheet/core-backend migrate`
+- `DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_module_verify pnpm --filter @metasheet/core-backend test:integration:attendance`
+
+### Results
+- Migrations succeeded on `metasheet_attendance_module_verify`, including `20260117090000_add_attendance_permissions`.
+- Attendance integration smoke test passed (1 test).
+- BPMN missing-table warnings appeared for `bpmn_process_definitions` but did not block the run.
+
+### Additional Commands Executed (Full Integration)
+- `DATABASE_URL=postgres://metasheet:metasheet@127.0.0.1:5435/metasheet_attendance_module_verify pnpm --filter @metasheet/core-backend test:integration`
+
+### Results (Full Integration)
+- Full `test:integration` failed due to existing suite issues not caused by attendance.
+- Missing deps: `socket.io-client` (kanban/rooms suites) and `supertest` (spreadsheet suite).
+- Plugin loader failures: `getFailedPlugins` missing and expectations around plugin load behavior.
+- Plugins API contract expects array response from `/api/plugins`.
+- Snapshot protection E2E fails because `snapshots.view_id` is null during inserts.
+- Comments/Kanban API tests failed with `Cannot read properties of undefined (reading 'status')` in fetch assertions.
+
 ## Update (2026-01-15)
 ### Commands Executed
 - `docker exec -i metasheet-dev-postgres psql -U metasheet -d postgres -c "DROP DATABASE IF EXISTS metasheet_attendance_verify;"`
