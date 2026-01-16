@@ -22,6 +22,8 @@
 - PLM UI regression (bom tools refresh): `docs/verification-plm-ui-regression-20260115_220146.md`
 - PLM BOM tools seed: `artifacts/plm-bom-tools-20260115_2229.md`
 - PLM UI regression (tree/compare UI): `docs/verification-plm-ui-regression-20260115_222941.md`
+- PLM UI regression: `docs/verification-plm-ui-regression-20260115_230030.md`
+- PLM UI regression (product mapping fallback): `docs/verification-plm-ui-regression-20260115_231459.md`
 
 ## Environment Notes
 - Yuantus PLM ran on `http://127.0.0.1:7910` (earlier) and `http://127.0.0.1:7911` (latest).
