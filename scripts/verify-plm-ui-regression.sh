@@ -126,7 +126,13 @@ if not compare_expect and changed:
     if len(path) > 1:
         compare_expect = path[-1].get("name") or path[-1].get("item_number") or ""
 
-bom_child_id = fixtures.get("child_z") or fixtures.get("child_x") or fixtures.get("child_y") or ""
+bom_child_id = (
+    fixtures.get("bom_child_id")
+    or fixtures.get("child_x")
+    or fixtures.get("child_y")
+    or fixtures.get("child_z")
+    or ""
+)
 
 substitutes = (data.get("substitutes") or {}).get("data") or {}
 bom_line_id = substitutes.get("bom_line_id") or ""
