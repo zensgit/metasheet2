@@ -388,6 +388,22 @@ async function waitOptional(scope, text) {
   }, null, { timeout: 60000 });
   await waitOptional(detailSection, itemNumberValue);
 
+  const copyIdButton = detailSection.locator('button:has-text("复制 ID")');
+  await copyIdButton.click();
+  await detailSection.getByText('已复制产品 ID', { exact: false }).waitFor({ timeout: 60000 });
+
+  const copyNumberButton = detailSection.locator('button:has-text("复制料号")');
+  await copyNumberButton.click();
+  await detailSection.getByText('已复制产品 料号', { exact: false }).waitFor({ timeout: 60000 });
+
+  const copyRevisionButton = detailSection.locator('button:has-text("复制版本")');
+  if (await copyRevisionButton.isEnabled()) {
+    await copyRevisionButton.click();
+    await detailSection.getByText('已复制产品 版本', { exact: false }).waitFor({ timeout: 60000 });
+  } else {
+    console.warn('Skipping product revision copy; revision not available.');
+  }
+
   const bomSection = page.locator('section:has-text("BOM 结构")');
   const bomRows = bomSection.locator('table tbody tr');
   await bomRows.first().waitFor({ timeout: 60000 });
@@ -553,6 +569,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 ## Results
 - Search returns matching row and selection loads product detail.
 - Item number-only load repopulates Product ID.
+- Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - Where-used query completes.
 - BOM compare completes.
