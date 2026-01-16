@@ -428,12 +428,10 @@ async function waitOptional(scope, text) {
     const match = bomRows.filter({ hasText: bomChildId });
     if (await match.count()) {
       bomTargetRow = match.first();
-    } else {
-      console.warn(`BOM child ${bomChildId} not found, falling back to first row.`);
     }
   }
   if (!bomTargetRow) {
-    bomTargetRow = bomRows.first();
+    throw new Error(`BOM child ${bomChildId || '(missing)'} not found; aborting regression.`);
   }
   const childIdCell = bomTargetRow.locator('td').nth(1).locator('.muted.mono');
   let resolvedChildId = '';

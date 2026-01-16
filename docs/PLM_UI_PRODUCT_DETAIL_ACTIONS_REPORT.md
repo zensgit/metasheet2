@@ -16,5 +16,5 @@ Add quick copy actions for product ID, item number, revision, type, and status i
 - Copy feedback surfaces via the shared status banner.
 
 ## Verification
-- UI regression: `docs/verification-plm-ui-regression-20260116_150725.md`
-- Screenshot: `artifacts/plm-ui-regression-20260116_150725.png`
+- UI regression: `docs/verification-plm-ui-regression-20260116_151519.md`
+- Screenshot: `artifacts/plm-ui-regression-20260116_151519.png`

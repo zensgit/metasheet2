@@ -16,5 +16,5 @@ Expose quick actions on BOM rows to jump to child products or copy child identif
 - "复制子件" copies the child ID if available, otherwise copies the child item number.
 
 ## Verification
-- UI regression: `docs/verification-plm-ui-regression-20260116_143745.md`
-- Screenshot: `artifacts/plm-ui-regression-20260116_143745.png`
+- UI regression: `docs/verification-plm-ui-regression-20260116_151519.md`
+- Screenshot: `artifacts/plm-ui-regression-20260116_151519.png`
