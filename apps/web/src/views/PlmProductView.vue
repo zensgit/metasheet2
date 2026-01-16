@@ -279,6 +279,10 @@
 
       <div v-if="product" class="detail-grid">
         <div>
+          <span>ID</span>
+          <strong class="mono">{{ productView.id || '-' }}</strong>
+        </div>
+        <div>
           <span>名称</span>
           <strong>{{ productView.name }}</strong>
         </div>
@@ -306,6 +310,21 @@
           <span>创建时间</span>
           <strong>{{ formatTime(productView.createdAt) }}</strong>
         </div>
+      </div>
+      <div v-if="product" class="inline-actions">
+        <button class="btn ghost mini" :disabled="!hasProductCopyValue('id')" @click="copyProductField('id')">
+          复制 ID
+        </button>
+        <button class="btn ghost mini" :disabled="!hasProductCopyValue('number')" @click="copyProductField('number')">
+          复制料号
+        </button>
+        <button
+          class="btn ghost mini"
+          :disabled="!hasProductCopyValue('revision')"
+          @click="copyProductField('revision')"
+        >
+          复制版本
+        </button>
       </div>
       <div v-else class="empty">
         暂无产品详情
@@ -2886,6 +2905,44 @@ async function copySearchValue(item: any, kind: 'id' | 'number') {
     return
   }
   setDeepLinkMessage(`已复制${kind === 'id' ? ' ID' : '料号'}：${value}`)
+}
+
+type ProductCopyKind = 'id' | 'number' | 'revision'
+
+function normalizeProductCopyValue(value?: string): string {
+  if (!value) return ''
+  if (value === '-') return ''
+  return value
+}
+
+function getProductCopyValue(kind: ProductCopyKind): string {
+  if (kind === 'id') {
+    return normalizeProductCopyValue(productView.value.id || productId.value)
+  }
+  if (kind === 'number') {
+    return normalizeProductCopyValue(productView.value.partNumber)
+  }
+  return normalizeProductCopyValue(productView.value.revision)
+}
+
+function hasProductCopyValue(kind: ProductCopyKind): boolean {
+  return Boolean(getProductCopyValue(kind))
+}
+
+async function copyProductField(kind: ProductCopyKind) {
+  const value = getProductCopyValue(kind)
+  if (!value) {
+    const label = kind === 'id' ? 'ID' : kind === 'number' ? '料号' : '版本'
+    setDeepLinkMessage(`产品缺少${label}`, true)
+    return
+  }
+  const ok = await copyToClipboard(value)
+  if (!ok) {
+    setDeepLinkMessage('复制失败，请手动复制', true)
+    return
+  }
+  const label = kind === 'id' ? 'ID' : kind === 'number' ? '料号' : '版本'
+  setDeepLinkMessage(`已复制产品 ${label}：${value}`)
 }
 
 async function loadProduct() {
