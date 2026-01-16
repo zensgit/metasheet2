@@ -12,6 +12,8 @@ Date: 2026-01-11
 
 ## Update (2026-01-16)
 - Added `lodash` to `@metasheet/core-backend` dependencies to satisfy parser imports during integration runs.
+- Restored `zz20251231_create_audit_tables.ts` placeholder migration to unblock existing DB migration history.
+- Added `packages/core-backend/vitest.integration.config.ts` so integration tests can run without unit test exclusions.
 
 ## Overview
 The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
