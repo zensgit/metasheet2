@@ -62,7 +62,7 @@
         <tbody>
           <tr v-for="item in searchResults" :key="item.id">
             <td>{{ item.name || '-' }}</td>
-            <td>{{ item.partNumber || item.code || '-' }}</td>
+            <td>{{ item.partNumber || item.item_number || item.itemNumber || item.code || '-' }}</td>
             <td>{{ item.status || '-' }}</td>
             <td>{{ item.itemType || '-' }}</td>
             <td>{{ item.updatedAt || item.updated_at || '-' }}</td>
@@ -1761,6 +1761,8 @@ const productView = computed(() => {
   const props = data.properties || {}
   const name =
     data.name ||
+    data.item_name ||
+    data.title ||
     props.name ||
     props.item_name ||
     props.title ||
@@ -1769,6 +1771,8 @@ const productView = computed(() => {
     '-'
   const partNumber =
     data.partNumber ||
+    data.item_number ||
+    data.itemNumber ||
     data.code ||
     props.item_number ||
     props.part_number ||
@@ -1779,6 +1783,7 @@ const productView = computed(() => {
   const revision =
     data.revision ||
     data.version ||
+    data.version_label ||
     props.revision ||
     props.version ||
     props.rev ||
@@ -1786,21 +1791,28 @@ const productView = computed(() => {
     '-'
   const status =
     data.status ||
+    data.state ||
+    data.current_state ||
     props.state ||
+    props.current_state ||
     props.status ||
     props.lifecycle_state ||
     '-'
   const itemType =
     data.itemType ||
+    data.item_type_id ||
+    data.item_type ||
     data.type ||
     props.item_type ||
     props.itemType ||
+    props.item_type_id ||
     props.type ||
     DEFAULT_ITEM_TYPE
   const description = data.description || props.description || props.desc || ''
   const createdAt =
     data.createdAt ||
     data.created_at ||
+    data.created_on ||
     props.created_at ||
     props.created_on ||
     props.create_date ||
@@ -1808,6 +1820,7 @@ const productView = computed(() => {
   const updatedAt =
     data.updatedAt ||
     data.updated_at ||
+    data.modified_on ||
     props.updated_at ||
     props.modified_on ||
     props.write_date ||
@@ -2101,43 +2114,43 @@ const productFieldCatalog = [
   {
     key: 'name',
     label: '名称',
-    source: 'name / properties.name / properties.item_name / properties.title',
+    source: 'name / item_name / title / properties.name / properties.item_name / properties.title / properties.label',
     fallback: 'id',
   },
   {
     key: 'partNumber',
     label: '料号',
-    source: 'partNumber / item_number / part_number / number / code',
+    source: 'partNumber / item_number / itemNumber / part_number / number / code / properties.item_number',
     fallback: 'properties.internal_reference',
   },
   {
     key: 'revision',
     label: '版本',
-    source: 'revision / version / properties.revision / properties.version / properties.version_label',
+    source: 'revision / version / version_label / properties.revision / properties.version / properties.version_label',
     fallback: '-',
   },
   {
     key: 'status',
     label: '状态',
-    source: 'status / state / properties.state / properties.status',
+    source: 'status / state / current_state / properties.state / properties.current_state / properties.status',
     fallback: '-',
   },
   {
     key: 'itemType',
     label: '类型',
-    source: 'itemType / item.type / properties.item_type',
+    source: 'itemType / item_type_id / item_type / type / properties.item_type / properties.itemType / properties.item_type_id',
     fallback: 'Part',
   },
   {
     key: 'createdAt',
     label: '创建时间',
-    source: 'created_at / created_on / properties.created_at / properties.created_on',
+    source: 'createdAt / created_at / created_on / properties.created_at / properties.created_on / properties.create_date',
     fallback: 'search hit created_at',
   },
   {
     key: 'updatedAt',
     label: '更新时间',
-    source: 'updated_at / modified_on / properties.updated_at / properties.modified_on',
+    source: 'updatedAt / updated_at / modified_on / properties.updated_at / properties.modified_on',
     fallback: 'search hit updated_at',
   },
 ]
@@ -2790,7 +2803,7 @@ async function searchProducts() {
 async function applySearchItem(item: any) {
   if (!item?.id) return
   productId.value = item.id
-  productItemNumber.value = item.partNumber || item.code || ''
+  productItemNumber.value = item.partNumber || item.item_number || item.itemNumber || item.code || ''
   if (item.itemType) {
     itemType.value = item.itemType
   }
@@ -2799,7 +2812,7 @@ async function applySearchItem(item: any) {
 
 function applyCompareFromSearch(item: any, side: 'left' | 'right') {
   const targetId = item?.id || item?.item_id || item?.itemId
-  const targetNumber = item?.partNumber || item?.item_number || item?.code || ''
+  const targetNumber = item?.partNumber || item?.item_number || item?.itemNumber || item?.code || ''
   if (!targetId && !targetNumber) {
     setDeepLinkMessage('搜索结果缺少 ID', true)
     return
@@ -2818,7 +2831,7 @@ function applyCompareFromSearch(item: any, side: 'left' | 'right') {
 
 async function copySearchValue(item: any, kind: 'id' | 'number') {
   const idValue = item?.id || item?.item_id || item?.itemId
-  const numberValue = item?.partNumber || item?.item_number || item?.code || ''
+  const numberValue = item?.partNumber || item?.item_number || item?.itemNumber || item?.code || ''
   const value = kind === 'id' ? idValue : numberValue
   if (!value) {
     setDeepLinkMessage(kind === 'id' ? '缺少 ID' : '缺少料号', true)
