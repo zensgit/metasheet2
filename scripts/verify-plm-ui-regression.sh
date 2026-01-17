@@ -524,6 +524,38 @@ async function waitOptional(scope, text) {
       }
     }
   }
+  const bomFilterFieldSelect = bomSection.locator('#plm-bom-filter-field');
+  if ((await bomFilterFieldSelect.count()) === 0) {
+    throw new Error('BOM filter field selector missing.');
+  }
+  const bomPresetNameInput = bomSection.locator('#plm-bom-filter-preset-name');
+  if (await bomPresetNameInput.count()) {
+    const currentFilterValue = await bomSection.locator('#plm-bom-filter').inputValue();
+    if (currentFilterValue.trim()) {
+      const presetName = `auto-${Date.now()}`;
+      await bomPresetNameInput.fill(presetName);
+      await bomSection
+        .locator('label:has(#plm-bom-filter-preset-name) button:has-text("保存")')
+        .click();
+      const presetSelect = bomSection.locator('#plm-bom-filter-preset');
+      const presetOptions = presetSelect.locator('option');
+      const optionCount = await presetOptions.count();
+      if (optionCount < 2) {
+        throw new Error('BOM filter preset was not saved.');
+      }
+      const lastValue = await presetOptions.nth(optionCount - 1).getAttribute('value');
+      if (lastValue) {
+        await presetSelect.selectOption(lastValue);
+        await bomSection
+          .locator('label:has(#plm-bom-filter-preset) button:has-text("应用")')
+          .click();
+        const appliedValue = await bomSection.locator('#plm-bom-filter').inputValue();
+        if (appliedValue.trim() !== currentFilterValue.trim()) {
+          throw new Error('BOM filter preset did not apply the expected value.');
+        }
+      }
+    }
+  }
 
   const bomViewSelect = bomSection.locator('#plm-bom-view');
   if (await bomViewSelect.count()) {
@@ -710,6 +742,38 @@ async function waitOptional(scope, text) {
       }
       await whereUsedFilterInput.fill('');
     }
+  }
+  const whereUsedFilterFieldSelect = whereUsedSection.locator('#plm-where-used-filter-field');
+  if ((await whereUsedFilterFieldSelect.count()) === 0) {
+    throw new Error('Where-used filter field selector missing.');
+  }
+  const whereUsedPresetNameInput = whereUsedSection.locator('#plm-where-used-filter-preset-name');
+  if (await whereUsedPresetNameInput.count()) {
+    await whereUsedFilterInput.fill(whereUsedExpect || whereUsedId);
+    const presetName = `auto-${Date.now()}`;
+    await whereUsedPresetNameInput.fill(presetName);
+    await whereUsedSection
+      .locator('label:has(#plm-where-used-filter-preset-name) button:has-text("保存")')
+      .click();
+    const presetSelect = whereUsedSection.locator('#plm-where-used-filter-preset');
+    const presetOptions = presetSelect.locator('option');
+    const optionCount = await presetOptions.count();
+    if (optionCount < 2) {
+      throw new Error('Where-used filter preset was not saved.');
+    }
+    const lastValue = await presetOptions.nth(optionCount - 1).getAttribute('value');
+    if (lastValue) {
+      await presetSelect.selectOption(lastValue);
+      await whereUsedSection
+        .locator('label:has(#plm-where-used-filter-preset) button:has-text("应用")')
+        .click();
+      const appliedValue = await whereUsedFilterInput.inputValue();
+      const expectedValue = whereUsedExpect || whereUsedId;
+      if (expectedValue && appliedValue.trim() !== String(expectedValue).trim()) {
+        throw new Error('Where-used filter preset did not apply the expected value.');
+      }
+    }
+    await whereUsedFilterInput.fill('');
   }
   const whereUsedViewSelect = whereUsedSection.locator('#plm-where-used-view');
   if (await whereUsedViewSelect.count()) {

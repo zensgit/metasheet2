@@ -458,12 +458,47 @@
         </label>
         <label for="plm-bom-filter">
           过滤
-          <input
-            id="plm-bom-filter"
-            v-model.trim="bomFilter"
-            name="plmBomFilter"
-            placeholder="编号/名称/行 ID"
-          />
+          <div class="field-inline">
+            <select id="plm-bom-filter-field" v-model="bomFilterField" name="plmBomFilterField">
+              <option v-for="option in bomFilterFieldOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+            <input
+              id="plm-bom-filter"
+              v-model.trim="bomFilter"
+              name="plmBomFilter"
+              :placeholder="bomFilterPlaceholder"
+            />
+          </div>
+        </label>
+        <label for="plm-bom-filter-preset">
+          预设
+          <div class="field-inline">
+            <select id="plm-bom-filter-preset" v-model="bomFilterPresetKey" name="plmBomFilterPreset">
+              <option value="">选择预设</option>
+              <option v-for="preset in bomFilterPresets" :key="preset.key" :value="preset.key">
+                {{ preset.label }}
+              </option>
+            </select>
+            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="applyBomFilterPreset">
+              应用
+            </button>
+            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="deleteBomFilterPreset">
+              删除
+            </button>
+          </div>
+          <div class="field-inline">
+            <input
+              id="plm-bom-filter-preset-name"
+              v-model.trim="bomFilterPresetName"
+              name="plmBomFilterPresetName"
+              placeholder="新预设名称"
+            />
+            <button class="btn ghost mini" :disabled="!canSaveBomFilterPreset" @click="saveBomFilterPreset">
+              保存
+            </button>
+          </div>
         </label>
       </div>
       <p v-if="bomError" class="status error">{{ bomError }}</p>
@@ -1214,12 +1249,63 @@
         </label>
         <label for="plm-where-used-filter">
           过滤
-          <input
-            id="plm-where-used-filter"
-            v-model.trim="whereUsedFilter"
-            name="plmWhereUsedFilter"
-            placeholder="父件编号/名称/关系ID"
-          />
+          <div class="field-inline">
+            <select id="plm-where-used-filter-field" v-model="whereUsedFilterField" name="plmWhereUsedFilterField">
+              <option v-for="option in whereUsedFilterFieldOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+            <input
+              id="plm-where-used-filter"
+              v-model.trim="whereUsedFilter"
+              name="plmWhereUsedFilter"
+              :placeholder="whereUsedFilterPlaceholder"
+            />
+          </div>
+        </label>
+        <label for="plm-where-used-filter-preset">
+          预设
+          <div class="field-inline">
+            <select
+              id="plm-where-used-filter-preset"
+              v-model="whereUsedFilterPresetKey"
+              name="plmWhereUsedFilterPreset"
+            >
+              <option value="">选择预设</option>
+              <option v-for="preset in whereUsedFilterPresets" :key="preset.key" :value="preset.key">
+                {{ preset.label }}
+              </option>
+            </select>
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresetKey"
+              @click="applyWhereUsedFilterPreset"
+            >
+              应用
+            </button>
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresetKey"
+              @click="deleteWhereUsedFilterPreset"
+            >
+              删除
+            </button>
+          </div>
+          <div class="field-inline">
+            <input
+              id="plm-where-used-filter-preset-name"
+              v-model.trim="whereUsedFilterPresetName"
+              name="plmWhereUsedFilterPresetName"
+              placeholder="新预设名称"
+            />
+            <button
+              class="btn ghost mini"
+              :disabled="!canSaveWhereUsedFilterPreset"
+              @click="saveWhereUsedFilterPreset"
+            >
+              保存
+            </button>
+          </div>
         </label>
       </div>
       <p v-if="whereUsedError" class="status error">{{ whereUsedError }}</p>
@@ -2162,6 +2248,13 @@ type DeepLinkPreset = {
   params?: Record<string, string | number | boolean>
 }
 
+type FilterPreset = {
+  key: string
+  label: string
+  field: string
+  value: string
+}
+
 type BomTreeRow = {
   key: string
   parentKey?: string
@@ -2292,7 +2385,6 @@ const bomLoading = ref(false)
 const bomError = ref('')
 const bomDepth = ref(DEFAULT_BOM_DEPTH)
 const bomEffectiveAt = ref('')
-const bomFilter = ref('')
 const bomView = ref<'table' | 'tree'>('table')
 const bomCollapsed = ref<Set<string>>(new Set())
 
@@ -2394,12 +2486,34 @@ const whereUsedItemId = ref('')
 const whereUsedRecursive = ref(true)
 const whereUsedMaxLevels = ref(DEFAULT_WHERE_USED_MAX_LEVELS)
 const whereUsedView = ref<'table' | 'tree'>('table')
+const whereUsedFilterFieldOptions = [
+  { value: 'all', label: '全部', placeholder: '父件/路径/关系 ID' },
+  { value: 'parent_number', label: '父件编号', placeholder: '父件编号' },
+  { value: 'parent_name', label: '父件名称', placeholder: '父件名称' },
+  { value: 'relationship_id', label: '关系 ID', placeholder: '关系 ID' },
+  { value: 'path', label: '路径 ID', placeholder: '路径 ID' },
+  { value: 'find_num', label: 'Find #', placeholder: 'Find #' },
+  { value: 'refdes', label: 'Refdes', placeholder: 'Refdes' },
+  { value: 'quantity', label: '数量', placeholder: '数量' },
+  { value: 'uom', label: '单位', placeholder: '单位' },
+]
+const whereUsedFilterField = ref('all')
 const whereUsedFilter = ref('')
+const whereUsedFilterPresetKey = ref('')
+const whereUsedFilterPresetName = ref('')
+const whereUsedFilterPresets = ref<FilterPreset[]>([])
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
 const whereUsedError = ref('')
 const whereUsedCollapsed = ref<Set<string>>(new Set())
 const whereUsedSelectedEntryKeys = ref<Set<string>>(new Set())
+const whereUsedFilterPlaceholder = computed(() => {
+  const option = whereUsedFilterFieldOptions.find((entry) => entry.value === whereUsedFilterField.value)
+  return option?.placeholder || '父件/路径/关系 ID'
+})
+const canSaveWhereUsedFilterPreset = computed(
+  () => Boolean(whereUsedFilter.value.trim() && whereUsedFilterPresetName.value.trim())
+)
 
 const whereUsedRows = computed(() => {
   const payload = whereUsed.value
@@ -2455,17 +2569,11 @@ const whereUsedRows = computed(() => {
 })
 
 const whereUsedFilteredRows = computed(() => {
-  const needle = whereUsedFilter.value.trim().toLowerCase()
+  const needle = normalizeFilterNeedle(whereUsedFilter.value)
   if (!needle) return whereUsedRows.value
   return whereUsedRows.value.filter((entry: any) => {
-    const tokens = [
-      getItemNumber(entry.parent),
-      getItemName(entry.parent),
-      entry?.relationship?.id,
-      entry?.pathLabel,
-      formatWhereUsedEntryPathIds(entry),
-    ]
-    return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+    const tokens = getWhereUsedFilterTokens(entry, whereUsedFilterField.value)
+    return matchesFilter(needle, tokens)
   })
 })
 
@@ -3006,24 +3114,131 @@ const substitutesActionError = ref('')
 const substitutesMutating = ref(false)
 const substitutesDeletingId = ref<string | null>(null)
 const bomSelectedLineIds = ref<Set<string>>(new Set())
+const bomFilterFieldOptions = [
+  { value: 'all', label: '全部', placeholder: '编号/名称/行 ID' },
+  { value: 'component', label: '组件编码/ID', placeholder: '组件编码/ID' },
+  { value: 'name', label: '组件名称', placeholder: '组件名称' },
+  { value: 'line_id', label: 'BOM 行 ID', placeholder: 'BOM 行 ID' },
+  { value: 'parent_id', label: '父件 ID', placeholder: '父件 ID' },
+  { value: 'find_num', label: 'Find #', placeholder: 'Find #' },
+  { value: 'refdes', label: 'Refdes', placeholder: 'Refdes' },
+  { value: 'path', label: '路径 ID', placeholder: '路径 ID' },
+  { value: 'quantity', label: '数量', placeholder: '数量' },
+  { value: 'unit', label: '单位', placeholder: '单位' },
+]
+const bomFilterField = ref('all')
+const bomFilter = ref('')
+const bomFilterPresetKey = ref('')
+const bomFilterPresetName = ref('')
+const bomFilterPresets = ref<FilterPreset[]>([])
+const bomFilterPlaceholder = computed(() => {
+  const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
+  return option?.placeholder || '编号/名称/行 ID'
+})
+const canSaveBomFilterPreset = computed(
+  () => Boolean(bomFilter.value.trim() && bomFilterPresetName.value.trim())
+)
+
+function normalizeFilterNeedle(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function matchesFilter(needle: string, tokens: unknown[]): boolean {
+  if (!needle) return true
+  return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+}
+
+function getBomFilterTokens(item: Record<string, any>, field: string): unknown[] {
+  const lineId = resolveBomLineId(item)
+  const tokens = {
+    component: [item.component_code, item.component_id],
+    name: [item.component_name],
+    line_id: [lineId, item.id],
+    parent_id: [item.parent_item_id],
+    find_num: [formatBomFindNum(item)],
+    refdes: [formatBomRefdes(item)],
+    path: [formatBomTablePathIds(item)],
+    quantity: [item.quantity],
+    unit: [item.unit],
+  }
+  if (field === 'all') {
+    return [
+      ...tokens.component,
+      ...tokens.name,
+      ...tokens.line_id,
+      ...tokens.parent_id,
+      ...tokens.find_num,
+      ...tokens.refdes,
+      ...tokens.path,
+      ...tokens.quantity,
+      ...tokens.unit,
+    ]
+  }
+  return tokens[field as keyof typeof tokens] || []
+}
+
+function getBomTreeFilterTokens(row: BomTreeRow, field: string): unknown[] {
+  const line = row.line || {}
+  const lineId = row.lineId || (row.line ? resolveBomLineId(row.line) : '')
+  const tokens = {
+    component: [row.label, row.componentId],
+    name: [row.name],
+    line_id: [lineId],
+    parent_id: [line?.parent_item_id ?? line?.parentItemId],
+    find_num: [row.line ? formatBomFindNum(row.line) : ''],
+    refdes: [row.line ? formatBomRefdes(row.line) : ''],
+    path: [formatBomPathIds(row)],
+    quantity: [row.line?.quantity],
+    unit: [row.line?.unit ?? row.line?.uom],
+  }
+  if (field === 'all') {
+    return [
+      ...tokens.component,
+      ...tokens.name,
+      ...tokens.line_id,
+      ...tokens.parent_id,
+      ...tokens.find_num,
+      ...tokens.refdes,
+      ...tokens.path,
+      ...tokens.quantity,
+      ...tokens.unit,
+    ]
+  }
+  return tokens[field as keyof typeof tokens] || []
+}
+
+function getWhereUsedFilterTokens(entry: Record<string, any>, field: string): unknown[] {
+  const tokens = {
+    parent_number: [getItemNumber(entry.parent)],
+    parent_name: [getItemName(entry.parent)],
+    relationship_id: [entry?.relationship?.id],
+    path: [entry?.pathLabel, formatWhereUsedEntryPathIds(entry)],
+    find_num: [getWhereUsedLineValue(entry, 'find_num')],
+    refdes: [getWhereUsedRefdes(entry)],
+    quantity: [getWhereUsedLineValue(entry, 'quantity')],
+    uom: [getWhereUsedLineValue(entry, 'uom')],
+  }
+  if (field === 'all') {
+    return [
+      ...tokens.parent_number,
+      ...tokens.parent_name,
+      ...tokens.relationship_id,
+      ...tokens.path,
+      ...tokens.find_num,
+      ...tokens.refdes,
+      ...tokens.quantity,
+      ...tokens.uom,
+    ]
+  }
+  return tokens[field as keyof typeof tokens] || []
+}
 
 const bomFilteredItems = computed(() => {
-  const needle = bomFilter.value.trim().toLowerCase()
+  const needle = normalizeFilterNeedle(bomFilter.value)
   if (!needle) return bomItems.value
   return bomItems.value.filter((item: any) => {
-    const tokens = [
-      item.component_name,
-      item.component_code,
-      item.component_id,
-      item.id,
-      item.parent_item_id,
-      formatBomFindNum(item),
-      formatBomRefdes(item),
-      formatBomTablePathIds(item),
-      item.quantity,
-      item.unit,
-    ]
-    return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+    const tokens = getBomFilterTokens(item, bomFilterField.value)
+    return matchesFilter(needle, tokens)
   })
 })
 
@@ -3214,25 +3429,13 @@ const bomPathRowMaps = computed(() => {
 const bomTreeFilteredKeys = computed(() => {
   const rows = bomTreeRows.value
   if (!rows.length) return new Set<string>()
-  const needle = bomFilter.value.trim().toLowerCase()
+  const needle = normalizeFilterNeedle(bomFilter.value)
   if (!needle) return new Set(rows.map((row) => row.key))
 
   const matches = new Set<string>()
   for (const row of rows) {
-    const line = row.line
-    const tokens = line
-      ? [
-          row.label,
-          row.name,
-          row.componentId,
-          row.lineId,
-          formatBomFindNum(line),
-          formatBomRefdes(line),
-          line?.quantity,
-          line?.unit ?? line?.uom,
-        ]
-      : [row.label, row.name, row.componentId]
-    if (tokens.some((token) => String(token || '').toLowerCase().includes(needle))) {
+    const tokens = getBomTreeFilterTokens(row, bomFilterField.value)
+    if (matchesFilter(needle, tokens)) {
       matches.add(row.key)
     }
   }
@@ -3491,6 +3694,8 @@ const DOCUMENT_COLUMNS_STORAGE_KEY = 'plm_document_columns'
 const APPROVAL_COLUMNS_STORAGE_KEY = 'plm_approval_columns'
 const DEEP_LINK_PRESETS_STORAGE_KEY = 'plm_deep_link_presets'
 const BOM_COLLAPSE_STORAGE_KEY = 'plm_bom_tree_collapsed'
+const BOM_FILTER_PRESETS_STORAGE_KEY = 'plm_bom_filter_presets'
+const WHERE_USED_FILTER_PRESETS_STORAGE_KEY = 'plm_where_used_filter_presets'
 const deepLinkPanelOptions = [
   { key: 'search', label: '搜索' },
   { key: 'product', label: '产品' },
@@ -3560,6 +3765,9 @@ function resetAll() {
   bomDepth.value = DEFAULT_BOM_DEPTH
   bomEffectiveAt.value = ''
   bomFilter.value = ''
+  bomFilterField.value = 'all'
+  bomFilterPresetKey.value = ''
+  bomFilterPresetName.value = ''
   bomView.value = 'table'
   bomCollapsed.value = new Set()
   documentRole.value = ''
@@ -3601,6 +3809,7 @@ function resetAll() {
   whereUsedView.value = 'table'
   whereUsed.value = null
   whereUsedError.value = ''
+  whereUsedFilterField.value = 'all'
   compareLeftId.value = ''
   compareRightId.value = ''
   compareMode.value = ''
@@ -3629,6 +3838,8 @@ function resetAll() {
   substitutesMutating.value = false
   substitutesDeletingId.value = null
   whereUsedFilter.value = ''
+  whereUsedFilterPresetKey.value = ''
+  whereUsedFilterPresetName.value = ''
   syncQueryParams({
     searchQuery: '',
     searchItemType: '',
@@ -3646,6 +3857,7 @@ function resetAll() {
     whereUsedRecursive: undefined,
     whereUsedMaxLevels: undefined,
     whereUsedFilter: '',
+    whereUsedFilterField: '',
     compareLeftId: '',
     compareRightId: '',
     compareMode: '',
@@ -3661,6 +3873,7 @@ function resetAll() {
     bomDepth: undefined,
     bomEffectiveAt: '',
     bomFilter: '',
+    bomFilterField: '',
     bomView: '',
     bomCollapsed: '',
     bomLineId: '',
@@ -5899,6 +6112,125 @@ function exportCustomPresets() {
   setDeepLinkMessage('已导出自定义预设。')
 }
 
+function createFilterPresetKey(prefix: string): string {
+  const suffix = Math.random().toString(36).slice(2, 6)
+  return `${prefix}:${Date.now().toString(36)}-${suffix}`
+}
+
+function upsertFilterPreset(
+  presets: FilterPreset[],
+  label: string,
+  field: string,
+  value: string,
+  prefix: string
+): { presets: FilterPreset[]; key: string } {
+  const trimmedLabel = label.trim()
+  const trimmedValue = value.trim()
+  if (!trimmedLabel || !trimmedValue) {
+    return { presets, key: '' }
+  }
+  const existingIndex = presets.findIndex((preset) => preset.label === trimmedLabel)
+  if (existingIndex >= 0) {
+    const updated = { ...presets[existingIndex], field, value: trimmedValue }
+    const next = [...presets]
+    next[existingIndex] = updated
+    return { presets: next, key: updated.key }
+  }
+  const key = createFilterPresetKey(prefix)
+  return {
+    presets: [...presets, { key, label: trimmedLabel, field, value: trimmedValue }],
+    key,
+  }
+}
+
+function applyFilterPreset(
+  presets: FilterPreset[],
+  key: string
+): FilterPreset | null {
+  const preset = presets.find((entry) => entry.key === key)
+  return preset || null
+}
+
+function saveBomFilterPreset() {
+  if (!canSaveBomFilterPreset.value) {
+    setDeepLinkMessage('请输入过滤条件和预设名称。', true)
+    return
+  }
+  const { presets, key } = upsertFilterPreset(
+    bomFilterPresets.value,
+    bomFilterPresetName.value,
+    bomFilterField.value,
+    bomFilter.value,
+    'bom'
+  )
+  bomFilterPresets.value = presets
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
+  bomFilterPresetKey.value = key
+  bomFilterPresetName.value = ''
+  setDeepLinkMessage('已保存 BOM 过滤预设。')
+}
+
+function applyBomFilterPreset() {
+  const preset = applyFilterPreset(bomFilterPresets.value, bomFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 BOM 过滤预设。', true)
+    return
+  }
+  bomFilterField.value = preset.field
+  bomFilter.value = preset.value
+  setDeepLinkMessage(`已应用 BOM 过滤预设：${preset.label}`)
+}
+
+function deleteBomFilterPreset() {
+  if (!bomFilterPresetKey.value) return
+  const next = bomFilterPresets.value.filter((preset) => preset.key !== bomFilterPresetKey.value)
+  bomFilterPresets.value = next
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
+  bomFilterPresetKey.value = ''
+  setDeepLinkMessage('已删除 BOM 过滤预设。')
+}
+
+function saveWhereUsedFilterPreset() {
+  if (!canSaveWhereUsedFilterPreset.value) {
+    setDeepLinkMessage('请输入过滤条件和预设名称。', true)
+    return
+  }
+  const { presets, key } = upsertFilterPreset(
+    whereUsedFilterPresets.value,
+    whereUsedFilterPresetName.value,
+    whereUsedFilterField.value,
+    whereUsedFilter.value,
+    'where-used'
+  )
+  whereUsedFilterPresets.value = presets
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
+  whereUsedFilterPresetKey.value = key
+  whereUsedFilterPresetName.value = ''
+  setDeepLinkMessage('已保存 Where-Used 过滤预设。')
+}
+
+function applyWhereUsedFilterPreset() {
+  const preset = applyFilterPreset(whereUsedFilterPresets.value, whereUsedFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设。', true)
+    return
+  }
+  whereUsedFilterField.value = preset.field
+  whereUsedFilter.value = preset.value
+  setDeepLinkMessage(`已应用 Where-Used 过滤预设：${preset.label}`)
+}
+
+function deleteWhereUsedFilterPreset() {
+  if (!whereUsedFilterPresetKey.value) return
+  const next = whereUsedFilterPresets.value.filter(
+    (preset) => preset.key !== whereUsedFilterPresetKey.value
+  )
+  whereUsedFilterPresets.value = next
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
+  whereUsedFilterPresetKey.value = ''
+  setDeepLinkMessage('已删除 Where-Used 过滤预设。')
+}
+
 function mergeImportedPresets(entries: unknown[]): number {
   const existing = new Map(customDeepLinkPresets.value.map((entry) => [entry.key, entry]))
   let importedCount = 0
@@ -6064,9 +6396,11 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('whereUsedRecursive', whereUsedRecursive.value !== true ? whereUsedRecursive.value : undefined)
   append('whereUsedMaxLevels', whereUsedMaxLevels.value !== DEFAULT_WHERE_USED_MAX_LEVELS ? whereUsedMaxLevels.value : undefined)
   append('whereUsedFilter', whereUsedFilter.value)
+  append('whereUsedFilterField', whereUsedFilterField.value !== 'all' ? whereUsedFilterField.value : undefined)
   append('bomDepth', bomDepth.value !== DEFAULT_BOM_DEPTH ? bomDepth.value : undefined)
   append('bomEffectiveAt', bomEffectiveAt.value)
   append('bomFilter', bomFilter.value)
+  append('bomFilterField', bomFilterField.value !== 'all' ? bomFilterField.value : undefined)
   append('bomView', bomView.value !== 'table' ? bomView.value : undefined)
   if (bomView.value === 'tree' && bomCollapsed.value.size) {
     const collapsedValue = serializeBomCollapsed(bomCollapsed.value)
@@ -6216,6 +6550,15 @@ async function applyQueryState() {
   if (whereUsedFilterParam !== undefined) {
     whereUsedFilter.value = whereUsedFilterParam
   }
+  const whereUsedFilterFieldParam = readQueryParam('whereUsedFilterField')
+  if (whereUsedFilterFieldParam !== undefined) {
+    const matched = whereUsedFilterFieldOptions.find(
+      (entry) => entry.value === whereUsedFilterFieldParam
+    )
+    if (matched) {
+      whereUsedFilterField.value = matched.value
+    }
+  }
   const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
   if (bomDepthParam !== undefined) {
     bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
@@ -6227,6 +6570,13 @@ async function applyQueryState() {
   const bomFilterParam = readQueryParam('bomFilter')
   if (bomFilterParam !== undefined) {
     bomFilter.value = bomFilterParam
+  }
+  const bomFilterFieldParam = readQueryParam('bomFilterField')
+  if (bomFilterFieldParam !== undefined) {
+    const matched = bomFilterFieldOptions.find((entry) => entry.value === bomFilterFieldParam)
+    if (matched) {
+      bomFilterField.value = matched.value
+    }
   }
   const bomViewParam = readQueryParam('bomView')
   if (bomViewParam !== undefined) {
@@ -6380,10 +6730,43 @@ function loadStoredPresets(): DeepLinkPreset[] {
   }
 }
 
+function loadStoredFilterPresets(storageKey: string): FilterPreset[] {
+  if (typeof localStorage === 'undefined') {
+    return []
+  }
+  try {
+    const raw = localStorage.getItem(storageKey)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((entry) => {
+        const key = String(entry?.key || '').trim()
+        const label = String(entry?.label || '').trim()
+        const field = String(entry?.field || '').trim()
+        const value = String(entry?.value || '').trim()
+        if (!key || !label || !field || !value) return null
+        return { key, label, field, value }
+      })
+      .filter(Boolean) as FilterPreset[]
+  } catch (_err) {
+    return []
+  }
+}
+
 function persistPresets(presets: DeepLinkPreset[]) {
   if (typeof localStorage === 'undefined') return
   try {
     localStorage.setItem(DEEP_LINK_PRESETS_STORAGE_KEY, JSON.stringify(presets))
+  } catch (_err) {
+    // ignore storage errors
+  }
+}
+
+function persistFilterPresets(storageKey: string, presets: FilterPreset[]) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(presets))
   } catch (_err) {
     // ignore storage errors
   }
@@ -6985,6 +7368,8 @@ onMounted(() => {
   documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
   approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
   customDeepLinkPresets.value = loadStoredPresets()
+  bomFilterPresets.value = loadStoredFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY)
+  whereUsedFilterPresets.value = loadStoredFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY)
   if (['valid', 'expiring'].includes(authState.value)) {
     void loadBomCompareSchema()
   }
@@ -7071,13 +7456,22 @@ watch(
 )
 
 watch(
-  () => [whereUsedFilter.value, compareFilter.value, substitutesFilter.value, bomFilter.value],
-  ([whereUsed, compareValue, substituteValue, bomFilterValue]) => {
+  () => [
+    whereUsedFilter.value,
+    whereUsedFilterField.value,
+    compareFilter.value,
+    substitutesFilter.value,
+    bomFilter.value,
+    bomFilterField.value,
+  ],
+  ([whereUsed, whereUsedField, compareValue, substituteValue, bomFilterValue, bomFilterFieldValue]) => {
     scheduleQuerySync({
       whereUsedFilter: whereUsed || undefined,
+      whereUsedFilterField: whereUsedField !== 'all' ? whereUsedField : undefined,
       compareFilter: compareValue || undefined,
       substitutesFilter: substituteValue || undefined,
       bomFilter: bomFilterValue || undefined,
+      bomFilterField: bomFilterFieldValue !== 'all' ? bomFilterFieldValue : undefined,
     })
   }
 )
@@ -7400,6 +7794,14 @@ watch(
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+.field-inline + .field-inline {
+  margin-top: 6px;
+}
+
+.field-inline select {
+  min-width: 120px;
 }
 
 .field-inline input {

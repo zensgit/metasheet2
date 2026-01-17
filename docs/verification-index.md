@@ -134,6 +134,8 @@ Entry points:
   - Report: `docs/PLM_UI_BOM_COMPARE_DETAIL_REPORT.md`
 - PLM UI BOM compare linking:
   - Report: `docs/PLM_UI_BOM_COMPARE_LINK_REPORT.md`
+- PLM UI filter presets:
+  - Report: `docs/PLM_UI_FILTER_PRESETS_REPORT.md`
 
 - PLM BOM tools federation:
   - Script: `scripts/verify-plm-bom-tools.sh`
@@ -405,12 +407,16 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260118_000708.png`
   - Report: `docs/verification-plm-ui-regression-20260118_004053.md`
   - Artifact: `artifacts/plm-ui-regression-20260118_004053.png`
+  - Report: `docs/verification-plm-ui-regression-20260118_012736.md`
+  - Artifact: `artifacts/plm-ui-regression-20260118_012736.png`
   - Report: `docs/verification-plm-ui-regression-20260117_234818.md`
   - Artifact: `artifacts/plm-ui-regression-20260117_234818.png`
   - Report: `docs/verification-plm-ui-regression-20260118_000708.md`
   - Artifact: `artifacts/plm-ui-regression-20260118_000708.png`
   - Report: `docs/verification-plm-ui-regression-20260118_004053.md`
   - Artifact: `artifacts/plm-ui-regression-20260118_004053.png`
+  - Report: `docs/verification-plm-ui-regression-20260118_012736.md`
+  - Artifact: `artifacts/plm-ui-regression-20260118_012736.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
