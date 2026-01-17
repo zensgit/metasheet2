@@ -562,6 +562,11 @@ async function waitOptional(scope, text) {
       }
       const bomImportInput = bomSection.locator('#plm-bom-filter-preset-import');
       if (await bomImportInput.count()) {
+        const bomImportMode = bomSection.locator('#plm-bom-filter-preset-import-mode');
+        if ((await bomImportMode.count()) === 0) {
+          throw new Error('BOM filter preset import mode selector missing.');
+        }
+        await bomImportMode.selectOption('replace');
         const importLabel = `import-${Date.now()}`;
         const importPayload = JSON.stringify([
           { label: importLabel, field: 'all', value: currentFilterValue.trim() },
@@ -802,6 +807,11 @@ async function waitOptional(scope, text) {
     }
     const whereUsedImportInput = whereUsedSection.locator('#plm-where-used-filter-preset-import');
     if (await whereUsedImportInput.count()) {
+      const whereUsedImportMode = whereUsedSection.locator('#plm-where-used-filter-preset-import-mode');
+      if ((await whereUsedImportMode.count()) === 0) {
+        throw new Error('Where-used filter preset import mode selector missing.');
+      }
+      await whereUsedImportMode.selectOption('replace');
       const importLabel = `import-${Date.now()}`;
       const expectedValue = whereUsedExpect || whereUsedId;
       const importPayload = JSON.stringify([

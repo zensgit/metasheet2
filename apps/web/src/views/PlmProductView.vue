@@ -514,6 +514,15 @@
               class="deep-link-input"
               placeholder="粘贴 JSON"
             />
+            <select
+              id="plm-bom-filter-preset-import-mode"
+              v-model="bomFilterPresetImportMode"
+              name="plmBomFilterPresetImportMode"
+              class="deep-link-select"
+            >
+              <option value="merge">合并</option>
+              <option value="replace">覆盖</option>
+            </select>
             <button
               class="btn ghost mini"
               :disabled="!bomFilterPresetImportText"
@@ -1354,6 +1363,15 @@
               class="deep-link-input"
               placeholder="粘贴 JSON"
             />
+            <select
+              id="plm-where-used-filter-preset-import-mode"
+              v-model="whereUsedFilterPresetImportMode"
+              name="plmWhereUsedFilterPresetImportMode"
+              class="deep-link-select"
+            >
+              <option value="merge">合并</option>
+              <option value="replace">覆盖</option>
+            </select>
             <button
               class="btn ghost mini"
               :disabled="!whereUsedFilterPresetImportText"
@@ -2569,6 +2587,7 @@ const whereUsedFilterPresetKey = ref('')
 const whereUsedFilterPresetName = ref('')
 const whereUsedFilterPresets = ref<FilterPreset[]>([])
 const whereUsedFilterPresetImportText = ref('')
+const whereUsedFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
 const whereUsedFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
@@ -3200,6 +3219,7 @@ const bomFilterPresetKey = ref('')
 const bomFilterPresetName = ref('')
 const bomFilterPresets = ref<FilterPreset[]>([])
 const bomFilterPresetImportText = ref('')
+const bomFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
 const bomFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const bomFilterPlaceholder = computed(() => {
   const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
@@ -3839,6 +3859,7 @@ function resetAll() {
   bomFilterPresetKey.value = ''
   bomFilterPresetName.value = ''
   bomFilterPresetImportText.value = ''
+  bomFilterPresetImportMode.value = 'merge'
   bomView.value = 'table'
   bomCollapsed.value = new Set()
   documentRole.value = ''
@@ -3912,6 +3933,7 @@ function resetAll() {
   whereUsedFilterPresetKey.value = ''
   whereUsedFilterPresetName.value = ''
   whereUsedFilterPresetImportText.value = ''
+  whereUsedFilterPresetImportMode.value = 'merge'
   syncQueryParams({
     searchQuery: '',
     searchItemType: '',
@@ -6307,11 +6329,21 @@ function mergeImportedFilterPresets(
   entries: unknown[],
   presets: FilterPreset[],
   fieldOptions: Array<{ value: string }>,
-  prefix: string
+  prefix: string,
+  mode: 'merge' | 'replace'
 ): { presets: FilterPreset[]; count: number } {
   const allowedFields = new Set(fieldOptions.map((option) => option.value))
-  const next = [...presets]
+  const next = mode === 'replace' ? [] : [...presets]
+  const usedKeys = new Set(next.map((preset) => preset.key))
   let count = 0
+  const ensureKey = (rawKey: string): string => {
+    let key = rawKey || createFilterPresetKey(prefix)
+    while (usedKeys.has(key)) {
+      key = createFilterPresetKey(prefix)
+    }
+    usedKeys.add(key)
+    return key
+  }
   for (const entry of entries) {
     const record = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {}
     const label = String(record.label ?? '').trim()
@@ -6319,11 +6351,12 @@ function mergeImportedFilterPresets(
     if (!label || !value) continue
     const rawField = String(record.field ?? '').trim()
     const field = allowedFields.has(rawField) ? rawField : 'all'
+    const rawKey = String(record.key ?? '').trim()
     const existingIndex = next.findIndex((preset) => preset.label === label)
     if (existingIndex >= 0) {
       next[existingIndex] = { ...next[existingIndex], field, value }
     } else {
-      next.push({ key: createFilterPresetKey(prefix), label, field, value })
+      next.push({ key: ensureKey(rawKey), label, field, value })
     }
     count += 1
   }
@@ -6361,11 +6394,15 @@ function importBomFilterPresetsFromText(raw: string) {
       parsed,
       bomFilterPresets.value,
       bomFilterFieldOptions,
-      'bom'
+      'bom',
+      bomFilterPresetImportMode.value
     )
     bomFilterPresets.value = presets
     persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
     bomFilterPresetImportText.value = ''
+    if (!presets.some((preset) => preset.key === bomFilterPresetKey.value)) {
+      bomFilterPresetKey.value = ''
+    }
     if (count) {
       setDeepLinkMessage(`已导入 ${count} 条 BOM 过滤预设。`)
     } else {
@@ -6426,11 +6463,15 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
       parsed,
       whereUsedFilterPresets.value,
       whereUsedFilterFieldOptions,
-      'where-used'
+      'where-used',
+      whereUsedFilterPresetImportMode.value
     )
     whereUsedFilterPresets.value = presets
     persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
     whereUsedFilterPresetImportText.value = ''
+    if (!presets.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
+      whereUsedFilterPresetKey.value = ''
+    }
     if (count) {
       setDeepLinkMessage(`已导入 ${count} 条 Where-Used 过滤预设。`)
     } else {
