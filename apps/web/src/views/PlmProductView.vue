@@ -488,10 +488,12 @@
           v-for="row in bomTreeVisibleRows"
           :key="row.key"
           class="tree-row"
-          :class="{ 'tree-root': row.depth === 0 }"
+          :class="{ 'tree-root': row.depth === 0, selected: isBomTreeSelected(row) }"
+          @click="selectBomTreeRow(row)"
+          :data-line-id="row.line ? resolveBomLineId(row.line) : ''"
         >
           <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
-            <button class="tree-toggle" :disabled="!row.hasChildren" @click="toggleBomNode(row.key)">
+            <button class="tree-toggle" :disabled="!row.hasChildren" @click.stop="toggleBomNode(row.key)">
               {{ row.hasChildren ? (isBomCollapsed(row.key) ? '▸' : '▾') : '•' }}
             </button>
             <div class="tree-node-meta">
@@ -519,37 +521,37 @@
               </button>
             </div>
           </div>
-          <div class="tree-cell">
-            <div class="inline-actions">
-              <button
-                class="btn ghost mini"
-                :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line)) || productLoading"
-                @click="row.line && applyProductFromBom(row.line)"
-              >
-                产品
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!row.line || !resolveBomChildId(row.line) || whereUsedLoading"
-                @click="row.line && applyWhereUsedFromBom(row.line)"
-              >
-                Where-Used
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!row.line || !resolveBomLineId(row.line) || substitutesLoading"
-                @click="row.line && applySubstitutesFromBom(row.line)"
-              >
-                替代件
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line))"
-                @click="row.line && copyBomChildId(row.line)"
-              >
-                复制子件
-              </button>
-            </div>
+            <div class="tree-cell">
+              <div class="inline-actions">
+                <button
+                  class="btn ghost mini"
+                  :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line)) || productLoading"
+                  @click.stop="row.line && applyProductFromBom(row.line)"
+                >
+                  产品
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!row.line || !resolveBomChildId(row.line) || whereUsedLoading"
+                  @click.stop="row.line && applyWhereUsedFromBom(row.line)"
+                >
+                  Where-Used
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!row.line || !resolveBomLineId(row.line) || substitutesLoading"
+                  @click.stop="row.line && applySubstitutesFromBom(row.line)"
+                >
+                  替代件
+                </button>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line))"
+                  @click.stop="row.line && copyBomChildId(row.line)"
+                >
+                  复制子件
+                </button>
+              </div>
           </div>
         </div>
       </div>
@@ -569,7 +571,12 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in bomFilteredItems" :key="item.id">
+          <tr
+            v-for="item in bomFilteredItems"
+            :key="item.id"
+            :class="{ 'row-selected': isBomItemSelected(item) }"
+            @click="selectBomTableRow(item)"
+          >
             <td>{{ item.level }}</td>
             <td>
               <div>{{ item.component_code || item.component_id }}</div>
@@ -606,27 +613,27 @@
                 >
                   切换产品
                 </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!resolveBomChildId(item) || whereUsedLoading"
-                  @click="applyWhereUsedFromBom(item)"
-                >
-                  Where-Used
-                </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!resolveBomLineId(item) || substitutesLoading"
-                  @click="applySubstitutesFromBom(item)"
-                >
-                  替代件
-                </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!resolveBomChildId(item) && !resolveBomChildNumber(item)"
-                  @click="copyBomChildId(item)"
-                >
-                  复制子件
-                </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!resolveBomChildId(item) || whereUsedLoading"
+                @click.stop="applyWhereUsedFromBom(item)"
+              >
+                Where-Used
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!resolveBomLineId(item) || substitutesLoading"
+                @click.stop="applySubstitutesFromBom(item)"
+              >
+                替代件
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!resolveBomChildId(item) && !resolveBomChildNumber(item)"
+                @click.stop="copyBomChildId(item)"
+              >
+                复制子件
+              </button>
               </div>
             </td>
           </tr>
@@ -2812,6 +2819,7 @@ const substitutesActionStatus = ref('')
 const substitutesActionError = ref('')
 const substitutesMutating = ref(false)
 const substitutesDeletingId = ref<string | null>(null)
+const bomSelectedLineIds = ref<Set<string>>(new Set())
 
 const bomFilteredItems = computed(() => {
   const needle = bomFilter.value.trim().toLowerCase()
@@ -2831,6 +2839,15 @@ const bomFilteredItems = computed(() => {
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
+})
+
+const bomFilteredLineIds = computed(() => {
+  const ids = new Set<string>()
+  for (const item of bomFilteredItems.value) {
+    const lineId = resolveBomLineId(item)
+    if (lineId) ids.add(lineId)
+  }
+  return ids
 })
 
 const bomTablePathIdsList = computed(() => {
@@ -3998,6 +4015,33 @@ function selectWhereUsedTreeRow(row: WhereUsedTreeRow): void {
 function selectWhereUsedTableRow(entry: Record<string, any>): void {
   const key = resolveWhereUsedEntryKey(entry)
   setWhereUsedSelection(key ? [key] : [])
+}
+
+function setBomSelection(lineIds: string[]) {
+  const nextIds = lineIds.filter(Boolean)
+  const current = bomSelectedLineIds.value
+  const isSame = nextIds.length === current.size && nextIds.every((id) => current.has(id))
+  bomSelectedLineIds.value = isSame ? new Set() : new Set(nextIds)
+}
+
+function isBomItemSelected(item: Record<string, any>): boolean {
+  const lineId = resolveBomLineId(item)
+  return lineId ? bomSelectedLineIds.value.has(lineId) : false
+}
+
+function isBomTreeSelected(row: BomTreeRow): boolean {
+  const lineId = row.line ? resolveBomLineId(row.line) : ''
+  return lineId ? bomSelectedLineIds.value.has(lineId) : false
+}
+
+function selectBomTreeRow(row: BomTreeRow): void {
+  const lineId = row.line ? resolveBomLineId(row.line) : ''
+  setBomSelection(lineId ? [lineId] : [])
+}
+
+function selectBomTableRow(item: Record<string, any>): void {
+  const lineId = resolveBomLineId(item)
+  setBomSelection(lineId ? [lineId] : [])
 }
 
 function isBomCollapsed(key: string): boolean {
@@ -6567,6 +6611,7 @@ watch(
   bomItems,
   () => {
     applyBomCollapsedState(resolveBomCollapsedState())
+    bomSelectedLineIds.value = new Set()
   }
 )
 

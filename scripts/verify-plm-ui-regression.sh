@@ -543,6 +543,15 @@ async function waitOptional(scope, text) {
     if (!(await bomTreeBulkButton.isEnabled())) {
       throw new Error('BOM tree bulk path ID button is disabled.');
     }
+    const bomTreeRow = bomSection.locator('.bom-tree .tree-row[data-line-id]:not([data-line-id=""])').first();
+    if ((await bomTreeRow.count()) === 0) {
+      throw new Error('BOM tree row with line id not found.');
+    }
+    await bomTreeRow.click();
+    const bomTreeSelected = await bomTreeRow.evaluate((el) => el.classList.contains('selected'));
+    if (!bomTreeSelected) {
+      throw new Error('BOM tree row highlight missing.');
+    }
     const bomExpandDepthButton = bomSection.locator('button:has-text("展开到深度")');
     if (!(await bomExpandDepthButton.isEnabled())) {
       throw new Error('BOM expand-to-depth button is disabled.');
@@ -583,6 +592,10 @@ async function waitOptional(scope, text) {
     const bomTablePathTitle = ((await bomTablePathButton.getAttribute('title')) || '').trim();
     if (!bomTablePathTitle) {
       throw new Error('BOM table path ID tooltip missing.');
+    }
+    const bomSelectedRows = bomSection.locator('table tbody tr.row-selected');
+    if ((await bomSelectedRows.count()) === 0) {
+      throw new Error('BOM table row highlight missing after tree selection.');
     }
     const bomBulkPathButton = bomSection.locator('.panel-actions button:has-text("复制所有路径 ID")');
     if ((await bomBulkPathButton.count()) === 0) {
