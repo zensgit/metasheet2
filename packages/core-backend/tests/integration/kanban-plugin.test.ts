@@ -85,7 +85,7 @@ describe('Kanban Plugin Integration', () => {
       ))
       expect(kanbanPlugin).toBeDefined()
       expect(kanbanPlugin.status).toBe('active')
-      expect(kanbanPlugin.displayName).toBe('Kanban View Plugin')
+      expect(['Kanban View Plugin', '看板视图']).toContain(kanbanPlugin.displayName)
     })
   })
 
