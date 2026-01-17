@@ -1539,7 +1539,12 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="entry in compareAddedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+              <tr
+                v-for="entry in compareAddedFiltered"
+                :key="entry.relationship_id || entry.line_key || entry.child_id"
+                :class="{ 'row-selected': isCompareEntrySelected(entry, 'added') }"
+                @click="selectCompareEntry(entry, 'added')"
+              >
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
@@ -1614,7 +1619,12 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="entry in compareRemovedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+              <tr
+                v-for="entry in compareRemovedFiltered"
+                :key="entry.relationship_id || entry.line_key || entry.child_id"
+                :class="{ 'row-selected': isCompareEntrySelected(entry, 'removed') }"
+                @click="selectCompareEntry(entry, 'removed')"
+              >
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
                   <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
@@ -1690,7 +1700,8 @@
               <tr
                 v-for="entry in compareChangedFiltered"
                 :key="entry.relationship_id || entry.line_key || entry.child_id"
-                :class="compareRowClass(entry)"
+                :class="[compareRowClass(entry), { 'row-selected': isCompareEntrySelected(entry, 'changed') }]"
+                @click="selectCompareEntry(entry, 'changed')"
               >
                 <td>{{ entry.level ?? '-' }}</td>
                 <td>
@@ -1765,6 +1776,62 @@
                       复制 Line
                     </button>
                   </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="compare-detail" data-compare-detail="true">
+          <div class="compare-detail-header">
+            <h3>字段级对照</h3>
+            <div class="compare-detail-actions">
+              <template v-if="compareSelectedMeta">
+                <span class="tag" :class="compareSelectedMeta.tagClass">{{ compareSelectedMeta.kindLabel }}</span>
+                <span v-if="compareSelectedMeta.lineKey" class="mono">Line: {{ compareSelectedMeta.lineKey }}</span>
+                <span v-if="compareSelectedMeta.relationshipId" class="muted mono">
+                  {{ compareSelectedMeta.relationshipId }}
+                </span>
+                <span v-if="compareSelectedMeta.pathLabel" class="muted">
+                  {{ compareSelectedMeta.pathLabel }}
+                </span>
+              </template>
+              <button class="btn ghost mini" :disabled="!compareSelectedEntry" @click="clearCompareSelection">
+                清空选择
+              </button>
+            </div>
+          </div>
+          <div v-if="!compareSelectedEntry" class="empty">点击上方条目查看字段级对照</div>
+          <table v-else class="data-table compact">
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>左侧</th>
+                <th>右侧</th>
+                <th>严重度</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in compareDetailRows"
+                :key="row.key"
+                :class="{ 'compare-field-row': true, changed: row.changed }"
+                :data-field-key="row.key"
+              >
+                <td>
+                  <div class="diff-field" :title="row.description || ''">{{ row.label }}</div>
+                  <div class="muted mono">{{ row.key }}</div>
+                </td>
+                <td>
+                  <div class="diff-value-left">{{ row.left }}</div>
+                  <div v-if="row.normalizedLeft" class="muted">规范化: {{ row.normalizedLeft }}</div>
+                </td>
+                <td>
+                  <div class="diff-value-right">{{ row.right }}</div>
+                  <div v-if="row.normalizedRight" class="muted">规范化: {{ row.normalizedRight }}</div>
+                </td>
+                <td>
+                  <span v-if="row.severity" class="tag" :class="severityClass(row.severity)">{{ row.severity }}</span>
+                  <span v-else class="muted">-</span>
                 </td>
               </tr>
             </tbody>
@@ -2562,6 +2629,13 @@ const compareError = ref('')
 const compareSchema = ref<CompareSchemaPayload | null>(null)
 const compareSchemaLoading = ref(false)
 const compareSchemaError = ref('')
+type CompareSelectionKind = 'added' | 'removed' | 'changed'
+type CompareSelection = {
+  kind: CompareSelectionKind
+  key: string
+  entry: Record<string, any>
+}
+const compareSelected = ref<CompareSelection | null>(null)
 const productFieldCatalog = [
   {
     key: 'name',
@@ -2839,6 +2913,58 @@ const compareFieldLabelMap = computed(
 const compareFieldMetaMap = computed(
   () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry]))
 )
+const compareSelectedEntry = computed(() => compareSelected.value?.entry || null)
+const compareSelectedMeta = computed(() => {
+  const selection = compareSelected.value
+  if (!selection) return null
+  const { entry, kind } = selection
+  const parent = getCompareParent(entry)
+  const child = getCompareChild(entry)
+  const parentNumber = getItemNumber(parent)
+  const parentName = getItemName(parent)
+  const parentLabel = parentNumber !== '-' ? parentNumber : parentName !== '-' ? parentName : ''
+  const childNumber = getItemNumber(child)
+  const childName = getItemName(child)
+  const childLabel = childNumber !== '-' ? childNumber : childName !== '-' ? childName : ''
+  const pathLabel = [parentLabel, childLabel].filter(Boolean).join(' → ')
+  return {
+    kindLabel: kind === 'added' ? '新增' : kind === 'removed' ? '删除' : '变更',
+    tagClass: `compare-kind-${kind}`,
+    lineKey: entry?.line_key || '',
+    relationshipId: entry?.relationship_id || '',
+    pathLabel,
+  }
+})
+const compareDetailRows = computed(() => {
+  const selection = compareSelected.value
+  if (!selection) return []
+  const { entry, kind } = selection
+  const changeMap = new Map<string, Record<string, any>>()
+  const changes = Array.isArray(entry?.changes) ? entry.changes : []
+  for (const change of changes) {
+    if (change?.field) {
+      changeMap.set(change.field, change)
+    }
+  }
+  return compareFieldCatalog.value.map((field) => {
+    const change = changeMap.get(field.key)
+    const left = resolveCompareFieldValue(entry, kind, 'left', field.key)
+    const right = resolveCompareFieldValue(entry, kind, 'right', field.key)
+    const normalizedLeft = resolveCompareNormalizedValue(entry, kind, 'left', field.key, change)
+    const normalizedRight = resolveCompareNormalizedValue(entry, kind, 'right', field.key, change)
+    return {
+      key: field.key,
+      label: field.label,
+      description: field.source && field.source !== '-' ? field.source : '',
+      left,
+      right,
+      normalizedLeft,
+      normalizedRight,
+      severity: change?.severity || '',
+      changed: Boolean(change),
+    }
+  })
+})
 const compareLineKeyOptions = computed(() => {
   const options = compareSchema.value?.line_key_options
   return options && options.length ? options : DEFAULT_COMPARE_LINE_KEYS
@@ -5249,6 +5375,126 @@ function getCompareProp(entry: Record<string, any>, key: string): string {
   return String(value)
 }
 
+function resolveCompareEntryKey(entry?: Record<string, any> | null): string {
+  if (!entry) return ''
+  return entry.relationship_id || entry.line_key || entry.child_id || ''
+}
+
+function resolveCompareLineValue(source: Record<string, any> | null, key: string): unknown {
+  if (!source) return undefined
+  return source[key] ?? source[resolveSnakeToCamel(key)]
+}
+
+function resolveCompareEntryLine(
+  entry: Record<string, any>,
+  kind: CompareSelectionKind,
+  side: 'left' | 'right'
+): Record<string, any> | null {
+  if (kind === 'added') {
+    return side === 'right' ? resolveCompareLineProps(entry) : null
+  }
+  if (kind === 'removed') {
+    return side === 'left' ? resolveCompareLineProps(entry) : null
+  }
+  if (side === 'left') {
+    return entry.before_line || entry.before || resolveCompareLineProps(entry)
+  }
+  return entry.after_line || entry.after || resolveCompareLineProps(entry)
+}
+
+function resolveCompareEntryNormalized(
+  entry: Record<string, any>,
+  kind: CompareSelectionKind,
+  side: 'left' | 'right'
+): Record<string, any> | null {
+  if (kind === 'added') {
+    return side === 'right' ? entry.line_normalized || null : null
+  }
+  if (kind === 'removed') {
+    return side === 'left' ? entry.line_normalized || null : null
+  }
+  if (side === 'left') {
+    return entry.before_normalized || null
+  }
+  return entry.after_normalized || null
+}
+
+function truncateCompareValue(value: string, limit = 160): string {
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit - 3)}...`
+}
+
+function formatCompareFieldValue(value: unknown): string {
+  if (value === undefined || value === null || value === '') return '-'
+  if (Array.isArray(value)) {
+    if (!value.length) return '-'
+    const parts = value.map((entry) => {
+      if (entry === null || entry === undefined) return ''
+      if (typeof entry === 'object') return JSON.stringify(entry)
+      return String(entry)
+    }).filter(Boolean)
+    return truncateCompareValue(parts.join(', ') || '-')
+  }
+  if (typeof value === 'object') {
+    return truncateCompareValue(JSON.stringify(value))
+  }
+  return truncateCompareValue(String(value))
+}
+
+function resolveCompareFieldValue(
+  entry: Record<string, any>,
+  kind: CompareSelectionKind,
+  side: 'left' | 'right',
+  key: string
+): string {
+  const line = resolveCompareEntryLine(entry, kind, side)
+  const value = resolveCompareLineValue(line, key)
+  return formatCompareFieldValue(value)
+}
+
+function resolveCompareNormalizedValue(
+  entry: Record<string, any>,
+  kind: CompareSelectionKind,
+  side: 'left' | 'right',
+  key: string,
+  change?: Record<string, any>
+): string {
+  let normalizedValue: unknown = undefined
+  if (change) {
+    normalizedValue = side === 'left' ? change.normalized_left : change.normalized_right
+  }
+  if (normalizedValue === undefined) {
+    const normalized = resolveCompareEntryNormalized(entry, kind, side)
+    normalizedValue = resolveCompareLineValue(normalized, key)
+  }
+  const formatted = formatCompareFieldValue(normalizedValue)
+  if (formatted === '-') return ''
+  const raw = resolveCompareFieldValue(entry, kind, side, key)
+  if (formatted === raw) return ''
+  return formatted
+}
+
+function selectCompareEntry(entry: Record<string, any>, kind: CompareSelectionKind): void {
+  const key = resolveCompareEntryKey(entry)
+  if (!key) return
+  const current = compareSelected.value
+  if (current && current.key === key && current.kind === kind) {
+    compareSelected.value = null
+  } else {
+    compareSelected.value = { key, kind, entry }
+  }
+}
+
+function clearCompareSelection(): void {
+  compareSelected.value = null
+}
+
+function isCompareEntrySelected(entry: Record<string, any>, kind: CompareSelectionKind): boolean {
+  const key = resolveCompareEntryKey(entry)
+  if (!key) return false
+  return Boolean(compareSelected.value && compareSelected.value.key === key && compareSelected.value.kind === kind)
+}
+
 function getWhereUsedRefdes(entry: Record<string, any>): string {
   const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
   const value = line.refdes ?? line.ref_des
@@ -6728,6 +6974,13 @@ watch(
 )
 
 watch(
+  bomCompare,
+  () => {
+    compareSelected.value = null
+  }
+)
+
+watch(
   bomView,
   (value) => {
     if (value === 'tree') {
@@ -7300,6 +7553,40 @@ input:focus, select:focus, textarea:focus {
   margin-bottom: 6px;
 }
 
+.compare-detail {
+  margin-top: 12px;
+  border: 1px solid #eef0f2;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fdfdfd;
+}
+
+.compare-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.compare-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.compare-field-row.changed {
+  background: #eef2ff;
+}
+
+.data-table.compact th,
+.data-table.compact td {
+  padding: 6px 6px;
+  font-size: 12px;
+}
+
 .compare-row.compare-row-major {
   background: #fff1f2;
 }
@@ -7372,6 +7659,24 @@ input:focus, select:focus, textarea:focus {
   color: #1e3a8a;
   background: #dbeafe;
   border-color: #bfdbfe;
+}
+
+.compare-kind-added {
+  color: #065f46;
+  background: #d1fae5;
+  border-color: #a7f3d0;
+}
+
+.compare-kind-removed {
+  color: #7f1d1d;
+  background: #fee2e2;
+  border-color: #fecaca;
+}
+
+.compare-kind-changed {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fde68a;
 }
 
 .status-neutral {

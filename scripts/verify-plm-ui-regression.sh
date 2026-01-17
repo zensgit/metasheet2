@@ -780,6 +780,32 @@ async function waitOptional(scope, text) {
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
   await compareSection.locator('button:has-text("对比")').click();
   await waitOptional(compareSection.locator('table'), compareExpect);
+  const compareDetailSection = compareSection.locator('[data-compare-detail="true"]');
+  const compareChangedRows = compareSection.locator('.compare-section:has(h3:has-text("变更")) table tbody tr');
+  const compareAddedRows = compareSection.locator('.compare-section:has(h3:has-text("新增")) table tbody tr');
+  const compareRemovedRows = compareSection.locator('.compare-section:has(h3:has-text("删除")) table tbody tr');
+  let compareTargetRows = compareChangedRows;
+  if ((await compareTargetRows.count()) === 0) {
+    compareTargetRows = compareAddedRows;
+  }
+  if ((await compareTargetRows.count()) === 0) {
+    compareTargetRows = compareRemovedRows;
+  }
+  if ((await compareTargetRows.count()) > 0) {
+    await compareTargetRows.first().click();
+    const compareDetailTable = compareDetailSection.locator('table');
+    await compareDetailTable.waitFor({ timeout: 60000 });
+    const compareDetailRows = compareDetailTable.locator('tbody tr[data-field-key]');
+    if ((await compareDetailRows.count()) === 0) {
+      throw new Error('BOM compare detail rows missing.');
+    }
+    const fieldKey = await compareDetailRows.first().getAttribute('data-field-key');
+    if (!fieldKey) {
+      throw new Error('BOM compare detail field key missing.');
+    }
+  } else {
+    console.warn('Skipping compare detail validation; no compare rows available.');
+  }
 
   const substitutesSection = page.locator('section:has-text("替代件")');
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
