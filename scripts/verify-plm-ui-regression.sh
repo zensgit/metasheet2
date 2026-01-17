@@ -35,6 +35,10 @@ PLM_COMPARE_RIGHT_ID="${PLM_COMPARE_RIGHT_ID:-}"
 PLM_COMPARE_EXPECT="${PLM_COMPARE_EXPECT:-}"
 PLM_BOM_LINE_ID="${PLM_BOM_LINE_ID:-}"
 PLM_BOM_CHILD_ID="${PLM_BOM_CHILD_ID:-}"
+PLM_BOM_FIND_NUM="${PLM_BOM_FIND_NUM:-}"
+PLM_BOM_REFDES="${PLM_BOM_REFDES:-}"
+PLM_BOM_DEPTH="${PLM_BOM_DEPTH:-1}"
+PLM_BOM_EFFECTIVE_AT="${PLM_BOM_EFFECTIVE_AT:-}"
 PLM_SUBSTITUTE_EXPECT="${PLM_SUBSTITUTE_EXPECT:-}"
 PLM_DOCUMENT_NAME="${PLM_DOCUMENT_NAME:-}"
 PLM_DOCUMENT_ROLE="${PLM_DOCUMENT_ROLE:-}"
@@ -63,6 +67,33 @@ if [[ -z "$PLM_BOM_TOOLS_JSON" ]]; then
   echo "Missing PLM_BOM_TOOLS_JSON and no artifacts/plm-bom-tools-*.json found." >&2
   echo "Run scripts/verify-plm-bom-tools.sh or set PLM_BOM_TOOLS_JSON." >&2
   exit 1
+fi
+
+if [[ -z "$PLM_BOM_FIND_NUM" || -z "$PLM_BOM_REFDES" ]]; then
+  mapfile -t bom_values < <(python3 - <<'PY' "$PLM_BOM_TOOLS_JSON"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    sys.exit(1)
+
+data = json.loads(path.read_text())
+bom = data.get("bom") or {}
+fixtures = data.get("fixtures") or {}
+find_num = bom.get("find_num") or fixtures.get("bom_child_find_num") or ""
+refdes = bom.get("refdes") or fixtures.get("bom_child_refdes") or ""
+print(find_num)
+print(refdes)
+PY
+  )
+  if [[ -z "$PLM_BOM_FIND_NUM" ]]; then PLM_BOM_FIND_NUM="${bom_values[0]:-}"; fi
+  if [[ -z "$PLM_BOM_REFDES" ]]; then PLM_BOM_REFDES="${bom_values[1]:-}"; fi
+fi
+
+if [[ -z "$PLM_BOM_EFFECTIVE_AT" ]]; then
+  PLM_BOM_EFFECTIVE_AT="$(date '+%Y-%m-%dT%H:%M')"
 fi
 
 if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" ]]; then
@@ -188,14 +219,19 @@ PY
   if [[ -z "$PLM_APPROVAL_PRODUCT_NUMBER" ]]; then PLM_APPROVAL_PRODUCT_NUMBER="${values[14]:-}"; fi
 fi
 
-if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" || -z "$PLM_DOCUMENT_NAME" || -z "$PLM_DOCUMENT_ROLE" || -z "$PLM_APPROVAL_TITLE" ]]; then
-  echo "Missing required PLM inputs; set PLM_SEARCH_QUERY/PLM_PRODUCT_ID/PLM_WHERE_USED_ID/PLM_COMPARE_LEFT_ID/PLM_COMPARE_RIGHT_ID/PLM_BOM_LINE_ID/PLM_DOCUMENT_NAME/PLM_DOCUMENT_ROLE/PLM_APPROVAL_TITLE." >&2
+if [[ -z "$PLM_SEARCH_QUERY" || -z "$PLM_PRODUCT_ID" || -z "$PLM_WHERE_USED_ID" || -z "$PLM_COMPARE_LEFT_ID" || -z "$PLM_COMPARE_RIGHT_ID" || -z "$PLM_BOM_LINE_ID" || -z "$PLM_BOM_FIND_NUM" || -z "$PLM_DOCUMENT_NAME" || -z "$PLM_DOCUMENT_ROLE" || -z "$PLM_APPROVAL_TITLE" ]]; then
+  echo "Missing required PLM inputs; set PLM_SEARCH_QUERY/PLM_PRODUCT_ID/PLM_WHERE_USED_ID/PLM_COMPARE_LEFT_ID/PLM_COMPARE_RIGHT_ID/PLM_BOM_LINE_ID/PLM_BOM_FIND_NUM/PLM_DOCUMENT_NAME/PLM_DOCUMENT_ROLE/PLM_APPROVAL_TITLE." >&2
   exit 1
 fi
 
 BOM_CHILD_RESULT="BOM child actions skipped (missing PLM_BOM_CHILD_ID)."
 if [[ -n "$PLM_BOM_CHILD_ID" ]]; then
   BOM_CHILD_RESULT="BOM child actions executed (copy + switch)."
+fi
+
+BOM_DETAIL_RESULT="BOM detail validation skipped (missing PLM_BOM_FIND_NUM)."
+if [[ -n "$PLM_BOM_FIND_NUM" ]]; then
+  BOM_DETAIL_RESULT="BOM detail validation executed (find_num/refdes + depth/effective + filter)."
 fi
 
 BACK_PID=""
@@ -312,6 +348,10 @@ const compareLeftId = process.env.PLM_COMPARE_LEFT_ID;
 const compareRightId = process.env.PLM_COMPARE_RIGHT_ID;
 const compareExpect = process.env.PLM_COMPARE_EXPECT || '';
 const bomLineId = process.env.PLM_BOM_LINE_ID;
+const bomFindNum = process.env.PLM_BOM_FIND_NUM || '';
+const bomRefdes = process.env.PLM_BOM_REFDES || '';
+const bomDepth = process.env.PLM_BOM_DEPTH || '1';
+const bomEffectiveAt = process.env.PLM_BOM_EFFECTIVE_AT || '';
 const substituteExpect = process.env.PLM_SUBSTITUTE_EXPECT || '';
 const docName = process.env.PLM_DOCUMENT_NAME;
 const docRole = process.env.PLM_DOCUMENT_ROLE;
@@ -421,6 +461,25 @@ async function waitOptional(scope, text) {
   }
 
   const bomSection = page.locator('section:has-text("BOM 结构")');
+  await bomSection.locator('#plm-bom-depth').fill(String(bomDepth));
+  if (bomEffectiveAt) {
+    await bomSection.locator('#plm-bom-effective-at').fill(bomEffectiveAt);
+  }
+  const bomRequestPromise = page.waitForResponse((response) => {
+    const url = response.url();
+    if (!url.includes(`/api/federation/plm/products/${encodeURIComponent(productId)}/bom`)) {
+      return false;
+    }
+    if (!url.includes(`depth=${encodeURIComponent(bomDepth)}`)) {
+      return false;
+    }
+    if (bomEffectiveAt && !url.includes('effective_at=')) {
+      return false;
+    }
+    return true;
+  });
+  await bomSection.locator('button:has-text("刷新 BOM")').click();
+  await bomRequestPromise;
   const bomRows = bomSection.locator('table tbody tr');
   await bomRows.first().waitFor({ timeout: 60000 });
   let bomTargetRow = null;
@@ -433,6 +492,122 @@ async function waitOptional(scope, text) {
   if (!bomTargetRow) {
     throw new Error(`BOM child ${bomChildId || '(missing)'} not found; aborting regression.`);
   }
+  const findNumCell = bomTargetRow.locator('td').nth(5);
+  const findNumText = ((await findNumCell.textContent()) || '').trim();
+  if (bomFindNum && !findNumText.includes(String(bomFindNum))) {
+    throw new Error(`BOM find_num mismatch. Expected ${bomFindNum}, got ${findNumText || '-'}`);
+  }
+  if (bomRefdes) {
+    const refdesCell = bomTargetRow.locator('td').nth(6);
+    const refdesText = ((await refdesCell.textContent()) || '').trim();
+    if (!refdesText.includes(String(bomRefdes))) {
+      throw new Error(`BOM refdes mismatch. Expected ${bomRefdes}, got ${refdesText || '-'}`);
+    }
+  }
+  const bomFilterValue = bomFindNum || bomChildId;
+  if (bomFilterValue) {
+    await bomSection.locator('#plm-bom-filter').fill(String(bomFilterValue));
+    const filteredRows = bomSection.locator('table tbody tr');
+    const filteredCount = await filteredRows.count();
+    if (filteredCount === 0) {
+      throw new Error(`BOM filter produced no rows for ${bomFilterValue}`);
+    }
+    const pathButton = bomSection.locator('table tbody tr button:has-text("路径 ID")').first();
+    if (await pathButton.count()) {
+      const pathTitle = ((await pathButton.getAttribute('title')) || '').trim();
+      if (pathTitle) {
+        await bomSection.locator('#plm-bom-filter').fill(pathTitle.split(' / ').slice(-1)[0]);
+        const pathFilteredCount = await bomSection.locator('table tbody tr').count();
+        if (pathFilteredCount === 0) {
+          throw new Error('BOM filter produced no rows for path id token.');
+        }
+      }
+    }
+  }
+
+  const bomViewSelect = bomSection.locator('#plm-bom-view');
+  if (await bomViewSelect.count()) {
+    await bomSection.locator('#plm-bom-filter').fill('');
+    await bomSection.locator('table tbody tr').first().waitFor({ timeout: 60000 });
+    await bomViewSelect.selectOption('tree');
+    const bomTreeRows = bomSection.locator('.bom-tree .tree-row');
+    await bomTreeRows.nth(1).waitFor({ timeout: 60000 });
+    const bomTreeToggle = bomSection.locator('.bom-tree .tree-toggle').first();
+    if (!(await bomTreeToggle.isEnabled())) {
+      throw new Error('BOM tree toggle is disabled; expected expandable nodes.');
+    }
+    const bomTreeBulkButton = bomSection.locator('.panel-actions button:has-text("复制树形路径 ID")');
+    if ((await bomTreeBulkButton.count()) === 0) {
+      throw new Error('BOM tree bulk path ID button missing.');
+    }
+    if (!(await bomTreeBulkButton.isEnabled())) {
+      throw new Error('BOM tree bulk path ID button is disabled.');
+    }
+    const bomExpandDepthButton = bomSection.locator('button:has-text("展开到深度")');
+    if (!(await bomExpandDepthButton.isEnabled())) {
+      throw new Error('BOM expand-to-depth button is disabled.');
+    }
+    const bomExportButton = bomSection.locator('button:has-text("导出 CSV")');
+    if (!(await bomExportButton.isEnabled())) {
+      throw new Error('BOM tree export button is disabled.');
+    }
+    const bomPathButton = bomSection.locator('.bom-tree button:has-text("路径 ID")').first();
+    if ((await bomPathButton.count()) === 0) {
+      throw new Error('BOM tree path ID button missing.');
+    }
+    const bomPathTitle = ((await bomPathButton.getAttribute('title')) || '').trim();
+    if (!bomPathTitle) {
+      throw new Error('BOM tree path ID tooltip missing.');
+    }
+    await bomViewSelect.selectOption('table');
+
+    const refreshedRows = bomSection.locator('table tbody tr');
+    await refreshedRows.first().waitFor({ timeout: 60000 });
+    if (bomChildId) {
+      const match = refreshedRows.filter({ hasText: bomChildId });
+      if (await match.count()) {
+        bomTargetRow = match.first();
+      }
+    }
+    if (!bomTargetRow) {
+      throw new Error(`BOM child ${bomChildId || '(missing)'} not found after tree view toggle.`);
+    }
+    const bomTablePathHeader = bomSection.locator('table thead th', { hasText: '路径 ID' });
+    if ((await bomTablePathHeader.count()) === 0) {
+      throw new Error('BOM table path ID column missing.');
+    }
+    const bomTablePathButton = bomSection.locator('table tbody tr button:has-text("路径 ID")').first();
+    if ((await bomTablePathButton.count()) === 0) {
+      throw new Error('BOM table path ID button missing.');
+    }
+    const bomTablePathTitle = ((await bomTablePathButton.getAttribute('title')) || '').trim();
+    if (!bomTablePathTitle) {
+      throw new Error('BOM table path ID tooltip missing.');
+    }
+    const bomBulkPathButton = bomSection.locator('.panel-actions button:has-text("复制所有路径 ID")');
+    if ((await bomBulkPathButton.count()) === 0) {
+      throw new Error('BOM bulk path ID button missing.');
+    }
+    if (!(await bomBulkPathButton.isEnabled())) {
+      throw new Error('BOM bulk path ID button is disabled.');
+    }
+
+    const deepLinkSelect = page.locator('#plm-deeplink-preset');
+    if (await deepLinkSelect.count()) {
+      await deepLinkSelect.selectOption('product-bom-tree');
+      await page.waitForFunction(() => {
+        const el = document.querySelector('#plm-bom-view');
+        return el && el.value === 'tree';
+      }, null, { timeout: 60000 });
+      await bomViewSelect.selectOption('table');
+      await bomSection.locator('table tbody tr').first().waitFor({ timeout: 60000 });
+    } else {
+      console.warn('Skipping BOM tree preset check; deep link preset selector missing.');
+    }
+  } else {
+    console.warn('Skipping BOM tree view check; view selector not found.');
+  }
+
   const childIdCell = bomTargetRow.locator('td').nth(1).locator('.muted.mono');
   let resolvedChildId = '';
   if (await childIdCell.count()) {
@@ -474,10 +649,63 @@ async function waitOptional(scope, text) {
     console.warn('Skipping BOM child actions; missing child identifier.');
   }
 
-  const whereUsedSection = page.locator('section:has-text("Where-Used")');
+  const whereUsedSection = page.locator('section:has(#plm-where-used-item-id)');
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
   await whereUsedSection.locator('button:has-text("查询")').click();
   await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
+  const whereUsedPathHeader = whereUsedSection.locator('table thead th', { hasText: '路径 ID' });
+  if ((await whereUsedPathHeader.count()) === 0) {
+    throw new Error('Where-used path ID column missing.');
+  }
+  const whereUsedTablePathButton = whereUsedSection.locator('table tbody tr button:has-text("路径 ID")').first();
+  if ((await whereUsedTablePathButton.count()) === 0) {
+    throw new Error('Where-used table path ID button missing.');
+  }
+  const whereUsedTablePathTitle = ((await whereUsedTablePathButton.getAttribute('title')) || '').trim();
+  if (!whereUsedTablePathTitle) {
+    throw new Error('Where-used table path ID tooltip missing.');
+  }
+  const whereUsedBulkPathButton = whereUsedSection.locator('.panel-actions button:has-text("复制所有路径 ID")');
+  if ((await whereUsedBulkPathButton.count()) === 0) {
+    throw new Error('Where-used bulk path ID button missing.');
+  }
+  if (!(await whereUsedBulkPathButton.isEnabled())) {
+    throw new Error('Where-used bulk path ID button is disabled.');
+  }
+  const whereUsedFilterInput = whereUsedSection.locator('#plm-where-used-filter');
+  if ((await whereUsedFilterInput.count()) && whereUsedTablePathTitle) {
+    const whereUsedPathToken = whereUsedTablePathTitle.split(' / ').slice(-1)[0];
+    if (whereUsedPathToken) {
+      await whereUsedFilterInput.fill(whereUsedPathToken);
+      const filteredCount = await whereUsedSection.locator('table tbody tr').count();
+      if (filteredCount === 0) {
+        throw new Error('Where-used filter produced no rows for path id token.');
+      }
+      await whereUsedFilterInput.fill('');
+    }
+  }
+  const whereUsedViewSelect = whereUsedSection.locator('#plm-where-used-view');
+  if (await whereUsedViewSelect.count()) {
+    await whereUsedViewSelect.selectOption('tree');
+    const whereUsedTreeRows = whereUsedSection.locator('.where-used-tree .tree-row');
+    await whereUsedTreeRows.nth(1).waitFor({ timeout: 60000 });
+    const whereUsedPathButton = whereUsedSection.locator('.where-used-tree button:has-text("路径 ID")').first();
+    if ((await whereUsedPathButton.count()) === 0) {
+      throw new Error('Where-used tree path ID button missing.');
+    }
+    const whereUsedPathTitle = ((await whereUsedPathButton.getAttribute('title')) || '').trim();
+    if (!whereUsedPathTitle) {
+      throw new Error('Where-used tree path ID tooltip missing.');
+    }
+    const whereUsedTreeBulkButton = whereUsedSection.locator('.panel-actions button:has-text("复制树形路径 ID")');
+    if ((await whereUsedTreeBulkButton.count()) === 0) {
+      throw new Error('Where-used tree bulk path ID button missing.');
+    }
+    if (!(await whereUsedTreeBulkButton.isEnabled())) {
+      throw new Error('Where-used tree bulk path ID button is disabled.');
+    }
+    await whereUsedViewSelect.selectOption('table');
+  }
 
   const compareSection = page.locator('section:has-text("BOM 对比")');
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
@@ -497,6 +725,21 @@ async function waitOptional(scope, text) {
   await waitOptional(documentsSection.locator('table'), docName);
   await waitOptional(documentsSection.locator('table'), docRole);
   await waitOptional(documentsSection.locator('table'), docRevision || '');
+  const docFileIdToggle = documentsSection.locator('#plm-document-column-fileId');
+  if (await docFileIdToggle.count()) {
+    await docFileIdToggle.check();
+    await documentsSection.locator('th', { hasText: 'File ID' }).first().waitFor({ timeout: 60000 });
+  }
+  const docAuthorToggle = documentsSection.locator('#plm-document-column-author');
+  if (await docAuthorToggle.count()) {
+    await docAuthorToggle.check();
+    await documentsSection.locator('th', { hasText: '作者' }).first().waitFor({ timeout: 60000 });
+  }
+  const docCreatedToggle = documentsSection.locator('#plm-document-column-created');
+  if (await docCreatedToggle.count()) {
+    await docCreatedToggle.check();
+    await documentsSection.locator('th', { hasText: '创建时间' }).first().waitFor({ timeout: 60000 });
+  }
 
   const approvalsSection = page.locator('section:has(h2:has-text("审批"))');
   await approvalsSection.locator('button:has-text("刷新审批")').click();
@@ -504,6 +747,21 @@ async function waitOptional(scope, text) {
   await approvalRows.first().waitFor({ timeout: 60000 });
   await waitOptional(approvalsSection.locator('table'), approvalTitle);
   await waitOptional(approvalsSection.locator('table'), approvalProductNumber);
+  const approvalIdToggle = approvalsSection.locator('#plm-approval-column-id');
+  if (await approvalIdToggle.count()) {
+    await approvalIdToggle.check();
+    await approvalsSection.locator('th', { hasText: '审批 ID' }).first().waitFor({ timeout: 60000 });
+  }
+  const approvalRequesterIdToggle = approvalsSection.locator('#plm-approval-column-requesterId');
+  if (await approvalRequesterIdToggle.count()) {
+    await approvalRequesterIdToggle.check();
+    await approvalsSection.locator('th', { hasText: '发起人 ID' }).first().waitFor({ timeout: 60000 });
+  }
+  const approvalProductIdToggle = approvalsSection.locator('#plm-approval-column-productId');
+  if (await approvalProductIdToggle.count()) {
+    await approvalProductIdToggle.check();
+    await approvalsSection.locator('th', { hasText: '产品 ID' }).first().waitFor({ timeout: 60000 });
+  }
 
   if (itemNumberPath) {
     const fs = require('fs');
@@ -521,6 +779,10 @@ METASHEET_TOKEN="$METASHEET_TOKEN" \
 PLM_SEARCH_QUERY="$PLM_SEARCH_QUERY" \
 PLM_PRODUCT_ID="$PLM_PRODUCT_ID" \
 PLM_BOM_CHILD_ID="$PLM_BOM_CHILD_ID" \
+PLM_BOM_FIND_NUM="$PLM_BOM_FIND_NUM" \
+PLM_BOM_REFDES="$PLM_BOM_REFDES" \
+PLM_BOM_DEPTH="$PLM_BOM_DEPTH" \
+PLM_BOM_EFFECTIVE_AT="$PLM_BOM_EFFECTIVE_AT" \
 PLM_WHERE_USED_ID="$PLM_WHERE_USED_ID" \
 PLM_WHERE_USED_EXPECT="$PLM_WHERE_USED_EXPECT" \
 PLM_COMPARE_LEFT_ID="$PLM_COMPARE_LEFT_ID" \
@@ -569,6 +831,11 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Where-used child ID: ${PLM_WHERE_USED_ID}
 - Where-used expect: ${PLM_WHERE_USED_EXPECT:-n/a}
 - BOM child ID: ${PLM_BOM_CHILD_ID:-n/a}
+- BOM find #: ${PLM_BOM_FIND_NUM:-n/a}
+- BOM refdes: ${PLM_BOM_REFDES:-n/a}
+- BOM depth: ${PLM_BOM_DEPTH:-n/a}
+- BOM effective at: ${PLM_BOM_EFFECTIVE_AT:-n/a}
+- BOM filter: ${PLM_BOM_FIND_NUM:-n/a}
 - BOM compare left/right: ${PLM_COMPARE_LEFT_ID} / ${PLM_COMPARE_RIGHT_ID}
 - BOM compare expect: ${PLM_COMPARE_EXPECT:-n/a}
 - Substitute BOM line: ${PLM_BOM_LINE_ID}
@@ -585,11 +852,15 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Item number-only load repopulates Product ID.
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
+- ${BOM_DETAIL_RESULT}
+- BOM tree view renders with expandable nodes.
+- BOM expand-to-depth button is enabled.
+- BOM tree export button is enabled.
 - Where-used query completes.
 - BOM compare completes.
 - Substitutes query completes.
-- Documents table loads with expected document metadata.
-- Approvals table loads with expected approval record.
+- Documents table loads with expected document metadata and extended columns.
+- Approvals table loads with expected approval metadata and extended columns.
 - Screenshot: ${SCREENSHOT_PATH}
 - Item number artifact: ${ITEM_NUMBER_JSON}
 REPORT_EOF

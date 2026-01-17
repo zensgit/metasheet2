@@ -371,14 +371,187 @@
     <section class="panel">
       <div class="panel-header">
         <h2>BOM 结构</h2>
-        <button class="btn" :disabled="!productId || bomLoading" @click="loadBom">
-          {{ bomLoading ? '加载中...' : '刷新 BOM' }}
-        </button>
+        <div class="panel-actions">
+          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="expandAllBom">
+            展开全部
+          </button>
+          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="collapseAllBom">
+            折叠全部
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="bomView !== 'tree' || !bomHasTree"
+            @click="expandBomToDepth(bomDepth)"
+          >
+            展开到深度
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="bomView !== 'table' || !bomTablePathIdsCount"
+            @click="copyBomTablePathIdsBulk"
+          >
+            复制所有路径 ID
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="bomView !== 'tree' || !bomTreePathIdsCount"
+            @click="copyBomTreePathIdsBulk"
+          >
+            复制树形路径 ID
+          </button>
+          <button class="btn ghost" :disabled="!bomExportCount" @click="exportBomCsv">
+            导出 CSV
+          </button>
+          <button class="btn" :disabled="!productId || bomLoading" @click="loadBom">
+            {{ bomLoading ? '加载中...' : '刷新 BOM' }}
+          </button>
+        </div>
+      </div>
+      <div class="form-grid compact">
+        <label for="plm-bom-depth">
+          深度
+          <div class="field-inline">
+            <input
+              id="plm-bom-depth"
+              v-model.number="bomDepth"
+              name="plmBomDepth"
+              type="number"
+              min="1"
+              max="10"
+            />
+            <div class="field-actions">
+              <button
+                v-for="depth in BOM_DEPTH_QUICK_OPTIONS"
+                :key="`bom-depth-${depth}`"
+                class="btn ghost mini"
+                type="button"
+                :disabled="bomDepth === depth"
+                @click="setBomDepthQuick(depth)"
+              >
+                {{ depth }}
+              </button>
+            </div>
+          </div>
+        </label>
+        <label for="plm-bom-effective-at">
+          生效时间
+          <input
+            id="plm-bom-effective-at"
+            v-model="bomEffectiveAt"
+            name="plmBomEffectiveAt"
+            type="datetime-local"
+          />
+        </label>
+        <label for="plm-bom-view">
+          视图
+          <select id="plm-bom-view" v-model="bomView" name="plmBomView">
+            <option value="table">表格</option>
+            <option value="tree">树形</option>
+          </select>
+        </label>
+        <label for="plm-bom-filter">
+          过滤
+          <input
+            id="plm-bom-filter"
+            v-model.trim="bomFilter"
+            name="plmBomFilter"
+            placeholder="编号/名称/行 ID"
+          />
+        </label>
       </div>
       <p v-if="bomError" class="status error">{{ bomError }}</p>
+      <p v-if="bomItems.length" class="status">共 {{ bomItems.length }} 条，展示 {{ bomDisplayCount }} 条</p>
       <div v-if="!bomItems.length" class="empty">
         暂无 BOM 数据
         <span class="empty-hint">（可在 PLM 关联 BOM 行后刷新）</span>
+      </div>
+      <div v-else-if="bomView === 'tree' && !bomTreeVisibleCount" class="empty">
+        暂无匹配项
+        <span class="empty-hint">（可清空过滤条件）</span>
+      </div>
+      <div v-else-if="bomView === 'table' && !bomFilteredItems.length" class="empty">
+        暂无匹配项
+        <span class="empty-hint">（可清空过滤条件）</span>
+      </div>
+      <div v-else-if="bomView === 'tree'" class="bom-tree">
+        <div class="tree-row tree-header bom-tree-header">
+          <div class="tree-cell">组件</div>
+          <div class="tree-cell">名称</div>
+          <div class="tree-cell">数量</div>
+          <div class="tree-cell">单位</div>
+          <div class="tree-cell">Find #</div>
+          <div class="tree-cell">Refdes</div>
+          <div class="tree-cell">BOM 行 ID</div>
+          <div class="tree-cell">操作</div>
+        </div>
+        <div
+          v-for="row in bomTreeVisibleRows"
+          :key="row.key"
+          class="tree-row"
+          :class="{ 'tree-root': row.depth === 0 }"
+        >
+          <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
+            <button class="tree-toggle" :disabled="!row.hasChildren" @click="toggleBomNode(row.key)">
+              {{ row.hasChildren ? (isBomCollapsed(row.key) ? '▸' : '▾') : '•' }}
+            </button>
+            <div class="tree-node-meta">
+              <span class="mono">{{ row.label }}</span>
+              <span v-if="row.componentId && row.componentId !== row.label" class="muted mono">
+                {{ row.componentId }}
+              </span>
+            </div>
+          </div>
+          <div class="tree-cell">{{ row.name || '-' }}</div>
+          <div class="tree-cell">{{ row.line?.quantity ?? '-' }}</div>
+          <div class="tree-cell">{{ row.line?.unit ?? row.line?.uom ?? '-' }}</div>
+          <div class="tree-cell">{{ row.line ? formatBomFindNum(row.line) : '-' }}</div>
+          <div class="tree-cell">{{ row.line ? formatBomRefdes(row.line) : '-' }}</div>
+          <div class="tree-cell">
+            <div class="tree-bom-meta">
+              <span class="mono">{{ row.line ? resolveBomLineId(row.line) || '-' : '-' }}</span>
+              <button
+                class="btn ghost mini"
+                :disabled="!formatBomPathIds(row)"
+                :title="formatBomPathIds(row)"
+                @click="copyBomPathIds(row)"
+              >
+                路径 ID
+              </button>
+            </div>
+          </div>
+          <div class="tree-cell">
+            <div class="inline-actions">
+              <button
+                class="btn ghost mini"
+                :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line)) || productLoading"
+                @click="row.line && applyProductFromBom(row.line)"
+              >
+                产品
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!row.line || !resolveBomChildId(row.line) || whereUsedLoading"
+                @click="row.line && applyWhereUsedFromBom(row.line)"
+              >
+                Where-Used
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!row.line || !resolveBomLineId(row.line) || substitutesLoading"
+                @click="row.line && applySubstitutesFromBom(row.line)"
+              >
+                替代件
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line))"
+                @click="row.line && copyBomChildId(row.line)"
+              >
+                复制子件
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
       <table v-else class="data-table">
         <thead>
@@ -388,13 +561,15 @@
             <th>组件名称</th>
             <th>数量</th>
             <th>单位</th>
-            <th>序号</th>
+            <th>Find #</th>
+            <th>Refdes</th>
+            <th>路径 ID</th>
             <th>BOM 行 ID</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in bomItems" :key="item.id">
+          <tr v-for="item in bomFilteredItems" :key="item.id">
             <td>{{ item.level }}</td>
             <td>
               <div>{{ item.component_code || item.component_id }}</div>
@@ -403,7 +578,21 @@
             <td>{{ item.component_name }}</td>
             <td>{{ item.quantity }}</td>
             <td>{{ item.unit }}</td>
-            <td>{{ item.sequence }}</td>
+            <td>{{ formatBomFindNum(item) }}</td>
+            <td>{{ formatBomRefdes(item) }}</td>
+            <td>
+              <div class="tree-bom-meta">
+                <span class="mono">{{ formatBomTablePathIds(item) || '-' }}</span>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!formatBomTablePathIds(item)"
+                  :title="formatBomTablePathIds(item)"
+                  @click="copyBomTablePathIds(item)"
+                >
+                  路径 ID
+                </button>
+              </div>
+            </td>
             <td>
               <div class="mono">{{ item.id || '-' }}</div>
               <div v-if="item.parent_item_id" class="muted">父: {{ item.parent_item_id }}</div>
@@ -474,13 +663,14 @@
             id="plm-document-filter"
             v-model.trim="documentFilter"
             name="plmDocumentFilter"
-            placeholder="名称/类型/MIME"
+            placeholder="名称/类型/作者/MIME"
           />
         </label>
         <label for="plm-document-sort">
           排序
           <select id="plm-document-sort" v-model="documentSortKey" name="plmDocumentSort">
             <option value="updated">更新时间</option>
+            <option value="created">创建时间</option>
             <option value="name">名称</option>
             <option value="type">类型</option>
             <option value="revision">版本</option>
@@ -523,11 +713,16 @@
         <thead>
           <tr>
             <th>名称</th>
+            <th v-if="documentColumns.fileId">File ID</th>
             <th v-if="documentColumns.type">类型</th>
             <th v-if="documentColumns.revision">版本</th>
             <th v-if="documentColumns.role">角色</th>
+            <th v-if="documentColumns.author">作者</th>
+            <th v-if="documentColumns.sourceSystem">来源系统</th>
+            <th v-if="documentColumns.sourceVersion">来源版本</th>
             <th v-if="documentColumns.mime">MIME</th>
             <th v-if="documentColumns.size">大小</th>
+            <th v-if="documentColumns.created">创建时间</th>
             <th v-if="documentColumns.updated">更新时间</th>
             <th v-if="documentColumns.preview">预览</th>
             <th v-if="documentColumns.download">下载</th>
@@ -538,13 +733,18 @@
         <tbody>
           <tr v-for="doc in documentsSorted" :key="doc.id">
             <td>{{ getDocumentName(doc) }}</td>
+            <td v-if="documentColumns.fileId" class="mono">{{ getDocumentId(doc) }}</td>
             <td v-if="documentColumns.type">{{ getDocumentType(doc) }}</td>
             <td v-if="documentColumns.revision">{{ getDocumentRevision(doc) }}</td>
             <td v-if="documentColumns.role">
               <span class="tag status-neutral">{{ getDocumentRole(doc) }}</span>
             </td>
+            <td v-if="documentColumns.author">{{ getDocumentAuthor(doc) }}</td>
+            <td v-if="documentColumns.sourceSystem">{{ getDocumentSourceSystem(doc) }}</td>
+            <td v-if="documentColumns.sourceVersion">{{ getDocumentSourceVersion(doc) }}</td>
             <td v-if="documentColumns.mime">{{ getDocumentMime(doc) }}</td>
             <td v-if="documentColumns.size">{{ formatBytes(getDocumentSize(doc)) }}</td>
+            <td v-if="documentColumns.created">{{ formatTime(getDocumentCreatedAt(doc)) }}</td>
             <td v-if="documentColumns.updated">{{ formatTime(getDocumentUpdatedAt(doc)) }}</td>
             <td v-if="documentColumns.preview">
               <a
@@ -849,17 +1049,21 @@
       <table v-else class="data-table">
         <thead>
           <tr>
+            <th v-if="approvalColumns.id">审批 ID</th>
             <th>标题</th>
             <th v-if="approvalColumns.status">状态</th>
             <th v-if="approvalColumns.type">类型</th>
             <th v-if="approvalColumns.requester">发起人</th>
+            <th v-if="approvalColumns.requesterId">发起人 ID</th>
             <th v-if="approvalColumns.created">创建时间</th>
             <th v-if="approvalColumns.product">产品</th>
+            <th v-if="approvalColumns.productId">产品 ID</th>
             <th v-if="approvalColumns.actions">操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="approval in approvalsSorted" :key="approval.id">
+            <td v-if="approvalColumns.id" class="mono">{{ getApprovalId(approval) }}</td>
             <td>{{ getApprovalTitle(approval) }}</td>
             <td v-if="approvalColumns.status">
               <span class="tag" :class="approvalStatusClass(getApprovalStatus(approval))">
@@ -868,11 +1072,13 @@
             </td>
             <td v-if="approvalColumns.type">{{ getApprovalType(approval) }}</td>
             <td v-if="approvalColumns.requester">{{ getApprovalRequester(approval) }}</td>
+            <td v-if="approvalColumns.requesterId" class="mono">{{ getApprovalRequesterId(approval) }}</td>
             <td v-if="approvalColumns.created">{{ formatTime(getApprovalCreatedAt(approval)) }}</td>
             <td v-if="approvalColumns.product">
               <div>{{ getApprovalProductNumber(approval) }}</div>
               <div class="muted">{{ getApprovalProductName(approval) }}</div>
             </td>
+            <td v-if="approvalColumns.productId" class="mono">{{ getApprovalProductId(approval) }}</td>
             <td v-if="approvalColumns.actions">
               <div class="inline-actions">
                 <button class="btn ghost mini" @click="applyProductFromApproval(approval)">切换产品</button>
@@ -923,6 +1129,20 @@
             @click="collapseAllWhereUsed"
           >
             折叠全部
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="whereUsedView !== 'table' || !whereUsedPathIdsCount"
+            @click="copyWhereUsedTablePathIdsBulk"
+          >
+            复制所有路径 ID
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="whereUsedView !== 'tree' || !whereUsedTreePathIdsCount"
+            @click="copyWhereUsedTreePathIdsBulk"
+          >
+            复制树形路径 ID
           </button>
           <button class="btn ghost" :disabled="!whereUsedFilteredRows.length" @click="exportWhereUsedCsv">
             导出 CSV
@@ -1025,7 +1245,19 @@
             <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'uom') }}</div>
             <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'find_num') }}</div>
             <div class="tree-cell">{{ getWhereUsedTreeRefdes(row) }}</div>
-            <div class="tree-cell">{{ getWhereUsedTreeRelationship(row) }}</div>
+            <div class="tree-cell">
+              <div class="tree-bom-meta">
+                <span class="mono">{{ getWhereUsedTreeRelationship(row) }}</span>
+                <button
+                  class="btn ghost mini"
+                  :disabled="!formatWhereUsedPathIds(row)"
+                  :title="formatWhereUsedPathIds(row)"
+                  @click="copyWhereUsedPathIds(row)"
+                >
+                  路径 ID
+                </button>
+              </div>
+            </div>
             <div class="tree-cell">
               <button
                 class="btn ghost mini"
@@ -1044,6 +1276,7 @@
               <th>父件编号</th>
               <th>父件名称</th>
               <th>路径</th>
+              <th>路径 ID</th>
               <th>数量</th>
               <th>单位</th>
               <th>Find #</th>
@@ -1070,6 +1303,19 @@
                   </div>
                 </details>
                 <span v-else>-</span>
+              </td>
+              <td>
+                <div class="tree-bom-meta">
+                  <span class="mono">{{ formatWhereUsedEntryPathIds(entry) || '-' }}</span>
+                  <button
+                    class="btn ghost mini"
+                    :disabled="!formatWhereUsedEntryPathIds(entry)"
+                    :title="formatWhereUsedEntryPathIds(entry)"
+                    @click="copyWhereUsedEntryPathIds(entry)"
+                  >
+                    路径 ID
+                  </button>
+                </div>
               </td>
               <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
               <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
@@ -1717,6 +1963,8 @@ const router = useRouter()
 const DEFAULT_ITEM_TYPE = 'Part'
 const DEFAULT_SEARCH_LIMIT = 10
 const DEFAULT_WHERE_USED_MAX_LEVELS = 5
+const DEFAULT_BOM_DEPTH = 2
+const BOM_DEPTH_QUICK_OPTIONS = [1, 2, 3]
 const DEFAULT_COMPARE_MAX_LEVELS = 10
 const DEFAULT_COMPARE_LINE_KEY = 'child_config'
 const DEFAULT_COMPARE_REL_PROPS = 'quantity,uom,find_num,refdes'
@@ -1787,6 +2035,29 @@ type WhereUsedTreeRow = {
   hasChildren: boolean
   entries: any[]
   entryCount: number
+  pathLabels: string[]
+  pathIds: string[]
+}
+
+type DeepLinkPreset = {
+  key: string
+  label: string
+  panels: string[]
+  params?: Record<string, string | number | boolean>
+}
+
+type BomTreeRow = {
+  key: string
+  parentKey?: string
+  depth: number
+  line?: any
+  label: string
+  name: string
+  componentId: string
+  lineId: string
+  hasChildren: boolean
+  pathLabels: string[]
+  pathIds: string[]
 }
 
 const authState = ref<AuthState>('missing')
@@ -1809,7 +2080,7 @@ const importPresetText = ref('')
 const importFileInput = ref<HTMLInputElement | null>(null)
 const isPresetDropActive = ref(false)
 let presetDropDepth = 0
-const customDeepLinkPresets = ref<Array<{ key: string; label: string; panels: string[] }>>([])
+const customDeepLinkPresets = ref<DeepLinkPreset[]>([])
 
 const productId = ref('')
 const productItemNumber = ref('')
@@ -1903,17 +2174,27 @@ const productView = computed(() => {
 const bomItems = ref<any[]>([])
 const bomLoading = ref(false)
 const bomError = ref('')
+const bomDepth = ref(DEFAULT_BOM_DEPTH)
+const bomEffectiveAt = ref('')
+const bomFilter = ref('')
+const bomView = ref<'table' | 'tree'>('table')
+const bomCollapsed = ref<Set<string>>(new Set())
 
 const documentRole = ref('')
 const documentFilter = ref('')
-const documentSortKey = ref<'updated' | 'name' | 'type' | 'revision' | 'role' | 'mime' | 'size'>('updated')
+const documentSortKey = ref<'updated' | 'created' | 'name' | 'type' | 'revision' | 'role' | 'mime' | 'size'>('updated')
 const documentSortDir = ref<'asc' | 'desc'>('desc')
 const defaultDocumentColumns: Record<string, boolean> = {
+  fileId: false,
   type: true,
   revision: true,
   role: true,
+  author: false,
+  sourceSystem: false,
+  sourceVersion: false,
   mime: true,
   size: true,
+  created: false,
   updated: true,
   preview: true,
   download: true,
@@ -1922,11 +2203,16 @@ const defaultDocumentColumns: Record<string, boolean> = {
 }
 const documentColumns = ref<Record<string, boolean>>({ ...defaultDocumentColumns })
 const documentColumnOptions = [
+  { key: 'fileId', label: 'File ID' },
   { key: 'type', label: '类型' },
   { key: 'revision', label: '版本' },
   { key: 'role', label: '角色' },
+  { key: 'author', label: '作者' },
+  { key: 'sourceSystem', label: '来源系统' },
+  { key: 'sourceVersion', label: '来源版本' },
   { key: 'mime', label: 'MIME' },
   { key: 'size', label: '大小' },
+  { key: 'created', label: '创建时间' },
   { key: 'updated', label: '更新时间' },
   { key: 'preview', label: '预览' },
   { key: 'download', label: '下载' },
@@ -1965,20 +2251,26 @@ const approvalsFilter = ref('')
 const approvalSortKey = ref<'created' | 'title' | 'status' | 'requester' | 'product'>('created')
 const approvalSortDir = ref<'asc' | 'desc'>('desc')
 const defaultApprovalColumns: Record<string, boolean> = {
+  id: false,
   status: true,
   type: true,
   requester: true,
+  requesterId: false,
   created: true,
   product: true,
+  productId: false,
   actions: true,
 }
 const approvalColumns = ref<Record<string, boolean>>({ ...defaultApprovalColumns })
 const approvalColumnOptions = [
+  { key: 'id', label: '审批 ID' },
   { key: 'status', label: '状态' },
   { key: 'type', label: '类型' },
   { key: 'requester', label: '发起人' },
+  { key: 'requesterId', label: '发起人 ID' },
   { key: 'created', label: '创建时间' },
   { key: 'product', label: '产品' },
+  { key: 'productId', label: '产品 ID' },
   { key: 'actions', label: '操作' },
 ]
 
@@ -2054,10 +2346,25 @@ const whereUsedFilteredRows = computed(() => {
       getItemName(entry.parent),
       entry?.relationship?.id,
       entry?.pathLabel,
+      formatWhereUsedEntryPathIds(entry),
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
   })
 })
+
+const whereUsedPathIdsList = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const entry of whereUsedFilteredRows.value) {
+    const pathIds = formatWhereUsedEntryPathIds(entry)
+    if (!pathIds || seen.has(pathIds)) continue
+    seen.add(pathIds)
+    list.push(pathIds)
+  }
+  return list
+})
+
+const whereUsedPathIdsCount = computed(() => whereUsedPathIdsList.value.length)
 
 const whereUsedTree = computed<WhereUsedTreeNode | null>(() => {
   const rows = whereUsedFilteredRows.value
@@ -2119,8 +2426,19 @@ const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
   const root = whereUsedTree.value
   if (!root) return []
   const rows: WhereUsedTreeRow[] = []
-  const walk = (node: WhereUsedTreeNode, depth: number, path: string, parentKey?: string) => {
+  const walk = (
+    node: WhereUsedTreeNode,
+    depth: number,
+    path: string,
+    parentKey: string | undefined,
+    pathLabels: string[],
+    pathIds: string[]
+  ) => {
     const key = path ? `${path}/${node.id}` : node.id
+    const labelToken = String(node.label || node.id || key)
+    const idToken = String(node.id || node.label || key)
+    const nextLabels = [...pathLabels, labelToken]
+    const nextIds = [...pathIds, idToken]
     rows.push({
       key,
       parentKey,
@@ -2131,12 +2449,14 @@ const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
       hasChildren: node.children.length > 0,
       entries: node.entries,
       entryCount: node.entries.length,
+      pathLabels: nextLabels,
+      pathIds: nextIds,
     })
     for (const child of node.children) {
-      walk(child, depth + 1, key, key)
+      walk(child, depth + 1, key, key, nextLabels, nextIds)
     }
   }
-  walk(root, 0, '', undefined)
+  walk(root, 0, '', undefined, [], [])
   return rows
 })
 
@@ -2157,6 +2477,20 @@ const whereUsedTreeVisibleRows = computed<WhereUsedTreeRow[]>(() => {
 })
 
 const whereUsedHasTree = computed(() => whereUsedTreeRows.value.some((row) => row.hasChildren))
+
+const whereUsedTreePathIdsList = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const row of whereUsedTreeVisibleRows.value) {
+    const pathIds = formatWhereUsedPathIds(row)
+    if (!pathIds || seen.has(pathIds)) continue
+    seen.add(pathIds)
+    list.push(pathIds)
+  }
+  return list
+})
+
+const whereUsedTreePathIdsCount = computed(() => whereUsedTreePathIdsList.value.length)
 
 const compareLeftId = ref('')
 const compareRightId = ref('')
@@ -2221,6 +2555,12 @@ const productFieldCatalog = [
 ]
 const documentFieldCatalog = [
   {
+    key: 'file_id',
+    label: 'File ID',
+    source: 'id / file_id / metadata.file_id',
+    fallback: 'id',
+  },
+  {
     key: 'name',
     label: '名称',
     source: 'name / metadata.filename / filename',
@@ -2236,6 +2576,24 @@ const documentFieldCatalog = [
     key: 'engineering_revision',
     label: '版本',
     source: 'engineering_revision / document_version / metadata.document_version',
+    fallback: '-',
+  },
+  {
+    key: 'author',
+    label: '作者',
+    source: 'author / metadata.author',
+    fallback: '-',
+  },
+  {
+    key: 'source_system',
+    label: '来源系统',
+    source: 'source_system / metadata.source_system',
+    fallback: '-',
+  },
+  {
+    key: 'source_version',
+    label: '来源版本',
+    source: 'source_version / metadata.source_version',
     fallback: '-',
   },
   {
@@ -2277,11 +2635,17 @@ const documentFieldCatalog = [
   {
     key: 'updated_at',
     label: '更新时间',
-    source: 'updated_at / metadata.updated_at',
+    source: 'updated_at / metadata.updated_at / metadata.created_at',
     fallback: '-',
   },
 ]
 const approvalFieldCatalog = [
+  {
+    key: 'id',
+    label: '审批 ID',
+    source: 'id / eco.id',
+    fallback: '-',
+  },
   {
     key: 'title',
     label: '标题',
@@ -2305,6 +2669,12 @@ const approvalFieldCatalog = [
     label: '发起人',
     source: 'requester_name / created_by_name / created_by_id',
     fallback: 'unknown',
+  },
+  {
+    key: 'requester_id',
+    label: '发起人 ID',
+    source: 'requester_id / created_by_id',
+    fallback: '-',
   },
   {
     key: 'created_at',
@@ -2435,15 +2805,279 @@ const substitutesActionError = ref('')
 const substitutesMutating = ref(false)
 const substitutesDeletingId = ref<string | null>(null)
 
+const bomFilteredItems = computed(() => {
+  const needle = bomFilter.value.trim().toLowerCase()
+  if (!needle) return bomItems.value
+  return bomItems.value.filter((item: any) => {
+    const tokens = [
+      item.component_name,
+      item.component_code,
+      item.component_id,
+      item.id,
+      item.parent_item_id,
+      formatBomFindNum(item),
+      formatBomRefdes(item),
+      formatBomTablePathIds(item),
+      item.quantity,
+      item.unit,
+    ]
+    return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+  })
+})
+
+const bomTablePathIdsList = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const item of bomFilteredItems.value) {
+    const pathIds = formatBomTablePathIds(item)
+    if (!pathIds || seen.has(pathIds)) continue
+    seen.add(pathIds)
+    list.push(pathIds)
+  }
+  return list
+})
+
+const bomTablePathIdsCount = computed(() => bomTablePathIdsList.value.length)
+
+const bomTreeRows = computed<BomTreeRow[]>(() => {
+  const items = bomItems.value
+  if (!items.length) return []
+
+  const parentMap = new Map<string, any[]>()
+  for (const line of items) {
+    const parentId = String(line?.parent_item_id || '')
+    if (!parentMap.has(parentId)) {
+      parentMap.set(parentId, [])
+    }
+    parentMap.get(parentId)?.push(line)
+  }
+
+  const rows: BomTreeRow[] = []
+  const rootId = productId.value || productView.value.id || ''
+  const rootLabel =
+    productView.value.partNumber && productView.value.partNumber !== '-' ? productView.value.partNumber : rootId || 'root'
+  const rootName = productView.value.name || ''
+  const rootKey = rootId || rootLabel || 'root'
+  const rootPathLabel = String(rootLabel || rootId || rootKey)
+  const rootPathId = String(rootId || rootLabel || rootKey)
+
+  const rootRow: BomTreeRow = {
+    key: rootKey,
+    parentKey: undefined,
+    depth: 0,
+    line: undefined,
+    label: rootLabel,
+    name: rootName,
+    componentId: rootId,
+    lineId: '',
+    hasChildren: false,
+    pathLabels: [rootPathLabel],
+    pathIds: [rootPathId],
+  }
+  rows.push(rootRow)
+
+  const sortLines = (lines: any[]) =>
+    [...lines].sort((a, b) => {
+      const aKey = String(a?.find_num ?? a?.findNum ?? a?.component_code ?? a?.component_id ?? a?.id ?? '')
+      const bKey = String(b?.find_num ?? b?.findNum ?? b?.component_code ?? b?.component_id ?? b?.id ?? '')
+      return aKey.localeCompare(bKey)
+    })
+
+  const seen = new Set<string>()
+  const rootLines = [
+    ...(parentMap.get(rootId) || []),
+    ...(parentMap.get('') || []),
+  ].filter((line) => {
+    const key = resolveBomLineId(line) || `${resolveBomChildId(line)}-${resolveBomChildNumber(line)}`
+    if (!key) return true
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  let autoIndex = 0
+  const makeLineKey = (line: any) => {
+    const base = resolveBomLineId(line) || resolveBomChildId(line) || resolveBomChildNumber(line)
+    if (base) return base
+    autoIndex += 1
+    return `line-${autoIndex}`
+  }
+
+  const walk = (
+    line: any,
+    depth: number,
+    parentKey: string,
+    path: Set<string>,
+    pathLabels: string[],
+    pathIds: string[]
+  ) => {
+    const componentId = resolveBomChildId(line)
+    const lineKey = makeLineKey(line)
+    const key = `${parentKey}/${lineKey}`
+    const label = line?.component_code || line?.component_id || componentId || resolveBomChildNumber(line) || lineKey
+    const name = line?.component_name || ''
+    const lineId = resolveBomLineId(line)
+    const labelToken = String(label || componentId || lineKey)
+    const idToken = String(componentId || label || lineKey)
+    const nextLabels = [...pathLabels, labelToken]
+    const nextIds = [...pathIds, idToken]
+    const nextPath = new Set(path)
+    const hasCycle = componentId ? nextPath.has(componentId) : false
+    if (componentId && !hasCycle) {
+      nextPath.add(componentId)
+    }
+    const children = componentId && !hasCycle ? parentMap.get(componentId) || [] : []
+    rows.push({
+      key,
+      parentKey,
+      depth,
+      line,
+      label,
+      name,
+      componentId,
+      lineId,
+      hasChildren: children.length > 0,
+      pathLabels: nextLabels,
+      pathIds: nextIds,
+    })
+    for (const child of sortLines(children)) {
+      walk(child, depth + 1, key, nextPath, nextLabels, nextIds)
+    }
+  }
+
+  for (const line of sortLines(rootLines)) {
+    walk(line, 1, rootKey, new Set(rootId ? [rootId] : []), rootRow.pathLabels, rootRow.pathIds)
+  }
+  rootRow.hasChildren = rows.length > 1
+  return rows
+})
+
+const bomPathRowMaps = computed(() => {
+  const rows = bomTreeRows.value
+  const byLineId = new Map<string, BomTreeRow>()
+  const byPair = new Map<string, BomTreeRow>()
+  const rowMap = new Map(rows.map((row) => [row.key, row]))
+  for (const row of rows) {
+    if (!row.line) continue
+    const lineId = resolveBomLineId(row.line)
+    if (lineId) {
+      byLineId.set(lineId, row)
+    }
+    const parentRow = row.parentKey ? rowMap.get(row.parentKey) : undefined
+    const parentId =
+      row.line?.parent_item_id ??
+      row.line?.parentItemId ??
+      parentRow?.componentId ??
+      ''
+    const childId = resolveBomChildId(row.line) || row.componentId
+    if (parentId || childId) {
+      byPair.set(`${parentId}::${childId}`, row)
+    }
+  }
+  return { byLineId, byPair }
+})
+
+const bomTreeFilteredKeys = computed(() => {
+  const rows = bomTreeRows.value
+  if (!rows.length) return new Set<string>()
+  const needle = bomFilter.value.trim().toLowerCase()
+  if (!needle) return new Set(rows.map((row) => row.key))
+
+  const matches = new Set<string>()
+  for (const row of rows) {
+    const line = row.line
+    const tokens = line
+      ? [
+          row.label,
+          row.name,
+          row.componentId,
+          row.lineId,
+          formatBomFindNum(line),
+          formatBomRefdes(line),
+          line?.quantity,
+          line?.unit ?? line?.uom,
+        ]
+      : [row.label, row.name, row.componentId]
+    if (tokens.some((token) => String(token || '').toLowerCase().includes(needle))) {
+      matches.add(row.key)
+    }
+  }
+
+  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
+  const included = new Set<string>()
+  for (const key of matches) {
+    let current = key
+    while (current) {
+      included.add(current)
+      current = parentMap.get(current) || ''
+    }
+  }
+  return included
+})
+
+const bomTreeVisibleRows = computed<BomTreeRow[]>(() => {
+  const rows = bomTreeRows.value
+  if (!rows.length) return []
+  const included = bomTreeFilteredKeys.value
+  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
+  const collapsed = bomCollapsed.value
+  const isHidden = (row: BomTreeRow) => {
+    if (!included.has(row.key)) return true
+    let parentKey = row.parentKey
+    while (parentKey) {
+      if (collapsed.has(parentKey)) return true
+      parentKey = parentMap.get(parentKey) || ''
+    }
+    return false
+  }
+  return rows.filter((row) => !isHidden(row))
+})
+
+const bomTreeVisibleCount = computed(() => bomTreeVisibleRows.value.filter((row) => row.line).length)
+
+const bomTreePathIdsList = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const row of bomTreeVisibleRows.value) {
+    if (!row.line) continue
+    const pathIds = formatBomPathIds(row)
+    if (!pathIds || seen.has(pathIds)) continue
+    seen.add(pathIds)
+    list.push(pathIds)
+  }
+  return list
+})
+
+const bomTreePathIdsCount = computed(() => bomTreePathIdsList.value.length)
+
+const bomTreeFilteredCount = computed(() => {
+  const included = bomTreeFilteredKeys.value
+  return bomTreeRows.value.filter((row) => row.line && included.has(row.key)).length
+})
+
+const bomHasTree = computed(() => bomTreeRows.value.some((row) => row.hasChildren))
+
+const bomDisplayCount = computed(() =>
+  bomView.value === 'tree' ? bomTreeVisibleCount.value : bomFilteredItems.value.length
+)
+
+const bomExportCount = computed(() =>
+  bomView.value === 'tree' ? bomTreeFilteredCount.value : bomFilteredItems.value.length
+)
+
 const documentsFiltered = computed(() => {
   const needle = documentFilter.value.trim().toLowerCase()
   if (!needle) return documents.value
   return documents.value.filter((doc: any) => {
     const tokens = [
       getDocumentName(doc),
+      getDocumentId(doc),
       getDocumentType(doc),
       getDocumentRevision(doc),
       getDocumentRole(doc),
+      getDocumentAuthor(doc),
+      getDocumentSourceSystem(doc),
+      getDocumentSourceVersion(doc),
       getDocumentMime(doc),
       doc.id,
       doc.file_id,
@@ -2459,6 +3093,7 @@ const documentSortConfig: SortConfig = {
   role: { type: 'string', accessor: (doc: any) => getDocumentRole(doc) },
   mime: { type: 'string', accessor: (doc: any) => getDocumentMime(doc) },
   size: { type: 'number', accessor: (doc: any) => getDocumentSize(doc) ?? 0 },
+  created: { type: 'date', accessor: (doc: any) => getDocumentCreatedAt(doc) },
   updated: { type: 'date', accessor: (doc: any) => getDocumentUpdatedAt(doc) },
 }
 
@@ -2475,8 +3110,10 @@ const approvalsFiltered = computed(() => {
     const tokens = [
       getApprovalTitle(entry),
       getApprovalRequester(entry),
+      getApprovalRequesterId(entry),
       getApprovalProductName(entry),
       getApprovalProductNumber(entry),
+      getApprovalProductId(entry),
       entry.product_id,
       entry.id,
     ]
@@ -2619,6 +3256,7 @@ const plmAuthHint = computed(() => {
 const DOCUMENT_COLUMNS_STORAGE_KEY = 'plm_document_columns'
 const APPROVAL_COLUMNS_STORAGE_KEY = 'plm_approval_columns'
 const DEEP_LINK_PRESETS_STORAGE_KEY = 'plm_deep_link_presets'
+const BOM_COLLAPSE_STORAGE_KEY = 'plm_bom_tree_collapsed'
 const deepLinkPanelOptions = [
   { key: 'search', label: '搜索' },
   { key: 'product', label: '产品' },
@@ -2629,14 +3267,18 @@ const deepLinkPanelOptions = [
   { key: 'compare', label: 'BOM 对比' },
   { key: 'substitutes', label: '替代件' },
 ]
-const builtInDeepLinkPresets = [
+const builtInDeepLinkPresets: DeepLinkPreset[] = [
   { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
   { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
+  { key: 'product-bom-tree', label: '产品 + BOM 树形', panels: ['product'], params: { bomView: 'tree' } },
   { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
   { key: 'docs-approvals', label: '文档 + 审批', panels: ['documents', 'approvals'] },
   { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
 ]
-const deepLinkPresets = computed(() => [...builtInDeepLinkPresets, ...customDeepLinkPresets.value])
+const deepLinkPresets = computed<DeepLinkPreset[]>(() => [
+  ...builtInDeepLinkPresets,
+  ...customDeepLinkPresets.value,
+])
 
 function formatJson(payload: unknown): string {
   return JSON.stringify(payload, null, 2)
@@ -2681,6 +3323,11 @@ function resetAll() {
   searchError.value = ''
   bomItems.value = []
   bomError.value = ''
+  bomDepth.value = DEFAULT_BOM_DEPTH
+  bomEffectiveAt.value = ''
+  bomFilter.value = ''
+  bomView.value = 'table'
+  bomCollapsed.value = new Set()
   documentRole.value = ''
   documentSortKey.value = 'updated'
   documentSortDir.value = 'desc'
@@ -2775,6 +3422,11 @@ function resetAll() {
     compareEffectiveAt: '',
     compareRelationshipProps: '',
     compareFilter: '',
+    bomDepth: undefined,
+    bomEffectiveAt: '',
+    bomFilter: '',
+    bomView: '',
+    bomCollapsed: '',
     bomLineId: '',
     substitutesFilter: '',
     panel: '',
@@ -3020,9 +3672,20 @@ async function loadBom() {
   bomLoading.value = true
   bomError.value = ''
   try {
-    const result = await apiGet<{ ok: boolean; data: { items: any[] } }>(
-      `/api/federation/plm/products/${encodeURIComponent(productId.value)}/bom`
-    )
+    const params = new URLSearchParams()
+    const depthValue = Number.isFinite(bomDepth.value) ? Math.max(1, Math.floor(bomDepth.value)) : undefined
+    if (depthValue) {
+      params.set('depth', String(depthValue))
+    }
+    const effectiveAt = normalizeEffectiveAt(bomEffectiveAt.value)
+    if (effectiveAt) {
+      params.set('effective_at', effectiveAt)
+    }
+    const query = params.toString()
+    const endpoint = query
+      ? `/api/federation/plm/products/${encodeURIComponent(productId.value)}/bom?${query}`
+      : `/api/federation/plm/products/${encodeURIComponent(productId.value)}/bom`
+    const result = await apiGet<{ ok: boolean; data: { items: any[] } }>(endpoint)
     if (!result.ok) {
       throw new Error('加载 BOM 失败')
     }
@@ -3055,6 +3718,56 @@ function resolveBomChildNumber(item: any): string {
 function resolveBomLineId(item: any): string {
   const value = item?.id ?? item?.bom_line_id ?? item?.relationship_id ?? item?.relationshipId
   return value ? String(value) : ''
+}
+
+function formatBomPathIds(row: BomTreeRow): string {
+  if (!row?.pathIds?.length) return ''
+  return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
+}
+
+function formatBomTablePathIds(item: Record<string, any>): string {
+  const lineId = resolveBomLineId(item)
+  const { byLineId, byPair } = bomPathRowMaps.value
+  let row: BomTreeRow | undefined
+  if (lineId) {
+    row = byLineId.get(lineId)
+  }
+  if (!row) {
+    const parentId = String(item?.parent_item_id ?? item?.parentItemId ?? '')
+    const childId = resolveBomChildId(item)
+    if (parentId || childId) {
+      row = byPair.get(`${parentId}::${childId}`)
+    }
+  }
+  if (!row?.pathIds?.length) return ''
+  return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
+}
+
+function formatBomFindNum(item: any): string {
+  const value = item?.find_num ?? item?.findNum ?? item?.find_number ?? item?.sequence
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry)).join(', ')
+  }
+  if (value === undefined || value === null || value === '') {
+    return '-'
+  }
+  return String(value)
+}
+
+function formatBomRefdes(item: any): string {
+  const value = item?.refdes ?? item?.refDes ?? item?.reference_designator
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry)).join(', ')
+  }
+  if (value === undefined || value === null || value === '') {
+    return '-'
+  }
+  return String(value)
+}
+
+function setBomDepthQuick(value: number): void {
+  const next = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : DEFAULT_BOM_DEPTH
+  bomDepth.value = next
 }
 
 function resolveCompareLineId(entry: any): string {
@@ -3162,6 +3875,128 @@ async function copyBomChildId(item: any) {
   }
   const label = childId ? 'ID' : '料号'
   setDeepLinkMessage(`已复制子件${label}：${target}`)
+}
+
+async function copyBomPathIds(row: BomTreeRow) {
+  const pathIds = formatBomPathIds(row)
+  if (!pathIds) {
+    setDeepLinkMessage('缺少路径 ID', true)
+    return
+  }
+  const ok = await copyToClipboard(pathIds)
+  if (!ok) {
+    setDeepLinkMessage('复制路径 ID 失败', true)
+    return
+  }
+  const lastToken = pathIds.split(' / ').slice(-1)[0] || pathIds
+  setDeepLinkMessage(`已复制路径 ID（末级：${lastToken}）`)
+}
+
+async function copyBomTablePathIds(item: Record<string, any>) {
+  const pathIds = formatBomTablePathIds(item)
+  if (!pathIds) {
+    setDeepLinkMessage('缺少路径 ID', true)
+    return
+  }
+  const ok = await copyToClipboard(pathIds)
+  if (!ok) {
+    setDeepLinkMessage('复制路径 ID 失败', true)
+    return
+  }
+  const lastToken = pathIds.split(' / ').slice(-1)[0] || pathIds
+  setDeepLinkMessage(`已复制路径 ID（末级：${lastToken}）`)
+}
+
+async function copyPathIdsList(label: string, list: string[]) {
+  if (!list.length) {
+    setDeepLinkMessage(`暂无${label}路径 ID`, true)
+    return
+  }
+  const ok = await copyToClipboard(list.join('\n'))
+  if (!ok) {
+    setDeepLinkMessage(`复制${label}路径 ID 失败`, true)
+    return
+  }
+  setDeepLinkMessage(`已复制${label}路径 ID：${list.length} 条`)
+}
+
+async function copyBomTablePathIdsBulk() {
+  await copyPathIdsList('BOM', bomTablePathIdsList.value)
+}
+
+async function copyBomTreePathIdsBulk() {
+  await copyPathIdsList('BOM树形', bomTreePathIdsList.value)
+}
+
+async function copyWhereUsedPathIdsValue(pathIds: string) {
+  if (!pathIds) {
+    setDeepLinkMessage('缺少路径 ID', true)
+    return
+  }
+  const ok = await copyToClipboard(pathIds)
+  if (!ok) {
+    setDeepLinkMessage('复制路径 ID 失败', true)
+    return
+  }
+  const lastToken = pathIds.split(' / ').slice(-1)[0] || pathIds
+  setDeepLinkMessage(`已复制路径 ID（末级：${lastToken}）`)
+}
+
+async function copyWhereUsedPathIds(row: WhereUsedTreeRow) {
+  const pathIds = formatWhereUsedPathIds(row)
+  await copyWhereUsedPathIdsValue(pathIds)
+}
+
+async function copyWhereUsedEntryPathIds(entry: Record<string, any>) {
+  const pathIds = formatWhereUsedEntryPathIds(entry)
+  await copyWhereUsedPathIdsValue(pathIds)
+}
+
+async function copyWhereUsedTablePathIdsBulk() {
+  await copyPathIdsList('Where-Used', whereUsedPathIdsList.value)
+}
+
+async function copyWhereUsedTreePathIdsBulk() {
+  await copyPathIdsList('Where-Used树形', whereUsedTreePathIdsList.value)
+}
+
+function isBomCollapsed(key: string): boolean {
+  return bomCollapsed.value.has(key)
+}
+
+function toggleBomNode(key: string): void {
+  const next = new Set(bomCollapsed.value)
+  if (next.has(key)) {
+    next.delete(key)
+  } else {
+    next.add(key)
+  }
+  applyBomCollapsedState(next)
+}
+
+function expandAllBom(): void {
+  applyBomCollapsedState(new Set())
+}
+
+function collapseAllBom(): void {
+  const next = new Set<string>()
+  for (const row of bomTreeRows.value) {
+    if (row.hasChildren) {
+      next.add(row.key)
+    }
+  }
+  applyBomCollapsedState(next)
+}
+
+function expandBomToDepth(depth: number): void {
+  const target = Number.isFinite(depth) ? Math.max(1, Math.floor(depth)) : DEFAULT_BOM_DEPTH
+  const next = new Set<string>()
+  for (const row of bomTreeRows.value) {
+    if (row.hasChildren && row.depth >= target) {
+      next.add(row.key)
+    }
+  }
+  applyBomCollapsedState(next)
 }
 
 function applySubstitutesFromCompare(entry: any) {
@@ -3975,6 +4810,26 @@ function getDocumentDownloadUrl(doc: Record<string, any>): string {
   return normalizeText(doc?.download_url || metadata.download_url, '')
 }
 
+function getDocumentAuthor(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.author || metadata.author, '-')
+}
+
+function getDocumentSourceSystem(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.source_system || metadata.source_system, '-')
+}
+
+function getDocumentSourceVersion(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.source_version || metadata.source_version, '-')
+}
+
+function getDocumentCreatedAt(doc: Record<string, any>): string {
+  const metadata = getDocumentMetadata(doc)
+  return normalizeText(doc?.created_at || metadata.created_at, '')
+}
+
 async function copyDocumentId(doc: Record<string, any>) {
   const value = getDocumentId(doc)
   if (!value) {
@@ -4007,6 +4862,10 @@ function getApprovalTitle(entry: Record<string, any>): string {
   return normalizeText(entry?.title || entry?.name || entry?.id, '-')
 }
 
+function getApprovalId(entry: Record<string, any>): string {
+  return normalizeText(entry?.id || entry?.request_id, '-')
+}
+
 function getApprovalStatus(entry: Record<string, any>): string {
   return normalizeText(entry?.status || entry?.state, '-')
 }
@@ -4025,6 +4884,10 @@ function getApprovalRequester(entry: Record<string, any>): string {
   )
 }
 
+function getApprovalRequesterId(entry: Record<string, any>): string {
+  return normalizeText(entry?.requester_id || entry?.created_by_id, '-')
+}
+
 function getApprovalCreatedAt(entry: Record<string, any>): string {
   return normalizeText(entry?.created_at || entry?.createdAt || entry?.updated_at, '')
 }
@@ -4037,6 +4900,10 @@ function getApprovalProductNumber(entry: Record<string, any>): string {
       entry?.product_id,
     '-',
   )
+}
+
+function getApprovalProductId(entry: Record<string, any>): string {
+  return normalizeText(entry?.product_id || entry?.productId || entry?.product?.id, '-')
 }
 
 function getApprovalProductName(entry: Record<string, any>): string {
@@ -4221,11 +5088,102 @@ function getWhereUsedTreeRelationship(row: WhereUsedTreeRow): string {
   return entry?.relationship?.id || '-'
 }
 
+function formatWhereUsedEntryPathIds(entry: Record<string, any>): string {
+  const nodes = Array.isArray(entry?.pathNodes) ? entry.pathNodes : []
+  if (!nodes.length) return ''
+  return nodes
+    .map((node: any) => node?.id || node?.label)
+    .filter((token) => String(token || '').length > 0)
+    .join(' / ')
+}
+
+function formatWhereUsedPathIds(row: WhereUsedTreeRow): string {
+  if (!row?.pathIds?.length) return ''
+  return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
+}
+
 function normalizeEffectiveAt(value: string): string | undefined {
   if (!value) return undefined
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return undefined
   return date.toISOString()
+}
+
+function serializeBomCollapsed(value: Set<string>): string {
+  return Array.from(value).join('|')
+}
+
+function parseBomCollapsed(raw: string): Set<string> {
+  if (!raw) return new Set()
+  return new Set(raw.split('|').map((entry) => entry.trim()).filter(Boolean))
+}
+
+function resolveBomCollapseStorageKey(): string | null {
+  const base = productId.value || productView.value.id || productItemNumber.value
+  if (!base) return null
+  return `${BOM_COLLAPSE_STORAGE_KEY}:${base}`
+}
+
+function loadStoredBomCollapsed(): Set<string> | null {
+  if (typeof localStorage === 'undefined') return null
+  const key = resolveBomCollapseStorageKey()
+  if (!key) return null
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return null
+    return new Set(parsed.map((entry) => String(entry)).filter(Boolean))
+  } catch (_err) {
+    return null
+  }
+}
+
+function persistBomCollapsed(value: Set<string>): void {
+  if (typeof localStorage === 'undefined') return
+  const key = resolveBomCollapseStorageKey()
+  if (!key) return
+  try {
+    if (!value.size) {
+      localStorage.removeItem(key)
+    } else {
+      localStorage.setItem(key, JSON.stringify(Array.from(value)))
+    }
+  } catch (_err) {
+    // ignore storage errors
+  }
+}
+
+function filterBomCollapsed(value: Set<string>): Set<string> {
+  const rows = bomTreeRows.value
+  if (!rows.length) return value
+  const allowed = new Set(rows.map((row) => row.key))
+  return new Set(Array.from(value).filter((key) => allowed.has(key)))
+}
+
+function resolveBomCollapsedState(): Set<string> {
+  const param = readQueryParam('bomCollapsed')
+  if (param !== undefined) {
+    return filterBomCollapsed(parseBomCollapsed(param))
+  }
+  const stored = loadStoredBomCollapsed()
+  return stored ? filterBomCollapsed(stored) : new Set()
+}
+
+function syncBomCollapsedQuery(value: Set<string>): void {
+  if (bomView.value !== 'tree') {
+    scheduleQuerySync({ bomCollapsed: undefined })
+    return
+  }
+  const serialized = serializeBomCollapsed(value)
+  scheduleQuerySync({ bomCollapsed: serialized || undefined })
+}
+
+function applyBomCollapsedState(value: Set<string>): void {
+  const filtered = filterBomCollapsed(value)
+  bomCollapsed.value = filtered
+  persistBomCollapsed(filtered)
+  syncBomCollapsedQuery(filtered)
 }
 
 function readQueryParam(key: string): string | undefined {
@@ -4320,6 +5278,17 @@ function clearDeepLinkScope() {
   customPresetName.value = ''
 }
 
+function applyPresetParams(preset?: DeepLinkPreset | null): void {
+  if (!preset?.params) return
+  const bomViewParam = preset.params.bomView
+  if (typeof bomViewParam === 'string') {
+    const normalized = bomViewParam.trim().toLowerCase()
+    if (normalized === 'tree' || normalized === 'table') {
+      bomView.value = normalized as typeof bomView.value
+    }
+  }
+}
+
 function applyDeepLinkPreset() {
   if (!deepLinkPreset.value) {
     deepLinkScope.value = []
@@ -4328,6 +5297,7 @@ function applyDeepLinkPreset() {
   const preset = deepLinkPresets.value.find((entry) => entry.key === deepLinkPreset.value)
   applyingPreset = true
   deepLinkScope.value = preset ? [...preset.panels] : []
+  applyPresetParams(preset || null)
   window.setTimeout(() => {
     applyingPreset = false
   }, 0)
@@ -4591,6 +5561,14 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('whereUsedRecursive', whereUsedRecursive.value !== true ? whereUsedRecursive.value : undefined)
   append('whereUsedMaxLevels', whereUsedMaxLevels.value !== DEFAULT_WHERE_USED_MAX_LEVELS ? whereUsedMaxLevels.value : undefined)
   append('whereUsedFilter', whereUsedFilter.value)
+  append('bomDepth', bomDepth.value !== DEFAULT_BOM_DEPTH ? bomDepth.value : undefined)
+  append('bomEffectiveAt', bomEffectiveAt.value)
+  append('bomFilter', bomFilter.value)
+  append('bomView', bomView.value !== 'table' ? bomView.value : undefined)
+  if (bomView.value === 'tree' && bomCollapsed.value.size) {
+    const collapsedValue = serializeBomCollapsed(bomCollapsed.value)
+    append('bomCollapsed', collapsedValue)
+  }
   append('compareLeftId', compareLeftId.value)
   append('compareRightId', compareRightId.value)
   append('compareMode', compareMode.value)
@@ -4734,6 +5712,36 @@ async function applyQueryState() {
   if (whereUsedFilterParam !== undefined) {
     whereUsedFilter.value = whereUsedFilterParam
   }
+  const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
+  if (bomDepthParam !== undefined) {
+    bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
+  }
+  const bomEffectiveAtParam = readQueryParam('bomEffectiveAt')
+  if (bomEffectiveAtParam !== undefined) {
+    bomEffectiveAt.value = bomEffectiveAtParam
+  }
+  const bomFilterParam = readQueryParam('bomFilter')
+  if (bomFilterParam !== undefined) {
+    bomFilter.value = bomFilterParam
+  }
+  const bomViewParam = readQueryParam('bomView')
+  if (bomViewParam !== undefined) {
+    const normalized = bomViewParam.trim().toLowerCase()
+    if (normalized === 'tree' || normalized === 'table') {
+      bomView.value = normalized as typeof bomView.value
+    }
+  }
+  const bomCollapsedParam = readQueryParam('bomCollapsed')
+  if (bomCollapsedParam !== undefined) {
+    const parsed = filterBomCollapsed(parseBomCollapsed(bomCollapsedParam))
+    bomCollapsed.value = parsed
+    persistBomCollapsed(parsed)
+  } else if (bomView.value === 'tree') {
+    const stored = loadStoredBomCollapsed()
+    if (stored) {
+      bomCollapsed.value = filterBomCollapsed(stored)
+    }
+  }
   const compareLeftParam = readQueryParam('compareLeftId')
   if (compareLeftParam !== undefined) {
     compareLeftId.value = compareLeftParam
@@ -4841,7 +5849,7 @@ function loadStoredColumns<T extends Record<string, boolean>>(key: string, defau
   }
 }
 
-function loadStoredPresets(): Array<{ key: string; label: string; panels: string[] }> {
+function loadStoredPresets(): DeepLinkPreset[] {
   if (typeof localStorage === 'undefined') {
     return []
   }
@@ -4858,13 +5866,13 @@ function loadStoredPresets(): Array<{ key: string; label: string; panels: string
         if (!key || !label || !panels.length) return null
         return { key, label, panels }
       })
-      .filter(Boolean) as Array<{ key: string; label: string; panels: string[] }>
+      .filter(Boolean) as DeepLinkPreset[]
   } catch (_err) {
     return []
   }
 }
 
-function persistPresets(presets: Array<{ key: string; label: string; panels: string[] }>) {
+function persistPresets(presets: DeepLinkPreset[]) {
   if (typeof localStorage === 'undefined') return
   try {
     localStorage.setItem(DEEP_LINK_PRESETS_STORAGE_KEY, JSON.stringify(presets))
@@ -5033,13 +6041,26 @@ function downloadCsv(filename: string, headers: string[], rows: Array<string[]>)
 }
 
 function exportWhereUsedCsv() {
-  const headers = ['level', 'parent_id', 'parent_number', 'parent_name', 'path', 'quantity', 'uom', 'find_num', 'refdes', 'relationship_id']
+  const headers = [
+    'level',
+    'parent_id',
+    'parent_number',
+    'parent_name',
+    'path',
+    'path_ids',
+    'quantity',
+    'uom',
+    'find_num',
+    'refdes',
+    'relationship_id',
+  ]
   const rows = whereUsedFilteredRows.value.map((entry: any) => [
     String(entry.level ?? ''),
     String(entry.parent?.id || entry.relationship?.source_id || ''),
     getItemNumber(entry.parent),
     getItemName(entry.parent),
     entry.pathLabel || '',
+    formatWhereUsedEntryPathIds(entry),
     (() => {
       const value = getWhereUsedLineValue(entry, 'quantity')
       return value === '-' ? '' : value
@@ -5110,6 +6131,91 @@ function exportBomCompareCsv() {
   downloadCsv(`plm-bom-compare-${Date.now()}.csv`, headers, rows)
 }
 
+
+function exportBomCsv() {
+  const normalize = (value: string) => (value === '-' ? '' : value)
+  if (bomView.value === 'tree') {
+    const headers = [
+      'root_product_id',
+      'depth',
+      'path',
+      'path_ids',
+      'component_code',
+      'component_name',
+      'component_id',
+      'quantity',
+      'unit',
+      'find_num',
+      'refdes',
+      'bom_line_id',
+      'parent_component_id',
+      'parent_line_id',
+    ]
+    const rowMap = new Map(bomTreeRows.value.map((row) => [row.key, row]))
+    const included = bomTreeFilteredKeys.value
+    const rootProductId = String(productId.value || productView.value.id || '')
+    const rows = bomTreeRows.value
+      .filter((row) => row.line && included.has(row.key))
+      .map((row) => {
+        const line = row.line || {}
+        const labels = row.pathLabels?.length
+          ? row.pathLabels
+          : [String(row.label || row.componentId || row.key)]
+        const idChain = row.pathIds?.length
+          ? row.pathIds
+          : [String(row.componentId || row.label || row.key)]
+        const parentRow = row.parentKey ? rowMap.get(row.parentKey) : undefined
+        const parentComponentId = parentRow?.componentId || ''
+        const parentLineId = parentRow?.line ? resolveBomLineId(parentRow.line) : ''
+        return [
+          rootProductId,
+          String(row.depth ?? ''),
+          labels.join(' / '),
+          idChain.join(' / '),
+          normalize(String(line.component_code ?? line.componentCode ?? '')),
+          normalize(String(line.component_name ?? line.componentName ?? '')),
+          String(resolveBomChildId(line) || row.componentId || ''),
+          normalize(String(line.quantity ?? '')),
+          normalize(String(line.unit ?? line.uom ?? '')),
+          normalize(String(formatBomFindNum(line) || '')),
+          normalize(String(formatBomRefdes(line) || '')),
+          String(resolveBomLineId(line) || ''),
+          String(parentComponentId || ''),
+          String(parentLineId || ''),
+        ]
+      })
+    downloadCsv(`plm-bom-tree-${Date.now()}.csv`, headers, rows)
+    return
+  }
+  const headers = [
+    'level',
+    'component_code',
+    'component_name',
+    'component_id',
+    'quantity',
+    'unit',
+    'find_num',
+    'refdes',
+    'path_ids',
+    'bom_line_id',
+    'parent_item_id',
+  ]
+  const rows = bomFilteredItems.value.map((item: any) => [
+    String(item.level ?? ''),
+    normalize(String(item.component_code ?? item.componentCode ?? '')),
+    normalize(String(item.component_name ?? item.componentName ?? '')),
+    String(resolveBomChildId(item) || ''),
+    normalize(String(item.quantity ?? '')),
+    normalize(String(item.unit ?? '')),
+    normalize(String(formatBomFindNum(item) || '')),
+    normalize(String(formatBomRefdes(item) || '')),
+    String(formatBomTablePathIds(item) || ''),
+    String(resolveBomLineId(item) || ''),
+    String(item.parent_item_id ?? item.parentItemId ?? ''),
+  ])
+  downloadCsv(`plm-bom-${Date.now()}.csv`, headers, rows)
+}
+
 function exportSubstitutesCsv() {
   const normalize = (value: string) => (value === '-' ? '' : value)
   const headers = [
@@ -5144,15 +6250,34 @@ function exportSubstitutesCsv() {
 }
 
 function exportDocumentsCsv() {
-  const headers = ['id', 'name', 'document_type', 'revision', 'role', 'mime_type', 'file_size', 'updated_at', 'preview_url', 'download_url']
+  const headers = [
+    'id',
+    'name',
+    'document_type',
+    'revision',
+    'role',
+    'author',
+    'source_system',
+    'source_version',
+    'mime_type',
+    'file_size',
+    'created_at',
+    'updated_at',
+    'preview_url',
+    'download_url',
+  ]
   const rows = documentsSorted.value.map((doc: any) => [
     String(doc.id || ''),
     String(getDocumentName(doc) || ''),
     String(getDocumentType(doc) || ''),
     String(getDocumentRevision(doc) || ''),
     String(getDocumentRole(doc) || ''),
+    String(getDocumentAuthor(doc) || ''),
+    String(getDocumentSourceSystem(doc) || ''),
+    String(getDocumentSourceVersion(doc) || ''),
     String(getDocumentMime(doc) || ''),
     String(getDocumentSize(doc) ?? ''),
+    String(getDocumentCreatedAt(doc) || ''),
     String(getDocumentUpdatedAt(doc) || ''),
     String(getDocumentPreviewUrl(doc) || ''),
     String(getDocumentDownloadUrl(doc) || ''),
@@ -5161,17 +6286,29 @@ function exportDocumentsCsv() {
 }
 
 function exportApprovalsCsv() {
-  const headers = ['id', 'title', 'status', 'type', 'requester', 'created_at', 'product_number', 'product_name', 'product_id']
+  const headers = [
+    'id',
+    'title',
+    'status',
+    'type',
+    'requester',
+    'requester_id',
+    'created_at',
+    'product_number',
+    'product_name',
+    'product_id',
+  ]
   const rows = approvalsSorted.value.map((entry: any) => [
     String(entry.id || ''),
     String(getApprovalTitle(entry) || ''),
     String(getApprovalStatus(entry) || ''),
     String(getApprovalType(entry) || ''),
     String(getApprovalRequester(entry) || ''),
+    String(getApprovalRequesterId(entry) || ''),
     String(getApprovalCreatedAt(entry) || ''),
     String(getApprovalProductNumber(entry) || ''),
     String(getApprovalProductName(entry) || ''),
-    String(entry.product_id || ''),
+    String(getApprovalProductId(entry) || ''),
   ])
   downloadCsv(`plm-approvals-${Date.now()}.csv`, headers, rows)
 }
@@ -5363,12 +6500,13 @@ watch(
 )
 
 watch(
-  () => [whereUsedFilter.value, compareFilter.value, substitutesFilter.value],
-  ([whereUsed, compareValue, substituteValue]) => {
+  () => [whereUsedFilter.value, compareFilter.value, substitutesFilter.value, bomFilter.value],
+  ([whereUsed, compareValue, substituteValue, bomFilterValue]) => {
     scheduleQuerySync({
       whereUsedFilter: whereUsed || undefined,
       compareFilter: compareValue || undefined,
       substitutesFilter: substituteValue || undefined,
+      bomFilter: bomFilterValue || undefined,
     })
   }
 )
@@ -5377,6 +6515,24 @@ watch(
   whereUsed,
   () => {
     whereUsedCollapsed.value = new Set()
+  }
+)
+
+watch(
+  bomItems,
+  () => {
+    applyBomCollapsedState(resolveBomCollapsedState())
+  }
+)
+
+watch(
+  bomView,
+  (value) => {
+    if (value === 'tree') {
+      applyBomCollapsedState(resolveBomCollapsedState())
+    } else {
+      syncBomCollapsedQuery(bomCollapsed.value)
+    }
   }
 )
 
@@ -5405,7 +6561,10 @@ watch(
     compareIncludeEffectivity.value,
     compareEffectiveAt.value,
     compareRelationshipProps.value,
+    bomDepth.value,
+    bomEffectiveAt.value,
     bomLineId.value,
+    bomView.value,
   ],
   ([
     productValue,
@@ -5425,7 +6584,10 @@ watch(
     compareEffectValue,
     compareEffectiveValue,
     comparePropsValue,
+    bomDepthValue,
+    bomEffectiveValue,
     bomLineValue,
+    bomViewValue,
   ]) => {
     scheduleQuerySync({
       productId: productValue || undefined,
@@ -5451,7 +6613,10 @@ watch(
       compareEffectiveAt: compareEffectiveValue || undefined,
       compareRelationshipProps:
         comparePropsValue !== DEFAULT_COMPARE_REL_PROPS ? comparePropsValue : undefined,
+      bomDepth: bomDepthValue !== DEFAULT_BOM_DEPTH ? bomDepthValue : undefined,
+      bomEffectiveAt: bomEffectiveValue || undefined,
       bomLineId: bomLineValue || undefined,
+      bomView: bomViewValue !== 'table' ? bomViewValue : undefined,
     })
   }
 )
@@ -5648,6 +6813,23 @@ watch(
   color: #374151;
 }
 
+.field-inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.field-inline input {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -5797,7 +6979,8 @@ input:focus, select:focus, textarea:focus {
   text-align: left;
 }
 
-.where-used-tree {
+.where-used-tree,
+.bom-tree {
   border: 1px solid #eef0f2;
   border-radius: 8px;
   overflow: hidden;
@@ -5833,6 +7016,22 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.tree-node-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tree-bom-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tree-bom-meta .btn {
+  align-self: flex-start;
 }
 
 .tree-toggle {
