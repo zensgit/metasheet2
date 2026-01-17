@@ -580,6 +580,19 @@ async function waitOptional(scope, text) {
           throw new Error('BOM filter preset import did not create a new preset.');
         }
       }
+      const bomClearButton = bomSection.locator(
+        'label:has(#plm-bom-filter-preset-import) button:has-text("清空")'
+      );
+      if ((await bomClearButton.count()) === 0) {
+        throw new Error('BOM filter preset clear button missing.');
+      }
+      if (await bomClearButton.isEnabled()) {
+        await bomClearButton.click();
+        const remainingOptions = await presetSelect.locator('option').count();
+        if (remainingOptions > 1) {
+          throw new Error('BOM filter presets were not cleared.');
+        }
+      }
     }
   }
 
@@ -824,6 +837,19 @@ async function waitOptional(scope, text) {
       const importedOption = presetSelect.locator('option', { hasText: importLabel });
       if ((await importedOption.count()) === 0) {
         throw new Error('Where-used filter preset import did not create a new preset.');
+      }
+    }
+    const whereUsedClearButton = whereUsedSection.locator(
+      'label:has(#plm-where-used-filter-preset-import) button:has-text("清空")'
+    );
+    if ((await whereUsedClearButton.count()) === 0) {
+      throw new Error('Where-used filter preset clear button missing.');
+    }
+    if (await whereUsedClearButton.isEnabled()) {
+      await whereUsedClearButton.click();
+      const remainingOptions = await presetSelect.locator('option').count();
+      if (remainingOptions > 1) {
+        throw new Error('Where-used filter presets were not cleared.');
       }
     }
     await whereUsedFilterInput.fill('');
@@ -1122,7 +1148,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - ${BOM_DETAIL_RESULT}
-- BOM/Where-Used filter presets import/export controls validated.
+- BOM/Where-Used filter presets import/export/clear controls validated.
 - BOM tree view renders with expandable nodes.
 - BOM expand-to-depth button is enabled.
 - BOM tree export button is enabled.

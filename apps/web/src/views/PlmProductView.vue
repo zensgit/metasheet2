@@ -540,6 +540,13 @@
               accept=".json,application/json"
               @change="handleBomFilterPresetFileImport"
             />
+            <button
+              class="btn ghost mini"
+              :disabled="!bomFilterPresets.length"
+              @click="clearBomFilterPresets"
+            >
+              清空
+            </button>
           </div>
         </label>
       </div>
@@ -1389,6 +1396,13 @@
               accept=".json,application/json"
               @change="handleWhereUsedFilterPresetFileImport"
             />
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresets.length"
+              @click="clearWhereUsedFilterPresets"
+            >
+              清空
+            </button>
           </div>
         </label>
       </div>
@@ -6331,11 +6345,13 @@ function mergeImportedFilterPresets(
   fieldOptions: Array<{ value: string }>,
   prefix: string,
   mode: 'merge' | 'replace'
-): { presets: FilterPreset[]; count: number } {
+): { presets: FilterPreset[]; count: number; skippedInvalid: number; skippedMissing: number } {
   const allowedFields = new Set(fieldOptions.map((option) => option.value))
   const next = mode === 'replace' ? [] : [...presets]
   const usedKeys = new Set(next.map((preset) => preset.key))
   let count = 0
+  let skippedInvalid = 0
+  let skippedMissing = 0
   const ensureKey = (rawKey: string): string => {
     let key = rawKey || createFilterPresetKey(prefix)
     while (usedKeys.has(key)) {
@@ -6345,10 +6361,18 @@ function mergeImportedFilterPresets(
     return key
   }
   for (const entry of entries) {
-    const record = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {}
+    const isObject = entry && typeof entry === 'object'
+    const record = isObject ? (entry as Record<string, unknown>) : {}
+    if (!isObject) {
+      skippedInvalid += 1
+      continue
+    }
     const label = String(record.label ?? '').trim()
     const value = String(record.value ?? '').trim()
-    if (!label || !value) continue
+    if (!label || !value) {
+      skippedMissing += 1
+      continue
+    }
     const rawField = String(record.field ?? '').trim()
     const field = allowedFields.has(rawField) ? rawField : 'all'
     const rawKey = String(record.key ?? '').trim()
@@ -6360,7 +6384,7 @@ function mergeImportedFilterPresets(
     }
     count += 1
   }
-  return { presets: next, count }
+  return { presets: next, count, skippedInvalid, skippedMissing }
 }
 
 function exportFilterPresets(presets: FilterPreset[], label: string, filenamePrefix: string) {
@@ -6390,7 +6414,7 @@ function importBomFilterPresetsFromText(raw: string) {
       setDeepLinkMessage('BOM 过滤预设 JSON 需要是数组。', true)
       return
     }
-    const { presets, count } = mergeImportedFilterPresets(
+    const { presets, count, skippedInvalid, skippedMissing } = mergeImportedFilterPresets(
       parsed,
       bomFilterPresets.value,
       bomFilterFieldOptions,
@@ -6403,8 +6427,17 @@ function importBomFilterPresetsFromText(raw: string) {
     if (!presets.some((preset) => preset.key === bomFilterPresetKey.value)) {
       bomFilterPresetKey.value = ''
     }
+    const skippedTotal = skippedInvalid + skippedMissing
     if (count) {
-      setDeepLinkMessage(`已导入 ${count} 条 BOM 过滤预设。`)
+      const detail = skippedTotal
+        ? `（忽略 ${skippedTotal} 条：${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）`
+        : ''
+      setDeepLinkMessage(`已导入 ${count} 条 BOM 过滤预设${detail}。`)
+    } else if (skippedTotal) {
+      setDeepLinkMessage(
+        `未导入有效 BOM 过滤预设，忽略 ${skippedTotal} 条（${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）。`,
+        true
+      )
     } else {
       setDeepLinkMessage('未发现可导入的 BOM 过滤预设。', true)
     }
@@ -6447,6 +6480,14 @@ async function handleBomFilterPresetFileImport(event: Event) {
   target.value = ''
 }
 
+function clearBomFilterPresets() {
+  if (!bomFilterPresets.value.length) return
+  bomFilterPresets.value = []
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, [])
+  bomFilterPresetKey.value = ''
+  setDeepLinkMessage('已清空 BOM 过滤预设。')
+}
+
 function importWhereUsedFilterPresetsFromText(raw: string) {
   const trimmed = raw.trim()
   if (!trimmed) {
@@ -6459,7 +6500,7 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
       setDeepLinkMessage('Where-Used 过滤预设 JSON 需要是数组。', true)
       return
     }
-    const { presets, count } = mergeImportedFilterPresets(
+    const { presets, count, skippedInvalid, skippedMissing } = mergeImportedFilterPresets(
       parsed,
       whereUsedFilterPresets.value,
       whereUsedFilterFieldOptions,
@@ -6472,8 +6513,17 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     if (!presets.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
       whereUsedFilterPresetKey.value = ''
     }
+    const skippedTotal = skippedInvalid + skippedMissing
     if (count) {
-      setDeepLinkMessage(`已导入 ${count} 条 Where-Used 过滤预设。`)
+      const detail = skippedTotal
+        ? `（忽略 ${skippedTotal} 条：${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）`
+        : ''
+      setDeepLinkMessage(`已导入 ${count} 条 Where-Used 过滤预设${detail}。`)
+    } else if (skippedTotal) {
+      setDeepLinkMessage(
+        `未导入有效 Where-Used 过滤预设，忽略 ${skippedTotal} 条（${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）。`,
+        true
+      )
     } else {
       setDeepLinkMessage('未发现可导入的 Where-Used 过滤预设。', true)
     }
@@ -6514,6 +6564,14 @@ async function handleWhereUsedFilterPresetFileImport(event: Event) {
   if (!file) return
   await importWhereUsedFilterPresetFile(file)
   target.value = ''
+}
+
+function clearWhereUsedFilterPresets() {
+  if (!whereUsedFilterPresets.value.length) return
+  whereUsedFilterPresets.value = []
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, [])
+  whereUsedFilterPresetKey.value = ''
+  setDeepLinkMessage('已清空 Where-Used 过滤预设。')
 }
 
 function mergeImportedPresets(entries: unknown[]): number {
