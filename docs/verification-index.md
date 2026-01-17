@@ -9,8 +9,8 @@ Entry points:
 ## Daily / Pre-PR
 
 - Verification summary (latest):
-  - Report: `docs/verification-summary-2026-01-17.md`
-  - Previous: `docs/verification-summary-2026-01-16.md`
+  - Report: `docs/verification-summary-2026-01-18.md`
+  - Previous: `docs/verification-summary-2026-01-17.md`
 
 - Univer POC runtime start (core mode):
   - Report: `docs/verification-univer-poc-runtime-20260106_1207.md`
@@ -132,6 +132,8 @@ Entry points:
   - Report: `docs/PLM_UI_MULTISELECT_COPY_REPORT.md`
 - PLM UI BOM compare detail:
   - Report: `docs/PLM_UI_BOM_COMPARE_DETAIL_REPORT.md`
+- PLM UI BOM compare linking:
+  - Report: `docs/PLM_UI_BOM_COMPARE_LINK_REPORT.md`
 
 - PLM BOM tools federation:
   - Script: `scripts/verify-plm-bom-tools.sh`
@@ -399,8 +401,12 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260117_233428.png`
   - Report: `docs/verification-plm-ui-regression-20260117_234818.md`
   - Artifact: `artifacts/plm-ui-regression-20260117_234818.png`
+  - Report: `docs/verification-plm-ui-regression-20260118_000708.md`
+  - Artifact: `artifacts/plm-ui-regression-20260118_000708.png`
   - Report: `docs/verification-plm-ui-regression-20260117_234818.md`
   - Artifact: `artifacts/plm-ui-regression-20260117_234818.png`
+  - Report: `docs/verification-plm-ui-regression-20260118_000708.md`
+  - Artifact: `artifacts/plm-ui-regression-20260118_000708.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`

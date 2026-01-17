@@ -792,7 +792,8 @@ async function waitOptional(scope, text) {
     compareTargetRows = compareRemovedRows;
   }
   if ((await compareTargetRows.count()) > 0) {
-    await compareTargetRows.first().click();
+    const compareTargetRow = compareTargetRows.first();
+    await compareTargetRow.click();
     const compareDetailTable = compareDetailSection.locator('table');
     await compareDetailTable.waitFor({ timeout: 60000 });
     const compareDetailRows = compareDetailTable.locator('tbody tr[data-field-key]');
@@ -802,6 +803,20 @@ async function waitOptional(scope, text) {
     const fieldKey = await compareDetailRows.first().getAttribute('data-field-key');
     if (!fieldKey) {
       throw new Error('BOM compare detail field key missing.');
+    }
+    const compareChildKey = ((await compareTargetRow.getAttribute('data-compare-child')) || '').trim();
+    const compareLineId = ((await compareTargetRow.getAttribute('data-compare-line')) || '').trim();
+    if (compareChildKey) {
+      const whereUsedValue = await whereUsedSection.locator('#plm-where-used-item-id').inputValue();
+      if (whereUsedValue.trim() !== compareChildKey) {
+        throw new Error(`Compare selection did not sync where-used child (${compareChildKey}).`);
+      }
+    }
+    if (compareLineId) {
+      const bomLineValue = await page.locator('#plm-bom-line-id').inputValue();
+      if (bomLineValue.trim() !== compareLineId) {
+        throw new Error(`Compare selection did not sync bom line id (${compareLineId}).`);
+      }
     }
     const compareCopyButton = compareDetailSection.locator('button:has-text("复制字段对照")');
     if ((await compareCopyButton.count()) === 0) {

@@ -1543,6 +1543,8 @@
                 v-for="entry in compareAddedFiltered"
                 :key="entry.relationship_id || entry.line_key || entry.child_id"
                 :class="{ 'row-selected': isCompareEntrySelected(entry, 'added') }"
+                :data-compare-child="resolveCompareChildKey(entry)"
+                :data-compare-line="resolveCompareLineId(entry)"
                 @click="selectCompareEntry(entry, 'added')"
               >
                 <td>{{ entry.level ?? '-' }}</td>
@@ -1623,6 +1625,8 @@
                 v-for="entry in compareRemovedFiltered"
                 :key="entry.relationship_id || entry.line_key || entry.child_id"
                 :class="{ 'row-selected': isCompareEntrySelected(entry, 'removed') }"
+                :data-compare-child="resolveCompareChildKey(entry)"
+                :data-compare-line="resolveCompareLineId(entry)"
                 @click="selectCompareEntry(entry, 'removed')"
               >
                 <td>{{ entry.level ?? '-' }}</td>
@@ -1701,6 +1705,8 @@
                 v-for="entry in compareChangedFiltered"
                 :key="entry.relationship_id || entry.line_key || entry.child_id"
                 :class="[compareRowClass(entry), { 'row-selected': isCompareEntrySelected(entry, 'changed') }]"
+                :data-compare-child="resolveCompareChildKey(entry)"
+                :data-compare-line="resolveCompareLineId(entry)"
                 @click="selectCompareEntry(entry, 'changed')"
               >
                 <td>{{ entry.level ?? '-' }}</td>
@@ -5488,6 +5494,7 @@ function selectCompareEntry(entry: Record<string, any>, kind: CompareSelectionKi
     compareSelected.value = null
   } else {
     compareSelected.value = { key, kind, entry }
+    syncCompareTargets(entry)
   }
 }
 
@@ -5499,6 +5506,37 @@ function isCompareEntrySelected(entry: Record<string, any>, kind: CompareSelecti
   const key = resolveCompareEntryKey(entry)
   if (!key) return false
   return Boolean(compareSelected.value && compareSelected.value.key === key && compareSelected.value.kind === kind)
+}
+
+function syncCompareTargets(entry: Record<string, any>): void {
+  const child = getCompareChild(entry)
+  const { id, itemNumber } = resolveItemKey(child)
+  const target = id || itemNumber
+  const lineId = resolveCompareLineId(entry)
+  const messages: string[] = []
+
+  if (target) {
+    whereUsedItemId.value = target
+    whereUsedError.value = ''
+    scheduleQuerySync({ whereUsedItemId: target })
+    messages.push(`Where-Used 子件：${target}`)
+  }
+
+  if (lineId) {
+    bomLineId.value = lineId
+    substitutesError.value = ''
+    substitutesActionStatus.value = ''
+    substitutesActionError.value = ''
+    scheduleQuerySync({ bomLineId: lineId })
+    messages.push(`替代件 BOM 行：${lineId}`)
+  }
+
+  if (!messages.length) {
+    setDeepLinkMessage('对比行缺少子件/行 ID', true)
+    return
+  }
+
+  setDeepLinkMessage(`已联动 ${messages.join('；')}`)
 }
 
 function getWhereUsedRefdes(entry: Record<string, any>): string {
