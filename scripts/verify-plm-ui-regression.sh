@@ -386,6 +386,11 @@ async function waitOptional(scope, text) {
   }, token);
 
   const page = await context.newPage();
+  const dialogMessages = [];
+  page.on('dialog', async (dialog) => {
+    dialogMessages.push(dialog.message());
+    await dialog.accept();
+  });
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.reload({ waitUntil: 'networkidle' });
 
@@ -852,6 +857,9 @@ async function waitOptional(scope, text) {
         throw new Error('Where-used filter presets were not cleared.');
       }
     }
+    if (!dialogMessages.some((message) => message.includes('覆盖'))) {
+      throw new Error('Import confirmation dialog was not shown.');
+    }
     await whereUsedFilterInput.fill('');
   }
   const whereUsedViewSelect = whereUsedSection.locator('#plm-where-used-view');
@@ -1148,7 +1156,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - ${BOM_DETAIL_RESULT}
-- BOM/Where-Used filter presets import/export/clear controls validated.
+- BOM/Where-Used filter presets import/export/clear/conflict dialogs validated.
 - BOM tree view renders with expandable nodes.
 - BOM expand-to-depth button is enabled.
 - BOM tree export button is enabled.

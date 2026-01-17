@@ -12,9 +12,10 @@
 - Import mode supports merge/replace on preset load.
 - Presets can be cleared in bulk from the filter panel.
 - Import feedback summarizes skipped entries and reasons.
+- Import shows conflict preview and confirmation before overwrite.
 
 ## Verification
 - Script: `scripts/verify-plm-ui-regression.sh`
 - Command: `AUTO_START=true PLM_BASE_URL=http://127.0.0.1:7911 scripts/verify-plm-ui-regression.sh`
-- Report: `docs/verification-plm-ui-regression-20260118_034546.md`
-- Artifact: `artifacts/plm-ui-regression-20260118_034546.png`
+- Report: `docs/verification-plm-ui-regression-20260118_043002.md`
+- Artifact: `artifacts/plm-ui-regression-20260118_043002.png`

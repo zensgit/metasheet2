@@ -2353,6 +2353,13 @@ type FilterPreset = {
   value: string
 }
 
+type FilterPresetImportEntry = {
+  key: string
+  label: string
+  field: string
+  value: string
+}
+
 type BomTreeRow = {
   key: string
   parentKey?: string
@@ -6339,19 +6346,87 @@ function deleteWhereUsedFilterPreset() {
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
 }
 
-function mergeImportedFilterPresets(
-  entries: unknown[],
-  presets: FilterPreset[],
-  fieldOptions: Array<{ value: string }>,
-  prefix: string,
-  mode: 'merge' | 'replace'
-): { presets: FilterPreset[]; count: number; skippedInvalid: number; skippedMissing: number } {
+function formatPresetLabelPreview(labels: string[]): string {
+  if (!labels.length) return ''
+  const sample = labels.slice(0, 3).join('、')
+  return labels.length > 3 ? `${sample} 等` : sample
+}
+
+function confirmFilterPresetImport(
+  label: string,
+  mode: 'merge' | 'replace',
+  existingLabels: string[],
+  conflictLabels: string[]
+): boolean {
+  if (typeof window === 'undefined') return true
+  if (mode === 'replace' && existingLabels.length) {
+    const sample = formatPresetLabelPreview(existingLabels)
+    const hint = sample ? `（如：${sample}）` : ''
+    return window.confirm(`将覆盖现有 ${existingLabels.length} 条${label}过滤预设${hint}，继续导入？`)
+  }
+  if (mode === 'merge' && conflictLabels.length) {
+    const sample = formatPresetLabelPreview(conflictLabels)
+    const hint = sample ? `（如：${sample}）` : ''
+    return window.confirm(`检测到 ${conflictLabels.length} 条同名${label}过滤预设${hint}，将覆盖现有预设。是否继续？`)
+  }
+  return true
+}
+
+function parseFilterPresetImport(
+  raw: string,
+  fieldOptions: Array<{ value: string }>
+): {
+  entries: FilterPresetImportEntry[]
+  skippedInvalid: number
+  skippedMissing: number
+  duplicateCount: number
+} {
   const allowedFields = new Set(fieldOptions.map((option) => option.value))
-  const next = mode === 'replace' ? [] : [...presets]
-  const usedKeys = new Set(next.map((preset) => preset.key))
-  let count = 0
+  const map = new Map<string, FilterPresetImportEntry>()
   let skippedInvalid = 0
   let skippedMissing = 0
+  let validCount = 0
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) {
+    throw new Error('not-array')
+  }
+  for (const entry of parsed) {
+    const isObject = entry && typeof entry === 'object'
+    if (!isObject) {
+      skippedInvalid += 1
+      continue
+    }
+    const record = entry as Record<string, unknown>
+    const label = String(record.label ?? '').trim()
+    const value = String(record.value ?? '').trim()
+    if (!label || !value) {
+      skippedMissing += 1
+      continue
+    }
+    const rawField = String(record.field ?? '').trim()
+    const field = allowedFields.has(rawField) ? rawField : 'all'
+    const key = String(record.key ?? '').trim()
+    validCount += 1
+    map.set(label, { key, label, field, value })
+  }
+  return {
+    entries: Array.from(map.values()),
+    skippedInvalid,
+    skippedMissing,
+    duplicateCount: Math.max(0, validCount - map.size),
+  }
+}
+
+function mergeImportedFilterPresets(
+  entries: FilterPresetImportEntry[],
+  presets: FilterPreset[],
+  prefix: string,
+  mode: 'merge' | 'replace'
+): { presets: FilterPreset[]; added: number; updated: number } {
+  const next = mode === 'replace' ? [] : [...presets]
+  const usedKeys = new Set(next.map((preset) => preset.key))
+  let added = 0
+  let updated = 0
   const ensureKey = (rawKey: string): string => {
     let key = rawKey || createFilterPresetKey(prefix)
     while (usedKeys.has(key)) {
@@ -6361,30 +6436,20 @@ function mergeImportedFilterPresets(
     return key
   }
   for (const entry of entries) {
-    const isObject = entry && typeof entry === 'object'
-    const record = isObject ? (entry as Record<string, unknown>) : {}
-    if (!isObject) {
-      skippedInvalid += 1
-      continue
-    }
-    const label = String(record.label ?? '').trim()
-    const value = String(record.value ?? '').trim()
-    if (!label || !value) {
-      skippedMissing += 1
-      continue
-    }
-    const rawField = String(record.field ?? '').trim()
-    const field = allowedFields.has(rawField) ? rawField : 'all'
-    const rawKey = String(record.key ?? '').trim()
+    const label = entry.label
+    const value = entry.value
+    const field = entry.field
+    const rawKey = entry.key
     const existingIndex = next.findIndex((preset) => preset.label === label)
     if (existingIndex >= 0) {
       next[existingIndex] = { ...next[existingIndex], field, value }
-    } else {
-      next.push({ key: ensureKey(rawKey), label, field, value })
+      updated += 1
+      continue
     }
-    count += 1
+    next.push({ key: ensureKey(rawKey), label, field, value })
+    added += 1
   }
-  return { presets: next, count, skippedInvalid, skippedMissing }
+  return { presets: next, added, updated }
 }
 
 function exportFilterPresets(presets: FilterPreset[], label: string, filenamePrefix: string) {
@@ -6409,15 +6474,41 @@ function importBomFilterPresetsFromText(raw: string) {
     return
   }
   try {
-    const parsed = JSON.parse(trimmed)
-    if (!Array.isArray(parsed)) {
-      setDeepLinkMessage('BOM 过滤预设 JSON 需要是数组。', true)
+    const { entries, skippedInvalid, skippedMissing, duplicateCount } = parseFilterPresetImport(
+      trimmed,
+      bomFilterFieldOptions
+    )
+    const skippedParts: string[] = []
+    if (duplicateCount) skippedParts.push(`重复 ${duplicateCount} 条`)
+    if (skippedInvalid) skippedParts.push(`格式错误 ${skippedInvalid} 条`)
+    if (skippedMissing) skippedParts.push(`缺少字段 ${skippedMissing} 条`)
+    const skippedText = skippedParts.length ? `，忽略 ${skippedParts.join('，')}` : ''
+    if (!entries.length) {
+      if (skippedParts.length) {
+        setDeepLinkMessage(`未导入有效 BOM 过滤预设${skippedText}。`, true)
+      } else {
+        setDeepLinkMessage('未发现可导入的 BOM 过滤预设。', true)
+      }
       return
     }
-    const { presets, count, skippedInvalid, skippedMissing } = mergeImportedFilterPresets(
-      parsed,
+    const existingLabels = bomFilterPresets.value.map((preset) => preset.label)
+    const existingLabelSet = new Set(existingLabels)
+    const conflictLabels = entries
+      .filter((entry) => existingLabelSet.has(entry.label))
+      .map((entry) => entry.label)
+    const confirmed = confirmFilterPresetImport(
+      'BOM',
+      bomFilterPresetImportMode.value,
+      existingLabels,
+      conflictLabels
+    )
+    if (!confirmed) {
+      setDeepLinkMessage('已取消导入 BOM 过滤预设。', true)
+      return
+    }
+    const { presets, added, updated } = mergeImportedFilterPresets(
+      entries,
       bomFilterPresets.value,
-      bomFilterFieldOptions,
       'bom',
       bomFilterPresetImportMode.value
     )
@@ -6427,21 +6518,21 @@ function importBomFilterPresetsFromText(raw: string) {
     if (!presets.some((preset) => preset.key === bomFilterPresetKey.value)) {
       bomFilterPresetKey.value = ''
     }
-    const skippedTotal = skippedInvalid + skippedMissing
-    if (count) {
-      const detail = skippedTotal
-        ? `（忽略 ${skippedTotal} 条：${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）`
-        : ''
-      setDeepLinkMessage(`已导入 ${count} 条 BOM 过滤预设${detail}。`)
-    } else if (skippedTotal) {
+    const importedCount = added + updated
+    if (importedCount) {
       setDeepLinkMessage(
-        `未导入有效 BOM 过滤预设，忽略 ${skippedTotal} 条（${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）。`,
-        true
+        `已导入 ${importedCount} 条 BOM 过滤预设（新增 ${added}，更新 ${updated}）${skippedText}。`
       )
+    } else if (skippedParts.length) {
+      setDeepLinkMessage(`未导入有效 BOM 过滤预设${skippedText}。`, true)
     } else {
       setDeepLinkMessage('未发现可导入的 BOM 过滤预设。', true)
     }
-  } catch (_err) {
+  } catch (err) {
+    if (err instanceof Error && err.message === 'not-array') {
+      setDeepLinkMessage('BOM 过滤预设 JSON 需要是数组。', true)
+      return
+    }
     setDeepLinkMessage('BOM 过滤预设 JSON 解析失败。', true)
   }
 }
@@ -6495,15 +6586,41 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     return
   }
   try {
-    const parsed = JSON.parse(trimmed)
-    if (!Array.isArray(parsed)) {
-      setDeepLinkMessage('Where-Used 过滤预设 JSON 需要是数组。', true)
+    const { entries, skippedInvalid, skippedMissing, duplicateCount } = parseFilterPresetImport(
+      trimmed,
+      whereUsedFilterFieldOptions
+    )
+    const skippedParts: string[] = []
+    if (duplicateCount) skippedParts.push(`重复 ${duplicateCount} 条`)
+    if (skippedInvalid) skippedParts.push(`格式错误 ${skippedInvalid} 条`)
+    if (skippedMissing) skippedParts.push(`缺少字段 ${skippedMissing} 条`)
+    const skippedText = skippedParts.length ? `，忽略 ${skippedParts.join('，')}` : ''
+    if (!entries.length) {
+      if (skippedParts.length) {
+        setDeepLinkMessage(`未导入有效 Where-Used 过滤预设${skippedText}。`, true)
+      } else {
+        setDeepLinkMessage('未发现可导入的 Where-Used 过滤预设。', true)
+      }
       return
     }
-    const { presets, count, skippedInvalid, skippedMissing } = mergeImportedFilterPresets(
-      parsed,
+    const existingLabels = whereUsedFilterPresets.value.map((preset) => preset.label)
+    const existingLabelSet = new Set(existingLabels)
+    const conflictLabels = entries
+      .filter((entry) => existingLabelSet.has(entry.label))
+      .map((entry) => entry.label)
+    const confirmed = confirmFilterPresetImport(
+      'Where-Used',
+      whereUsedFilterPresetImportMode.value,
+      existingLabels,
+      conflictLabels
+    )
+    if (!confirmed) {
+      setDeepLinkMessage('已取消导入 Where-Used 过滤预设。', true)
+      return
+    }
+    const { presets, added, updated } = mergeImportedFilterPresets(
+      entries,
       whereUsedFilterPresets.value,
-      whereUsedFilterFieldOptions,
       'where-used',
       whereUsedFilterPresetImportMode.value
     )
@@ -6513,21 +6630,21 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     if (!presets.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
       whereUsedFilterPresetKey.value = ''
     }
-    const skippedTotal = skippedInvalid + skippedMissing
-    if (count) {
-      const detail = skippedTotal
-        ? `（忽略 ${skippedTotal} 条：${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）`
-        : ''
-      setDeepLinkMessage(`已导入 ${count} 条 Where-Used 过滤预设${detail}。`)
-    } else if (skippedTotal) {
+    const importedCount = added + updated
+    if (importedCount) {
       setDeepLinkMessage(
-        `未导入有效 Where-Used 过滤预设，忽略 ${skippedTotal} 条（${skippedInvalid} 条格式错误，${skippedMissing} 条缺少字段）。`,
-        true
+        `已导入 ${importedCount} 条 Where-Used 过滤预设（新增 ${added}，更新 ${updated}）${skippedText}。`
       )
+    } else if (skippedParts.length) {
+      setDeepLinkMessage(`未导入有效 Where-Used 过滤预设${skippedText}。`, true)
     } else {
       setDeepLinkMessage('未发现可导入的 Where-Used 过滤预设。', true)
     }
-  } catch (_err) {
+  } catch (err) {
+    if (err instanceof Error && err.message === 'not-array') {
+      setDeepLinkMessage('Where-Used 过滤预设 JSON 需要是数组。', true)
+      return
+    }
     setDeepLinkMessage('Where-Used 过滤预设 JSON 解析失败。', true)
   }
 }
