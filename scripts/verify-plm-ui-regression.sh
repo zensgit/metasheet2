@@ -704,7 +704,22 @@ async function waitOptional(scope, text) {
     if (!(await whereUsedTreeBulkButton.isEnabled())) {
       throw new Error('Where-used tree bulk path ID button is disabled.');
     }
+    const whereUsedTreeRow = whereUsedSection
+      .locator('.where-used-tree .tree-row[data-entry-count]:not([data-entry-count="0"])')
+      .first();
+    if ((await whereUsedTreeRow.count()) === 0) {
+      throw new Error('Where-used tree row with entries not found.');
+    }
+    await whereUsedTreeRow.click();
+    const treeSelected = await whereUsedTreeRow.evaluate((el) => el.classList.contains('selected'));
+    if (!treeSelected) {
+      throw new Error('Where-used tree row highlight missing.');
+    }
     await whereUsedViewSelect.selectOption('table');
+    const selectedTableRows = whereUsedSection.locator('table tbody tr.row-selected');
+    if ((await selectedTableRows.count()) === 0) {
+      throw new Error('Where-used table row highlight missing after tree selection.');
+    }
   }
 
   const compareSection = page.locator('section:has-text("BOM 对比")');

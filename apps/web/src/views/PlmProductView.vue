@@ -1227,13 +1227,15 @@
             v-for="row in whereUsedTreeVisibleRows"
             :key="row.key"
             class="tree-row"
-            :class="{ 'tree-root': row.depth === 0 }"
+            :class="{ 'tree-root': row.depth === 0, selected: isWhereUsedTreeSelected(row) }"
+            @click="selectWhereUsedTreeRow(row)"
+            :data-entry-count="row.entryCount"
           >
             <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
               <button
                 class="tree-toggle"
                 :disabled="!row.hasChildren"
-                @click="toggleWhereUsedNode(row.key)"
+                @click.stop="toggleWhereUsedNode(row.key)"
               >
                 {{ row.hasChildren ? (isWhereUsedCollapsed(row.key) ? '▸' : '▾') : '•' }}
               </button>
@@ -1262,7 +1264,7 @@
               <button
                 class="btn ghost mini"
                 :disabled="!row.id || productLoading"
-                @click="applyProductFromWhereUsedRow(row)"
+                @click.stop="applyProductFromWhereUsedRow(row)"
               >
                 产品
               </button>
@@ -1286,7 +1288,12 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="entry in whereUsedFilteredRows" :key="entry._key">
+            <tr
+              v-for="entry in whereUsedFilteredRows"
+              :key="entry._key"
+              :class="{ 'row-selected': isWhereUsedEntrySelected(entry) }"
+              @click="selectWhereUsedTableRow(entry)"
+            >
               <td>{{ entry.level }}</td>
               <td>{{ getItemNumber(entry.parent) }}</td>
               <td>{{ getItemName(entry.parent) }}</td>
@@ -1326,7 +1333,7 @@
                 <button
                   class="btn ghost mini"
                   :disabled="!resolveWhereUsedParentId(entry) || productLoading"
-                  @click="applyProductFromWhereUsed(entry)"
+                  @click.stop="applyProductFromWhereUsed(entry)"
                 >
                   产品
                 </button>
@@ -2283,6 +2290,7 @@ const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
 const whereUsedError = ref('')
 const whereUsedCollapsed = ref<Set<string>>(new Set())
+const whereUsedSelectedEntryKeys = ref<Set<string>>(new Set())
 
 const whereUsedRows = computed(() => {
   const payload = whereUsed.value
@@ -3960,6 +3968,38 @@ async function copyWhereUsedTreePathIdsBulk() {
   await copyPathIdsList('Where-Used树形', whereUsedTreePathIdsList.value)
 }
 
+function setWhereUsedSelection(keys: string[]) {
+  const nextKeys = keys.filter(Boolean)
+  const current = whereUsedSelectedEntryKeys.value
+  const isSame = nextKeys.length === current.size && nextKeys.every((key) => current.has(key))
+  whereUsedSelectedEntryKeys.value = isSame ? new Set() : new Set(nextKeys)
+}
+
+function isWhereUsedEntrySelected(entry: Record<string, any>): boolean {
+  const key = resolveWhereUsedEntryKey(entry)
+  return key ? whereUsedSelectedEntryKeys.value.has(key) : false
+}
+
+function isWhereUsedTreeSelected(row: WhereUsedTreeRow): boolean {
+  if (!row.entries.length) return false
+  const selected = whereUsedSelectedEntryKeys.value
+  for (const entry of row.entries) {
+    const key = resolveWhereUsedEntryKey(entry)
+    if (key && selected.has(key)) return true
+  }
+  return false
+}
+
+function selectWhereUsedTreeRow(row: WhereUsedTreeRow): void {
+  const keys = row.entries.map((entry) => resolveWhereUsedEntryKey(entry)).filter(Boolean)
+  setWhereUsedSelection(keys)
+}
+
+function selectWhereUsedTableRow(entry: Record<string, any>): void {
+  const key = resolveWhereUsedEntryKey(entry)
+  setWhereUsedSelection(key ? [key] : [])
+}
+
 function isBomCollapsed(key: string): boolean {
   return bomCollapsed.value.has(key)
 }
@@ -5065,6 +5105,10 @@ function getWhereUsedLineValue(entry: Record<string, any>, key: string): string 
   const value = line[key]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
+}
+
+function resolveWhereUsedEntryKey(entry: Record<string, any>): string {
+  return entry?._key || entry?.relationship?.id || ''
 }
 
 function getWhereUsedTreeEntry(row: WhereUsedTreeRow): Record<string, any> | null {
@@ -6515,6 +6559,7 @@ watch(
   whereUsed,
   () => {
     whereUsedCollapsed.value = new Set()
+    whereUsedSelectedEntryKeys.value = new Set()
   }
 )
 
@@ -6979,6 +7024,14 @@ input:focus, select:focus, textarea:focus {
   text-align: left;
 }
 
+.data-table tbody tr {
+  cursor: pointer;
+}
+
+.data-table tbody tr.row-selected {
+  background: #f8fafc;
+}
+
 .where-used-tree,
 .bom-tree {
   border: 1px solid #eef0f2;
@@ -6995,6 +7048,14 @@ input:focus, select:focus, textarea:focus {
   padding: 8px 10px;
   border-bottom: 1px solid #eef0f2;
   font-size: 12px;
+}
+
+.tree-row:not(.tree-header) {
+  cursor: pointer;
+}
+
+.tree-row.selected {
+  background: #eff6ff;
 }
 
 .tree-row:last-child {

@@ -22,5 +22,5 @@
 ## Verification
 - Script: `scripts/verify-plm-ui-regression.sh`
 - Command: `AUTO_START=true PLM_BASE_URL=http://127.0.0.1:7911 scripts/verify-plm-ui-regression.sh`
-- Report: `docs/verification-plm-ui-regression-20260117_205457.md`
-- Artifact: `artifacts/plm-ui-regression-20260117_205457.png`
+- Report: `docs/verification-plm-ui-regression-20260117_211911.md`
+- Artifact: `artifacts/plm-ui-regression-20260117_211911.png`
