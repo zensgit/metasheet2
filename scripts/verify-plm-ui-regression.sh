@@ -554,6 +554,27 @@ async function waitOptional(scope, text) {
           throw new Error('BOM filter preset did not apply the expected value.');
         }
       }
+      const bomExportButton = bomSection.locator(
+        'label:has(#plm-bom-filter-preset-import) button:has-text("导出")'
+      );
+      if ((await bomExportButton.count()) === 0) {
+        throw new Error('BOM filter preset export button missing.');
+      }
+      const bomImportInput = bomSection.locator('#plm-bom-filter-preset-import');
+      if (await bomImportInput.count()) {
+        const importLabel = `import-${Date.now()}`;
+        const importPayload = JSON.stringify([
+          { label: importLabel, field: 'all', value: currentFilterValue.trim() },
+        ]);
+        await bomImportInput.fill(importPayload);
+        await bomSection
+          .locator('label:has(#plm-bom-filter-preset-import) button:has-text("导入")')
+          .click();
+        const importedOption = presetSelect.locator('option', { hasText: importLabel });
+        if ((await importedOption.count()) === 0) {
+          throw new Error('BOM filter preset import did not create a new preset.');
+        }
+      }
     }
   }
 
@@ -771,6 +792,28 @@ async function waitOptional(scope, text) {
       const expectedValue = whereUsedExpect || whereUsedId;
       if (expectedValue && appliedValue.trim() !== String(expectedValue).trim()) {
         throw new Error('Where-used filter preset did not apply the expected value.');
+      }
+    }
+    const whereUsedExportButton = whereUsedSection.locator(
+      'label:has(#plm-where-used-filter-preset-import) button:has-text("导出")'
+    );
+    if ((await whereUsedExportButton.count()) === 0) {
+      throw new Error('Where-used filter preset export button missing.');
+    }
+    const whereUsedImportInput = whereUsedSection.locator('#plm-where-used-filter-preset-import');
+    if (await whereUsedImportInput.count()) {
+      const importLabel = `import-${Date.now()}`;
+      const expectedValue = whereUsedExpect || whereUsedId;
+      const importPayload = JSON.stringify([
+        { label: importLabel, field: 'all', value: String(expectedValue) },
+      ]);
+      await whereUsedImportInput.fill(importPayload);
+      await whereUsedSection
+        .locator('label:has(#plm-where-used-filter-preset-import) button:has-text("导入")')
+        .click();
+      const importedOption = presetSelect.locator('option', { hasText: importLabel });
+      if ((await importedOption.count()) === 0) {
+        throw new Error('Where-used filter preset import did not create a new preset.');
       }
     }
     await whereUsedFilterInput.fill('');
@@ -1069,6 +1112,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - ${BOM_DETAIL_RESULT}
+- BOM/Where-Used filter presets import/export controls validated.
 - BOM tree view renders with expandable nodes.
 - BOM expand-to-depth button is enabled.
 - BOM tree export button is enabled.

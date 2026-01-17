@@ -499,6 +499,39 @@
               保存
             </button>
           </div>
+          <div class="field-inline field-actions">
+            <button
+              class="btn ghost mini"
+              :disabled="!bomFilterPresets.length"
+              @click="exportBomFilterPresets"
+            >
+              导出
+            </button>
+            <input
+              id="plm-bom-filter-preset-import"
+              v-model.trim="bomFilterPresetImportText"
+              name="plmBomFilterPresetImport"
+              class="deep-link-input"
+              placeholder="粘贴 JSON"
+            />
+            <button
+              class="btn ghost mini"
+              :disabled="!bomFilterPresetImportText"
+              @click="importBomFilterPresets"
+            >
+              导入
+            </button>
+            <button class="btn ghost mini" @click="triggerBomFilterPresetFileImport">文件</button>
+            <input
+              ref="bomFilterPresetFileInput"
+              id="plm-bom-filter-preset-file"
+              name="plmBomFilterPresetFile"
+              class="deep-link-file"
+              type="file"
+              accept=".json,application/json"
+              @change="handleBomFilterPresetFileImport"
+            />
+          </div>
         </label>
       </div>
       <p v-if="bomError" class="status error">{{ bomError }}</p>
@@ -1305,6 +1338,39 @@
             >
               保存
             </button>
+          </div>
+          <div class="field-inline field-actions">
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresets.length"
+              @click="exportWhereUsedFilterPresets"
+            >
+              导出
+            </button>
+            <input
+              id="plm-where-used-filter-preset-import"
+              v-model.trim="whereUsedFilterPresetImportText"
+              name="plmWhereUsedFilterPresetImport"
+              class="deep-link-input"
+              placeholder="粘贴 JSON"
+            />
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresetImportText"
+              @click="importWhereUsedFilterPresets"
+            >
+              导入
+            </button>
+            <button class="btn ghost mini" @click="triggerWhereUsedFilterPresetFileImport">文件</button>
+            <input
+              ref="whereUsedFilterPresetFileInput"
+              id="plm-where-used-filter-preset-file"
+              name="plmWhereUsedFilterPresetFile"
+              class="deep-link-file"
+              type="file"
+              accept=".json,application/json"
+              @change="handleWhereUsedFilterPresetFileImport"
+            />
           </div>
         </label>
       </div>
@@ -2502,6 +2568,8 @@ const whereUsedFilter = ref('')
 const whereUsedFilterPresetKey = ref('')
 const whereUsedFilterPresetName = ref('')
 const whereUsedFilterPresets = ref<FilterPreset[]>([])
+const whereUsedFilterPresetImportText = ref('')
+const whereUsedFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
 const whereUsedError = ref('')
@@ -3131,6 +3199,8 @@ const bomFilter = ref('')
 const bomFilterPresetKey = ref('')
 const bomFilterPresetName = ref('')
 const bomFilterPresets = ref<FilterPreset[]>([])
+const bomFilterPresetImportText = ref('')
+const bomFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const bomFilterPlaceholder = computed(() => {
   const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
   return option?.placeholder || '编号/名称/行 ID'
@@ -3768,6 +3838,7 @@ function resetAll() {
   bomFilterField.value = 'all'
   bomFilterPresetKey.value = ''
   bomFilterPresetName.value = ''
+  bomFilterPresetImportText.value = ''
   bomView.value = 'table'
   bomCollapsed.value = new Set()
   documentRole.value = ''
@@ -3840,6 +3911,7 @@ function resetAll() {
   whereUsedFilter.value = ''
   whereUsedFilterPresetKey.value = ''
   whereUsedFilterPresetName.value = ''
+  whereUsedFilterPresetImportText.value = ''
   syncQueryParams({
     searchQuery: '',
     searchItemType: '',
@@ -6229,6 +6301,178 @@ function deleteWhereUsedFilterPreset() {
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
   whereUsedFilterPresetKey.value = ''
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
+}
+
+function mergeImportedFilterPresets(
+  entries: unknown[],
+  presets: FilterPreset[],
+  fieldOptions: Array<{ value: string }>,
+  prefix: string
+): { presets: FilterPreset[]; count: number } {
+  const allowedFields = new Set(fieldOptions.map((option) => option.value))
+  const next = [...presets]
+  let count = 0
+  for (const entry of entries) {
+    const record = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {}
+    const label = String(record.label ?? '').trim()
+    const value = String(record.value ?? '').trim()
+    if (!label || !value) continue
+    const rawField = String(record.field ?? '').trim()
+    const field = allowedFields.has(rawField) ? rawField : 'all'
+    const existingIndex = next.findIndex((preset) => preset.label === label)
+    if (existingIndex >= 0) {
+      next[existingIndex] = { ...next[existingIndex], field, value }
+    } else {
+      next.push({ key: createFilterPresetKey(prefix), label, field, value })
+    }
+    count += 1
+  }
+  return { presets: next, count }
+}
+
+function exportFilterPresets(presets: FilterPreset[], label: string, filenamePrefix: string) {
+  if (!presets.length) {
+    setDeepLinkMessage(`暂无可导出的${label}过滤预设。`, true)
+    return
+  }
+  const payload = JSON.stringify(presets, null, 2)
+  const blob = new Blob([payload], { type: 'application/json;charset=utf-8;' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `${filenamePrefix}-${Date.now()}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
+  setDeepLinkMessage(`已导出${label}过滤预设。`)
+}
+
+function importBomFilterPresetsFromText(raw: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    setDeepLinkMessage('请粘贴 BOM 过滤预设 JSON。', true)
+    return
+  }
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) {
+      setDeepLinkMessage('BOM 过滤预设 JSON 需要是数组。', true)
+      return
+    }
+    const { presets, count } = mergeImportedFilterPresets(
+      parsed,
+      bomFilterPresets.value,
+      bomFilterFieldOptions,
+      'bom'
+    )
+    bomFilterPresets.value = presets
+    persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
+    bomFilterPresetImportText.value = ''
+    if (count) {
+      setDeepLinkMessage(`已导入 ${count} 条 BOM 过滤预设。`)
+    } else {
+      setDeepLinkMessage('未发现可导入的 BOM 过滤预设。', true)
+    }
+  } catch (_err) {
+    setDeepLinkMessage('BOM 过滤预设 JSON 解析失败。', true)
+  }
+}
+
+function importBomFilterPresets() {
+  importBomFilterPresetsFromText(bomFilterPresetImportText.value)
+}
+
+function exportBomFilterPresets() {
+  exportFilterPresets(bomFilterPresets.value, 'BOM', 'plm-bom-filter-presets')
+}
+
+function triggerBomFilterPresetFileImport() {
+  bomFilterPresetFileInput.value?.click()
+}
+
+async function importBomFilterPresetFile(file: File) {
+  if (!file) return
+  if (file.type && !file.type.includes('json') && !file.name.endsWith('.json')) {
+    setDeepLinkMessage('仅支持 BOM 过滤预设 JSON 文件。', true)
+    return
+  }
+  try {
+    const text = await file.text()
+    importBomFilterPresetsFromText(text)
+  } catch (_err) {
+    setDeepLinkMessage('读取 BOM 过滤预设文件失败。', true)
+  }
+}
+
+async function handleBomFilterPresetFileImport(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  await importBomFilterPresetFile(file)
+  target.value = ''
+}
+
+function importWhereUsedFilterPresetsFromText(raw: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    setDeepLinkMessage('请粘贴 Where-Used 过滤预设 JSON。', true)
+    return
+  }
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) {
+      setDeepLinkMessage('Where-Used 过滤预设 JSON 需要是数组。', true)
+      return
+    }
+    const { presets, count } = mergeImportedFilterPresets(
+      parsed,
+      whereUsedFilterPresets.value,
+      whereUsedFilterFieldOptions,
+      'where-used'
+    )
+    whereUsedFilterPresets.value = presets
+    persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
+    whereUsedFilterPresetImportText.value = ''
+    if (count) {
+      setDeepLinkMessage(`已导入 ${count} 条 Where-Used 过滤预设。`)
+    } else {
+      setDeepLinkMessage('未发现可导入的 Where-Used 过滤预设。', true)
+    }
+  } catch (_err) {
+    setDeepLinkMessage('Where-Used 过滤预设 JSON 解析失败。', true)
+  }
+}
+
+function importWhereUsedFilterPresets() {
+  importWhereUsedFilterPresetsFromText(whereUsedFilterPresetImportText.value)
+}
+
+function exportWhereUsedFilterPresets() {
+  exportFilterPresets(whereUsedFilterPresets.value, 'Where-Used', 'plm-where-used-filter-presets')
+}
+
+function triggerWhereUsedFilterPresetFileImport() {
+  whereUsedFilterPresetFileInput.value?.click()
+}
+
+async function importWhereUsedFilterPresetFile(file: File) {
+  if (!file) return
+  if (file.type && !file.type.includes('json') && !file.name.endsWith('.json')) {
+    setDeepLinkMessage('仅支持 Where-Used 过滤预设 JSON 文件。', true)
+    return
+  }
+  try {
+    const text = await file.text()
+    importWhereUsedFilterPresetsFromText(text)
+  } catch (_err) {
+    setDeepLinkMessage('读取 Where-Used 过滤预设文件失败。', true)
+  }
+}
+
+async function handleWhereUsedFilterPresetFileImport(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  await importWhereUsedFilterPresetFile(file)
+  target.value = ''
 }
 
 function mergeImportedPresets(entries: unknown[]): number {
