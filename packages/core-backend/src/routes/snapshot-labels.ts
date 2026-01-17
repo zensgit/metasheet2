@@ -127,7 +127,7 @@ router.patch('/:id/release-channel', async (req, res) => {
  * Query snapshots with optional filters
  * Supports filtering by: tags, protection_level, release_channel
  */
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
   try {
     const { tags, protection_level, release_channel } = req.query;
 
@@ -156,10 +156,7 @@ router.get('/', async (req, res) => {
       }
       snapshots = await snapshotService.getByReleaseChannel(release_channel as ReleaseChannel);
     } else {
-      return res.status(400).json({
-        success: false,
-        error: 'Please specify at least one filter: tags, protection_level, or release_channel'
-      });
+      return next();
     }
 
     res.json({

@@ -33,6 +33,7 @@ import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
+import snapshotLabelsRouter from './routes/snapshot-labels'
 import changeManagementRouter from './routes/change-management'
 import { permissionsRouter } from './routes/permissions'
 import { filesRouter } from './routes/files'
@@ -338,12 +339,26 @@ export class MetaSheetServer {
         broadcastTo: (room: string, event: string, data: unknown) => {
           this.injector.get(ICollabService).broadcastTo(room, event, data)
         },
+        broadcastToRoom: (room: string, event: string, data: unknown) => {
+          this.injector.get(ICollabService).broadcastTo(room, event, data)
+        },
         sendTo: (userId: string, event: string, data: unknown) => {
           this.injector.get(ICollabService).sendTo(userId, event, data)
         },
-        join: (room: string, options: { userId?: string }) => {
-          if (!options?.userId) return
-          this.injector.get(ICollabService).joinRoom(room, options.userId)
+        join: (arg1: string, arg2: string | { userId?: string }) => {
+          if (typeof arg2 === 'string') {
+            this.injector.get(ICollabService).joinRoom(arg1, arg2)
+            return
+          }
+          if (arg2?.userId) {
+            this.injector.get(ICollabService).joinRoom(arg1, arg2.userId)
+          }
+        },
+        leave: (socketId: string, room: string) => {
+          const collab = this.injector.get(ICollabService)
+          if (collab.leaveRoom) {
+            collab.leaveRoom(socketId, room)
+          }
         },
         onConnection: (handler: (socket: import('./types/plugin').SocketInfo) => void | Promise<void>) => {
           this.injector.get(ICollabService).onConnection(handler)
@@ -523,6 +538,8 @@ export class MetaSheetServer {
     this.app.use(commentsRouter(this.injector))
     // 路由：看板（Kanban MVP API）
     this.app.use('/api/kanban', kanbanRouter())
+    // 路由：快照标签/保护
+    this.app.use('/api/snapshots', snapshotLabelsRouter)
     // 路由：快照（Snapshot MVP）
     this.app.use(snapshotsRouter())
 

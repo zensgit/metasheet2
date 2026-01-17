@@ -58,9 +58,12 @@
     "@types/node": "^20.10.5",
     "@types/pg": "^8.15.5",
     "@types/semver": "^7.7.1",
+    "@types/supertest": "^2.0.16",
     "@types/uuid": "^9.0.7",
     "cross-env": "^7.0.3",
     "rimraf": "^5.0.5",
+    "socket.io-client": "^4.7.5",
+    "supertest": "^6.3.4",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
     "vitest": "^1.1.0"

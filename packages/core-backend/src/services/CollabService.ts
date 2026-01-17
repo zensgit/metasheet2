@@ -98,9 +98,17 @@ export class CollabService implements ICollabService {
     this.io.to(room).emit(event, data)
   }
 
-  joinRoom(room: string, userId: string): void {
-    if (!this.io || !userId) return
-    this.io.in(userId).socketsJoin(room)
+  joinRoom(room: string, userId: string): void
+  joinRoom(socketId: string, room: string): void
+  joinRoom(arg1: string, arg2: string): void {
+    if (!this.io) return
+    const socket = this.io.sockets.sockets.get(arg1)
+    if (socket) {
+      socket.join(arg2)
+      return
+    }
+    if (!arg2) return
+    this.io.in(arg2).socketsJoin(arg1)
   }
 
   async close(): Promise<void> {
@@ -117,5 +125,23 @@ export class CollabService implements ICollabService {
     this.connectionHandlers.push(handler);
     if (!this.io) return;
     this.io.on('connection', handler);
+  }
+
+  leaveRoom(socketId: string, room: string): void {
+    if (!this.io) return
+    const socket = this.io.sockets.sockets.get(socketId)
+    if (!socket) {
+      this.logger.warn(`WebSocket client not found: ${socketId}`)
+      return
+    }
+    socket.leave(room)
+  }
+
+  broadcastTo(room: string, event: string, data: unknown): void {
+    if (!this.io) {
+      this.logger.warn('Attempted to broadcastTo before initialization')
+      return
+    }
+    this.io.to(room).emit(event, data)
   }
 }

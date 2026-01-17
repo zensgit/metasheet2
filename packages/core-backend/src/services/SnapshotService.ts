@@ -640,6 +640,29 @@ export class SnapshotService {
     return true
   }
 
+  async updateSnapshot(snapshotId: string, updates: { expires_at?: Date | null }): Promise<boolean> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    const patch: { expires_at?: string | null } = {}
+    if (Object.prototype.hasOwnProperty.call(updates, 'expires_at')) {
+      patch.expires_at = updates.expires_at ? updates.expires_at.toISOString() : null
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return false
+    }
+
+    await db
+      .updateTable('snapshots')
+      .set(patch)
+      .where('id', '=', snapshotId)
+      .execute()
+
+    return true
+  }
+
   /**
    * Cleanup expired snapshots
    * Sprint 2: Skip protected and critical snapshots

@@ -8,16 +8,13 @@ const coreAPI: any = {
   }
 }
 
-const describeIfPlugins = process.env.SKIP_PLUGINS === 'true' ? describe.skip : describe
-
-describeIfPlugins('PluginLoader failure paths', () => {
+describe('PluginLoader failure paths', () => {
   it('handles circular dependencies gracefully (warns, does not throw)', async () => {
     const loader = new PluginLoader(coreAPI, {
       pluginDirs: [__dirname + '/fixtures/cycle-a', __dirname + '/fixtures/cycle-b']
     })
     // Current strategy: log warning and continue loading without throwing
-    const loaded = await loader.loadPlugins()
-    expect(Array.isArray(loaded)).toBe(true)
+    await expect(loader.loadPlugins()).resolves.toBeInstanceOf(Array)
   })
   it('marks plugin as failed when permission not in whitelist', async () => {
     const loader = new PluginLoader(coreAPI, {

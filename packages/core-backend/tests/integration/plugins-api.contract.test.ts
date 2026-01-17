@@ -8,8 +8,11 @@ const describeIfPlugins = process.env.SKIP_PLUGINS === 'true' ? describe.skip : 
 describeIfPlugins('GET /api/plugins contract', () => {
   let server: MetaSheetServer
   let baseUrl: string
+  let previousSkip: string | undefined
 
   beforeAll(async () => {
+    previousSkip = process.env.SKIP_PLUGINS
+    process.env.SKIP_PLUGINS = 'false'
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
       s.once('error', () => resolve(false))
@@ -34,6 +37,11 @@ describeIfPlugins('GET /api/plugins contract', () => {
     if (server && (server as any).stop) {
       await server.stop()
     }
+    if (previousSkip === undefined) {
+      delete process.env.SKIP_PLUGINS
+    } else {
+      process.env.SKIP_PLUGINS = previousSkip
+    }
   })
 
   it('returns views only for active plugins', async () => {
@@ -44,7 +52,9 @@ describeIfPlugins('GET /api/plugins contract', () => {
     expect(Array.isArray(data)).toBe(true)
 
     // Find kanban plugin and verify basic shape
-    const kanban = data.find((p: any) => p.name === '@metasheet/plugin-view-kanban')
+    const kanban = data.find((p: any) => (
+      p.name === 'plugin-view-kanban' || p.name === '@metasheet/plugin-view-kanban'
+    ))
     expect(kanban).toBeDefined()
     expect(['active', 'failed', 'inactive']).toContain(kanban.status)
 

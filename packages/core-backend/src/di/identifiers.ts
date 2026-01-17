@@ -42,6 +42,8 @@ export interface ICollabService {
   broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;
   joinRoom(room: string, userId: string): void;
+  joinRoom(socketId: string, room: string): void;
+  leaveRoom?(socketId: string, room: string): void;
   close(): Promise<void>;
   onConnection(handler: (socket: any) => void): void;
 }

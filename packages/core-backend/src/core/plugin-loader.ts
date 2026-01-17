@@ -10,9 +10,10 @@
 
 import * as path from 'path'
 import * as fs from 'fs'
-import { z } from 'zod'
 import semver from 'semver'
-import { PERMISSION_WHITELIST, type PluginManifest, type PluginLifecycle } from '../types/plugin'
+import { z } from 'zod'
+import { PERMISSION_WHITELIST } from '../types/plugin'
+import type { PluginManifest, PluginLifecycle } from '../types/plugin'
 import { Logger } from './logger'
 import { getPluginStateManager } from './plugin-state-manager'
 import { coreMetrics } from '../integration/metrics/metrics'
@@ -141,6 +142,69 @@ const PluginManifestSchema = z.object({
   homepage: z.string().optional()
 }).passthrough() // Allow additional fields for forward compatibility
 
+const CORE_VERSION = resolveCoreVersion()
+
+function resolveCoreVersion(): string {
+  const envVersion = process.env.METASHEET_VERSION || process.env.npm_package_version
+  if (envVersion) return envVersion
+  const roots = [
+    process.cwd(),
+    path.resolve(process.cwd(), '..'),
+    path.resolve(process.cwd(), '../..'),
+  ]
+  for (const root of roots) {
+    try {
+      const raw = fs.readFileSync(path.join(root, 'package.json'), 'utf-8')
+      const parsed = JSON.parse(raw) as { version?: string }
+      if (parsed?.version) return parsed.version
+    } catch {
+      // ignore and try next location
+    }
+  }
+  return '0.0.0'
+}
+
+function normalizePermissionList(permissions: PluginManifest['permissions'] | undefined): string[] {
+  if (!permissions) return []
+  if (Array.isArray(permissions)) {
+    return permissions.filter((perm): perm is string => typeof perm === 'string')
+  }
+
+  const resolved = new Set<string>()
+
+  if (permissions.database) {
+    if (permissions.database.read?.length) resolved.add('database.read')
+    if (permissions.database.write?.length) resolved.add('database.write')
+  }
+
+  if (permissions.http) {
+    if (permissions.http.internal || permissions.http.external?.length) {
+      resolved.add('http.request')
+    }
+  }
+
+  if (permissions.filesystem) {
+    if (permissions.filesystem.read?.length) resolved.add('file.read')
+    if (permissions.filesystem.write?.length) resolved.add('file.write')
+  }
+
+  if (permissions.events) {
+    if (permissions.events.emit?.length) resolved.add('events.emit')
+    if (permissions.events.subscribe?.length) resolved.add('events.listen')
+  }
+
+  if (permissions.messaging) {
+    if (permissions.messaging.publish?.length || permissions.messaging.rpc?.length) {
+      resolved.add('websocket.send')
+    }
+    if (permissions.messaging.subscribe?.length || permissions.messaging.pattern) {
+      resolved.add('websocket.listen')
+    }
+  }
+
+  return Array.from(resolved)
+}
+
 export interface LoadOptions {
   basePath?: string
   validate?: boolean
@@ -157,9 +221,11 @@ export interface LoadedPlugin {
 export class PluginLoader {
   private logger = new Logger('PluginLoader')
   private loadedPlugins = new Map<string, LoadedPlugin>()
-  private failedPlugins = new Map<string, { error: string }>()
+  private failedPlugins = new Map<string, string>()
+  private coreVersion = CORE_VERSION
   private basePath: string
   private pluginDirs: string[] | null = null
+  private allowFallback = false
 
   constructor(basePathOrCoreAPI: string | unknown = './plugins', options?: { pluginDirs?: string[] }) {
     // Accept either a string path or a CoreAPI object (for backwards compatibility)
@@ -173,6 +239,10 @@ export class PluginLoader {
     if (options?.pluginDirs?.length) {
       this.pluginDirs = options.pluginDirs
     }
+
+    const resolvedBasePath = path.resolve(this.basePath)
+    const defaultBasePath = path.resolve(process.cwd(), 'plugins')
+    this.allowFallback = resolvedBasePath === defaultBasePath
   }
 
   /**
@@ -181,7 +251,7 @@ export class PluginLoader {
    */
   async load(pluginPath: string, options?: LoadOptions): Promise<LoadedPlugin | null> {
     const fullPath = path.resolve(options?.basePath || this.basePath, pluginPath)
-    let pluginName: string | null = null
+    let manifestName: string | undefined
 
     try {
       // Check if directory exists
@@ -221,23 +291,10 @@ export class PluginLoader {
       }
 
       const manifest = rawManifest as PluginManifest
-      pluginName = manifest.name
+      manifestName = manifest.name
 
-      const requiredVersion = manifest.engines?.metasheet || manifest.engine?.metasheet
-      if (requiredVersion) {
-        const currentVersion = this.getCurrentVersion()
-        if (!semver.satisfies(currentVersion, requiredVersion, { includePrerelease: true })) {
-          throw new Error(`Version incompatible: requires ${requiredVersion}, current ${currentVersion}`)
-        }
-      }
-
-      const declaredPermissions = this.normalizePermissions(manifest.permissions)
-      if (declaredPermissions.length > 0) {
-        const invalid = declaredPermissions.filter((permission) => !PERMISSION_WHITELIST.includes(permission as (typeof PERMISSION_WHITELIST)[number]))
-        if (invalid.length > 0) {
-          throw new Error(`Permissions not allowed: ${invalid.join(', ')}`)
-        }
-      }
+      this.validateEngineCompatibility(manifest)
+      this.validatePermissions(manifest)
 
       // Determine entry point - handle both string and object formats
       let mainEntry: string
@@ -275,9 +332,9 @@ export class PluginLoader {
 
       return loadedPlugin
     } catch (error) {
-      const failedId = pluginName || path.basename(fullPath)
       const message = error instanceof Error ? error.message : String(error)
-      this.failedPlugins.set(failedId, { error: message })
+      const failedId = manifestName ?? path.basename(fullPath)
+      this.failedPlugins.set(failedId, message)
       this.logger.error(`Failed to load plugin from ${pluginPath}:`, error instanceof Error ? error : undefined)
       return null
     }
@@ -325,6 +382,28 @@ export class PluginLoader {
   private validateManifest(manifest: PluginManifest): void {
     if (!manifest.name) throw new Error('Plugin manifest missing name')
     if (!manifest.version) throw new Error('Plugin manifest missing version')
+  }
+
+  private validateEngineCompatibility(manifest: PluginManifest): void {
+    const required = manifest.engine?.metasheet ?? manifest.engines?.metasheet
+    if (!required) return
+    if (!semver.validRange(required)) {
+      throw new Error(`Invalid metasheet engine range: ${required}`)
+    }
+    const coreVersion = semver.coerce(this.coreVersion) ?? this.coreVersion
+    if (!semver.satisfies(coreVersion, required, { includePrerelease: true })) {
+      throw new Error(`Metasheet version ${this.coreVersion} does not satisfy ${required}`)
+    }
+  }
+
+  private validatePermissions(manifest: PluginManifest): void {
+    const permissions = normalizePermissionList(manifest.permissions)
+    if (permissions.length === 0) return
+    const whitelist = new Set(PERMISSION_WHITELIST)
+    const invalid = permissions.filter(permission => !whitelist.has(permission))
+    if (invalid.length > 0) {
+      throw new Error(`Permission not in whitelist: ${invalid.join(', ')}`)
+    }
   }
 
   /**
@@ -396,19 +475,25 @@ export class PluginLoader {
       }
 
       if (!fs.existsSync(this.basePath)) {
+        if (!this.allowFallback) {
+          this.logger.warn(`Plugin directory not found: ${path.resolve(this.basePath)}`)
+          return discoveredPlugins
+        }
         fs.mkdirSync(this.basePath, { recursive: true })
       }
 
       scanContainer(this.basePath)
 
-      const fallbackRoots = [
-        path.resolve(process.cwd(), 'plugins'),
-        path.resolve(process.cwd(), '..', 'plugins'),
-        path.resolve(process.cwd(), '..', '..', 'plugins'),
-      ]
-      for (const root of fallbackRoots) {
-        if (path.resolve(root) === path.resolve(this.basePath)) continue
-        scanContainer(root)
+      if (this.allowFallback) {
+        const fallbackRoots = [
+          path.resolve(process.cwd(), 'plugins'),
+          path.resolve(process.cwd(), '..', 'plugins'),
+          path.resolve(process.cwd(), '..', '..', 'plugins'),
+        ]
+        for (const root of fallbackRoots) {
+          if (path.resolve(root) === path.resolve(this.basePath)) continue
+          scanContainer(root)
+        }
       }
     } catch (error) {
       this.logger.error('Failed to discover plugins:', error instanceof Error ? error : undefined)
@@ -425,9 +510,9 @@ export class PluginLoader {
   }
 
   /**
-   * Get plugins that failed to load
+   * Get failed plugins with error messages.
    */
-  getFailedPlugins(): Map<string, { error: string }> {
+  getFailedPlugins(): Map<string, string> {
     return new Map(this.failedPlugins)
   }
 
@@ -455,10 +540,10 @@ export class PluginLoader {
       return entry
     })
 
-    const failed = Array.from(this.failedPlugins.entries()).map(([name, info]) => ({
+    const failed = Array.from(this.failedPlugins.entries()).map(([name, error]) => ({
       name,
       status: 'failed',
-      error: info.error
+      error
     }))
 
     return [...active, ...failed]
@@ -479,6 +564,7 @@ export class PluginLoader {
    * Load all plugins from the base directory
    */
   async loadPlugins(): Promise<LoadedPlugin[]> {
+    this.failedPlugins.clear()
     const discovered = await this.discover()
     const loaded: LoadedPlugin[] = []
 
@@ -613,50 +699,6 @@ export class PluginLoader {
     }
 
     return dependents
-  }
-
-  private getCurrentVersion(): string {
-    const raw = process.env.METASHEET_VERSION || process.env.npm_package_version || '1.0.0'
-    return semver.valid(raw) ?? semver.coerce(raw)?.version ?? '1.0.0'
-  }
-
-  private normalizePermissions(permissions: PluginManifest['permissions']): string[] {
-    if (!permissions) return []
-    if (Array.isArray(permissions)) return permissions
-
-    const resolved = new Set<string>()
-
-    if (permissions.database) {
-      if (permissions.database.read?.length) resolved.add('database.read')
-      if (permissions.database.write?.length) resolved.add('database.write')
-    }
-
-    if (permissions.http) {
-      if (permissions.http.internal || permissions.http.external?.length) {
-        resolved.add('http.request')
-      }
-    }
-
-    if (permissions.filesystem) {
-      if (permissions.filesystem.read?.length) resolved.add('file.read')
-      if (permissions.filesystem.write?.length) resolved.add('file.write')
-    }
-
-    if (permissions.events) {
-      if (permissions.events.emit?.length) resolved.add('events.emit')
-      if (permissions.events.subscribe?.length) resolved.add('events.listen')
-    }
-
-    if (permissions.messaging) {
-      if (permissions.messaging.publish?.length || permissions.messaging.rpc?.length) {
-        resolved.add('websocket.send')
-      }
-      if (permissions.messaging.subscribe?.length || permissions.messaging.pattern) {
-        resolved.add('websocket.listen')
-      }
-    }
-
-    return Array.from(resolved)
   }
 
   /**

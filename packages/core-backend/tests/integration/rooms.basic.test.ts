@@ -44,10 +44,9 @@ describe('WebSocket Rooms - basic flow', () => {
       })
     ])
 
-    // Join user a to room R via server API
-    // We invoke through server websocket API directly (simulating plugin call)
+    // Join client A to room R via server API (simulating plugin call)
     // @ts-ignore access private for test
-    await server['createCoreAPI']().websocket.join('room:R', { userId: 'a' })
+    await server['createCoreAPI']().websocket.join?.(a.id, 'room:R')
 
     const gotA = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('A did not receive')), 3000)
@@ -59,7 +58,7 @@ describe('WebSocket Rooms - basic flow', () => {
 
     // Broadcast to room
     // @ts-ignore
-    server['createCoreAPI']().websocket.broadcastTo('room:R', 'kanban:notify', { ok: true })
+    server['createCoreAPI']().websocket.broadcastToRoom?.('room:R', 'kanban:notify', { ok: true })
 
     const payload = await gotA
     expect(payload).toEqual({ ok: true })

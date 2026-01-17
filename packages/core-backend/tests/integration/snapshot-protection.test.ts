@@ -4,30 +4,83 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { randomUUID } from 'crypto'
 import { MetaSheetServer } from '../../src/index'
 import { snapshotService } from '../../src/services/SnapshotService'
 import { protectionRuleService } from '../../src/services/ProtectionRuleService'
-import { poolManager } from '../../src/integration/db/connection-pool'
 import net from 'net'
 import type { ProtectionRule } from '../../src/services/ProtectionRuleService'
+import crypto from 'crypto'
+import { poolManager } from '../../src/integration/db/connection-pool'
+
+async function ensureAuditLogsTable() {
+  const pool = poolManager.get()
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      event_type TEXT,
+      event_category TEXT,
+      event_severity TEXT,
+      resource_type TEXT,
+      resource_id TEXT,
+      resource_name TEXT,
+      resource_path TEXT,
+      action TEXT,
+      action_details JSONB,
+      user_id TEXT,
+      user_name TEXT,
+      user_email TEXT,
+      user_roles TEXT[],
+      impersonated_by TEXT,
+      session_id TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      device_id TEXT,
+      device_type TEXT,
+      geo_country TEXT,
+      geo_region TEXT,
+      geo_city TEXT,
+      geo_latitude DOUBLE PRECISION,
+      geo_longitude DOUBLE PRECISION,
+      request_id TEXT,
+      request_method TEXT,
+      request_path TEXT,
+      request_query JSONB,
+      request_body JSONB,
+      request_headers JSONB,
+      response_status INTEGER,
+      response_time_ms INTEGER,
+      response_size_bytes INTEGER,
+      error_code TEXT,
+      error_message TEXT,
+      error_stack TEXT,
+      compliance_flags TEXT[],
+      data_classification TEXT,
+      retention_period INTEGER,
+      tags TEXT[],
+      correlation_id TEXT,
+      parent_event_id TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    )
+  `)
+  await pool.query(`
+    ALTER TABLE IF EXISTS audit_logs
+      ALTER COLUMN user_id TYPE TEXT USING user_id::text,
+      ALTER COLUMN impersonated_by TYPE TEXT USING impersonated_by::text
+  `)
+}
 
 describe('Snapshot Protection System E2E', () => {
   let server: MetaSheetServer
   let baseUrl = ''
   const testUserId = 'test-user-snapshot-protection'
-  const testViewId = randomUUID()
   let authToken = ''
+  let testViewId = ''
   let testSnapshotId: string
   let testRuleId: string
-  const authHeaders = () => ({
-    Authorization: `Bearer ${authToken}`,
-    'x-user-id': testUserId
-  })
-  const jsonHeaders = () => ({
-    ...authHeaders(),
-    'Content-Type': 'application/json'
-  })
+
+  const authHeaders = () => ({ Authorization: `Bearer ${authToken}`, 'x-user-id': testUserId })
+  const jsonHeaders = () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}`, 'x-user-id': testUserId })
 
   beforeAll(async () => {
     // Check if port is available
@@ -47,13 +100,16 @@ describe('Snapshot Protection System E2E', () => {
     const address = server.getAddress()
     if (!address || !address.port) return
     baseUrl = `http://127.0.0.1:${address.port}`
-
+    await ensureAuditLogsTable()
     const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}`)
-    if (!tokenRes.ok) {
-      throw new Error(`Failed to get dev token: ${tokenRes.status}`)
-    }
     const tokenJson = await tokenRes.json()
     authToken = tokenJson.token as string
+    testViewId = crypto.randomUUID()
+    const pool = poolManager.get()
+    await pool.query(
+      'INSERT INTO views (id, type, name, config) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING',
+      [testViewId, 'kanban', 'Snapshot Test View', JSON.stringify({})]
+    )
   })
 
   afterAll(async () => {
@@ -72,6 +128,14 @@ describe('Snapshot Protection System E2E', () => {
         // Ignore cleanup errors
       }
     }
+    if (testViewId) {
+      try {
+        const pool = poolManager.get()
+        await pool.query('DELETE FROM views WHERE id = $1', [testViewId])
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
 
     if (server && (server as any).stop) {
       await server.stop()
@@ -80,14 +144,14 @@ describe('Snapshot Protection System E2E', () => {
 
   beforeEach(async () => {
     // Create a test snapshot for each test
+    if (!testViewId) return
     if (!testSnapshotId) {
       const snapshot = await snapshotService.createSnapshot({
         viewId: testViewId,
         name: 'Test Snapshot for Protection',
         description: 'Snapshot for testing protection features',
-        createdBy: testUserId,
-        snapshotType: 'manual',
-        metadata: { test: 'data' }
+        metadata: { test: 'data' },
+        createdBy: testUserId
       })
       testSnapshotId = snapshot.id
     }
@@ -97,7 +161,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should add tags to snapshot', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/tags`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -117,7 +181,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // First add some tags
-      await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/tags`, {
+      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -126,7 +190,7 @@ describe('Snapshot Protection System E2E', () => {
       })
 
       // Then remove one
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/tags`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -145,7 +209,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set protection level to protected', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/protection`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -162,7 +226,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set protection level to critical', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/protection`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -179,7 +243,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should reject invalid protection level', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/protection`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -195,7 +259,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set release channel', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/release-channel`, {
+      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/release-channel`, {
         method: 'PATCH',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -213,7 +277,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // Add specific tags
-      await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/tags`, {
+      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -221,7 +285,7 @@ describe('Snapshot Protection System E2E', () => {
         })
       })
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots?tags=query-test,findable`, {
+      const response = await fetch(`${baseUrl}/api/snapshots?tags=query-test,findable`, {
         headers: authHeaders()
       })
 
@@ -236,13 +300,13 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // Set protection level
-      await fetch(`${baseUrl}/api/admin/snapshots/${testSnapshotId}/protection`, {
+      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: jsonHeaders(),
         body: JSON.stringify({ level: 'critical' })
       })
 
-      const response = await fetch(`${baseUrl}/api/admin/snapshots?protection_level=critical`, {
+      const response = await fetch(`${baseUrl}/api/snapshots?protection_level=critical`, {
         headers: authHeaders()
       })
 
@@ -265,7 +329,8 @@ describe('Snapshot Protection System E2E', () => {
           description: 'Prevent deletion of snapshots tagged as production',
           target_type: 'snapshot',
           conditions: {
-            all: [
+            type: 'all',
+            conditions: [
               {
                 field: 'tags',
                 operator: 'contains',
@@ -432,8 +497,9 @@ describe('Snapshot Protection System E2E', () => {
       // Mark snapshot as expired
       const now = new Date()
       const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-      const pool = poolManager.get()
-      await pool.query('UPDATE snapshots SET expires_at = $1 WHERE id = $2', [yesterday, testSnapshotId])
+      await snapshotService.updateSnapshot(testSnapshotId, {
+        expires_at: yesterday
+      })
 
       // Run cleanup
       const result = await snapshotService.cleanupExpired()
@@ -456,8 +522,9 @@ describe('Snapshot Protection System E2E', () => {
       // Mark snapshot as expired
       const now = new Date()
       const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-      const pool = poolManager.get()
-      await pool.query('UPDATE snapshots SET expires_at = $1 WHERE id = $2', [yesterday, testSnapshotId])
+      await snapshotService.updateSnapshot(testSnapshotId, {
+        expires_at: yesterday
+      })
 
       // Run cleanup
       const result = await snapshotService.cleanupExpired()
@@ -508,7 +575,8 @@ describe('Snapshot Protection System E2E', () => {
           description: 'Require confirmation for beta snapshot operations',
           target_type: 'snapshot',
           conditions: {
-            all: [
+            type: 'all',
+            conditions: [
               {
                 field: 'release_channel',
                 operator: 'eq',
@@ -549,7 +617,8 @@ describe('Snapshot Protection System E2E', () => {
           description: 'Critical snapshots need double confirmation',
           target_type: 'snapshot',
           conditions: {
-            all: [
+            type: 'all',
+            conditions: [
               {
                 field: 'protection_level',
                 operator: 'eq',

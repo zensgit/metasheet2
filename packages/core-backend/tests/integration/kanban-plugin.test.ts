@@ -1,46 +1,38 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import { waitForHealth } from '../utils/waitFor'
 import { io as ioClient } from 'socket.io-client'
 import net from 'net'
-import { authService } from '../../src/auth/AuthService'
+import { poolManager } from '../../src/integration/db/connection-pool'
 
-const describeIfPlugins = process.env.SKIP_PLUGINS === 'true' ? describe.skip : describe
-vi.mock('../../src/integration/db/connection-pool', () => {
-  const mockPool = {
-    query: vi.fn().mockResolvedValue({ rows: [] }),
-    transaction: vi.fn(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
-      return handler({ query: async () => ({ rows: [] }) })
-    }),
-    getInternalPool: vi.fn().mockReturnValue(null)
-  }
+async function ensureRecordsTable() {
+  const pool = poolManager.get()
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS records (
+      id TEXT PRIMARY KEY,
+      spreadsheet_id TEXT NOT NULL,
+      status TEXT,
+      row_order INTEGER,
+      column_order INTEGER,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    )
+  `)
+  await pool.query('ALTER TABLE records ADD COLUMN IF NOT EXISTS status TEXT')
+  await pool.query('ALTER TABLE records ADD COLUMN IF NOT EXISTS row_order INTEGER')
+  await pool.query('ALTER TABLE records ADD COLUMN IF NOT EXISTS column_order INTEGER')
+  await pool.query('ALTER TABLE records ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()')
+}
 
-  return {
-    poolManager: {
-      get: () => mockPool
-    }
-  }
-})
-
-vi.mock('../../src/db/pg', () => ({
-  pool: null,
-  query: vi.fn(),
-  transaction: vi.fn(),
-  getPoolStats: vi.fn().mockReturnValue({ total: 0, idle: 0, waiting: 0 })
-}))
-
-vi.mock('../../src/audit/audit', () => ({
-  auditLog: vi.fn().mockResolvedValue(undefined),
-  auditService: { logEvent: vi.fn() }
-}))
-
-describeIfPlugins('Kanban Plugin Integration', () => {
+describe('Kanban Plugin Integration', () => {
   let server: MetaSheetServer
   let baseUrl: string
-  let authHeader: string
+  let previousSkip: string | undefined
+  let authToken = ''
 
   beforeAll(async () => {
+    previousSkip = process.env.SKIP_PLUGINS
+    process.env.SKIP_PLUGINS = 'false'
     // Preflight: if environment forbids listen(), skip suite by early return
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
@@ -48,6 +40,8 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
     })
     if (!canListen) return
+
+    await ensureRecordsTable()
 
     // Start server with test configuration
     const repoRoot = path.join(__dirname, '../../../../')
@@ -59,27 +53,24 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       ]
     })
 
-    const token = authService.createToken({
-      id: 'test-user',
-      email: 'test@example.com',
-      name: 'Test User',
-      role: 'admin',
-      permissions: [],
-      created_at: new Date(),
-      updated_at: new Date()
-    })
-    authHeader = `Bearer ${token}`
-
     await server.start()
     const address = server.getAddress()
     if (!address || !address.port) return // environment limitation; skip
     baseUrl = `http://127.0.0.1:${address.port}`
     await waitForHealth(baseUrl)
+    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=1`)
+    const tokenJson = await tokenRes.json()
+    authToken = tokenJson.token as string
   })
 
   afterAll(async () => {
     if (server && (server as any).stop) {
       await server.stop()
+    }
+    if (previousSkip === undefined) {
+      delete process.env.SKIP_PLUGINS
+    } else {
+      process.env.SKIP_PLUGINS = previousSkip
     }
   })
 
@@ -89,10 +80,12 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       const res = await fetch(`${baseUrl}/api/plugins`)
       const plugins = await res.json()
 
-      const kanbanPlugin = plugins.find(p => p.name === '@metasheet/plugin-view-kanban')
+      const kanbanPlugin = plugins.find((p: any) => (
+        p.name === 'plugin-view-kanban' || p.name === '@metasheet/plugin-view-kanban'
+      ))
       expect(kanbanPlugin).toBeDefined()
       expect(kanbanPlugin.status).toBe('active')
-      expect(kanbanPlugin.displayName).toBe('看板视图')
+      expect(kanbanPlugin.displayName).toBe('Kanban View Plugin')
     })
   })
 
@@ -101,9 +94,9 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       if (!baseUrl) return
       // Test that kanban routes are accessible
       const res = await fetch(`${baseUrl}/api/kanban/boards`, {
-        headers: { Authorization: authHeader }
+        headers: { Authorization: `Bearer ${authToken}` }
       })
-      expect(res.status).not.toBe(404)
+      expect(res.status).toBe(200)
     })
 
     it('should handle kanban card operations', async () => {
@@ -111,7 +104,10 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       // Test card move endpoint
       const res = await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -120,16 +116,17 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       })
 
       // Should either succeed or return proper error
-      expect([200, 400, 401]).toContain(res.status)
+      expect(res.status).toBe(200)
     })
   })
 
   describe('Event Registration', () => {
     it('should emit kanban events', async () => {
       if (!server) return
+      if (!baseUrl) return
       const addr = server.getAddress()
       if (!addr || !addr.port) return // environment limitation; skip
-      const socket = ioClient(`http://127.0.0.1:${addr.port}`, { transports: ['websocket'], reconnection: false })
+      const socket = ioClient(`http://127.0.0.1:${addr.port}`, { transports: ['websocket'] })
 
       // Wait for connection first (regression guard for event-before-connect)
       await new Promise<void>((resolve, reject) => {
@@ -153,13 +150,13 @@ describeIfPlugins('Kanban Plugin Integration', () => {
         })
       })
 
-      // Small delay to ensure listener is ready
-      await new Promise(resolve => setTimeout(resolve, 100))
-
       // Trigger card move AFTER connection is established
       await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -170,14 +167,10 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       // Wait for event
       const event = await eventPromise
 
-      await new Promise<void>((resolve) => {
-        if (socket.disconnected) return resolve()
-        socket.once('disconnect', () => resolve())
-        socket.disconnect()
-      })
+      socket.close()
 
       expect(event).toBeDefined()
-      expect(event).toMatchObject({
+      expect(event).toEqual({
         cardId: 'test-card',
         fromColumn: 'todo',
         toColumn: 'doing'
@@ -191,7 +184,11 @@ describeIfPlugins('Kanban Plugin Integration', () => {
       const res = await fetch(`${baseUrl}/api/plugins`)
       const plugins = await res.json()
 
-      const kanbanPlugin = plugins.find(p => p.name === '@metasheet/plugin-view-kanban')
+      const kanbanPlugin = plugins.find((p: any) => (
+        p.name === 'plugin-view-kanban' || p.name === '@metasheet/plugin-view-kanban'
+      ))
+      expect(kanbanPlugin).toBeDefined()
+      if (!kanbanPlugin) return
 
       // Plugin should be active if permissions are granted
       if (kanbanPlugin.status === 'failed') {

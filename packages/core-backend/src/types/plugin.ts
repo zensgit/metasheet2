@@ -501,6 +501,11 @@ export interface WebSocketAPI {
   broadcastTo(room: string, event: string, data: unknown): void
   sendTo(userId: string, event: string, data: unknown): void
   join(room: string, options: { userId?: string }): void
+  broadcastToRoom?(room: string, event: string, data: unknown): void
+  sendTo(userId: string, event: string, data: unknown): void
+  join(room: string, options: { userId?: string }): void
+  join(socketId: string, room: string): void
+  leave?(socketId: string, room: string): void
   onConnection(handler: WebSocketConnectionHandler): void
 }
 

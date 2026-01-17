@@ -11,11 +11,11 @@ export interface AuditLogData {
   resourcePath?: string;
   action: string;
   actionDetails?: Record<string, unknown>;
-  userId?: number;
+  userId?: string | number;
   userName?: string;
   userEmail?: string;
   userRoles?: string[];
-  impersonatedBy?: number;
+  impersonatedBy?: string | number;
   sessionId?: string;
   ipAddress?: string;
   userAgent?: string;
@@ -94,7 +94,7 @@ export interface AuditLogQueryFilters {
   eventCategory?: string;
   resourceType?: string;
   resourceId?: string;
-  userId?: number;
+  userId?: string | number;
   startDate?: Date;
   endDate?: Date;
   severity?: string;

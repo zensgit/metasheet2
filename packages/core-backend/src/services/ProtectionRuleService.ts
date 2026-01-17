@@ -122,6 +122,17 @@ function parseJsonField<T>(value: unknown): T {
   return value as T
 }
 
+function normalizeRuleConditions(value: RuleConditions): RuleConditions {
+  const shaped = value as RuleConditions & { type?: string; conditions?: RuleCondition[] }
+  if (Array.isArray(shaped.conditions)) {
+    const mode = shaped.type || 'all'
+    if (mode === 'all') return { all: shaped.conditions }
+    if (mode === 'any') return { any: shaped.conditions }
+    if (mode === 'not' && shaped.conditions.length > 0) return { not: shaped.conditions[0] }
+  }
+  return value
+}
+
 // ============================================
 // SERVICE IMPLEMENTATION
 // ============================================
@@ -145,9 +156,11 @@ export class ProtectionRuleService {
 
     try {
       // Avoid double JSON stringify: if client accidentally sends stringified JSON, parse first
-      const normalizedConditions = isJsonString(options.conditions)
-        ? JSON.parse(options.conditions)
-        : options.conditions
+      const normalizedConditions = normalizeRuleConditions(
+        (isJsonString(options.conditions)
+          ? JSON.parse(options.conditions)
+          : options.conditions) as RuleConditions
+      )
       const normalizedEffects = isJsonString(options.effects)
         ? JSON.parse(options.effects)
         : options.effects
@@ -233,9 +246,11 @@ export class ProtectionRuleService {
       if (options.rule_name !== undefined) updateData.rule_name = options.rule_name
       if (options.description !== undefined) updateData.description = options.description
       if (options.conditions !== undefined) {
-        const normalizedConditions = isJsonString(options.conditions)
-          ? JSON.parse(options.conditions)
-          : options.conditions
+        const normalizedConditions = normalizeRuleConditions(
+          (isJsonString(options.conditions)
+            ? JSON.parse(options.conditions)
+            : options.conditions) as RuleConditions
+        )
         updateData.conditions = JSON.stringify(normalizedConditions)
         updateData.version = currentRule.version + 1
       }
@@ -476,17 +491,19 @@ export class ProtectionRuleService {
    * Evaluate rule conditions against entity properties
    */
   private evaluateConditions(conditions: RuleConditions, properties: Record<string, unknown>): boolean {
+    const normalized = normalizeRuleConditions(conditions)
+
     // Handle composite conditions
-    if (conditions.all) {
-      return conditions.all.every(condition => this.evaluateCondition(condition, properties))
+    if (normalized.all) {
+      return normalized.all.every(condition => this.evaluateCondition(condition, properties))
     }
 
-    if (conditions.any) {
-      return conditions.any.some(condition => this.evaluateCondition(condition, properties))
+    if (normalized.any) {
+      return normalized.any.some(condition => this.evaluateCondition(condition, properties))
     }
 
-    if (conditions.not) {
-      return !this.evaluateCondition(conditions.not, properties)
+    if (normalized.not) {
+      return !this.evaluateCondition(normalized.not, properties)
     }
 
     return false

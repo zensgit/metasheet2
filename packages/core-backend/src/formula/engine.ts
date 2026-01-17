@@ -456,7 +456,7 @@ export class FormulaEngine {
       .executeTakeFirst()
 
     if (!cell) {
-      return '#ERROR!'
+      return null
     }
 
     // Extract actual value from JSONB column - may be stored as {value: x} or directly as primitive
