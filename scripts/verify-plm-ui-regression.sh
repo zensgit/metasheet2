@@ -806,6 +806,13 @@ async function waitOptional(scope, text) {
     }
     const compareChildKey = ((await compareTargetRow.getAttribute('data-compare-child')) || '').trim();
     const compareLineId = ((await compareTargetRow.getAttribute('data-compare-line')) || '').trim();
+    const compareSyncToggle = compareSection.locator('#plm-compare-sync');
+    if ((await compareSyncToggle.count()) === 0) {
+      throw new Error('BOM compare sync toggle missing.');
+    }
+    if (!(await compareSyncToggle.isChecked())) {
+      throw new Error('BOM compare sync toggle is not enabled by default.');
+    }
     if (compareChildKey) {
       const whereUsedValue = await whereUsedSection.locator('#plm-where-used-item-id').inputValue();
       if (whereUsedValue.trim() !== compareChildKey) {
@@ -817,6 +824,26 @@ async function waitOptional(scope, text) {
       if (bomLineValue.trim() !== compareLineId) {
         throw new Error(`Compare selection did not sync bom line id (${compareLineId}).`);
       }
+    }
+    if (compareChildKey || compareLineId) {
+      await compareSyncToggle.uncheck();
+      await whereUsedSection.locator('#plm-where-used-item-id').fill('');
+      await page.locator('#plm-bom-line-id').fill('');
+      await compareTargetRow.click();
+      await compareTargetRow.click();
+      if (compareChildKey) {
+        const whereUsedValue = await whereUsedSection.locator('#plm-where-used-item-id').inputValue();
+        if (whereUsedValue.trim() !== '') {
+          throw new Error('Compare sync toggle did not disable where-used update.');
+        }
+      }
+      if (compareLineId) {
+        const bomLineValue = await page.locator('#plm-bom-line-id').inputValue();
+        if (bomLineValue.trim() !== '') {
+          throw new Error('Compare sync toggle did not disable bom line update.');
+        }
+      }
+      await compareSyncToggle.check();
     }
     const compareCopyButton = compareDetailSection.locator('button:has-text("复制字段对照")');
     if ((await compareCopyButton.count()) === 0) {

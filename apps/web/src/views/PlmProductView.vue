@@ -1502,6 +1502,15 @@
             type="checkbox"
           />
         </label>
+        <label class="checkbox-field" for="plm-compare-sync">
+          <span>联动 Where-Used / 替代件</span>
+          <input
+            id="plm-compare-sync"
+            name="plmCompareSync"
+            v-model="compareSyncEnabled"
+            type="checkbox"
+          />
+        </label>
       </div>
       <p v-if="compareSchemaLoading" class="status">对比字段加载中...</p>
       <p v-else-if="compareSchemaError" class="status error">{{ compareSchemaError }}（已回退默认字段）</p>
@@ -2632,6 +2641,7 @@ const compareLineKey = ref(DEFAULT_COMPARE_LINE_KEY)
 const compareIncludeChildFields = ref(true)
 const compareIncludeSubstitutes = ref(false)
 const compareIncludeEffectivity = ref(false)
+const compareSyncEnabled = ref(true)
 const compareEffectiveAt = ref('')
 const compareFilter = ref('')
 const compareRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
@@ -3599,6 +3609,7 @@ function resetAll() {
   compareIncludeChildFields.value = true
   compareIncludeSubstitutes.value = false
   compareIncludeEffectivity.value = false
+  compareSyncEnabled.value = true
   compareEffectiveAt.value = ''
   compareFilter.value = ''
   compareRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
@@ -3643,6 +3654,7 @@ function resetAll() {
     compareIncludeChildFields: undefined,
     compareIncludeSubstitutes: undefined,
     compareIncludeEffectivity: undefined,
+    compareSync: undefined,
     compareEffectiveAt: '',
     compareRelationshipProps: '',
     compareFilter: '',
@@ -5509,6 +5521,7 @@ function isCompareEntrySelected(entry: Record<string, any>, kind: CompareSelecti
 }
 
 function syncCompareTargets(entry: Record<string, any>): void {
+  if (!compareSyncEnabled.value) return
   const child = getCompareChild(entry)
   const { id, itemNumber } = resolveItemKey(child)
   const target = id || itemNumber
@@ -6067,6 +6080,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('compareIncludeChildFields', compareIncludeChildFields.value !== true ? compareIncludeChildFields.value : undefined)
   append('compareIncludeSubstitutes', compareIncludeSubstitutes.value !== false ? compareIncludeSubstitutes.value : undefined)
   append('compareIncludeEffectivity', compareIncludeEffectivity.value !== false ? compareIncludeEffectivity.value : undefined)
+  append('compareSync', compareSyncEnabled.value !== true ? compareSyncEnabled.value : undefined)
   append('compareEffectiveAt', compareEffectiveAt.value)
   append('compareRelationshipProps', compareRelationshipProps.value !== DEFAULT_COMPARE_REL_PROPS ? compareRelationshipProps.value : undefined)
   append('compareFilter', compareFilter.value)
@@ -6275,6 +6289,10 @@ async function applyQueryState() {
   const includeEffectivityParam = parseQueryBoolean(readQueryParam('compareIncludeEffectivity'))
   if (includeEffectivityParam !== undefined) {
     compareIncludeEffectivity.value = includeEffectivityParam
+  }
+  const compareSyncParam = parseQueryBoolean(readQueryParam('compareSync'))
+  if (compareSyncParam !== undefined) {
+    compareSyncEnabled.value = compareSyncParam
   }
   const bomLineParam = readQueryParam('bomLineId')
   if (bomLineParam !== undefined) {
@@ -7121,6 +7139,7 @@ watch(
     compareIncludeChildFields.value,
     compareIncludeSubstitutes.value,
     compareIncludeEffectivity.value,
+    compareSyncEnabled.value,
     compareEffectiveAt.value,
     compareRelationshipProps.value,
     bomDepth.value,
@@ -7144,6 +7163,7 @@ watch(
     compareChildValue,
     compareSubsValue,
     compareEffectValue,
+    compareSyncValue,
     compareEffectiveValue,
     comparePropsValue,
     bomDepthValue,
@@ -7172,6 +7192,7 @@ watch(
         compareSubsValue !== false ? compareSubsValue : undefined,
       compareIncludeEffectivity:
         compareEffectValue !== false ? compareEffectValue : undefined,
+      compareSync: compareSyncValue !== true ? compareSyncValue : undefined,
       compareEffectiveAt: compareEffectiveValue || undefined,
       compareRelationshipProps:
         comparePropsValue !== DEFAULT_COMPARE_REL_PROPS ? comparePropsValue : undefined,
