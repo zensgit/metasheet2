@@ -128,6 +128,8 @@ Entry points:
 - PLM UI where-used path view:
   - Report: `docs/verification-plm-ui-where-used-path-20260104_1314.md`
   - Artifacts: `artifacts/where-used-path-20260104_1314.json`, `artifacts/plm-ui-where-used-path-20260104_1330.png`
+- PLM UI multi-select copy (BOM + Where-Used):
+  - Report: `docs/PLM_UI_MULTISELECT_COPY_REPORT.md`
 
 - PLM BOM tools federation:
   - Script: `scripts/verify-plm-bom-tools.sh`
@@ -389,6 +391,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260117_221425.png`
   - Report: `docs/verification-plm-ui-regression-20260117_224348.md`
   - Artifact: `artifacts/plm-ui-regression-20260117_224348.png`
+  - Report: `docs/verification-plm-ui-regression-20260117_230222.md`
+  - Artifact: `artifacts/plm-ui-regression-20260117_230222.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`

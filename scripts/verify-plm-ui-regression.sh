@@ -597,6 +597,20 @@ async function waitOptional(scope, text) {
     if ((await bomSelectedRows.count()) === 0) {
       throw new Error('BOM table row highlight missing after tree selection.');
     }
+    const bomCopySelectedButton = bomSection.locator('.panel-actions button:has-text("复制选中子件")');
+    if ((await bomCopySelectedButton.count()) === 0) {
+      throw new Error('BOM selected child copy button missing.');
+    }
+    if (!(await bomCopySelectedButton.isEnabled())) {
+      throw new Error('BOM selected child copy button is disabled.');
+    }
+    const bomClearSelectionButton = bomSection.locator('.panel-actions button:has-text("清空选择")');
+    if ((await bomClearSelectionButton.count()) === 0) {
+      throw new Error('BOM clear selection button missing.');
+    }
+    if (!(await bomClearSelectionButton.isEnabled())) {
+      throw new Error('BOM clear selection button is disabled.');
+    }
     const bomBulkPathButton = bomSection.locator('.panel-actions button:has-text("复制所有路径 ID")');
     if ((await bomBulkPathButton.count()) === 0) {
       throw new Error('BOM bulk path ID button missing.');
@@ -728,10 +742,36 @@ async function waitOptional(scope, text) {
     if (!treeSelected) {
       throw new Error('Where-used tree row highlight missing.');
     }
+    const whereUsedCopySelectedButton = whereUsedSection.locator(
+      '.panel-actions button:has-text("复制选中父件")'
+    );
+    if ((await whereUsedCopySelectedButton.count()) === 0) {
+      throw new Error('Where-used selected parent copy button missing.');
+    }
+    if (!(await whereUsedCopySelectedButton.isEnabled())) {
+      throw new Error('Where-used selected parent copy button is disabled.');
+    }
+    const whereUsedClearSelectionButton = whereUsedSection.locator(
+      '.panel-actions button:has-text("清空选择")'
+    );
+    if ((await whereUsedClearSelectionButton.count()) === 0) {
+      throw new Error('Where-used clear selection button missing.');
+    }
+    if (!(await whereUsedClearSelectionButton.isEnabled())) {
+      throw new Error('Where-used clear selection button is disabled.');
+    }
     await whereUsedViewSelect.selectOption('table');
     const selectedTableRows = whereUsedSection.locator('table tbody tr.row-selected');
     if ((await selectedTableRows.count()) === 0) {
       throw new Error('Where-used table row highlight missing after tree selection.');
+    }
+    await whereUsedCopySelectedButton.click();
+    await detailSection.getByText('已复制父件', { exact: false }).waitFor({ timeout: 60000 });
+    await whereUsedClearSelectionButton.click();
+    await page.waitForTimeout(200);
+    const clearedRows = whereUsedSection.locator('table tbody tr.row-selected');
+    if ((await clearedRows.count()) !== 0) {
+      throw new Error('Where-used clear selection did not reset highlights.');
     }
   }
 

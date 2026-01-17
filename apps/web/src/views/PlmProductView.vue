@@ -399,6 +399,13 @@
           >
             复制树形路径 ID
           </button>
+          <button class="btn ghost" :disabled="!bomSelectedCount" @click="copyBomSelectedChildIds">
+            复制选中子件
+          </button>
+          <button class="btn ghost" :disabled="!bomSelectedCount" @click="clearBomSelection">
+            清空选择
+          </button>
+          <span v-if="bomSelectedCount" class="muted">已选 {{ bomSelectedCount }}</span>
           <button class="btn ghost" :disabled="!bomExportCount" @click="exportBomCsv">
             导出 CSV
           </button>
@@ -1151,6 +1158,13 @@
           >
             复制树形路径 ID
           </button>
+          <button class="btn ghost" :disabled="!whereUsedSelectedCount" @click="copyWhereUsedSelectedParents">
+            复制选中父件
+          </button>
+          <button class="btn ghost" :disabled="!whereUsedSelectedCount" @click="clearWhereUsedSelection">
+            清空选择
+          </button>
+          <span v-if="whereUsedSelectedCount" class="muted">已选 {{ whereUsedSelectedCount }}</span>
           <button class="btn ghost" :disabled="!whereUsedFilteredRows.length" @click="exportWhereUsedCsv">
             导出 CSV
           </button>
@@ -2381,6 +2395,30 @@ const whereUsedPathIdsList = computed(() => {
 
 const whereUsedPathIdsCount = computed(() => whereUsedPathIdsList.value.length)
 
+const whereUsedSelectedEntries = computed(() => {
+  const selected = whereUsedSelectedEntryKeys.value
+  if (!selected.size) return []
+  return whereUsedRows.value.filter((entry: any) => {
+    const key = resolveWhereUsedEntryKey(entry)
+    return key && selected.has(key)
+  })
+})
+
+const whereUsedSelectedParents = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const entry of whereUsedSelectedEntries.value) {
+    const parentId = resolveWhereUsedParentId(entry)
+    const fallback = parentId || getItemNumber(entry.parent)
+    if (!fallback || seen.has(fallback)) continue
+    seen.add(fallback)
+    list.push(fallback)
+  }
+  return list
+})
+
+const whereUsedSelectedCount = computed(() => whereUsedSelectedEntryKeys.value.size)
+
 const whereUsedTree = computed<WhereUsedTreeNode | null>(() => {
   const rows = whereUsedFilteredRows.value
   if (!rows.length) return null
@@ -2849,6 +2887,29 @@ const bomFilteredLineIds = computed(() => {
   }
   return ids
 })
+
+const bomSelectedItems = computed(() => {
+  const selected = bomSelectedLineIds.value
+  if (!selected.size) return []
+  return bomItems.value.filter((item: any) => {
+    const lineId = resolveBomLineId(item)
+    return lineId && selected.has(lineId)
+  })
+})
+
+const bomSelectedChildIds = computed(() => {
+  const seen = new Set<string>()
+  const list: string[] = []
+  for (const item of bomSelectedItems.value) {
+    const target = resolveBomChildId(item) || resolveBomChildNumber(item)
+    if (!target || seen.has(target)) continue
+    seen.add(target)
+    list.push(target)
+  }
+  return list
+})
+
+const bomSelectedCount = computed(() => bomSelectedLineIds.value.size)
 
 const bomTablePathIdsList = computed(() => {
   const seen = new Set<string>()
@@ -3945,12 +4006,29 @@ async function copyPathIdsList(label: string, list: string[]) {
   setDeepLinkMessage(`已复制${label}路径 ID：${list.length} 条`)
 }
 
+async function copyValueList(label: string, list: string[]) {
+  if (!list.length) {
+    setDeepLinkMessage(`暂无${label}`, true)
+    return
+  }
+  const ok = await copyToClipboard(list.join('\n'))
+  if (!ok) {
+    setDeepLinkMessage(`复制${label}失败`, true)
+    return
+  }
+  setDeepLinkMessage(`已复制${label}：${list.length} 条`)
+}
+
 async function copyBomTablePathIdsBulk() {
   await copyPathIdsList('BOM', bomTablePathIdsList.value)
 }
 
 async function copyBomTreePathIdsBulk() {
   await copyPathIdsList('BOM树形', bomTreePathIdsList.value)
+}
+
+async function copyBomSelectedChildIds() {
+  await copyValueList('子件', bomSelectedChildIds.value)
 }
 
 async function copyWhereUsedPathIdsValue(pathIds: string) {
@@ -3985,11 +4063,30 @@ async function copyWhereUsedTreePathIdsBulk() {
   await copyPathIdsList('Where-Used树形', whereUsedTreePathIdsList.value)
 }
 
+async function copyWhereUsedSelectedParents() {
+  await copyValueList('父件', whereUsedSelectedParents.value)
+}
+
+function clearWhereUsedSelection() {
+  whereUsedSelectedEntryKeys.value = new Set()
+}
+
 function setWhereUsedSelection(keys: string[]) {
   const nextKeys = keys.filter(Boolean)
-  const current = whereUsedSelectedEntryKeys.value
-  const isSame = nextKeys.length === current.size && nextKeys.every((key) => current.has(key))
-  whereUsedSelectedEntryKeys.value = isSame ? new Set() : new Set(nextKeys)
+  if (!nextKeys.length) {
+    whereUsedSelectedEntryKeys.value = new Set()
+    return
+  }
+  const next = new Set(whereUsedSelectedEntryKeys.value)
+  const hasAll = nextKeys.every((key) => next.has(key))
+  for (const key of nextKeys) {
+    if (hasAll) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+  }
+  whereUsedSelectedEntryKeys.value = next
 }
 
 function isWhereUsedEntrySelected(entry: Record<string, any>): boolean {
@@ -4019,9 +4116,24 @@ function selectWhereUsedTableRow(entry: Record<string, any>): void {
 
 function setBomSelection(lineIds: string[]) {
   const nextIds = lineIds.filter(Boolean)
-  const current = bomSelectedLineIds.value
-  const isSame = nextIds.length === current.size && nextIds.every((id) => current.has(id))
-  bomSelectedLineIds.value = isSame ? new Set() : new Set(nextIds)
+  if (!nextIds.length) {
+    bomSelectedLineIds.value = new Set()
+    return
+  }
+  const next = new Set(bomSelectedLineIds.value)
+  const hasAll = nextIds.every((id) => next.has(id))
+  for (const id of nextIds) {
+    if (hasAll) {
+      next.delete(id)
+    } else {
+      next.add(id)
+    }
+  }
+  bomSelectedLineIds.value = next
+}
+
+function clearBomSelection() {
+  bomSelectedLineIds.value = new Set()
 }
 
 function isBomItemSelected(item: Record<string, any>): boolean {
