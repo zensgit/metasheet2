@@ -803,6 +803,22 @@ async function waitOptional(scope, text) {
     if (!fieldKey) {
       throw new Error('BOM compare detail field key missing.');
     }
+    const compareCopyButton = compareDetailSection.locator('button:has-text("复制字段对照")');
+    if ((await compareCopyButton.count()) === 0) {
+      throw new Error('BOM compare detail copy button missing.');
+    }
+    if (!(await compareCopyButton.isEnabled())) {
+      throw new Error('BOM compare detail copy button is disabled.');
+    }
+    const compareExportButton = compareDetailSection.locator('button:has-text("导出字段对照")');
+    if ((await compareExportButton.count()) === 0) {
+      throw new Error('BOM compare detail export button missing.');
+    }
+    if (!(await compareExportButton.isEnabled())) {
+      throw new Error('BOM compare detail export button is disabled.');
+    }
+    await compareCopyButton.click();
+    await detailSection.getByText('已复制字段对照', { exact: false }).waitFor({ timeout: 60000 });
   } else {
     console.warn('Skipping compare detail validation; no compare rows available.');
   }

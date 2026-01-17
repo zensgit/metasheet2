@@ -31,6 +31,7 @@
 - PLM UI regression (multi-select copy): `docs/verification-plm-ui-regression-20260117_230222.md`
 - PLM BOM tools seed: `artifacts/plm-bom-tools-20260117_2333.md`
 - PLM UI regression (BOM compare detail): `docs/verification-plm-ui-regression-20260117_233428.md`
+- PLM UI regression (BOM compare detail export): `docs/verification-plm-ui-regression-20260117_234818.md`
 
 ## Environment Notes
 - MetaSheet API: `http://127.0.0.1:7790`

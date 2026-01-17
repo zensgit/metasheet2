@@ -1795,6 +1795,12 @@
                   {{ compareSelectedMeta.pathLabel }}
                 </span>
               </template>
+              <button class="btn ghost mini" :disabled="!compareDetailRows.length" @click="copyCompareDetailRows">
+                复制字段对照
+              </button>
+              <button class="btn ghost mini" :disabled="!compareDetailRows.length" @click="exportCompareDetailCsv">
+                导出字段对照
+              </button>
               <button class="btn ghost mini" :disabled="!compareSelectedEntry" @click="clearCompareSelection">
                 清空选择
               </button>
@@ -6575,6 +6581,69 @@ function exportBomCompareCsv() {
     ...compareChangedFiltered.value.map((entry) => buildRow(entry, 'changed')),
   ]
   downloadCsv(`plm-bom-compare-${Date.now()}.csv`, headers, rows)
+}
+
+async function copyCompareDetailRows() {
+  if (!compareDetailRows.value.length) {
+    setDeepLinkMessage('暂无字段对照', true)
+    return
+  }
+  const headers = [
+    'field_key',
+    'field_label',
+    'description',
+    'left',
+    'right',
+    'severity',
+    'normalized_left',
+    'normalized_right',
+  ]
+  const rows = compareDetailRows.value.map((row) => [
+    row.key,
+    row.label,
+    row.description || '',
+    row.left === '-' ? '' : row.left,
+    row.right === '-' ? '' : row.right,
+    row.severity || '',
+    row.normalizedLeft || '',
+    row.normalizedRight || '',
+  ])
+  const lines = [headers, ...rows].map((line) => line.join('\t')).join('\n')
+  const ok = await copyToClipboard(lines)
+  if (!ok) {
+    setDeepLinkMessage('复制字段对照失败', true)
+    return
+  }
+  setDeepLinkMessage(`已复制字段对照：${rows.length} 行`)
+}
+
+function exportCompareDetailCsv() {
+  if (!compareDetailRows.value.length) {
+    setDeepLinkMessage('暂无字段对照', true)
+    return
+  }
+  const headers = [
+    'field_key',
+    'field_label',
+    'description',
+    'left',
+    'right',
+    'severity',
+    'normalized_left',
+    'normalized_right',
+  ]
+  const rows = compareDetailRows.value.map((row) => [
+    row.key,
+    row.label,
+    row.description || '',
+    row.left === '-' ? '' : row.left,
+    row.right === '-' ? '' : row.right,
+    row.severity || '',
+    row.normalizedLeft || '',
+    row.normalizedRight || '',
+  ])
+  downloadCsv(`plm-bom-compare-detail-${Date.now()}.csv`, headers, rows)
+  setDeepLinkMessage('已导出字段对照。')
 }
 
 
