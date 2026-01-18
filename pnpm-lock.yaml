@@ -41,6 +41,9 @@ importers:
       eslint-plugin-vue:
         specifier: ^9.19.2
         version: 9.33.0(eslint@8.57.1)
+      js-yaml:
+        specifier: ^4.1.1
+        version: 4.1.1
       preact:
         specifier: ^10.28.1
         version: 10.28.2

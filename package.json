@@ -98,6 +98,7 @@
     "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-vue": "^9.19.2",
+    "js-yaml": "^4.1.1",
     "preact": "^10.28.1",
     "prettier": "^3.1.1",
     "tsx": "^4.20.6",

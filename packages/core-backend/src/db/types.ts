@@ -16,6 +16,10 @@ export interface Database {
   user_orgs: UserOrgsTable
   cells: CellsTable
   formulas: FormulasTable
+  spreadsheets: SpreadsheetsTable
+  sheets: SheetsTable
+  cell_versions: CellVersionsTable
+  named_ranges: NamedRangesTable
   tables: TablesTable
   // Data source tables
   data_sources: DataSourcesTable
@@ -689,11 +693,43 @@ export interface TablesTable {
   updated_at: UpdatedAt
 }
 
+export interface SpreadsheetsTable {
+  id: string
+  name: string
+  owner_id: string | null
+  deleted_at: NullableTimestamp
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+  description?: string | null
+  workspace_id?: string | null
+  is_template?: boolean | null
+  template_id?: string | null
+  settings?: JSONColumnType<Record<string, unknown> | null>
+  metadata?: JSONColumnType<Record<string, unknown> | null>
+  created_by?: string | null
+}
+
+export interface SheetsTable {
+  id: string
+  spreadsheet_id: string
+  name: string
+  order_index: number
+  row_count: number
+  column_count: number
+  frozen_rows?: number
+  frozen_columns?: number
+  hidden_rows?: JSONColumnType<number[] | null>
+  hidden_columns?: JSONColumnType<number[] | null>
+  row_heights?: JSONColumnType<Record<string, number> | null>
+  column_widths?: JSONColumnType<Record<string, number> | null>
+  config?: JSONColumnType<Record<string, unknown> | null>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
 export interface CellsTable {
   id: Generated<string>
   sheet_id: string
-  row_id: string
-  column_id: string
   row_index: number
   column_index: number
   value: JSONColumnType<Record<string, unknown> | null>
@@ -716,6 +752,31 @@ export interface FormulasTable {
   error_message: string | null
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+export interface CellVersionsTable {
+  id: Generated<string>
+  cell_id: string
+  sheet_id: string
+  version_number: number
+  value: JSONColumnType<Record<string, unknown> | null> | null
+  formula: string | null
+  format: JSONColumnType<Record<string, unknown> | null> | null
+  changed_by: string | null
+  change_type: string | null
+  change_summary: string | null
+  created_at: CreatedAt
+}
+
+export interface NamedRangesTable {
+  id: string
+  spreadsheet_id: string
+  sheet_id: string | null
+  name: string
+  range: string
+  description: string | null
+  created_by: string | null
+  created_at: CreatedAt
 }
 
 // ============================================

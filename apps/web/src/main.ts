@@ -15,6 +15,8 @@ import GalleryView from './views/GalleryView.vue'
 import FormView from './views/FormView.vue'
 import PlmProductView from './views/PlmProductView.vue'
 import AttendanceView from './views/AttendanceView.vue'
+import SpreadsheetsView from './views/SpreadsheetsView.vue'
+import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -57,6 +59,18 @@ const routes: RouteRecordRaw[] = [
     name: 'attendance',
     component: AttendanceView,
     meta: { title: 'Attendance' }
+  },
+  {
+    path: '/spreadsheets',
+    name: 'spreadsheet-list',
+    component: SpreadsheetsView,
+    meta: { title: 'Spreadsheets' }
+  },
+  {
+    path: '/spreadsheets/:id',
+    name: 'spreadsheet-detail',
+    component: SpreadsheetDetailView,
+    meta: { title: 'Spreadsheet' }
   },
   {
     path: '/plm',

@@ -285,6 +285,78 @@ components:
               type: integer
         minPunchIntervalMinutes:
           type: integer
+    Spreadsheet:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+    Sheet:
+      type: object
+      properties:
+        id:
+          type: string
+        spreadsheet_id:
+          type: string
+        name:
+          type: string
+        order_index:
+          type: integer
+        row_count:
+          type: integer
+        column_count:
+          type: integer
+        frozen_rows:
+          type: integer
+          nullable: true
+        frozen_columns:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Cell:
+      type: object
+      properties:
+        id:
+          type: string
+        sheet_id:
+          type: string
+        row_index:
+          type: integer
+        column_index:
+          type: integer
+        value:
+          nullable: true
+        data_type:
+          type: string
+          nullable: true
+        formula:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token
