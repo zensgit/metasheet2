@@ -538,6 +538,7 @@ async function waitOptional(scope, text) {
     const currentFilterValue = await bomSection.locator('#plm-bom-filter').inputValue();
     if (currentFilterValue.trim()) {
       const presetName = `auto-${Date.now()}`;
+      let managerPresetLabel = presetName;
       const presetGroup = `group-${Date.now()}`;
       const bomPresetGroupInput = bomSection.locator('#plm-bom-filter-preset-group');
       if ((await bomPresetGroupInput.count()) === 0) {
@@ -569,12 +570,24 @@ async function waitOptional(scope, text) {
       if ((await bomGroupFilter.count()) === 0) {
         throw new Error('BOM filter preset group filter missing.');
       }
+      await bomPresetGroupInput.fill('');
+      await bomSection.locator('label:has(#plm-bom-filter-preset) button:has-text("设为分组")').click();
+      await bomGroupFilter.selectOption('ungrouped');
+      const ungroupedOption = presetSelect.locator('option', { hasText: presetName });
+      if ((await ungroupedOption.count()) === 0) {
+        throw new Error('BOM preset assign group clear failed.');
+      }
+      await bomPresetGroupInput.fill(presetGroup);
+      await bomSection.locator('label:has(#plm-bom-filter-preset) button:has-text("设为分组")').click();
       await bomGroupFilter.selectOption(presetGroup);
       const groupOption = presetSelect.locator('option', { hasText: presetName });
       if ((await groupOption.count()) === 0) {
         throw new Error('BOM filter preset group filter did not match expected preset.');
       }
       await bomGroupFilter.selectOption('all');
+      if (lastValue) {
+        await presetSelect.selectOption(lastValue);
+      }
       const bomShareButton = bomSection.locator(
         'label:has(#plm-bom-filter-preset) button:has-text("分享")'
       );
@@ -611,10 +624,34 @@ async function waitOptional(scope, text) {
         if ((await importedOption.count()) === 0) {
           throw new Error('BOM filter preset import did not create a new preset.');
         }
+        managerPresetLabel = importLabel;
       }
-      const bomClearButton = bomSection.locator(
-        'label:has(#plm-bom-filter-preset-import) button:has-text("清空")'
-      );
+      const bomManagerToggle = bomSection.locator('label:has(#plm-bom-filter-preset-import) button:has-text("管理")');
+      if ((await bomManagerToggle.count()) === 0) {
+        throw new Error('BOM preset manager toggle missing.');
+      }
+      await bomManagerToggle.click();
+      const bomManagerPanel = bomSection.locator('.preset-manager');
+      await bomManagerPanel.waitFor({ timeout: 10000 });
+      const bomBatchGroupInput = bomSection.locator('#plm-bom-filter-preset-batch-group');
+      if ((await bomBatchGroupInput.count()) === 0) {
+        throw new Error('BOM preset batch group input missing.');
+      }
+      await bomSection.locator('.preset-manager button:has-text("全选")').click();
+      await bomBatchGroupInput.fill('batch');
+      await bomSection.locator('.preset-manager button:has-text("应用分组")').click();
+      await bomGroupFilter.selectOption('batch');
+      const batchOption = presetSelect.locator('option', { hasText: managerPresetLabel });
+      if ((await batchOption.count()) === 0) {
+        throw new Error('BOM preset batch group apply failed.');
+      }
+      const optionCountBeforeDelete = await presetSelect.locator('option').count();
+      await bomSection.locator('.preset-manager button:has-text("批量删除")').click();
+      const afterDeleteCount = await presetSelect.locator('option').count();
+      if (afterDeleteCount >= optionCountBeforeDelete) {
+        throw new Error('BOM preset batch delete did not remove entries.');
+      }
+      const bomClearButton = bomSection.locator('#plm-bom-filter-preset-clear');
       if ((await bomClearButton.count()) === 0) {
         throw new Error('BOM filter preset clear button missing.');
       }
@@ -822,6 +859,7 @@ async function waitOptional(scope, text) {
   if (await whereUsedPresetNameInput.count()) {
     await whereUsedFilterInput.fill(whereUsedExpect || whereUsedId);
     const presetName = `auto-${Date.now()}`;
+    let managerPresetLabel = presetName;
     const presetGroup = `group-${Date.now()}`;
     const whereUsedPresetGroupInput = whereUsedSection.locator('#plm-where-used-filter-preset-group');
     if ((await whereUsedPresetGroupInput.count()) === 0) {
@@ -854,12 +892,24 @@ async function waitOptional(scope, text) {
     if ((await whereUsedGroupFilter.count()) === 0) {
       throw new Error('Where-used filter preset group filter missing.');
     }
+    await whereUsedPresetGroupInput.fill('');
+    await whereUsedSection.locator('label:has(#plm-where-used-filter-preset) button:has-text("设为分组")').click();
+    await whereUsedGroupFilter.selectOption('ungrouped');
+    const ungroupedOption = presetSelect.locator('option', { hasText: presetName });
+    if ((await ungroupedOption.count()) === 0) {
+      throw new Error('Where-used preset assign group clear failed.');
+    }
+    await whereUsedPresetGroupInput.fill(presetGroup);
+    await whereUsedSection.locator('label:has(#plm-where-used-filter-preset) button:has-text("设为分组")').click();
     await whereUsedGroupFilter.selectOption(presetGroup);
     const groupOption = presetSelect.locator('option', { hasText: presetName });
     if ((await groupOption.count()) === 0) {
       throw new Error('Where-used filter preset group filter did not match expected preset.');
     }
     await whereUsedGroupFilter.selectOption('all');
+    if (lastValue) {
+      await presetSelect.selectOption(lastValue);
+    }
     const whereUsedShareButton = whereUsedSection.locator(
       'label:has(#plm-where-used-filter-preset) button:has-text("分享")'
     );
@@ -897,10 +947,36 @@ async function waitOptional(scope, text) {
       if ((await importedOption.count()) === 0) {
         throw new Error('Where-used filter preset import did not create a new preset.');
       }
+      managerPresetLabel = importLabel;
     }
-    const whereUsedClearButton = whereUsedSection.locator(
-      'label:has(#plm-where-used-filter-preset-import) button:has-text("清空")'
+    const whereUsedManagerToggle = whereUsedSection.locator(
+      'label:has(#plm-where-used-filter-preset-import) button:has-text("管理")'
     );
+    if ((await whereUsedManagerToggle.count()) === 0) {
+      throw new Error('Where-used preset manager toggle missing.');
+    }
+    await whereUsedManagerToggle.click();
+    const whereUsedManagerPanel = whereUsedSection.locator('.preset-manager');
+    await whereUsedManagerPanel.waitFor({ timeout: 10000 });
+    const whereUsedBatchGroupInput = whereUsedSection.locator('#plm-where-used-filter-preset-batch-group');
+    if ((await whereUsedBatchGroupInput.count()) === 0) {
+      throw new Error('Where-used preset batch group input missing.');
+    }
+    await whereUsedSection.locator('.preset-manager button:has-text("全选")').click();
+    await whereUsedBatchGroupInput.fill('batch');
+    await whereUsedSection.locator('.preset-manager button:has-text("应用分组")').click();
+    await whereUsedGroupFilter.selectOption('batch');
+    const batchOption = presetSelect.locator('option', { hasText: managerPresetLabel });
+    if ((await batchOption.count()) === 0) {
+      throw new Error('Where-used preset batch group apply failed.');
+    }
+    const optionCountBeforeDelete = await presetSelect.locator('option').count();
+    await whereUsedSection.locator('.preset-manager button:has-text("批量删除")').click();
+    const afterDeleteCount = await presetSelect.locator('option').count();
+    if (afterDeleteCount >= optionCountBeforeDelete) {
+      throw new Error('Where-used preset batch delete did not remove entries.');
+    }
+    const whereUsedClearButton = whereUsedSection.locator('#plm-where-used-filter-preset-clear');
     if ((await whereUsedClearButton.count()) === 0) {
       throw new Error('Where-used filter preset clear button missing.');
     }

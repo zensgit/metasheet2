@@ -10,6 +10,7 @@
 - PLM UI regression (filter presets conflict confirm update): `docs/verification-plm-ui-regression-20260118_043002.md`
 - PLM UI regression (filter presets share link): `docs/verification-plm-ui-regression-20260118_121019.md`
 - PLM UI regression (filter presets grouping): `docs/verification-plm-ui-regression-20260118_125754.md`
+- PLM UI regression (filter presets batch manage): `docs/verification-plm-ui-regression-20260118_172926.md`
 
 ## Environment Notes
 - MetaSheet API: `http://127.0.0.1:7778`

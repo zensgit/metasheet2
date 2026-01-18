@@ -501,6 +501,13 @@
             <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="shareBomFilterPreset">
               分享
             </button>
+            <button
+              class="btn ghost mini"
+              :disabled="!bomFilterPresetKey"
+              @click="assignBomPresetGroup"
+            >
+              设为分组
+            </button>
           </div>
           <div class="field-inline">
             <input
@@ -562,12 +569,48 @@
               @change="handleBomFilterPresetFileImport"
             />
             <button
+              id="plm-bom-filter-preset-clear"
               class="btn ghost mini"
               :disabled="!bomFilterPresets.length"
               @click="clearBomFilterPresets"
             >
               清空
             </button>
+            <button class="btn ghost mini" @click="showBomPresetManager = !showBomPresetManager">
+              {{ showBomPresetManager ? '收起' : '管理' }}
+            </button>
+          </div>
+          <div v-if="showBomPresetManager" class="preset-manager">
+            <div class="field-inline field-actions">
+              <button class="btn ghost mini" :disabled="!bomFilteredPresets.length" @click="selectAllBomPresets">
+                全选
+              </button>
+              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="clearBomPresetSelection">
+                清空选择
+              </button>
+              <span class="muted">已选 {{ bomPresetSelectionCount }}/{{ bomFilteredPresets.length }}</span>
+            </div>
+            <div class="field-inline field-actions">
+              <input
+                id="plm-bom-filter-preset-batch-group"
+                v-model.trim="bomPresetBatchGroup"
+                name="plmBomFilterPresetBatchGroup"
+                class="deep-link-input"
+                placeholder="批量分组（留空清除）"
+              />
+              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="applyBomPresetBatchGroup">
+                应用分组
+              </button>
+              <button class="btn ghost mini danger" :disabled="!bomPresetSelectionCount" @click="deleteBomPresetSelection">
+                批量删除
+              </button>
+            </div>
+            <div class="preset-list">
+              <label v-for="preset in bomFilteredPresets" :key="preset.key" class="preset-item">
+                <input type="checkbox" :value="preset.key" v-model="bomPresetSelection" />
+                <span>{{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}</span>
+              </label>
+            </div>
           </div>
         </label>
       </div>
@@ -1378,6 +1421,13 @@
             >
               分享
             </button>
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresetKey"
+              @click="assignWhereUsedPresetGroup"
+            >
+              设为分组
+            </button>
           </div>
           <div class="field-inline">
             <input
@@ -1443,12 +1493,64 @@
               @change="handleWhereUsedFilterPresetFileImport"
             />
             <button
+              id="plm-where-used-filter-preset-clear"
               class="btn ghost mini"
               :disabled="!whereUsedFilterPresets.length"
               @click="clearWhereUsedFilterPresets"
             >
               清空
             </button>
+            <button class="btn ghost mini" @click="showWhereUsedPresetManager = !showWhereUsedPresetManager">
+              {{ showWhereUsedPresetManager ? '收起' : '管理' }}
+            </button>
+          </div>
+          <div v-if="showWhereUsedPresetManager" class="preset-manager">
+            <div class="field-inline field-actions">
+              <button
+                class="btn ghost mini"
+                :disabled="!whereUsedFilteredPresets.length"
+                @click="selectAllWhereUsedPresets"
+              >
+                全选
+              </button>
+              <button
+                class="btn ghost mini"
+                :disabled="!whereUsedPresetSelectionCount"
+                @click="clearWhereUsedPresetSelection"
+              >
+                清空选择
+              </button>
+              <span class="muted">已选 {{ whereUsedPresetSelectionCount }}/{{ whereUsedFilteredPresets.length }}</span>
+            </div>
+            <div class="field-inline field-actions">
+              <input
+                id="plm-where-used-filter-preset-batch-group"
+                v-model.trim="whereUsedPresetBatchGroup"
+                name="plmWhereUsedFilterPresetBatchGroup"
+                class="deep-link-input"
+                placeholder="批量分组（留空清除）"
+              />
+              <button
+                class="btn ghost mini"
+                :disabled="!whereUsedPresetSelectionCount"
+                @click="applyWhereUsedPresetBatchGroup"
+              >
+                应用分组
+              </button>
+              <button
+                class="btn ghost mini danger"
+                :disabled="!whereUsedPresetSelectionCount"
+                @click="deleteWhereUsedPresetSelection"
+              >
+                批量删除
+              </button>
+            </div>
+            <div class="preset-list">
+              <label v-for="preset in whereUsedFilteredPresets" :key="preset.key" class="preset-item">
+                <input type="checkbox" :value="preset.key" v-model="whereUsedPresetSelection" />
+                <span>{{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}</span>
+              </label>
+            </div>
           </div>
         </label>
       </div>
@@ -2660,6 +2762,9 @@ const whereUsedFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
 const whereUsedFilterPresetGroup = ref('')
 const whereUsedFilterPresetGroupFilter = ref('all')
 const whereUsedFilterPresetFileInput = ref<HTMLInputElement | null>(null)
+const showWhereUsedPresetManager = ref(false)
+const whereUsedPresetSelection = ref<string[]>([])
+const whereUsedPresetBatchGroup = ref('')
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
 const whereUsedError = ref('')
@@ -2690,6 +2795,7 @@ const whereUsedFilteredPresets = computed(() => {
     (preset) => String(preset.group || '').trim() === filter
   )
 })
+const whereUsedPresetSelectionCount = computed(() => whereUsedPresetSelection.value.length)
 
 const whereUsedRows = computed(() => {
   const payload = whereUsed.value
@@ -3312,6 +3418,9 @@ const bomFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
 const bomFilterPresetGroup = ref('')
 const bomFilterPresetGroupFilter = ref('all')
 const bomFilterPresetFileInput = ref<HTMLInputElement | null>(null)
+const showBomPresetManager = ref(false)
+const bomPresetSelection = ref<string[]>([])
+const bomPresetBatchGroup = ref('')
 const bomFilterPlaceholder = computed(() => {
   const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
   return option?.placeholder || '编号/名称/行 ID'
@@ -3335,6 +3444,7 @@ const bomFilteredPresets = computed(() => {
   }
   return bomFilterPresets.value.filter((preset) => String(preset.group || '').trim() === filter)
 })
+const bomPresetSelectionCount = computed(() => bomPresetSelection.value.length)
 
 function normalizeFilterNeedle(value: string): string {
   return value.trim().toLowerCase()
@@ -3969,6 +4079,9 @@ function resetAll() {
   bomFilterPresetImportMode.value = 'merge'
   bomFilterPresetGroup.value = ''
   bomFilterPresetGroupFilter.value = 'all'
+  showBomPresetManager.value = false
+  bomPresetSelection.value = []
+  bomPresetBatchGroup.value = ''
   bomView.value = 'table'
   bomCollapsed.value = new Set()
   documentRole.value = ''
@@ -4045,6 +4158,9 @@ function resetAll() {
   whereUsedFilterPresetImportMode.value = 'merge'
   whereUsedFilterPresetGroup.value = ''
   whereUsedFilterPresetGroupFilter.value = 'all'
+  showWhereUsedPresetManager.value = false
+  whereUsedPresetSelection.value = []
+  whereUsedPresetBatchGroup.value = ''
   syncQueryParams({
     searchQuery: '',
     searchItemType: '',
@@ -6399,6 +6515,17 @@ function deleteBomFilterPreset() {
   setDeepLinkMessage('已删除 BOM 过滤预设。')
 }
 
+function assignBomPresetGroup() {
+  const group = bomFilterPresetGroup.value.trim()
+  if (!bomFilterPresetKey.value) return
+  const next = bomFilterPresets.value.map((preset) =>
+    preset.key === bomFilterPresetKey.value ? { ...preset, group } : preset
+  )
+  bomFilterPresets.value = next
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
+  setDeepLinkMessage(group ? '已更新 BOM 过滤预设分组。' : '已清空 BOM 过滤预设分组。')
+}
+
 async function shareBomFilterPreset() {
   const preset = bomFilterPresets.value.find((entry) => entry.key === bomFilterPresetKey.value)
   if (!preset) {
@@ -6415,6 +6542,45 @@ async function shareBomFilterPreset() {
     ok ? '已复制 BOM 过滤预设分享链接。' : '复制 BOM 过滤预设分享链接失败。',
     !ok
   )
+}
+
+function selectAllBomPresets() {
+  bomPresetSelection.value = bomFilteredPresets.value.map((preset) => preset.key)
+}
+
+function clearBomPresetSelection() {
+  bomPresetSelection.value = []
+}
+
+function applyBomPresetBatchGroup() {
+  if (!bomPresetSelection.value.length) {
+    setDeepLinkMessage('请选择要批量修改的 BOM 过滤预设。', true)
+    return
+  }
+  const group = bomPresetBatchGroup.value.trim()
+  const selected = new Set(bomPresetSelection.value)
+  bomFilterPresets.value = bomFilterPresets.value.map((preset) =>
+    selected.has(preset.key) ? { ...preset, group } : preset
+  )
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, bomFilterPresets.value)
+  bomPresetBatchGroup.value = ''
+  setDeepLinkMessage(group ? '已批量更新 BOM 过滤预设分组。' : '已清空选中 BOM 过滤预设分组。')
+}
+
+function deleteBomPresetSelection() {
+  if (!bomPresetSelection.value.length) {
+    setDeepLinkMessage('请选择要删除的 BOM 过滤预设。', true)
+    return
+  }
+  const selected = new Set(bomPresetSelection.value)
+  const next = bomFilterPresets.value.filter((preset) => !selected.has(preset.key))
+  bomFilterPresets.value = next
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
+  if (!next.some((preset) => preset.key === bomFilterPresetKey.value)) {
+    bomFilterPresetKey.value = ''
+  }
+  bomPresetSelection.value = []
+  setDeepLinkMessage(`已删除 ${selected.size} 条 BOM 过滤预设。`)
 }
 
 function saveWhereUsedFilterPreset() {
@@ -6460,6 +6626,17 @@ function deleteWhereUsedFilterPreset() {
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
 }
 
+function assignWhereUsedPresetGroup() {
+  const group = whereUsedFilterPresetGroup.value.trim()
+  if (!whereUsedFilterPresetKey.value) return
+  const next = whereUsedFilterPresets.value.map((preset) =>
+    preset.key === whereUsedFilterPresetKey.value ? { ...preset, group } : preset
+  )
+  whereUsedFilterPresets.value = next
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
+  setDeepLinkMessage(group ? '已更新 Where-Used 过滤预设分组。' : '已清空 Where-Used 过滤预设分组。')
+}
+
 async function shareWhereUsedFilterPreset() {
   const preset = whereUsedFilterPresets.value.find(
     (entry) => entry.key === whereUsedFilterPresetKey.value
@@ -6478,6 +6655,45 @@ async function shareWhereUsedFilterPreset() {
     ok ? '已复制 Where-Used 过滤预设分享链接。' : '复制 Where-Used 过滤预设分享链接失败。',
     !ok
   )
+}
+
+function selectAllWhereUsedPresets() {
+  whereUsedPresetSelection.value = whereUsedFilteredPresets.value.map((preset) => preset.key)
+}
+
+function clearWhereUsedPresetSelection() {
+  whereUsedPresetSelection.value = []
+}
+
+function applyWhereUsedPresetBatchGroup() {
+  if (!whereUsedPresetSelection.value.length) {
+    setDeepLinkMessage('请选择要批量修改的 Where-Used 过滤预设。', true)
+    return
+  }
+  const group = whereUsedPresetBatchGroup.value.trim()
+  const selected = new Set(whereUsedPresetSelection.value)
+  whereUsedFilterPresets.value = whereUsedFilterPresets.value.map((preset) =>
+    selected.has(preset.key) ? { ...preset, group } : preset
+  )
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, whereUsedFilterPresets.value)
+  whereUsedPresetBatchGroup.value = ''
+  setDeepLinkMessage(group ? '已批量更新 Where-Used 过滤预设分组。' : '已清空选中 Where-Used 过滤预设分组。')
+}
+
+function deleteWhereUsedPresetSelection() {
+  if (!whereUsedPresetSelection.value.length) {
+    setDeepLinkMessage('请选择要删除的 Where-Used 过滤预设。', true)
+    return
+  }
+  const selected = new Set(whereUsedPresetSelection.value)
+  const next = whereUsedFilterPresets.value.filter((preset) => !selected.has(preset.key))
+  whereUsedFilterPresets.value = next
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
+  if (!next.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
+    whereUsedFilterPresetKey.value = ''
+  }
+  whereUsedPresetSelection.value = []
+  setDeepLinkMessage(`已删除 ${selected.size} 条 Where-Used 过滤预设。`)
 }
 
 function formatPresetLabelPreview(labels: string[]): string {
@@ -8197,6 +8413,8 @@ watch(
     if (!bomFilteredPresets.value.some((preset) => preset.key === bomFilterPresetKey.value)) {
       bomFilterPresetKey.value = ''
     }
+    const allowed = new Set(bomFilteredPresets.value.map((preset) => preset.key))
+    bomPresetSelection.value = bomPresetSelection.value.filter((key) => allowed.has(key))
   }
 )
 
@@ -8206,8 +8424,22 @@ watch(
     if (!whereUsedFilteredPresets.value.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
       whereUsedFilterPresetKey.value = ''
     }
+    const allowed = new Set(whereUsedFilteredPresets.value.map((preset) => preset.key))
+    whereUsedPresetSelection.value = whereUsedPresetSelection.value.filter((key) => allowed.has(key))
   }
 )
+
+watch(showBomPresetManager, (value) => {
+  if (value) return
+  bomPresetSelection.value = []
+  bomPresetBatchGroup.value = ''
+})
+
+watch(showWhereUsedPresetManager, (value) => {
+  if (value) return
+  whereUsedPresetSelection.value = []
+  whereUsedPresetBatchGroup.value = ''
+})
 
 watch(
   () => [searchQuery.value, searchItemType.value, searchLimit.value],
@@ -8598,6 +8830,37 @@ watch(
   display: inline-flex;
   gap: 4px;
   flex-wrap: wrap;
+}
+
+.preset-manager {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px dashed #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  display: grid;
+  gap: 6px;
+}
+
+.preset-list {
+  display: grid;
+  gap: 4px;
+  max-height: 160px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #374151;
+}
+
+.btn.danger {
+  border-color: #fecaca;
+  color: #b91c1c;
 }
 
 .form-grid {
