@@ -14,9 +14,10 @@
 - Import feedback summarizes skipped entries and reasons.
 - Import shows conflict preview and confirmation before overwrite.
 - Presets support share links for cross-user reuse.
+- Presets can be grouped and filtered by group.
 
 ## Verification
 - Script: `scripts/verify-plm-ui-regression.sh`
 - Command: `AUTO_START=true PLM_BASE_URL=http://127.0.0.1:7911 scripts/verify-plm-ui-regression.sh`
-- Report: `docs/verification-plm-ui-regression-20260118_121019.md`
-- Artifact: `artifacts/plm-ui-regression-20260118_121019.png`
+- Report: `docs/verification-plm-ui-regression-20260118_125754.md`
+- Artifact: `artifacts/plm-ui-regression-20260118_125754.png`

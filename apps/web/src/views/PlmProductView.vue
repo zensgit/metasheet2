@@ -475,10 +475,21 @@
         <label for="plm-bom-filter-preset">
           预设
           <div class="field-inline">
+            <select
+              id="plm-bom-filter-preset-group-filter"
+              v-model="bomFilterPresetGroupFilter"
+              name="plmBomFilterPresetGroupFilter"
+            >
+              <option value="all">全部分组</option>
+              <option value="ungrouped">未分组</option>
+              <option v-for="group in bomFilterPresetGroups" :key="group" :value="group">
+                {{ group }}
+              </option>
+            </select>
             <select id="plm-bom-filter-preset" v-model="bomFilterPresetKey" name="plmBomFilterPreset">
               <option value="">选择预设</option>
-              <option v-for="preset in bomFilterPresets" :key="preset.key" :value="preset.key">
-                {{ preset.label }}
+              <option v-for="preset in bomFilteredPresets" :key="preset.key" :value="preset.key">
+                {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
               </option>
             </select>
             <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="applyBomFilterPreset">
@@ -497,6 +508,13 @@
               v-model.trim="bomFilterPresetName"
               name="plmBomFilterPresetName"
               placeholder="新预设名称"
+            />
+            <input
+              id="plm-bom-filter-preset-group"
+              v-model.trim="bomFilterPresetGroup"
+              name="plmBomFilterPresetGroup"
+              class="deep-link-input"
+              placeholder="分组（可选）"
             />
             <button class="btn ghost mini" :disabled="!canSaveBomFilterPreset" @click="saveBomFilterPreset">
               保存
@@ -1319,13 +1337,24 @@
           预设
           <div class="field-inline">
             <select
+              id="plm-where-used-filter-preset-group-filter"
+              v-model="whereUsedFilterPresetGroupFilter"
+              name="plmWhereUsedFilterPresetGroupFilter"
+            >
+              <option value="all">全部分组</option>
+              <option value="ungrouped">未分组</option>
+              <option v-for="group in whereUsedFilterPresetGroups" :key="group" :value="group">
+                {{ group }}
+              </option>
+            </select>
+            <select
               id="plm-where-used-filter-preset"
               v-model="whereUsedFilterPresetKey"
               name="plmWhereUsedFilterPreset"
             >
               <option value="">选择预设</option>
-              <option v-for="preset in whereUsedFilterPresets" :key="preset.key" :value="preset.key">
-                {{ preset.label }}
+              <option v-for="preset in whereUsedFilteredPresets" :key="preset.key" :value="preset.key">
+                {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
               </option>
             </select>
             <button
@@ -1356,6 +1385,13 @@
               v-model.trim="whereUsedFilterPresetName"
               name="plmWhereUsedFilterPresetName"
               placeholder="新预设名称"
+            />
+            <input
+              id="plm-where-used-filter-preset-group"
+              v-model.trim="whereUsedFilterPresetGroup"
+              name="plmWhereUsedFilterPresetGroup"
+              class="deep-link-input"
+              placeholder="分组（可选）"
             />
             <button
               class="btn ghost mini"
@@ -2361,6 +2397,7 @@ type FilterPreset = {
   label: string
   field: string
   value: string
+  group?: string
 }
 
 type FilterPresetImportEntry = {
@@ -2368,6 +2405,7 @@ type FilterPresetImportEntry = {
   label: string
   field: string
   value: string
+  group?: string
 }
 
 type BomTreeRow = {
@@ -2619,6 +2657,8 @@ const whereUsedFilterPresetName = ref('')
 const whereUsedFilterPresets = ref<FilterPreset[]>([])
 const whereUsedFilterPresetImportText = ref('')
 const whereUsedFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
+const whereUsedFilterPresetGroup = ref('')
+const whereUsedFilterPresetGroupFilter = ref('all')
 const whereUsedFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const whereUsed = ref<any | null>(null)
 const whereUsedLoading = ref(false)
@@ -2632,6 +2672,24 @@ const whereUsedFilterPlaceholder = computed(() => {
 const canSaveWhereUsedFilterPreset = computed(
   () => Boolean(whereUsedFilter.value.trim() && whereUsedFilterPresetName.value.trim())
 )
+const whereUsedFilterPresetGroups = computed(() => {
+  const groups = new Set<string>()
+  for (const preset of whereUsedFilterPresets.value) {
+    const group = String(preset.group || '').trim()
+    if (group) groups.add(group)
+  }
+  return Array.from(groups).sort((left, right) => left.localeCompare(right))
+})
+const whereUsedFilteredPresets = computed(() => {
+  const filter = whereUsedFilterPresetGroupFilter.value
+  if (filter === 'all') return whereUsedFilterPresets.value
+  if (filter === 'ungrouped') {
+    return whereUsedFilterPresets.value.filter((preset) => !String(preset.group || '').trim())
+  }
+  return whereUsedFilterPresets.value.filter(
+    (preset) => String(preset.group || '').trim() === filter
+  )
+})
 
 const whereUsedRows = computed(() => {
   const payload = whereUsed.value
@@ -3251,6 +3309,8 @@ const bomFilterPresetName = ref('')
 const bomFilterPresets = ref<FilterPreset[]>([])
 const bomFilterPresetImportText = ref('')
 const bomFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
+const bomFilterPresetGroup = ref('')
+const bomFilterPresetGroupFilter = ref('all')
 const bomFilterPresetFileInput = ref<HTMLInputElement | null>(null)
 const bomFilterPlaceholder = computed(() => {
   const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
@@ -3259,6 +3319,22 @@ const bomFilterPlaceholder = computed(() => {
 const canSaveBomFilterPreset = computed(
   () => Boolean(bomFilter.value.trim() && bomFilterPresetName.value.trim())
 )
+const bomFilterPresetGroups = computed(() => {
+  const groups = new Set<string>()
+  for (const preset of bomFilterPresets.value) {
+    const group = String(preset.group || '').trim()
+    if (group) groups.add(group)
+  }
+  return Array.from(groups).sort((left, right) => left.localeCompare(right))
+})
+const bomFilteredPresets = computed(() => {
+  const filter = bomFilterPresetGroupFilter.value
+  if (filter === 'all') return bomFilterPresets.value
+  if (filter === 'ungrouped') {
+    return bomFilterPresets.value.filter((preset) => !String(preset.group || '').trim())
+  }
+  return bomFilterPresets.value.filter((preset) => String(preset.group || '').trim() === filter)
+})
 
 function normalizeFilterNeedle(value: string): string {
   return value.trim().toLowerCase()
@@ -3891,6 +3967,8 @@ function resetAll() {
   bomFilterPresetName.value = ''
   bomFilterPresetImportText.value = ''
   bomFilterPresetImportMode.value = 'merge'
+  bomFilterPresetGroup.value = ''
+  bomFilterPresetGroupFilter.value = 'all'
   bomView.value = 'table'
   bomCollapsed.value = new Set()
   documentRole.value = ''
@@ -3965,6 +4043,8 @@ function resetAll() {
   whereUsedFilterPresetName.value = ''
   whereUsedFilterPresetImportText.value = ''
   whereUsedFilterPresetImportMode.value = 'merge'
+  whereUsedFilterPresetGroup.value = ''
+  whereUsedFilterPresetGroupFilter.value = 'all'
   syncQueryParams({
     searchQuery: '',
     searchItemType: '',
@@ -6247,23 +6327,25 @@ function upsertFilterPreset(
   label: string,
   field: string,
   value: string,
+  group: string,
   prefix: string
 ): { presets: FilterPreset[]; key: string } {
   const trimmedLabel = label.trim()
   const trimmedValue = value.trim()
+  const trimmedGroup = group.trim()
   if (!trimmedLabel || !trimmedValue) {
     return { presets, key: '' }
   }
   const existingIndex = presets.findIndex((preset) => preset.label === trimmedLabel)
   if (existingIndex >= 0) {
-    const updated = { ...presets[existingIndex], field, value: trimmedValue }
+    const updated = { ...presets[existingIndex], field, value: trimmedValue, group: trimmedGroup }
     const next = [...presets]
     next[existingIndex] = updated
     return { presets: next, key: updated.key }
   }
   const key = createFilterPresetKey(prefix)
   return {
-    presets: [...presets, { key, label: trimmedLabel, field, value: trimmedValue }],
+    presets: [...presets, { key, label: trimmedLabel, field, value: trimmedValue, group: trimmedGroup }],
     key,
   }
 }
@@ -6286,12 +6368,14 @@ function saveBomFilterPreset() {
     bomFilterPresetName.value,
     bomFilterField.value,
     bomFilter.value,
+    bomFilterPresetGroup.value,
     'bom'
   )
   bomFilterPresets.value = presets
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
   bomFilterPresetKey.value = key
   bomFilterPresetName.value = ''
+  bomFilterPresetGroup.value = ''
   setDeepLinkMessage('已保存 BOM 过滤预设。')
 }
 
@@ -6343,12 +6427,14 @@ function saveWhereUsedFilterPreset() {
     whereUsedFilterPresetName.value,
     whereUsedFilterField.value,
     whereUsedFilter.value,
+    whereUsedFilterPresetGroup.value,
     'where-used'
   )
   whereUsedFilterPresets.value = presets
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
   whereUsedFilterPresetKey.value = key
   whereUsedFilterPresetName.value = ''
+  whereUsedFilterPresetGroup.value = ''
   setDeepLinkMessage('已保存 Where-Used 过滤预设。')
 }
 
@@ -6429,6 +6515,7 @@ function encodePresetSharePayload(preset: FilterPreset): string {
     label: preset.label,
     field: preset.field,
     value: preset.value,
+    group: preset.group || '',
   })
   return encodeBase64Url(payload)
 }
@@ -6449,7 +6536,8 @@ function decodePresetSharePayload(
     const rawField = String(record.field ?? '').trim()
     const allowedFields = new Set(fieldOptions.map((option) => option.value))
     const field = allowedFields.has(rawField) ? rawField : 'all'
-    return { key: '', label, field, value }
+    const group = String(record.group ?? '').trim()
+    return { key: '', label, field, value, group }
   } catch (_err) {
     return null
   }
@@ -6603,8 +6691,9 @@ function parseFilterPresetImport(
     const rawField = String(record.field ?? '').trim()
     const field = allowedFields.has(rawField) ? rawField : 'all'
     const key = String(record.key ?? '').trim()
+    const group = String(record.group ?? '').trim()
     validCount += 1
-    map.set(label, { key, label, field, value })
+    map.set(label, { key, label, field, value, group })
   }
   return {
     entries: Array.from(map.values()),
@@ -6636,14 +6725,15 @@ function mergeImportedFilterPresets(
     const label = entry.label
     const value = entry.value
     const field = entry.field
+    const group = String(entry.group || '').trim()
     const rawKey = entry.key
     const existingIndex = next.findIndex((preset) => preset.label === label)
     if (existingIndex >= 0) {
-      next[existingIndex] = { ...next[existingIndex], field, value }
+      next[existingIndex] = { ...next[existingIndex], field, value, group }
       updated += 1
       continue
     }
-    next.push({ key: ensureKey(rawKey), label, field, value })
+    next.push({ key: ensureKey(rawKey), label, field, value, group })
     added += 1
   }
   return { presets: next, added, updated }
@@ -6773,6 +6863,7 @@ function clearBomFilterPresets() {
   bomFilterPresets.value = []
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, [])
   bomFilterPresetKey.value = ''
+  bomFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 BOM 过滤预设。')
 }
 
@@ -6885,6 +6976,7 @@ function clearWhereUsedFilterPresets() {
   whereUsedFilterPresets.value = []
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, [])
   whereUsedFilterPresetKey.value = ''
+  whereUsedFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 Where-Used 过滤预设。')
 }
 
@@ -7419,8 +7511,9 @@ function loadStoredFilterPresets(storageKey: string): FilterPreset[] {
         const label = String(entry?.label || '').trim()
         const field = String(entry?.field || '').trim()
         const value = String(entry?.value || '').trim()
+        const group = String(entry?.group || '').trim()
         if (!key || !label || !field || !value) return null
-        return { key, label, field, value }
+        return { key, label, field, value, group }
       })
       .filter(Boolean) as FilterPreset[]
   } catch (_err) {
@@ -8096,6 +8189,24 @@ watch(
     }
   },
   { deep: true }
+)
+
+watch(
+  () => [bomFilterPresetGroupFilter.value, bomFilterPresets.value],
+  () => {
+    if (!bomFilteredPresets.value.some((preset) => preset.key === bomFilterPresetKey.value)) {
+      bomFilterPresetKey.value = ''
+    }
+  }
+)
+
+watch(
+  () => [whereUsedFilterPresetGroupFilter.value, whereUsedFilterPresets.value],
+  () => {
+    if (!whereUsedFilteredPresets.value.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
+      whereUsedFilterPresetKey.value = ''
+    }
+  }
 )
 
 watch(

@@ -538,7 +538,13 @@ async function waitOptional(scope, text) {
     const currentFilterValue = await bomSection.locator('#plm-bom-filter').inputValue();
     if (currentFilterValue.trim()) {
       const presetName = `auto-${Date.now()}`;
+      const presetGroup = `group-${Date.now()}`;
+      const bomPresetGroupInput = bomSection.locator('#plm-bom-filter-preset-group');
+      if ((await bomPresetGroupInput.count()) === 0) {
+        throw new Error('BOM filter preset group input missing.');
+      }
       await bomPresetNameInput.fill(presetName);
+      await bomPresetGroupInput.fill(presetGroup);
       await bomSection
         .locator('label:has(#plm-bom-filter-preset-name) button:has-text("保存")')
         .click();
@@ -559,6 +565,16 @@ async function waitOptional(scope, text) {
           throw new Error('BOM filter preset did not apply the expected value.');
         }
       }
+      const bomGroupFilter = bomSection.locator('#plm-bom-filter-preset-group-filter');
+      if ((await bomGroupFilter.count()) === 0) {
+        throw new Error('BOM filter preset group filter missing.');
+      }
+      await bomGroupFilter.selectOption(presetGroup);
+      const groupOption = presetSelect.locator('option', { hasText: presetName });
+      if ((await groupOption.count()) === 0) {
+        throw new Error('BOM filter preset group filter did not match expected preset.');
+      }
+      await bomGroupFilter.selectOption('all');
       const bomShareButton = bomSection.locator(
         'label:has(#plm-bom-filter-preset) button:has-text("分享")'
       );
@@ -806,7 +822,13 @@ async function waitOptional(scope, text) {
   if (await whereUsedPresetNameInput.count()) {
     await whereUsedFilterInput.fill(whereUsedExpect || whereUsedId);
     const presetName = `auto-${Date.now()}`;
+    const presetGroup = `group-${Date.now()}`;
+    const whereUsedPresetGroupInput = whereUsedSection.locator('#plm-where-used-filter-preset-group');
+    if ((await whereUsedPresetGroupInput.count()) === 0) {
+      throw new Error('Where-used filter preset group input missing.');
+    }
     await whereUsedPresetNameInput.fill(presetName);
+    await whereUsedPresetGroupInput.fill(presetGroup);
     await whereUsedSection
       .locator('label:has(#plm-where-used-filter-preset-name) button:has-text("保存")')
       .click();
@@ -828,6 +850,16 @@ async function waitOptional(scope, text) {
         throw new Error('Where-used filter preset did not apply the expected value.');
       }
     }
+    const whereUsedGroupFilter = whereUsedSection.locator('#plm-where-used-filter-preset-group-filter');
+    if ((await whereUsedGroupFilter.count()) === 0) {
+      throw new Error('Where-used filter preset group filter missing.');
+    }
+    await whereUsedGroupFilter.selectOption(presetGroup);
+    const groupOption = presetSelect.locator('option', { hasText: presetName });
+    if ((await groupOption.count()) === 0) {
+      throw new Error('Where-used filter preset group filter did not match expected preset.');
+    }
+    await whereUsedGroupFilter.selectOption('all');
     const whereUsedShareButton = whereUsedSection.locator(
       'label:has(#plm-where-used-filter-preset) button:has-text("分享")'
     );
@@ -1178,7 +1210,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - ${BOM_DETAIL_RESULT}
-- BOM/Where-Used filter presets import/export/share/clear/conflict dialogs validated.
+- BOM/Where-Used filter presets import/export/share/group/clear/conflict dialogs validated.
 - BOM tree view renders with expandable nodes.
 - BOM expand-to-depth button is enabled.
 - BOM tree export button is enabled.
