@@ -13,9 +13,10 @@
 - Presets can be cleared in bulk from the filter panel.
 - Import feedback summarizes skipped entries and reasons.
 - Import shows conflict preview and confirmation before overwrite.
+- Presets support share links for cross-user reuse.
 
 ## Verification
 - Script: `scripts/verify-plm-ui-regression.sh`
 - Command: `AUTO_START=true PLM_BASE_URL=http://127.0.0.1:7911 scripts/verify-plm-ui-regression.sh`
-- Report: `docs/verification-plm-ui-regression-20260118_043002.md`
-- Artifact: `artifacts/plm-ui-regression-20260118_043002.png`
+- Report: `docs/verification-plm-ui-regression-20260118_121019.md`
+- Artifact: `artifacts/plm-ui-regression-20260118_121019.png`

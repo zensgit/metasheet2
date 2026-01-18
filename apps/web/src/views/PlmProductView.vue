@@ -487,6 +487,9 @@
             <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="deleteBomFilterPreset">
               删除
             </button>
+            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="shareBomFilterPreset">
+              分享
+            </button>
           </div>
           <div class="field-inline">
             <input
@@ -1338,6 +1341,13 @@
               @click="deleteWhereUsedFilterPreset"
             >
               删除
+            </button>
+            <button
+              class="btn ghost mini"
+              :disabled="!whereUsedFilterPresetKey"
+              @click="shareWhereUsedFilterPreset"
+            >
+              分享
             </button>
           </div>
           <div class="field-inline">
@@ -6305,6 +6315,24 @@ function deleteBomFilterPreset() {
   setDeepLinkMessage('已删除 BOM 过滤预设。')
 }
 
+async function shareBomFilterPreset() {
+  const preset = bomFilterPresets.value.find((entry) => entry.key === bomFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 BOM 过滤预设后分享。', true)
+    return
+  }
+  const url = buildPresetShareUrl('bom', preset, bomFilterPresetImportMode.value)
+  if (!url) {
+    setDeepLinkMessage('生成 BOM 过滤预设分享链接失败。', true)
+    return
+  }
+  const ok = await copyToClipboard(url)
+  setDeepLinkMessage(
+    ok ? '已复制 BOM 过滤预设分享链接。' : '复制 BOM 过滤预设分享链接失败。',
+    !ok
+  )
+}
+
 function saveWhereUsedFilterPreset() {
   if (!canSaveWhereUsedFilterPreset.value) {
     setDeepLinkMessage('请输入过滤条件和预设名称。', true)
@@ -6346,10 +6374,111 @@ function deleteWhereUsedFilterPreset() {
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
 }
 
+async function shareWhereUsedFilterPreset() {
+  const preset = whereUsedFilterPresets.value.find(
+    (entry) => entry.key === whereUsedFilterPresetKey.value
+  )
+  if (!preset) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设后分享。', true)
+    return
+  }
+  const url = buildPresetShareUrl('where-used', preset, whereUsedFilterPresetImportMode.value)
+  if (!url) {
+    setDeepLinkMessage('生成 Where-Used 过滤预设分享链接失败。', true)
+    return
+  }
+  const ok = await copyToClipboard(url)
+  setDeepLinkMessage(
+    ok ? '已复制 Where-Used 过滤预设分享链接。' : '复制 Where-Used 过滤预设分享链接失败。',
+    !ok
+  )
+}
+
 function formatPresetLabelPreview(labels: string[]): string {
   if (!labels.length) return ''
   const sample = labels.slice(0, 3).join('、')
   return labels.length > 3 ? `${sample} 等` : sample
+}
+
+function encodeBase64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+  const base64 = btoa(binary)
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function decodeBase64Url(value: string): string | null {
+  if (!value) return null
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = normalized.length % 4
+  const padded = pad ? normalized + '='.repeat(4 - pad) : normalized
+  try {
+    const binary = atob(padded)
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
+  } catch (_err) {
+    return null
+  }
+}
+
+function encodePresetSharePayload(preset: FilterPreset): string {
+  const payload = JSON.stringify({
+    label: preset.label,
+    field: preset.field,
+    value: preset.value,
+  })
+  return encodeBase64Url(payload)
+}
+
+function decodePresetSharePayload(
+  raw: string,
+  fieldOptions: Array<{ value: string }>
+): FilterPresetImportEntry | null {
+  const decoded = decodeBase64Url(raw)
+  if (!decoded) return null
+  try {
+    const parsed = JSON.parse(decoded)
+    if (!parsed || typeof parsed !== 'object') return null
+    const record = parsed as Record<string, unknown>
+    const label = String(record.label ?? '').trim()
+    const value = String(record.value ?? '').trim()
+    if (!label || !value) return null
+    const rawField = String(record.field ?? '').trim()
+    const allowedFields = new Set(fieldOptions.map((option) => option.value))
+    const field = allowedFields.has(rawField) ? rawField : 'all'
+    return { key: '', label, field, value }
+  } catch (_err) {
+    return null
+  }
+}
+
+function resolvePresetShareMode(value?: string): 'merge' | 'replace' {
+  if (!value) return 'merge'
+  return value.trim().toLowerCase() === 'replace' ? 'replace' : 'merge'
+}
+
+function buildPresetShareUrl(
+  kind: 'bom' | 'where-used',
+  preset: FilterPreset,
+  mode: 'merge' | 'replace'
+): string {
+  if (typeof window === 'undefined') return ''
+  const encoded = encodePresetSharePayload(preset)
+  if (!encoded) return ''
+  const base = `${window.location.origin}${route.path}`
+  const params = new URLSearchParams()
+  if (kind === 'bom') {
+    params.set('bomPresetShare', encoded)
+    if (mode === 'replace') params.set('bomPresetShareMode', mode)
+  } else {
+    params.set('whereUsedPresetShare', encoded)
+    if (mode === 'replace') params.set('whereUsedPresetShareMode', mode)
+  }
+  const query = params.toString()
+  return query ? `${base}?${query}` : base
 }
 
 function confirmFilterPresetImport(
@@ -6370,6 +6499,74 @@ function confirmFilterPresetImport(
     return window.confirm(`检测到 ${conflictLabels.length} 条同名${label}过滤预设${hint}，将覆盖现有预设。是否继续？`)
   }
   return true
+}
+
+function importBomFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
+  const entry = decodePresetSharePayload(raw, bomFilterFieldOptions)
+  if (!entry) {
+    setDeepLinkMessage('BOM 过滤预设分享链接解析失败。', true)
+    return
+  }
+  const existingLabels = bomFilterPresets.value.map((preset) => preset.label)
+  const existingLabelSet = new Set(existingLabels)
+  const conflictLabels = existingLabelSet.has(entry.label) ? [entry.label] : []
+  const confirmed = confirmFilterPresetImport('BOM', mode, existingLabels, conflictLabels)
+  if (!confirmed) {
+    setDeepLinkMessage('已取消导入 BOM 过滤预设。', true)
+    return
+  }
+  const { presets, added, updated } = mergeImportedFilterPresets(
+    [entry],
+    bomFilterPresets.value,
+    'bom',
+    mode
+  )
+  bomFilterPresets.value = presets
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
+  const imported = presets.find((preset) => preset.label === entry.label)
+  bomFilterPresetKey.value = imported?.key || ''
+  const importedCount = added + updated
+  if (importedCount) {
+    setDeepLinkMessage(
+      `已导入 BOM 过滤预设：${entry.label}（新增 ${added}，更新 ${updated}）。`
+    )
+  } else {
+    setDeepLinkMessage('未导入 BOM 过滤预设。', true)
+  }
+}
+
+function importWhereUsedFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
+  const entry = decodePresetSharePayload(raw, whereUsedFilterFieldOptions)
+  if (!entry) {
+    setDeepLinkMessage('Where-Used 过滤预设分享链接解析失败。', true)
+    return
+  }
+  const existingLabels = whereUsedFilterPresets.value.map((preset) => preset.label)
+  const existingLabelSet = new Set(existingLabels)
+  const conflictLabels = existingLabelSet.has(entry.label) ? [entry.label] : []
+  const confirmed = confirmFilterPresetImport('Where-Used', mode, existingLabels, conflictLabels)
+  if (!confirmed) {
+    setDeepLinkMessage('已取消导入 Where-Used 过滤预设。', true)
+    return
+  }
+  const { presets, added, updated } = mergeImportedFilterPresets(
+    [entry],
+    whereUsedFilterPresets.value,
+    'where-used',
+    mode
+  )
+  whereUsedFilterPresets.value = presets
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
+  const imported = presets.find((preset) => preset.label === entry.label)
+  whereUsedFilterPresetKey.value = imported?.key || ''
+  const importedCount = added + updated
+  if (importedCount) {
+    setDeepLinkMessage(
+      `已导入 Where-Used 过滤预设：${entry.label}（新增 ${added}，更新 ${updated}）。`
+    )
+  } else {
+    setDeepLinkMessage('未导入 Where-Used 过滤预设。', true)
+  }
 }
 
 function parseFilterPresetImport(
@@ -7111,6 +7308,23 @@ async function applyQueryState() {
   const substitutesFilterParam = readQueryParam('substitutesFilter')
   if (substitutesFilterParam !== undefined) {
     substitutesFilter.value = substitutesFilterParam
+  }
+
+  const bomPresetShareParam = readQueryParam('bomPresetShare')
+  if (bomPresetShareParam !== undefined) {
+    if (bomPresetShareParam) {
+      const mode = resolvePresetShareMode(readQueryParam('bomPresetShareMode'))
+      importBomFilterPresetShare(bomPresetShareParam, mode)
+    }
+    syncQueryParams({ bomPresetShare: undefined, bomPresetShareMode: undefined })
+  }
+  const whereUsedPresetShareParam = readQueryParam('whereUsedPresetShare')
+  if (whereUsedPresetShareParam !== undefined) {
+    if (whereUsedPresetShareParam) {
+      const mode = resolvePresetShareMode(readQueryParam('whereUsedPresetShareMode'))
+      importWhereUsedFilterPresetShare(whereUsedPresetShareParam, mode)
+    }
+    syncQueryParams({ whereUsedPresetShare: undefined, whereUsedPresetShareMode: undefined })
   }
 
   const panelParam = readQueryParam('panel')

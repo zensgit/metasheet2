@@ -559,6 +559,17 @@ async function waitOptional(scope, text) {
           throw new Error('BOM filter preset did not apply the expected value.');
         }
       }
+      const bomShareButton = bomSection.locator(
+        'label:has(#plm-bom-filter-preset) button:has-text("分享")'
+      );
+      if ((await bomShareButton.count()) === 0) {
+        throw new Error('BOM filter preset share button missing.');
+      }
+      await bomShareButton.click();
+      await detailSection
+        .locator('p.status', { hasText: '分享链接' })
+        .first()
+        .waitFor({ timeout: 10000 });
       const bomExportButton = bomSection.locator(
         'label:has(#plm-bom-filter-preset-import) button:has-text("导出")'
       );
@@ -817,6 +828,17 @@ async function waitOptional(scope, text) {
         throw new Error('Where-used filter preset did not apply the expected value.');
       }
     }
+    const whereUsedShareButton = whereUsedSection.locator(
+      'label:has(#plm-where-used-filter-preset) button:has-text("分享")'
+    );
+    if ((await whereUsedShareButton.count()) === 0) {
+      throw new Error('Where-used filter preset share button missing.');
+    }
+    await whereUsedShareButton.click();
+    await detailSection
+      .locator('p.status', { hasText: '分享链接' })
+      .first()
+      .waitFor({ timeout: 10000 });
     const whereUsedExportButton = whereUsedSection.locator(
       'label:has(#plm-where-used-filter-preset-import) button:has-text("导出")'
     );
@@ -1156,7 +1178,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Product detail copy actions executed.
 - ${BOM_CHILD_RESULT}
 - ${BOM_DETAIL_RESULT}
-- BOM/Where-Used filter presets import/export/clear/conflict dialogs validated.
+- BOM/Where-Used filter presets import/export/share/clear/conflict dialogs validated.
 - BOM tree view renders with expandable nodes.
 - BOM expand-to-depth button is enabled.
 - BOM tree export button is enabled.
