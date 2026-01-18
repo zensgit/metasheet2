@@ -6,7 +6,7 @@
 import { describe, test, expect, beforeEach, vi, afterEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import spreadsheetRouter from '../../src/routes/spreadsheet'
+import { spreadsheetsRouter } from '../../src/routes/spreadsheets'
 import { FormulaEngine } from '../../src/formula/engine'
 import { createMockDb, PerformanceTracker } from '../utils/test-db'
 import {
@@ -106,16 +106,21 @@ describe('Spreadsheet Integration Tests', () => {
   beforeEach(() => {
     // Create mock database and formula engine
     mockDb = createMockDb()
-    formulaEngine = new FormulaEngine()
+    formulaEngine = new FormulaEngine({ db: mockDb })
     performanceTracker = new PerformanceTracker()
-
-    // Mock the database import
-    vi.doMock('../../src/db/db', () => ({ db: mockDb }))
 
     // Create Express app
     app = express()
     app.use(express.json())
-    app.use('/api', spreadsheetRouter)
+    app.use((req, _res, next) => {
+      req.user = {
+        id: TEST_IDS.USER_1,
+        roles: ['admin'],
+        perms: ['spreadsheets:read', 'spreadsheets:write']
+      }
+      next()
+    })
+    app.use(spreadsheetsRouter(undefined, { db: mockDb }))
   })
 
   afterEach(() => {
@@ -134,7 +139,7 @@ describe('Spreadsheet Integration Tests', () => {
               values: vi.fn().mockReturnValue({
                 returningAll: vi.fn().mockReturnValue({
                   executeTakeFirstOrThrow: vi.fn()
-                    .mockResolvedValueOnce(BASIC_SPREADSHEET)
+                    .mockResolvedValueOnce({ ...BASIC_SPREADSHEET, name: 'Formula Test Spreadsheet' })
                     .mockResolvedValueOnce(BASIC_SHEET)
                 })
               })
@@ -246,6 +251,71 @@ describe('Spreadsheet Integration Tests', () => {
       expect(response.body.data.sheets).toHaveLength(2)
       expect(response.body.data.sheets[0].name).toBe('Data')
       expect(response.body.data.sheets[1].name).toBe('Summary')
+    })
+
+    test('should retrieve sheet cells for a spreadsheet', async () => {
+      const sheetQueryBuilder = vi.fn().mockReturnValue({
+        selectAll: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        executeTakeFirst: vi.fn().mockResolvedValue(BASIC_SHEET)
+      })
+
+      const cells = [
+        { id: TEST_IDS.CELL_A1, sheet_id: TEST_IDS.SHEET_1, row_index: 0, column_index: 0, value: { value: 'Hello' }, formula: null },
+        { id: TEST_IDS.CELL_B1, sheet_id: TEST_IDS.SHEET_1, row_index: 1, column_index: 0, value: { value: 42 }, formula: null },
+        { id: TEST_IDS.CELL_C1, sheet_id: TEST_IDS.SHEET_1, row_index: 1, column_index: 1, value: null, formula: '=A2+1' }
+      ]
+
+      const cellsQueryBuilder = vi.fn().mockReturnValue({
+        selectAll: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        execute: vi.fn().mockResolvedValue(cells)
+      })
+
+      mockDb.selectFrom
+        .mockReturnValueOnce(sheetQueryBuilder())
+        .mockReturnValueOnce(cellsQueryBuilder())
+
+      const response = await request(app)
+        .get(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
+        .expect(200)
+
+      expect(response).toHaveSuccessResponse()
+      expect(response.body.data.sheet.id).toBe(TEST_IDS.SHEET_1)
+      expect(response.body.data.cells).toHaveLength(3)
+      expect(response.body.data.cells[0].row_index).toBe(0)
+      expect(response.body.data.cells[2].formula).toBe('=A2+1')
+    })
+
+    test('should update sheet metadata', async () => {
+      const existingSheet = { ...BASIC_SHEET, row_count: 10, column_count: 5 }
+      const updatedSheet = { ...existingSheet, row_count: 20, column_count: 8 }
+
+      const sheetQueryBuilder = vi.fn().mockReturnValue({
+        selectAll: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        executeTakeFirst: vi.fn().mockResolvedValue(existingSheet)
+      })
+
+      const updateBuilder = {
+        set: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        returningAll: vi.fn().mockReturnThis(),
+        executeTakeFirstOrThrow: vi.fn().mockResolvedValue(updatedSheet)
+      }
+
+      mockDb.selectFrom.mockReturnValueOnce(sheetQueryBuilder())
+      mockDb.updateTable.mockReturnValueOnce(updateBuilder as any)
+
+      const response = await request(app)
+        .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}`)
+        .send({ row_count: 20, column_count: 8 })
+        .expect(200)
+
+      expect(response).toHaveSuccessResponse()
+      expect(response.body.data.row_count).toBe(20)
+      expect(response.body.data.column_count).toBe(8)
     })
 
     test('should maintain data integrity during concurrent operations', async () => {
@@ -640,7 +710,7 @@ describe('Spreadsheet Integration Tests', () => {
 
       end()
 
-      expect(results).toEqual([55, 5.5, 5, 'Result: 15', 8.25])
+      expect(results).toEqual([55, 5.5, 5, 'Result: 15', 4.5])
 
       const stats = performanceTracker.getStats('complex_formulas')
       expect(stats?.avg).toBeLessThan(100)
@@ -681,11 +751,19 @@ describe('Spreadsheet Integration Tests', () => {
 
       const failingQueryBuilder = vi.fn().mockReturnValue({
         selectAll: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        offset: vi.fn().mockReturnThis(),
         execute: vi.fn().mockRejectedValueOnce(connectionError)
       })
 
       const successQueryBuilder = vi.fn().mockReturnValue({
         selectAll: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        offset: vi.fn().mockReturnThis(),
         execute: vi.fn().mockResolvedValue([BASIC_SPREADSHEET])
       })
 

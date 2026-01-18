@@ -1,1 +1,2474 @@
-openapi: 3.0.0
+openapi: 3.0.3
+info:
+  title: Metasheet v2 API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8900
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    StandardResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          nullable: true
+    ErrorResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          default: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    AttendanceEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        occurred_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+          enum:
+            - check_in
+            - check_out
+            - adjustment
+        source:
+          type: string
+        timezone:
+          type: string
+        location:
+          type: object
+        meta:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+    AttendanceRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        timezone:
+          type: string
+        first_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_out_at:
+          type: string
+          format: date-time
+          nullable: true
+        work_minutes:
+          type: integer
+        late_minutes:
+          type: integer
+        early_leave_minutes:
+          type: integer
+        status:
+          type: string
+        is_workday:
+          type: boolean
+        meta:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AttendanceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        org_id:
+          type: string
+        work_date:
+          type: string
+          format: date
+        request_type:
+          type: string
+          enum:
+            - missed_check_in
+            - missed_check_out
+            - time_correction
+        requested_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        requested_out_at:
+          type: string
+          format: date-time
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+            - pending
+            - approved
+            - rejected
+            - cancelled
+        approval_instance_id:
+          type: string
+          nullable: true
+        resolved_by:
+          type: string
+          nullable: true
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AttendanceSummary:
+      type: object
+      properties:
+        total_days:
+          type: integer
+        total_minutes:
+          type: integer
+        normal_days:
+          type: integer
+        late_days:
+          type: integer
+        early_leave_days:
+          type: integer
+        late_early_days:
+          type: integer
+        partial_days:
+          type: integer
+        absent_days:
+          type: integer
+        adjusted_days:
+          type: integer
+        off_days:
+          type: integer
+    AttendanceRule:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        workStartTime:
+          type: string
+        workEndTime:
+          type: string
+        lateGraceMinutes:
+          type: integer
+        earlyGraceMinutes:
+          type: integer
+        roundingMinutes:
+          type: integer
+        workingDays:
+          type: array
+          items:
+            type: integer
+        isDefault:
+          type: boolean
+    AttendanceShift:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        workStartTime:
+          type: string
+        workEndTime:
+          type: string
+        lateGraceMinutes:
+          type: integer
+        earlyGraceMinutes:
+          type: integer
+        roundingMinutes:
+          type: integer
+        workingDays:
+          type: array
+          items:
+            type: integer
+    AttendanceShiftAssignment:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        shiftId:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        isActive:
+          type: boolean
+    AttendanceHoliday:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+          nullable: true
+        isWorkingDay:
+          type: boolean
+    AttendanceSettings:
+      type: object
+      properties:
+        autoAbsence:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            runAt:
+              type: string
+            lookbackDays:
+              type: integer
+        ipAllowlist:
+          type: array
+          items:
+            type: string
+        geoFence:
+          type: object
+          nullable: true
+          properties:
+            lat:
+              type: number
+            lng:
+              type: number
+            radiusMeters:
+              type: integer
+        minPunchIntervalMinutes:
+          type: integer
+    Spreadsheet:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+    Sheet:
+      type: object
+      properties:
+        id:
+          type: string
+        spreadsheet_id:
+          type: string
+        name:
+          type: string
+        order_index:
+          type: integer
+        row_count:
+          type: integer
+        column_count:
+          type: integer
+        frozen_rows:
+          type: integer
+          nullable: true
+        frozen_columns:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Cell:
+      type: object
+      properties:
+        id:
+          type: string
+        sheet_id:
+          type: string
+        row_index:
+          type: integer
+        column_index:
+          type: integer
+        value:
+          nullable: true
+        data_type:
+          type: string
+          nullable: true
+        formula:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+  responses:
+    Unauthorized:
+      description: Unauthorized - Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missing_token:
+              summary: Missing Authorization Header
+              value:
+                ok: false
+                error:
+                  code: UNAUTHORIZED
+                  message: Authorization header is required
+            invalid_token:
+              summary: Invalid JWT Token
+              value:
+                ok: false
+                error:
+                  code: INVALID_TOKEN
+                  message: Invalid or expired JWT token
+            malformed_token:
+              summary: Malformed Token
+              value:
+                ok: false
+                error:
+                  code: MALFORMED_TOKEN
+                  message: Authorization header must start with 'Bearer '
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            insufficient_permissions:
+              summary: Insufficient Permissions
+              value:
+                ok: false
+                error:
+                  code: FORBIDDEN
+                  message: You do not have permission to perform this action
+            role_restricted:
+              summary: Role Restriction
+              value:
+                ok: false
+                error:
+                  code: ROLE_RESTRICTED
+                  message: This action requires admin privileges
+            resource_access_denied:
+              summary: Resource Access Denied
+              value:
+                ok: false
+                error:
+                  code: ACCESS_DENIED
+                  message: Access denied to this resource
+    ValidationError:
+      description: Validation error - Invalid request data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missing_required_field:
+              summary: Missing Required Field
+              value:
+                ok: false
+                error:
+                  code: VALIDATION_ERROR
+                  message: Required field 'name' is missing
+            invalid_field_type:
+              summary: Invalid Field Type
+              value:
+                ok: false
+                error:
+                  code: INVALID_TYPE
+                  message: Field 'page' must be a positive integer
+            invalid_field_value:
+              summary: Invalid Field Value
+              value:
+                ok: false
+                error:
+                  code: INVALID_VALUE
+                  message: Field 'pageSize' must be between 1 and 100
+            invalid_request_format:
+              summary: Invalid Request Format
+              value:
+                ok: false
+                error:
+                  code: INVALID_FORMAT
+                  message: Request body must be valid JSON
+    NotFound:
+      description: Not found - Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            resource_not_found:
+              summary: Resource Not Found
+              value:
+                ok: false
+                error:
+                  code: NOT_FOUND
+                  message: The requested resource was not found
+            user_not_found:
+              summary: User Not Found
+              value:
+                ok: false
+                error:
+                  code: USER_NOT_FOUND
+                  message: User with ID 'user123' does not exist
+            role_not_found:
+              summary: Role Not Found
+              value:
+                ok: false
+                error:
+                  code: ROLE_NOT_FOUND
+                  message: Role with ID 'role456' does not exist
+            spreadsheet_not_found:
+              summary: Spreadsheet Not Found
+              value:
+                ok: false
+                error:
+                  code: SPREADSHEET_NOT_FOUND
+                  message: Spreadsheet with ID 'sheet789' does not exist
+            file_not_found:
+              summary: File Not Found
+              value:
+                ok: false
+                error:
+                  code: FILE_NOT_FOUND
+                  message: File with ID 'file123' does not exist
+    ServiceUnavailable:
+      description: Service unavailable - Temporary server issues
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            database_unavailable:
+              summary: Database Unavailable
+              value:
+                ok: false
+                error:
+                  code: DATABASE_UNAVAILABLE
+                  message: Database connection temporarily unavailable
+            service_overloaded:
+              summary: Service Overloaded
+              value:
+                ok: false
+                error:
+                  code: SERVICE_OVERLOADED
+                  message: Service temporarily overloaded, please try again later
+            maintenance_mode:
+              summary: Maintenance Mode
+              value:
+                ok: false
+                error:
+                  code: MAINTENANCE
+                  message: Service is temporarily under maintenance
+    Pagination:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {}
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+        total:
+          type: integer
+          minimum: 0
+paths:
+  /api/approvals/{id}:
+    get:
+      summary: Get approval instance
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+  /api/approvals/{id}/approve:
+    post:
+      summary: Approve instance with optimistic locking
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: APPROVED
+                      version:
+                        type: integer
+                        example: 1
+                      prevVersion:
+                        type: integer
+                        example: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 1
+  /api/approvals/{id}/reject:
+    post:
+      summary: Reject instance with optimistic locking
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: REJECTED
+                      version:
+                        type: integer
+                        example: 2
+                      prevVersion:
+                        type: integer
+                        example: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/ValidationError'
+  /api/approvals/{id}/return:
+    post:
+      summary: Return instance with optimistic locking
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: RETURNED
+                      version:
+                        type: integer
+                        example: 3
+                      prevVersion:
+                        type: integer
+                        example: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/ValidationError'
+  /api/approvals/{id}/revoke:
+    post:
+      summary: Revoke instance with optimistic locking
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: integer
+              required:
+                - version
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: REVOKED
+                      version:
+                        type: integer
+                        example: 4
+                      prevVersion:
+                        type: integer
+                        example: 3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/ValidationError'
+  /api/approvals/{id}/history:
+    get:
+      summary: Get approval history (from approval_records)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagination'
+              examples:
+                sample:
+                  value:
+                    items:
+                      - occurred_at: '2025-09-19T09:12:00Z'
+                        actor_id: u1
+                        action: approve
+                        comment: LGTM
+                        from_status: PENDING
+                        to_status: APPROVED
+                        version: 1
+                    page: 1
+                    pageSize: 50
+                    total: 4
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/attendance/punch:
+    x-plugin: plugin-attendance
+    post:
+      summary: Punch attendance (check in/out)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventType:
+                  type: string
+                  enum:
+                    - check_in
+                    - check_out
+                occurredAt:
+                  type: string
+                  format: date-time
+                timezone:
+                  type: string
+                source:
+                  type: string
+                location:
+                  type: object
+                meta:
+                  type: object
+                orgId:
+                  type: string
+              required:
+                - eventType
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      event:
+                        $ref: '#/components/schemas/AttendanceEvent'
+                      record:
+                        $ref: '#/components/schemas/AttendanceRecord'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/records:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance records
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceRecord'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/summary:
+    x-plugin: plugin-attendance
+    get:
+      summary: Attendance summary
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/requests:
+    x-plugin: plugin-attendance
+    post:
+      summary: Create attendance adjustment request
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workDate:
+                  type: string
+                  format: date
+                requestType:
+                  type: string
+                  enum:
+                    - missed_check_in
+                    - missed_check_out
+                    - time_correction
+                requestedInAt:
+                  type: string
+                  format: date-time
+                requestedOutAt:
+                  type: string
+                  format: date-time
+                reason:
+                  type: string
+                orgId:
+                  type: string
+              required:
+                - workDate
+                - requestType
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      request:
+                        $ref: '#/components/schemas/AttendanceRequest'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      summary: List attendance requests
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceRequest'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/requests/{id}/approve:
+    x-plugin: plugin-attendance
+    post:
+      summary: Approve attendance request
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                metadata:
+                  type: object
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      status:
+                        type: string
+                      orgId:
+                        type: string
+                      userId:
+                        type: string
+                      record:
+                        $ref: '#/components/schemas/AttendanceRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/requests/{id}/reject:
+    x-plugin: plugin-attendance
+    post:
+      summary: Reject attendance request
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                metadata:
+                  type: object
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      status:
+                        type: string
+                      orgId:
+                        type: string
+                      userId:
+                        type: string
+                      record:
+                        nullable: true
+                        allOf:
+                          - $ref: '#/components/schemas/AttendanceRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rules/default:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get default attendance rule
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      summary: Update default attendance rule
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                timezone:
+                  type: string
+                workStartTime:
+                  type: string
+                workEndTime:
+                  type: string
+                lateGraceMinutes:
+                  type: integer
+                earlyGraceMinutes:
+                  type: integer
+                roundingMinutes:
+                  type: integer
+                workingDays:
+                  type: array
+                  items:
+                    type: integer
+                orgId:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceRule'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/shifts:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance shifts
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceShift'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create attendance shift
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                timezone:
+                  type: string
+                workStartTime:
+                  type: string
+                workEndTime:
+                  type: string
+                lateGraceMinutes:
+                  type: integer
+                earlyGraceMinutes:
+                  type: integer
+                roundingMinutes:
+                  type: integer
+                workingDays:
+                  type: array
+                  items:
+                    type: integer
+                orgId:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceShift'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/shifts/{id}:
+    x-plugin: plugin-attendance
+    put:
+      summary: Update attendance shift
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                timezone:
+                  type: string
+                workStartTime:
+                  type: string
+                workEndTime:
+                  type: string
+                lateGraceMinutes:
+                  type: integer
+                earlyGraceMinutes:
+                  type: integer
+                roundingMinutes:
+                  type: integer
+                workingDays:
+                  type: array
+                  items:
+                    type: integer
+                orgId:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceShift'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      summary: Delete attendance shift
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/assignments:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance shift assignments
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            assignment:
+                              $ref: '#/components/schemas/AttendanceShiftAssignment'
+                            shift:
+                              $ref: '#/components/schemas/AttendanceShift'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create attendance shift assignment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                shiftId:
+                  type: string
+                startDate:
+                  type: string
+                  format: date
+                endDate:
+                  type: string
+                  format: date
+                  nullable: true
+                isActive:
+                  type: boolean
+                orgId:
+                  type: string
+              required:
+                - userId
+                - shiftId
+                - startDate
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      assignment:
+                        $ref: '#/components/schemas/AttendanceShiftAssignment'
+                      shift:
+                        $ref: '#/components/schemas/AttendanceShift'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/assignments/{id}:
+    x-plugin: plugin-attendance
+    put:
+      summary: Update attendance shift assignment
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                shiftId:
+                  type: string
+                startDate:
+                  type: string
+                  format: date
+                endDate:
+                  type: string
+                  format: date
+                  nullable: true
+                isActive:
+                  type: boolean
+                orgId:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      assignment:
+                        $ref: '#/components/schemas/AttendanceShiftAssignment'
+                      shift:
+                        $ref: '#/components/schemas/AttendanceShift'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      summary: Delete attendance shift assignment
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/holidays:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance holidays
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceHoliday'
+                      total:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create attendance holiday
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                name:
+                  type: string
+                  nullable: true
+                isWorkingDay:
+                  type: boolean
+                orgId:
+                  type: string
+              required:
+                - date
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceHoliday'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/holidays/{id}:
+    x-plugin: plugin-attendance
+    put:
+      summary: Update attendance holiday
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                name:
+                  type: string
+                  nullable: true
+                isWorkingDay:
+                  type: boolean
+                orgId:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceHoliday'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      summary: Delete attendance holiday
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/settings:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance settings
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      summary: Update attendance settings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceSettings'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceSettings'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/export:
+    x-plugin: plugin-attendance
+    get:
+      summary: Export attendance records as CSV
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 1000
+            maximum: 5000
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/audit-logs:
+    get:
+      summary: Admin-only audit log query
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: actorId
+          schema:
+            type: string
+        - in: query
+          name: resourceType
+          schema:
+            type: string
+        - in: query
+          name: resourceId
+          schema:
+            type: string
+        - in: query
+          name: action
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+        '403':
+          description: Forbidden
+  /api/spreadsheets/{id}/permissions:
+    get:
+      summary: List spreadsheet permissions
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            userId:
+                              type: string
+                            permissions:
+                              type: array
+                              items:
+                                type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/spreadsheets/{id}/permissions/grant:
+    post:
+      summary: Grant spreadsheet permission
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                permission:
+                  type: string
+              required:
+                - userId
+                - permission
+      responses:
+        '200':
+          description: OK
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/spreadsheets/{id}/permissions/revoke:
+    post:
+      summary: Revoke spreadsheet permission
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                permission:
+                  type: string
+              required:
+                - userId
+                - permission
+      responses:
+        '200':
+          description: OK
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/spreadsheets:
+    get:
+      summary: List spreadsheets
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Spreadsheet'
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+                      total:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create spreadsheet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                owner_id:
+                  type: string
+                ownerId:
+                  type: string
+                workspace_id:
+                  type: string
+                initial_sheets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                      - name
+              required:
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      spreadsheet:
+                        $ref: '#/components/schemas/Spreadsheet'
+                      sheets:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Sheet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/spreadsheets/{id}:
+    get:
+      summary: Get spreadsheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/Spreadsheet'
+                      - type: object
+                        properties:
+                          sheets:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Sheet'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      summary: Update spreadsheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Spreadsheet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete spreadsheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/spreadsheets/{id}/sheets/{sheetId}:
+    put:
+      summary: Update sheet metadata
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                row_count:
+                  type: integer
+                  minimum: 1
+                rowCount:
+                  type: integer
+                  minimum: 1
+                column_count:
+                  type: integer
+                  minimum: 1
+                columnCount:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/Sheet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/spreadsheets/{id}/sheets/{sheetId}/cells:
+    get:
+      summary: Get spreadsheet cells
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      sheet:
+                        $ref: '#/components/schemas/Sheet'
+                      cells:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Cell'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      summary: Update spreadsheet cells
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cells:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      row:
+                        type: integer
+                        minimum: 0
+                      col:
+                        type: integer
+                        minimum: 0
+                      value:
+                        nullable: true
+                      formula:
+                        type: string
+                      dataType:
+                        type: string
+                      data_type:
+                        type: string
+                    required:
+                      - row
+                      - col
+              required:
+                - cells
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      cells:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Cell'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'

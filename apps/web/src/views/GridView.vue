@@ -242,6 +242,7 @@
     <div class="status-bar">
       <span>当前单元格: {{ getCurrentCellLabel() }}</span>
       <span v-if="lastSaved">最后保存: {{ lastSaved }}</span>
+      <span v-if="saveNotice" class="status-notice">{{ saveNotice }}</span>
       <span v-if="autoSaveEnabled && nextAutoSave">下次自动保存: {{ nextAutoSave }}秒</span>
     </div>
 
@@ -259,7 +260,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { formulaEngine } from '../utils/formulaEngine'
-import { getApiBase, authHeaders } from '../utils/api'
+import { apiFetch } from '../utils/api'
 import ContextMenu from '../components/ContextMenu.vue'
 import type { MenuItem } from '../components/ContextMenu.vue'
 
@@ -282,9 +283,29 @@ interface Snapshot {
   data: any[][]
 }
 
+interface ServerSheet {
+  id: string
+  row_count: number
+  column_count: number
+}
+
+interface ServerCell {
+  row_index: number
+  column_index: number
+  value: unknown
+  formula: string | null
+}
+
+const DEFAULT_ROWS = 30
+const DEFAULT_COLS = 15
+const GRID_DATA_KEY = 'gridData'
+const GRID_SIZE_KEY = 'gridSize'
+const GRID_SPREADSHEET_ID_KEY = 'gridSpreadsheetId'
+const GRID_SHEET_ID_KEY = 'gridSheetId'
+
 // 数据状态
-const rows = ref(30)
-const cols = ref(15)
+const rows = ref(DEFAULT_ROWS)
+const cols = ref(DEFAULT_COLS)
 const data = ref<string[][]>([])
 const selectedRow = ref(0)
 const selectedCol = ref(0)
@@ -294,6 +315,11 @@ const editingValue = ref('')
 const formulaBarValue = ref('')
 const isReadonly = ref(false)
 const lastSaved = ref('')
+const saveNotice = ref('')
+const lastSyncedData = ref<string[][] | null>(null)
+const lastSyncedSize = ref<{ rows: number; cols: number } | null>(null)
+const gridSpreadsheetId = ref<string | null>(null)
+const gridSheetId = ref<string | null>(null)
 
 // 撤销/重做
 const undoStack = ref<any[]>([])
@@ -504,6 +530,7 @@ function recalculateAll() {
 
 // 保存撤销状态
 function saveUndo() {
+  saveNotice.value = ''
   undoStack.value.push(JSON.parse(JSON.stringify(data.value)))
   redoStack.value = []
 
@@ -537,6 +564,7 @@ function addRow() {
   for (let i = 0; i < 5; i++) {
     data.value.push(Array(cols.value).fill(''))
   }
+  void updateSheetDimensions()
 }
 
 // 添加列
@@ -548,29 +576,303 @@ function addColumn() {
       row.push('')
     }
   })
+  void updateSheetDimensions()
+}
+
+function buildEmptyData(rowCount: number, colCount: number): string[][] {
+  return Array.from({ length: rowCount }, () => Array(colCount).fill(''))
+}
+
+function cloneDataMatrix(source: string[][]): string[][] {
+  return source.map(row => [...row])
+}
+
+function snapshotSyncedState() {
+  lastSyncedData.value = cloneDataMatrix(data.value)
+  lastSyncedSize.value = { rows: rows.value, cols: cols.value }
+}
+
+function resolveSheetSize(sheet?: ServerSheet | null, sizeHint?: { rows: number; cols: number }): { rows: number; cols: number } {
+  const rawRows = sheet?.row_count
+  const rawCols = sheet?.column_count
+  const sheetRows = typeof rawRows === 'number' && rawRows > 0 ? rawRows : DEFAULT_ROWS
+  const sheetCols = typeof rawCols === 'number' && rawCols > 0 ? rawCols : DEFAULT_COLS
+  const targetRows = Math.max(sizeHint?.rows ?? 0, sheetRows)
+  const targetCols = Math.max(sizeHint?.cols ?? 0, sheetCols)
+  return { rows: targetRows, cols: targetCols }
+}
+
+function normalizeCellValue(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') {
+    if ('value' in (value as Record<string, unknown>)) {
+      const inner = (value as Record<string, unknown>).value
+      if (inner === null || inner === undefined) return ''
+      return String(inner)
+    }
+    return JSON.stringify(value)
+  }
+  return String(value)
+}
+
+function applyServerCells(cells: ServerCell[], sizeHint?: { rows: number; cols: number }) {
+  let maxRow = DEFAULT_ROWS - 1
+  let maxCol = DEFAULT_COLS - 1
+
+  for (const cell of cells) {
+    maxRow = Math.max(maxRow, cell.row_index)
+    maxCol = Math.max(maxCol, cell.column_index)
+  }
+
+  const targetRows = Math.max(sizeHint?.rows ?? DEFAULT_ROWS, maxRow + 1)
+  const targetCols = Math.max(sizeHint?.cols ?? DEFAULT_COLS, maxCol + 1)
+  rows.value = targetRows
+  cols.value = targetCols
+
+  const next = buildEmptyData(rows.value, cols.value)
+  for (const cell of cells) {
+    if (cell.row_index < 0 || cell.column_index < 0) continue
+    if (cell.row_index >= rows.value || cell.column_index >= cols.value) continue
+    if (typeof cell.formula === 'string' && cell.formula.length > 0) {
+      const formulaText = cell.formula.startsWith('=') ? cell.formula : `=${cell.formula}`
+      next[cell.row_index][cell.column_index] = formulaText
+    } else {
+      next[cell.row_index][cell.column_index] = normalizeCellValue(cell.value)
+    }
+  }
+
+  data.value = next
+  recalculateAll()
+  snapshotSyncedState()
+}
+
+function loadGridSizeFromStorage(): { rows: number; cols: number } | null {
+  const savedSize = localStorage.getItem(GRID_SIZE_KEY)
+  if (!savedSize) return null
+  try {
+    const parsed = JSON.parse(savedSize) as { rows?: number; cols?: number }
+    if (!parsed || typeof parsed.rows !== 'number' || typeof parsed.cols !== 'number') return null
+    return { rows: parsed.rows, cols: parsed.cols }
+  } catch (error) {
+    console.error('Failed to parse saved grid size:', error)
+    return null
+  }
+}
+
+function loadGridDataFromStorage(): string[][] | null {
+  const savedData = localStorage.getItem(GRID_DATA_KEY)
+  if (!savedData) return null
+  try {
+    const parsed = JSON.parse(savedData)
+    if (!Array.isArray(parsed)) return null
+    return parsed as string[][]
+  } catch (error) {
+    console.error('Failed to parse saved grid data:', error)
+    return null
+  }
+}
+
+function applyLocalData(savedData: string[][], sizeHint?: { rows: number; cols: number }) {
+  const dataRows = savedData.length
+  const dataCols = savedData[0]?.length ?? DEFAULT_COLS
+  const targetRows = Math.max(sizeHint?.rows ?? DEFAULT_ROWS, dataRows)
+  const targetCols = Math.max(sizeHint?.cols ?? DEFAULT_COLS, dataCols)
+
+  rows.value = targetRows
+  cols.value = targetCols
+
+  const next = buildEmptyData(rows.value, cols.value)
+  for (let r = 0; r < savedData.length; r++) {
+    for (let c = 0; c < savedData[r]!.length; c++) {
+      next[r]![c] = savedData[r]![c] ?? ''
+    }
+  }
+  data.value = next
+  recalculateAll()
+  snapshotSyncedState()
+}
+
+function readGridIdsFromStorage(): { spreadsheetId: string; sheetId: string } | null {
+  const spreadsheetId = localStorage.getItem(GRID_SPREADSHEET_ID_KEY)
+  const sheetId = localStorage.getItem(GRID_SHEET_ID_KEY)
+  if (!spreadsheetId || !sheetId) return null
+  gridSpreadsheetId.value = spreadsheetId
+  gridSheetId.value = sheetId
+  return { spreadsheetId, sheetId }
+}
+
+function storeGridIds(spreadsheetId: string, sheetId: string) {
+  gridSpreadsheetId.value = spreadsheetId
+  gridSheetId.value = sheetId
+  localStorage.setItem(GRID_SPREADSHEET_ID_KEY, spreadsheetId)
+  localStorage.setItem(GRID_SHEET_ID_KEY, sheetId)
+}
+
+function clearGridIds() {
+  gridSpreadsheetId.value = null
+  gridSheetId.value = null
+  localStorage.removeItem(GRID_SPREADSHEET_ID_KEY)
+  localStorage.removeItem(GRID_SHEET_ID_KEY)
+}
+
+async function createGridSpreadsheet(): Promise<{ spreadsheetId: string; sheetId: string } | null> {
+  try {
+    const response = await apiFetch('/api/spreadsheets', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Grid Workspace',
+        initial_sheets: [{ name: 'Sheet1' }]
+      })
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error?.message || 'Failed to create spreadsheet')
+    }
+    const spreadsheetId = payload.data?.spreadsheet?.id
+    const sheetId = payload.data?.sheets?.[0]?.id
+    if (!spreadsheetId || !sheetId) {
+      throw new Error('Spreadsheet response missing identifiers')
+    }
+    storeGridIds(spreadsheetId, sheetId)
+    await updateSheetDimensions({ spreadsheetId, sheetId }, { rows: rows.value, cols: cols.value })
+    return { spreadsheetId, sheetId }
+  } catch (error) {
+    console.error('Failed to create grid spreadsheet:', error)
+    return null
+  }
+}
+
+async function ensureGridSpreadsheet(): Promise<{ spreadsheetId: string; sheetId: string } | null> {
+  const stored = readGridIdsFromStorage()
+  if (stored) return stored
+  return createGridSpreadsheet()
+}
+
+async function updateSheetDimensions(
+  ids?: { spreadsheetId: string; sheetId: string },
+  sizeOverride?: { rows: number; cols: number }
+): Promise<void> {
+  try {
+    const resolved = ids ?? await ensureGridSpreadsheet()
+    if (!resolved) return
+
+    const targetRows = sizeOverride?.rows ?? rows.value
+    const targetCols = sizeOverride?.cols ?? cols.value
+    if (lastSyncedSize.value?.rows === targetRows && lastSyncedSize.value?.cols === targetCols) {
+      return
+    }
+
+    const response = await apiFetch(`/api/spreadsheets/${resolved.spreadsheetId}/sheets/${resolved.sheetId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        row_count: targetRows,
+        column_count: targetCols
+      })
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error?.message || 'Failed to update sheet metadata')
+    }
+    lastSyncedSize.value = { rows: targetRows, cols: targetCols }
+  } catch (error) {
+    console.error('Failed to update sheet metadata:', error)
+  }
+}
+
+async function fetchGridCells(spreadsheetId: string, sheetId: string): Promise<{ sheet: ServerSheet; cells: ServerCell[] } | null> {
+  const response = await apiFetch(`/api/spreadsheets/${spreadsheetId}/sheets/${sheetId}/cells`)
+  const payload = await response.json().catch(() => null)
+  if (response.status === 404) {
+    clearGridIds()
+    return null
+  }
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error?.message || 'Failed to load spreadsheet cells')
+  }
+  return payload.data ?? null
+}
+
+async function loadCellsFromServer(
+  spreadsheetId: string,
+  sheetId: string,
+  sizeHint?: { rows: number; cols: number }
+): Promise<boolean> {
+  try {
+    const payload = await fetchGridCells(spreadsheetId, sheetId)
+    if (!payload) {
+      return false
+    }
+    const resolvedSize = resolveSheetSize(payload.sheet, sizeHint)
+    if (payload.cells && payload.cells.length > 0) {
+      applyServerCells(payload.cells, resolvedSize)
+      return true
+    }
+    rows.value = resolvedSize.rows
+    cols.value = resolvedSize.cols
+    data.value = buildEmptyData(rows.value, cols.value)
+    recalculateAll()
+    snapshotSyncedState()
+    return true
+  } catch (error) {
+    console.error('Failed to load grid cells:', error)
+    return false
+  }
+}
+
+function buildChangedCellPayload(): Array<{ row: number; col: number; value?: string | null; formula?: string }> {
+  const cells: Array<{ row: number; col: number; value?: string | null; formula?: string }> = []
+  for (let r = 0; r < rows.value; r++) {
+    for (let c = 0; c < cols.value; c++) {
+      const raw = data.value[r]?.[c] ?? ''
+      const current = raw === null || raw === undefined ? '' : String(raw)
+      const previousRaw = lastSyncedData.value?.[r]?.[c] ?? ''
+      const previous = previousRaw === null || previousRaw === undefined ? '' : String(previousRaw)
+      if (current === previous) continue
+
+      if (current.length === 0) {
+        cells.push({ row: r, col: c, value: null })
+      } else if (current.startsWith('=')) {
+        cells.push({ row: r, col: c, formula: current, value: null })
+      } else {
+        cells.push({ row: r, col: c, value: current })
+      }
+    }
+  }
+  return cells
 }
 
 // 保存数据
 async function saveData() {
   try {
+    saveNotice.value = ''
     // 保存到localStorage
-    localStorage.setItem('gridData', JSON.stringify(data.value))
-    localStorage.setItem('gridSize', JSON.stringify({ rows: rows.value, cols: cols.value }))
+    localStorage.setItem(GRID_DATA_KEY, JSON.stringify(data.value))
+    localStorage.setItem(GRID_SIZE_KEY, JSON.stringify({ rows: rows.value, cols: cols.value }))
 
     // 保存到服务器
-    const response = await fetch(`${getApiBase()}/api/spreadsheet`, {
-      method: 'POST',
-      headers: authHeaders(),
+    const ids = await ensureGridSpreadsheet()
+    if (!ids) {
+      throw new Error('Missing spreadsheet context')
+    }
+    await updateSheetDimensions(ids)
+    const changedCells = buildChangedCellPayload()
+    if (changedCells.length === 0) {
+      saveNotice.value = '无更改，未提交'
+      return
+    }
+
+    const response = await apiFetch(`/api/spreadsheets/${ids.spreadsheetId}/sheets/${ids.sheetId}/cells`, {
+      method: 'PUT',
       body: JSON.stringify({
-        id: 'default',
-        rows: rows.value,
-        cols: cols.value,
-        data: data.value
+        cells: changedCells
       })
     })
+    const payload = await response.json().catch(() => null)
 
-    if (response.ok) {
+    if (response.ok && payload?.ok) {
       lastSaved.value = new Date().toLocaleTimeString()
+      snapshotSyncedState()
+      saveNotice.value = '已保存'
 
       // 创建版本记录
       const newVersion: Version = {
@@ -587,9 +889,12 @@ async function saveData() {
       localStorage.setItem('versionHistory', JSON.stringify(versionHistory.value))
 
       alert('保存成功！')
+    } else {
+      throw new Error(payload?.error?.message || '保存失败')
     }
   } catch (error) {
     console.error('Save failed:', error)
+    saveNotice.value = '保存失败'
     alert('保存失败！')
   }
 }
@@ -654,7 +959,7 @@ function loadVersion(version: Version) {
 function exitVersionView() {
   currentVersion.value = null
   isReadonly.value = false
-  loadSavedData()
+  void loadSavedData()
 }
 
 // 对比版本
@@ -723,6 +1028,7 @@ function importData() {
           rows.value = imported.length
           cols.value = imported[0]?.length || cols.value
           recalculateAll()
+          void updateSheetDimensions()
           alert('导入成功！')
         } catch (error) {
           alert('导入失败：文件格式错误')
@@ -867,43 +1173,35 @@ watch(autoSaveEnabled, (enabled) => {
 })
 
 // 加载保存的数据
-function loadSavedData() {
-  // 从localStorage加载
-  const savedData = localStorage.getItem('gridData')
-  const savedSize = localStorage.getItem('gridSize')
+async function loadSavedData() {
+  lastSyncedData.value = null
+  lastSyncedSize.value = null
+  const sizeHint = loadGridSizeFromStorage()
+  const localData = loadGridDataFromStorage()
 
-  if (savedData) {
-    try {
-      data.value = JSON.parse(savedData)
-      if (savedSize) {
-        const size = JSON.parse(savedSize)
-        rows.value = size.rows
-        cols.value = size.cols
-      }
-      recalculateAll()
-      return
-    } catch (error) {
-      console.error('Failed to load saved data:', error)
-    }
+  if (sizeHint) {
+    rows.value = sizeHint.rows
+    cols.value = sizeHint.cols
   }
 
-  // 从服务器加载
-  fetch(`${getApiBase()}/api/spreadsheet?id=default`, {
-    headers: authHeaders()
-  })
-    .then(res => res.json())
-    .then(serverData => {
-      if (serverData.data && Object.keys(serverData.data).length > 0) {
-        // 转换服务器数据格式
-        // 服务器数据可能是稀疏的，需要转换
-        initData()
-      } else {
-        initData()
-      }
-    })
-    .catch(() => {
-      initData()
-    })
+  const storedIds = readGridIdsFromStorage()
+  if (storedIds) {
+    const loaded = await loadCellsFromServer(storedIds.spreadsheetId, storedIds.sheetId, sizeHint ?? undefined)
+    if (loaded) return
+  }
+
+  const created = await createGridSpreadsheet()
+  if (created) {
+    const loaded = await loadCellsFromServer(created.spreadsheetId, created.sheetId, sizeHint ?? undefined)
+    if (loaded) return
+  }
+
+  if (localData) {
+    applyLocalData(localData, sizeHint ?? undefined)
+    return
+  }
+
+  initData()
 }
 
 // 加载版本历史
@@ -1652,7 +1950,7 @@ function autoFitRow(row: number) {
 
 // 组件挂载
 onMounted(() => {
-  loadSavedData()
+  void loadSavedData()
   loadVersionHistory()
   loadSnapshots()
 
@@ -2114,6 +2412,11 @@ onUnmounted(() => {
   border-top: 1px solid #e0e0e0;
   font-size: 12px;
   color: #6b7280;
+}
+
+.status-notice {
+  color: #1f6feb;
+  font-weight: 600;
 }
 
 /* 动画 */

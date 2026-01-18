@@ -6,6 +6,7 @@
       </div>
       <div class="nav-links">
         <router-link to="/grid" class="nav-link">Grid</router-link>
+        <router-link to="/spreadsheets" class="nav-link">Spreadsheets</router-link>
         <router-link to="/kanban" class="nav-link">Kanban</router-link>
         <router-link to="/calendar" class="nav-link">Calendar</router-link>
         <router-link to="/gallery" class="nav-link">Gallery</router-link>
