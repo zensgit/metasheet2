@@ -26,6 +26,19 @@ export class CollabService {
     })
   }
 
+  private getUserIdFromSocket(socket: Socket): string | undefined {
+    const raw = socket.handshake.query.userId
+    const value = Array.isArray(raw) ? raw[0] : raw
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+    return undefined
+  }
+
+  private resolveTarget(options?: { userId?: string; socketId?: string }): string | null {
+    if (options?.userId) return options.userId
+    if (options?.socketId) return options.socketId
+    return null
+  }
+
   initialize(httpServer: HttpServer): void {
     this.io = new SocketServer(httpServer, {
       cors: {
@@ -40,6 +53,11 @@ export class CollabService {
 
     this.io.on('connection', (socket: Socket) => {
       this.logger.info(`WebSocket client connected: ${socket.id}`)
+      const userId = this.getUserIdFromSocket(socket)
+      if (userId) {
+        socket.join(userId)
+        this.logger.debug(`WebSocket client ${socket.id} joined user room ${userId}`)
+      }
 
       socket.on('disconnect', () => {
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
@@ -72,9 +90,45 @@ export class CollabService {
     this.io.emit(event, data)
   }
 
+  broadcastTo(room: string, event: string, data: unknown): void {
+    if (!this.io) {
+      this.logger.warn('Attempted to broadcastTo before initialization')
+      return
+    }
+    this.io.to(room).emit(event, data)
+  }
+
   sendTo(userId: string, event: string, data: unknown): void {
     if (!this.io) return
     this.io.to(userId).emit(event, data)
+  }
+
+  async join(room: string, options?: { userId?: string; socketId?: string }): Promise<void> {
+    if (!this.io) {
+      this.logger.warn('Attempted to join room before initialization')
+      return
+    }
+    const target = this.resolveTarget(options)
+    if (!target) {
+      this.logger.warn('join requires userId or socketId')
+      return
+    }
+    await this.io.in(target).socketsJoin(room)
+    this.logger.debug(`Joined ${target} to room ${room}`)
+  }
+
+  async leave(room: string, options?: { userId?: string; socketId?: string }): Promise<void> {
+    if (!this.io) {
+      this.logger.warn('Attempted to leave room before initialization')
+      return
+    }
+    const target = this.resolveTarget(options)
+    if (!target) {
+      this.logger.warn('leave requires userId or socketId')
+      return
+    }
+    await this.io.in(target).socketsLeave(room)
+    this.logger.debug(`Left ${target} from room ${room}`)
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -15,7 +15,19 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
-import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData, PluginContext, PluginCommunication, PluginStorage, PluginApiMethod } from './types/plugin'
+import type {
+  CoreAPI,
+  UserInfo,
+  TokenOptions,
+  UploadOptions,
+  MessageHandler,
+  RpcHandler,
+  QueueJobData,
+  PluginContext,
+  PluginCommunication,
+  PluginStorage,
+  PluginApiMethod,
+} from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { eventBus } from './integration/events/event-bus'
@@ -69,7 +81,6 @@ export class MetaSheetServer {
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
-  private pluginContexts = new Map<string, PluginContext>()
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -333,8 +344,17 @@ export class MetaSheetServer {
         broadcast: (event: string, data: unknown) => {
           this.injector.get(ICollabService).broadcast(event, data)
         },
+        broadcastTo: (room: string, event: string, data: unknown) => {
+          this.injector.get(ICollabService).broadcastTo(room, event, data)
+        },
         sendTo: (userId: string, event: string, data: unknown) => {
           this.injector.get(ICollabService).sendTo(userId, event, data)
+        },
+        join: (room: string, options?: { userId?: string; socketId?: string }) => {
+          return this.injector.get(ICollabService).join(room, options)
+        },
+        leave: (room: string, options?: { userId?: string; socketId?: string }) => {
+          return this.injector.get(ICollabService).leave(room, options)
         },
         onConnection: (handler: (socket: import('./types/plugin').SocketInfo) => void | Promise<void>) => {
           this.injector.get(ICollabService).onConnection(handler)
@@ -629,24 +649,27 @@ export class MetaSheetServer {
     // Phase 3: Plugin will register RedisCache when FEATURE_CACHE_REDIS=true
   }
 
-  private createPluginContext(loaded: LoadedPlugin, coreAPI: CoreAPI): PluginContext {
-    const storageMap = new Map<string, unknown>()
+  private createPluginContext(loaded: LoadedPlugin): PluginContext {
+    const coreApi = this.injector.get(ICoreAPI)
+    const manifest = loaded.manifest
+    const storageCache = new Map<string, unknown>()
     const storage: PluginStorage = {
-      get: async <T = unknown>(key: string): Promise<T | null> => {
-        if (!storageMap.has(key)) return null
-        return storageMap.get(key) as T
+      async get<T = unknown>(key: string): Promise<T | null> {
+        if (!storageCache.has(key)) return null
+        return storageCache.get(key) as T
       },
-      set: async (key: string, value: unknown): Promise<void> => {
-        storageMap.set(key, value)
+      async set<T = unknown>(key: string, value: T): Promise<void> {
+        storageCache.set(key, value)
       },
-      delete: async (key: string): Promise<void> => {
-        storageMap.delete(key)
+      async delete(key: string): Promise<void> {
+        storageCache.delete(key)
       },
-      list: async (): Promise<string[]> => Array.from(storageMap.keys())
+      async list(): Promise<string[]> {
+        return Array.from(storageCache.keys())
+      },
     }
-
     const communication: PluginCommunication = {
-      call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
+      async call<R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> {
         const api = this.pluginApis.get(plugin)
         const fn = api?.[method]
         if (!fn) {
@@ -665,32 +688,26 @@ export class MetaSheetServer {
       },
     }
 
-    const rawAuthor = loaded.manifest.author
-    const author = typeof rawAuthor === 'string'
-      ? rawAuthor
-      : (rawAuthor && typeof rawAuthor === 'object' ? (rawAuthor as { name?: string }).name : undefined)
-
     return {
       metadata: {
-        name: loaded.manifest.name,
-        version: loaded.manifest.version,
-        displayName: loaded.manifest.displayName,
-        description: loaded.manifest.description,
-        author,
+        name: manifest.name,
+        version: manifest.version,
+        displayName: manifest.displayName,
+        description: manifest.description,
+        author: typeof manifest.author === 'string' ? manifest.author : manifest.author?.name,
         path: loaded.path,
       },
-      api: coreAPI,
-      core: coreAPI,
+      api: coreApi,
+      core: coreApi,
       storage,
       config: {},
       communication,
-      logger: new Logger(`Plugin:${loaded.manifest.name}`),
+      logger: new Logger(`Plugin:${manifest.name}`),
     }
   }
 
   private async activateLoadedPlugins(): Promise<void> {
     const plugins = this.pluginLoader.getPlugins()
-    const coreAPI = this.injector.get(ICoreAPI)
     for (const [name, loaded] of plugins) {
       const lastAttempt = new Date().toISOString()
       if (!loaded.plugin || typeof loaded.plugin.activate !== 'function') {
@@ -698,10 +715,9 @@ export class MetaSheetServer {
         continue
       }
 
-      const context = this.createPluginContext(loaded, coreAPI)
+      const context = this.createPluginContext(loaded)
       try {
         await loaded.plugin.activate(context)
-        this.pluginContexts.set(loaded.manifest.name, context)
         this.pluginStatus.set(name, { status: 'active', lastAttempt })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)

@@ -25,6 +25,8 @@ jobs:
       RBAC_BYPASS: 'true'
       PLAYWRIGHT_CHANNEL: chromium
       SMOKE_SKIP_WEB: 'true'
+      RUN_WEB_REACT_UNIVER_SMOKE: 'true'
+      WEB_REACT_BASE: http://127.0.0.1:5180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,6 +45,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps
+
       - name: Run smoke verification
         run: pnpm verify:smoke:all
 
@@ -57,3 +62,5 @@ jobs:
             artifacts/smoke/smoke-report.json
             artifacts/smoke/web.log
             artifacts/smoke/smoke-report.json
+            artifacts/smoke/web-react.log
+            artifacts/smoke/verify-web-react-univer-smoke.json

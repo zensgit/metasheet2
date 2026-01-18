@@ -3,7 +3,9 @@
  * Handles formula parsing, dependency resolution, and calculation
  */
 
-import { db } from '../db/db'
+import type { Kysely } from 'kysely'
+import { db as defaultDb } from '../db/db'
+import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('FormulaEngine')
@@ -101,11 +103,13 @@ export type ASTNodeUnion =
 type SpreadsheetFunction = (...args: unknown[]) => unknown
 
 export class FormulaEngine {
+  private db: Pick<Kysely<Database>, 'selectFrom'> | null
   private functions: Map<string, SpreadsheetFunction> = new Map()
   private calculationOrder: string[] = []
   private dependencyGraph: Map<string, Set<string>> = new Map()
 
-  constructor() {
+  constructor(options: { db?: Pick<Kysely<Database>, 'selectFrom'> } = {}) {
+    this.db = options.db ?? defaultDb
     this.registerBuiltinFunctions()
   }
 
@@ -442,12 +446,12 @@ export class FormulaEngine {
       return context.cache.get(cacheKey)!
     }
 
-    if (!db) {
+    if (!this.db) {
       logger.warn('getCellValue: db is undefined')
       return null
     }
 
-    const cell = await db
+    const cell = await this.db
       .selectFrom('cells')
       .select(['value', 'formula', 'data_type'])
       .where('sheet_id', '=', context.sheetId)
@@ -456,7 +460,7 @@ export class FormulaEngine {
       .executeTakeFirst()
 
     if (!cell) {
-      return '#ERROR!'
+      return null
     }
 
     // Extract actual value from JSONB column - may be stored as {value: x} or directly as primitive
@@ -712,9 +716,9 @@ export class FormulaEngine {
    * Build dependency graph for a sheet
    */
   async buildDependencyGraph(sheetId: string): Promise<void> {
-    if (!db) return
+    if (!this.db) return
 
-    const formulas = await db
+    const formulas = await this.db
       .selectFrom('formulas')
       .select(['cell_id', 'dependencies', 'dependents'])
       .where('sheet_id', '=', sheetId)

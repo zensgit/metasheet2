@@ -14,7 +14,7 @@ describe('PluginLoader failure paths', () => {
       pluginDirs: [__dirname + '/fixtures/cycle-a', __dirname + '/fixtures/cycle-b']
     })
     // Current strategy: log warning and continue loading without throwing
-    await expect(loader.loadPlugins()).resolves.toBeUndefined()
+    await expect(loader.loadPlugins()).resolves.toEqual(expect.any(Array))
   })
   it('marks plugin as failed when permission not in whitelist', async () => {
     const loader = new PluginLoader(coreAPI, {
