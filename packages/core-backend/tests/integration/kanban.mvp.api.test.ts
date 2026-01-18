@@ -1,12 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
+import { poolManager } from '../../src/integration/db/connection-pool'
 import * as path from 'path'
+import crypto from 'crypto'
 import net from 'net'
 
 describe('Kanban MVP API', () => {
   let server: MetaSheetServer
   let baseUrl = ''
-  const viewId = 'board1' // fixture view id for MVP
+  let viewId = ''
+  let authHeader: Record<string, string> = {}
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -26,6 +29,21 @@ describe('Kanban MVP API', () => {
     const address = server.getAddress()
     if (!address || !address.port) return
     baseUrl = `http://127.0.0.1:${address.port}`
+
+    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=1`)
+    const tokenJson = await tokenRes.json()
+    if (tokenJson?.token) {
+      authHeader = { Authorization: `Bearer ${tokenJson.token as string}` }
+    }
+
+    const pool = poolManager.get()
+    viewId = crypto.randomUUID()
+    await pool.query(
+      `INSERT INTO views (id, type, name, config)
+       VALUES ($1, 'kanban', 'Test Kanban', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+      [viewId],
+    )
   })
 
   afterAll(async () => {
@@ -36,7 +54,7 @@ describe('Kanban MVP API', () => {
 
   it('GET returns config+state and supports ETag', async () => {
     if (!baseUrl) return
-    const res1 = await fetch(`${baseUrl}/api/kanban/${viewId}`)
+    const res1 = await fetch(`${baseUrl}/api/kanban/${viewId}`, { headers: authHeader })
     expect(res1.status).toBe(200)
     const etag = res1.headers.get('etag')
     expect(etag).toBeTruthy()
@@ -44,7 +62,9 @@ describe('Kanban MVP API', () => {
     expect(data1.success).toBe(true)
     expect(data1.data).toBeDefined()
 
-    const res304 = await fetch(`${baseUrl}/api/kanban/${viewId}`, { headers: { 'If-None-Match': etag! } })
+    const res304 = await fetch(`${baseUrl}/api/kanban/${viewId}`, {
+      headers: { ...authHeader, 'If-None-Match': etag! },
+    })
     expect(res304.status).toBe(304)
   })
 
@@ -53,12 +73,12 @@ describe('Kanban MVP API', () => {
     const newState = { columns: [{ id: 'todo', cards: ['1','2'] }] }
     const post = await fetch(`${baseUrl}/api/kanban/${viewId}/state`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-user-id': 'itest' },
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({ state: newState })
     })
     expect(post.status).toBe(204)
 
-    const res = await fetch(`${baseUrl}/api/kanban/${viewId}`, { headers: { 'x-user-id': 'itest' } })
+    const res = await fetch(`${baseUrl}/api/kanban/${viewId}`, { headers: authHeader })
     expect(res.status).toBe(200)
     const body = await res.json() as any
     expect(body.success).toBe(true)
@@ -68,8 +88,9 @@ describe('Kanban MVP API', () => {
 
   it('returns 404 for unknown viewId', async () => {
     if (!baseUrl) return
-    const res = await fetch(`${baseUrl}/api/kanban/unknown-view`, { headers: { 'x-user-id': 'itest' } })
-    expect([404, 200]).toContain(res.status) // allow 200 if demo data present
+    const unknownId = crypto.randomUUID()
+    const res = await fetch(`${baseUrl}/api/kanban/${unknownId}`, { headers: authHeader })
+    expect(res.status).toBe(404)
   })
 
   it('requires JWT when KANBAN_AUTH_REQUIRED=true', async () => {

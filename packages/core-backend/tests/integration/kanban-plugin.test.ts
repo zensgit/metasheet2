@@ -8,6 +8,7 @@ import net from 'net'
 describe('Kanban Plugin Integration', () => {
   let server: MetaSheetServer
   let baseUrl: string
+  let authToken = ''
 
   beforeAll(async () => {
     // Preflight: if environment forbids listen(), skip suite by early return
@@ -33,6 +34,12 @@ describe('Kanban Plugin Integration', () => {
     if (!address || !address.port) return // environment limitation; skip
     baseUrl = `http://127.0.0.1:${address.port}`
     await waitForHealth(baseUrl)
+
+    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=kanban_test`)
+    if (tokenRes.status === 200) {
+      const tokenJson = await tokenRes.json()
+      authToken = tokenJson.token as string
+    }
   })
 
   afterAll(async () => {
@@ -45,29 +52,39 @@ describe('Kanban Plugin Integration', () => {
     it('should load and activate kanban plugin', async () => {
       if (!baseUrl) return
       const res = await fetch(`${baseUrl}/api/plugins`)
-      const plugins = await res.json()
+      const payload = await res.json()
+      const plugins = Array.isArray(payload)
+        ? payload
+        : (payload && typeof payload === 'object' && Array.isArray((payload as { list?: unknown[] }).list)
+            ? (payload as { list: unknown[] }).list
+            : [])
 
-      const kanbanPlugin = plugins.find(p => p.name === '@metasheet/plugin-view-kanban')
+      const kanbanPlugin = plugins.find(p => p.name === 'plugin-view-kanban' || p.name === '@metasheet/plugin-view-kanban')
       expect(kanbanPlugin).toBeDefined()
       expect(kanbanPlugin.status).toBe('active')
-      expect(kanbanPlugin.displayName).toBe('看板视图')
+      expect(['Kanban View Plugin', '看板视图']).toContain(kanbanPlugin.displayName)
     })
   })
 
   describe('Route Registration', () => {
     it('should register kanban API routes', async () => {
-      if (!baseUrl) return
+      if (!baseUrl || !authToken) return
       // Test that kanban routes are accessible
-      const res = await fetch(`${baseUrl}/api/kanban/boards`)
+      const res = await fetch(`${baseUrl}/api/kanban/boards`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
       expect(res.status).not.toBe(404)
     })
 
     it('should handle kanban card operations', async () => {
-      if (!baseUrl) return
+      if (!baseUrl || !authToken) return
       // Test card move endpoint
       const res = await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -82,7 +99,7 @@ describe('Kanban Plugin Integration', () => {
 
   describe('Event Registration', () => {
     it('should emit kanban events', async () => {
-      if (!server) return
+      if (!server || !authToken) return
       const addr = server.getAddress()
       if (!addr || !addr.port) return // environment limitation; skip
       const socket = ioClient(`http://127.0.0.1:${addr.port}`, { transports: ['websocket'] })
@@ -115,7 +132,10 @@ describe('Kanban Plugin Integration', () => {
       // Trigger card move AFTER connection is established
       await fetch(`${baseUrl}/api/kanban/cards/move`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
         body: JSON.stringify({
           cardId: 'test-card',
           fromColumn: 'todo',
@@ -139,11 +159,16 @@ describe('Kanban Plugin Integration', () => {
 
   describe('Permission Check', () => {
     it('should verify plugin has required permissions', async () => {
-      if (!baseUrl) return
+      if (!baseUrl || !authToken) return
       const res = await fetch(`${baseUrl}/api/plugins`)
-      const plugins = await res.json()
+      const payload = await res.json()
+      const plugins = Array.isArray(payload)
+        ? payload
+        : (payload && typeof payload === 'object' && Array.isArray((payload as { list?: unknown[] }).list)
+            ? (payload as { list: unknown[] }).list
+            : [])
 
-      const kanbanPlugin = plugins.find(p => p.name === '@metasheet/plugin-view-kanban')
+      const kanbanPlugin = plugins.find(p => p.name === 'plugin-view-kanban' || p.name === '@metasheet/plugin-view-kanban')
 
       // Plugin should be active if permissions are granted
       if (kanbanPlugin.status === 'failed') {

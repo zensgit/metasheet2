@@ -38,11 +38,16 @@ describe('GET /api/plugins contract', () => {
     if (!baseUrl) return
     const res = await fetch(`${baseUrl}/api/plugins`)
     expect(res.status).toBe(200)
-    const data = await res.json()
-    expect(Array.isArray(data)).toBe(true)
+    const payload = await res.json()
+    const list = Array.isArray(payload)
+      ? payload
+      : (payload && typeof payload === 'object' && Array.isArray((payload as { list?: unknown[] }).list)
+          ? (payload as { list: unknown[] }).list
+          : [])
+    expect(Array.isArray(list)).toBe(true)
 
     // Find kanban plugin and verify basic shape
-    const kanban = data.find((p: any) => p.name === '@metasheet/plugin-view-kanban')
+    const kanban = list.find((p: any) => p.name === 'plugin-view-kanban')
     expect(kanban).toBeDefined()
     expect(['active', 'failed', 'inactive']).toContain(kanban.status)
 
@@ -60,7 +65,7 @@ describe('GET /api/plugins contract', () => {
     }
 
     // Ensure failed-only entries (if any) do not expose contributes
-    const failedOnly = data.filter((p: any) => p.status === 'failed' && !p.version)
+    const failedOnly = list.filter((p: any) => p.status === 'failed' && !p.version)
     for (const f of failedOnly) {
       expect(f.contributes).toBeUndefined()
     }

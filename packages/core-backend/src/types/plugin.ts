@@ -542,12 +542,20 @@ export interface QueueAPI {
  */
 export type WebSocketConnectionHandler = (socket: SocketInfo) => void | Promise<void>
 
+export interface WebSocketRoomTarget {
+  userId?: string
+  socketId?: string
+}
+
 /**
  * WebSocket API
  */
 export interface WebSocketAPI {
   broadcast(event: string, data: unknown): void
+  broadcastTo(room: string, event: string, data: unknown): void
   sendTo(userId: string, event: string, data: unknown): void
+  join(room: string, options?: WebSocketRoomTarget): Promise<void>
+  leave(room: string, options?: WebSocketRoomTarget): Promise<void>
   onConnection(handler: WebSocketConnectionHandler): void
 }
 

@@ -46,7 +46,13 @@ export function createContainer(options: ContainerOptions = {}): Injector {
 
   injector.add([ICollectionManager, { useClass: CollectionManager }])
   injector.add([IFormulaService, { useClass: FormulaService }])
-  injector.add([ICommentService, { useClass: CommentService }])
+  injector.add([
+    ICommentService,
+    {
+      useFactory: (collabService: CollabService, logger: Logger) => new CommentService(collabService, logger),
+      deps: [ICollabService, ILogger],
+    },
+  ])
 
   injector.add([
     IPluginLoader,
