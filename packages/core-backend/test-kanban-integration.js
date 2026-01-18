@@ -5,7 +5,8 @@ console.log('=== Kanban Plugin Integration Test ===\n');
 // 1. 插件激活测试
 fetch('http://localhost:8900/api/plugins')
   .then(res => res.json())
-  .then(plugins => {
+  .then(payload => {
+    const plugins = Array.isArray(payload) ? payload : (payload && payload.list ? payload.list : []);
     const kanban = plugins.find(p => p.name.includes('kanban'));
     if (kanban && kanban.status === 'active') {
       console.log('✅ Plugin Activation: Kanban plugin is active');

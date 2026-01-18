@@ -22,7 +22,8 @@
     // 测试1: 正常连接
     fetch('http://localhost:8900/api/plugins')
       .then(res => res.json())
-      .then(plugins => {
+      .then(payload => {
+        const plugins = Array.isArray(payload) ? payload : (payload && payload.list ? payload.list : []);
         document.getElementById('test1').innerHTML = 
           '<p>✅ 连接成功，获取到 ' + plugins.length + ' 个插件</p>';
       })

@@ -6,7 +6,7 @@
   "description": "Sample basic plugin registering a test route and metric",
   "author": { "name": "system" },
   "engine": { "metasheet": ">=2.0.0-0" },
-  "main": "index.js",
+  "main": "index.cjs",
   "capabilities": { "views": [], "workflows": [], "functions": [] },
   "permissions": { "http": { "internal": true } }
 }

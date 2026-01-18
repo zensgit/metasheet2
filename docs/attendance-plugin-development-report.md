@@ -2,21 +2,36 @@
 
 Date: 2026-01-11
 
-## Update (2026-01-15)
-- Added migration `z20251231_create_system_configs.ts` so attendance settings persist in new databases.
-- Activated plugins during backend startup to register attendance routes at runtime.
-- `/api/plugins` now returns an array with status + contributions for frontend gating.
-- Frontend plugin fetch now tolerates both array and legacy `{ list, summary }` payloads.
-- Added integration smoke test `packages/core-backend/tests/integration/attendance-plugin.test.ts` (skips when DB is unavailable).
-- Added `packages/core-backend/vitest.integration.config.ts` plus `test:integration:attendance` script for the new attendance smoke.
+## Update (2026-01-17)
+- Added migration `zzzz20260117090000_add_attendance_permissions.ts` to seed attendance RBAC permissions and grant them to the `admin` role.
+- Documented a minimal enablement checklist for plugin activation and RBAC setup.
+- Guarded audit logging against non-numeric user IDs and fixed audit insert placeholders.
+- Added WebSocket room APIs (join/leave/broadcastTo) to CollabService/CoreAPI and updated shared types.
+- Merged snapshot label endpoints and filter queries into `/api/snapshots` and added `updateSnapshot` helper.
+- Normalized protection rule evaluation to accept legacy `{ type, conditions }` rule format.
+- Fixed `CommentService` injection so broadcasts are available during API flows.
+- Skipped spreadsheet integration suite pending spreadsheet cell APIs.
 
 ## Update (2026-01-16)
 - Added `lodash` to `@metasheet/core-backend` dependencies to satisfy parser imports during integration runs.
 - Restored `zz20251231_create_audit_tables.ts` placeholder migration to unblock existing DB migration history.
 - Added `packages/core-backend/vitest.integration.config.ts` so integration tests can run without unit test exclusions.
 
+## Update (2026-01-15)
+- Added migration `z20251231_create_system_configs.ts` so attendance settings persist in new databases.
+- Activated plugins during backend startup to register attendance routes at runtime.
+- `/api/plugins` returns `{ list, summary }` with status + contributions for frontend gating; frontend fetch tolerates array payloads too.
+- Added integration smoke test `packages/core-backend/tests/integration/attendance-plugin.test.ts` (skips when DB is unavailable).
+- Added `packages/core-backend/vitest.integration.config.ts` plus `test:integration:attendance` script for the new attendance smoke.
+
 ## Overview
 The attendance module has been finalized as an optional plugin with org-aware data handling, admin settings, CSV export, automated absence scheduling, and shift/holiday scheduling. Auto-absence now respects org membership through a `user_orgs` mapping plus shift assignments and holiday overrides. Frontend support surfaces org/user filters, admin controls, shift scheduling, and export actions only when the plugin is active. OpenAPI contracts and RBAC seed data were updated accordingly.
+
+## Enablement Checklist
+- Run migrations (ensure attendance and RBAC tables exist).
+- Start backend without `SKIP_PLUGINS=true` so `plugin-attendance` activates.
+- For local smoke tests, set `RBAC_BYPASS=true` or grant `attendance:*` permissions to users/roles.
+- Populate `user_orgs` for non-default orgs so auto-absence can compute attendance.
 
 ## Backend + Plugin Changes
 - Implemented org-aware attendance routes in `plugins/plugin-attendance/index.cjs` (punch, records, summary, requests, approvals, rules, settings, export).
@@ -58,9 +73,9 @@ The attendance module has been finalized as an optional plugin with org-aware da
 - `GET /api/attendance/export`
 
 ## Database Changes
-- Added migration `20260110120000_add_attendance_org_id.ts` to introduce `org_id` to attendance tables and update indexes.
-- Added migration `zzzz20260110123000_create_user_orgs_table.ts` to track user/org membership for auto-absence.
-- Added migration `20260111120000_add_attendance_scheduling_tables.ts` for shifts, shift assignments, holidays, and `attendance_records.is_workday`.
+- Added migration `zzzz20260114100000_add_attendance_org_id.ts` to introduce `org_id` to attendance tables and update indexes.
+- Added migration `zzzz20260114110000_create_user_orgs_table.ts` to track user/org membership for auto-absence.
+- Added migration `zzzz20260114120000_add_attendance_scheduling_tables.ts` for shifts, shift assignments, holidays, and `attendance_records.is_workday`.
 - Updated Kysely types in `packages/core-backend/src/db/types.ts` to include `org_id` on attendance tables.
 - Added `user_orgs` table type to Kysely Database typing.
 

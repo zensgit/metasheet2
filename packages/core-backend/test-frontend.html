@@ -15,7 +15,8 @@ async function testPlugins() {
   try {
     const res = await fetch('http://localhost:8900/api/plugins');
     if (!res.ok) throw new Error(\`\${res.status} \${res.statusText}\`);
-    const plugins = await res.json();
+    const payload = await res.json();
+    const plugins = Array.isArray(payload) ? payload : (payload && payload.list ? payload.list : []);
     
     status.textContent = \`Loaded \${plugins.length} plugins\`;
     pluginsDiv.innerHTML = '<h3>Plugins:</h3>' + plugins.map(p => 

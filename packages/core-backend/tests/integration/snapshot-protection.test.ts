@@ -8,12 +8,15 @@ import { MetaSheetServer } from '../../src/index'
 import { snapshotService } from '../../src/services/SnapshotService'
 import { protectionRuleService } from '../../src/services/ProtectionRuleService'
 import net from 'net'
+import crypto from 'crypto'
 import type { ProtectionRule } from '../../src/services/ProtectionRuleService'
 
 describe('Snapshot Protection System E2E', () => {
   let server: MetaSheetServer
   let baseUrl = ''
+  let authToken = ''
   const testUserId = 'test-user-snapshot-protection'
+  const viewId = crypto.randomUUID()
   let testSnapshotId: string
   let testRuleId: string
 
@@ -35,6 +38,12 @@ describe('Snapshot Protection System E2E', () => {
     const address = server.getAddress()
     if (!address || !address.port) return
     baseUrl = `http://127.0.0.1:${address.port}`
+
+    const tokenRes = await authFetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}`)
+    if (tokenRes.status === 200) {
+      const tokenJson = await tokenRes.json()
+      authToken = tokenJson.token as string
+    }
   })
 
   afterAll(async () => {
@@ -63,11 +72,11 @@ describe('Snapshot Protection System E2E', () => {
     // Create a test snapshot for each test
     if (!testSnapshotId) {
       const snapshot = await snapshotService.createSnapshot({
-        view_id: 'test-view-protection',
+        viewId,
         name: 'Test Snapshot for Protection',
         description: 'Snapshot for testing protection features',
         snapshot_data: { test: 'data' },
-        created_by: testUserId,
+        createdBy: testUserId,
         tags: [],
         protection_level: 'normal'
       })
@@ -75,11 +84,19 @@ describe('Snapshot Protection System E2E', () => {
     }
   })
 
+  const authFetch = (url: string, init: RequestInit = {}) => {
+    const headers = { ...(init.headers as Record<string, string> | undefined) }
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`
+    }
+    return fetch(url, { ...init, headers })
+  }
+
   describe('Snapshot Labeling API', () => {
     it('should add tags to snapshot', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -102,7 +119,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // First add some tags
-      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
+      await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -114,7 +131,7 @@ describe('Snapshot Protection System E2E', () => {
       })
 
       // Then remove one
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -136,7 +153,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set protection level to protected', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -156,7 +173,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set protection level to critical', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -176,7 +193,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should reject invalid protection level', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -195,7 +212,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should set release channel', async () => {
       if (!baseUrl || !testSnapshotId) return
 
-      const response = await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/release-channel`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/release-channel`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -216,7 +233,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // Add specific tags
-      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
+      await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -227,7 +244,7 @@ describe('Snapshot Protection System E2E', () => {
         })
       })
 
-      const response = await fetch(`${baseUrl}/api/snapshots?tags=query-test,findable`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots?tags=query-test,findable`, {
         headers: {
           'x-user-id': testUserId
         }
@@ -244,7 +261,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testSnapshotId) return
 
       // Set protection level
-      await fetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
+      await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -253,7 +270,7 @@ describe('Snapshot Protection System E2E', () => {
         body: JSON.stringify({ level: 'critical' })
       })
 
-      const response = await fetch(`${baseUrl}/api/snapshots?protection_level=critical`, {
+      const response = await authFetch(`${baseUrl}/api/snapshots?protection_level=critical`, {
         headers: { 'x-user-id': testUserId }
       })
 
@@ -268,7 +285,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should create a protection rule', async () => {
       if (!baseUrl) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -308,7 +325,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should list protection rules', async () => {
       if (!baseUrl) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         headers: { 'x-user-id': testUserId }
       })
 
@@ -321,7 +338,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should filter rules by target_type', async () => {
       if (!baseUrl) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules?target_type=snapshot`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules?target_type=snapshot`, {
         headers: { 'x-user-id': testUserId }
       })
 
@@ -334,7 +351,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should get a single protection rule', async () => {
       if (!baseUrl || !testRuleId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         headers: { 'x-user-id': testUserId }
       })
 
@@ -347,7 +364,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should update a protection rule', async () => {
       if (!baseUrl || !testRuleId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -369,7 +386,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should deactivate a protection rule', async () => {
       if (!baseUrl || !testRuleId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -390,7 +407,7 @@ describe('Snapshot Protection System E2E', () => {
       if (!baseUrl || !testRuleId) return
 
       // First reactivate the rule
-      await fetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
+      await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -400,7 +417,7 @@ describe('Snapshot Protection System E2E', () => {
       })
 
       // Evaluate rule against a snapshot with production tag
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules/evaluate`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules/evaluate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -427,7 +444,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should not match when conditions are not met', async () => {
       if (!baseUrl || !testRuleId) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules/evaluate`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules/evaluate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -532,7 +549,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should create risk elevation rule', async () => {
       if (!baseUrl) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -577,7 +594,7 @@ describe('Snapshot Protection System E2E', () => {
     it('should create approval requirement rule', async () => {
       if (!baseUrl) return
 
-      const response = await fetch(`${baseUrl}/api/admin/safety/rules`, {
+      const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

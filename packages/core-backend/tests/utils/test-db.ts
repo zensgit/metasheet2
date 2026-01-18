@@ -32,6 +32,7 @@ export function createMockQueryBuilder() {
   builder.where = vi.fn().mockImplementation(() => builder)
   builder.orderBy = vi.fn().mockReturnValue(builder)
   builder.limit = vi.fn().mockReturnValue(builder)
+  builder.offset = vi.fn().mockReturnValue(builder)
   builder.values = vi.fn().mockReturnValue(builder)
   builder.set = vi.fn().mockReturnValue(builder)
   builder.returningAll = vi.fn().mockReturnValue(builder)

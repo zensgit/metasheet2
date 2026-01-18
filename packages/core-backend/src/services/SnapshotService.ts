@@ -1086,6 +1086,42 @@ export class SnapshotService {
   }
 
   /**
+   * Update snapshot fields (used for maintenance flows like expiry updates).
+   */
+  async updateSnapshot(
+    snapshotId: string,
+    updates: Partial<Pick<Snapshot, 'expires_at' | 'tags' | 'protection_level' | 'release_channel'>>,
+    userId?: string
+  ): Promise<boolean> {
+    if (!db) {
+      throw new Error('Database not available')
+    }
+
+    if (!updates || Object.keys(updates).length === 0) {
+      return true
+    }
+
+    await db
+      .updateTable('snapshots')
+      .set(updates)
+      .where('id', '=', snapshotId)
+      .execute()
+
+    if (userId) {
+      await auditLog({
+        actorId: userId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'snapshot',
+        resourceId: snapshotId,
+        meta: { updates }
+      })
+    }
+
+    return true
+  }
+
+  /**
    * Query snapshots by tags
    */
   async getByTags(tags: string[]): Promise<Snapshot[]> {

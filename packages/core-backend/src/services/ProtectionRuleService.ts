@@ -476,6 +476,20 @@ export class ProtectionRuleService {
    * Evaluate rule conditions against entity properties
    */
   private evaluateConditions(conditions: RuleConditions, properties: Record<string, unknown>): boolean {
+    const legacy = conditions as unknown as { type?: string; conditions?: RuleCondition[] }
+    if (legacy.type && Array.isArray(legacy.conditions)) {
+      if (legacy.type === 'all') {
+        return legacy.conditions.every(condition => this.evaluateCondition(condition, properties))
+      }
+      if (legacy.type === 'any') {
+        return legacy.conditions.some(condition => this.evaluateCondition(condition, properties))
+      }
+      if (legacy.type === 'not') {
+        const first = legacy.conditions[0]
+        return first ? !this.evaluateCondition(first, properties) : true
+      }
+    }
+
     // Handle composite conditions
     if (conditions.all) {
       return conditions.all.every(condition => this.evaluateCondition(condition, properties))
