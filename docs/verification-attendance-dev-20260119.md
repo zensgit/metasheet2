@@ -17,6 +17,7 @@ pnpm dev
 ## Auth
 - Dev token from `GET /api/auth/dev-token`
 - Test accounts created via `POST /api/auth/register`: `attn-login3@example.com`, `attn-login4@example.com`, `attn-ui-verify-1768822476@example.com` (passwords redacted)
+- Attendance permissions granted via `user_permissions` for `attn-ui-verify-1768822476@example.com` to validate attendance UI
 - Roles/permissions: dev token has admin + attendance/spreadsheets; registered users default to `role=user` with spreadsheet permissions
 
 ## API Smoke Results
@@ -58,10 +59,12 @@ pnpm dev
 - Export (API): CSV export returned header + row when `userId` filter supplied.
 - Auth: register/login succeeded for test accounts; verify/me returned 200; logout is client-side token clear.
 - Grid RBAC: normal user token created spreadsheet (201), loaded cells (200), and deleted spreadsheet (200) without 401/403.
+- Attendance UI: `/attendance` endpoints returned 200 after granting attendance permissions to the test user (no 401/403 in console).
 - Admin scheduling (UI): delete confirmed for shifts (confirmation dialog + row removed); holiday create/delete confirmed; assignment delete still not confirmed due to MCP automation timeouts.
 
 ## Findings
 - Attendance plugin RBAC checks require `RBAC_BYPASS=true` for dev tokens unless permissions are seeded in DB.
+- Attendance UI requires `user_permissions` (or admin role) for the viewing user; otherwise API calls return 403.
 - RBAC now falls back to `users.permissions` for legacy user permissions in addition to RBAC tables.
 - CSV export returns header-only when no `userId` filter matches records.
 - Login flow requires `users` table in DB; migration now added so register/login works.
