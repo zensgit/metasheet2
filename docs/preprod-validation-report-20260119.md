@@ -4,24 +4,24 @@
 - Date: 2026-01-19
 - Owner: TBD
 - Environment: dev (local)
-- Release tag / commit: a50fe9df (main)
+- Release tag / commit: d485c1f3 (main)
 - Scope: dev validation for grid/spreadsheets + attendance plugin (optional)
-- Status: pending
+- Status: pending (partial dev validation)
 
 ## Build and Deploy
 - Build ID: N/A (local dev)
 - Image or artifact: N/A (local dev)
 - Deploy window: N/A (local dev)
-- Feature flags: None detected in local env files (confirm runtime overrides)
+- Feature flags: RBAC_TOKEN_TRUST=true (dev token RBAC trust)
 - Migration plan: run `pnpm --filter @metasheet/core-backend migrate` with `DATABASE_URL`
 - Rollback plan: reset dev DB (drop + re-migrate) if needed
 
 ## Environment Access
-- Web URL: http://localhost:8899 (default `VITE_PORT`, confirm)
-- API URL: http://127.0.0.1:7778 (from `.env.local` `VITE_API_URL`)
-- Admin URL: http://127.0.0.1:7778/api/admin (via Vite proxy) or http://localhost:8900/api/admin (direct)
+- Web URL: http://localhost:8899 (Vite dev)
+- API URL: http://localhost:7778 (backend dev, aligned to `VITE_API_URL`)
+- Admin URL: http://localhost:7778/api/admin (direct) or http://localhost:8899/api/admin (via Vite proxy)
 - Observability links: N/A (dev)
-- Test accounts (roles only, no passwords): TBD
+- Test accounts (roles only, no passwords): dev-user (admin via dev token)
 - Secrets note: do not paste secrets, use <redacted>
 
 ## Pre-Checks
@@ -29,25 +29,25 @@
 - [ ] Backups verified
 - [ ] Monitoring and alerts enabled
 - [ ] Rollback steps confirmed
-- [ ] Data migration dry-run completed (if applicable)
+- [x] Data migration dry-run completed (if applicable)
 
 ## Validation Checklist
 ### Smoke
 - [ ] Login / logout
-- [ ] Navigation and routing
+- [x] Navigation and routing
 - [ ] Core workflows (list)
-- [ ] Plugin loading
+- [x] Plugin loading
 - [ ] Error reporting / toast
 
 ### API
-- [ ] Auth endpoints
-- [ ] Spreadsheets endpoints
+- [x] Auth endpoints
+- [x] Spreadsheets endpoints
 - [ ] Attendance endpoints (if enabled)
 - [ ] WebSocket connection
 - [ ] OpenAPI / SDK compatibility
 
 ### Data and Migrations
-- Migration IDs: TBD
+- Migration IDs: zzzz20260113_create_spreadsheets_table, zzzz20260117120000_create_spreadsheet_grid_tables, zzzz20260114090000_create_attendance_tables, zzzz20260114100000_add_attendance_org_id, zzzz20260114120000_add_attendance_scheduling_tables, zzzz20260117090000_add_attendance_permissions
 - [ ] Schema verification
 - [ ] Seed data validation
 - [ ] Rollback tested (if applicable)
@@ -70,28 +70,29 @@
 - [ ] Mobile layout
 
 ### Regression
-- Areas covered: TBD
-- Areas deferred: TBD
+- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update
+- Areas deferred: UI login flows, attendance API workflows, WebSocket checks, performance
 
 ## Commands Executed
 ```sh
-# Example
-pnpm lint
-pnpm type-check
-pnpm test
-pnpm --filter @metasheet/core-backend test:integration
-pnpm --filter @metasheet/web exec vitest run --watch=false
+pnpm --filter @metasheet/core-backend migrate
+RBAC_TOKEN_TRUST=true PORT=7778 JWT_SECRET=dev-secret-key pnpm --filter @metasheet/core-backend dev
+pnpm dev
+curl http://localhost:8899/grid
+curl http://localhost:8899/attendance
+curl http://localhost:7778/api/plugins
+curl http://localhost:7778/api/auth/dev-token
 ```
 
 ## Findings
-- Issues: TBD
-- Risks: TBD
-- Follow-ups: TBD
+- Issues: RBAC denies spreadsheets write unless `RBAC_TOKEN_TRUST=true` is set for dev token
+- Risks: Frontend `.env.local` targets port 7778 while backend `.env` sets 8900; keep them aligned
+- Follow-ups: Run attendance API flows, UI grid save flow, WebSocket validation
 
 ## Artifacts
-- Logs: TBD
-- Screenshots: TBD
-- Test runs: TBD
+- Logs: local dev server logs in terminal
+- Screenshots: N/A
+- Test runs: N/A (curl-based checks only)
 
 ## Sign-Off
 - QA: TBD
