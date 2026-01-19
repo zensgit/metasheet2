@@ -352,6 +352,48 @@ export function federationRouter(injector?: Injector): Router {
     return undefined
   }
 
+  const resolveAdapterError = (error: unknown, fallbackMessage: string) => {
+    const status = (error as { response?: { status?: number } })?.response?.status
+    const statusCode = typeof status === 'number' ? status : 502
+    const message = error instanceof Error ? error.message : fallbackMessage
+    let code = 'PLM_ERROR'
+    if (statusCode === 401) {
+      code = 'PLM_UNAUTHORIZED'
+    } else if (statusCode === 403) {
+      code = 'PLM_FORBIDDEN'
+    } else if (statusCode === 404) {
+      code = 'PLM_NOT_FOUND'
+    } else if (statusCode >= 500) {
+      code = 'PLM_UPSTREAM'
+    }
+    return { statusCode, code, message }
+  }
+
+  const sendAdapterError = (
+    res: Response,
+    error: unknown,
+    fallbackMessage: string,
+    metrics: ReturnType<typeof getAdapterMetrics>,
+    method: string,
+    endpoint: string,
+    startTime: number
+  ): boolean => {
+    if (!error) return false
+    const resolved = resolveAdapterError(error, fallbackMessage)
+    metrics.recordRequest(
+      { adapter: 'plm', method, endpoint, status: String(resolved.statusCode) },
+      Date.now() - startTime
+    )
+    res.status(resolved.statusCode).json({
+      ok: false,
+      error: {
+        code: resolved.code,
+        message: resolved.message,
+      },
+    })
+    return true
+  }
+
   const toStringArrayParam = (value: unknown): string[] | undefined => {
     if (Array.isArray(value)) {
       const items = value.map((item) => String(item).trim()).filter(Boolean)
@@ -394,6 +436,9 @@ export function federationRouter(injector?: Injector): Router {
           search,
           itemType,
         })
+        if (sendAdapterError(res, result.error, 'Failed to list products', metrics, 'GET', '/products', startTime)) {
+          return
+        }
         const items = result.data.map((product: PLMProductWire) => mapPLMProduct(product))
 
         metrics.recordRequest(
@@ -427,6 +472,9 @@ export function federationRouter(injector?: Injector): Router {
         data: mockData,
       })
     } catch (error) {
+      if (sendAdapterError(res, error, 'Failed to list products', metrics, 'GET', '/products', startTime)) {
+        return
+      }
       metrics.recordRequest(
         { adapter: 'plm', method: 'GET', endpoint: '/products', status: '500' },
         Date.now() - startTime
@@ -491,6 +539,9 @@ export function federationRouter(injector?: Injector): Router {
         },
       })
     } catch (error) {
+      if (sendAdapterError(res, error, 'Failed to get product', metrics, 'GET', '/products/:id', startTime)) {
+        return
+      }
       metrics.recordRequest(
         { adapter: 'plm', method: 'GET', endpoint: '/products/:id', status: '500' },
         Date.now() - startTime
@@ -512,6 +563,9 @@ export function federationRouter(injector?: Injector): Router {
 
     try {
       const productId = req.params.id
+      const depthValue = toNumberParam(req.query.depth)
+      const depth = typeof depthValue === 'number' ? Math.max(1, Math.floor(depthValue)) : undefined
+      const effectiveAt = toStringParam(req.query.effective_at ?? req.query.effectiveAt)
       const adapter = await ensurePlmAdapter()
       const fallbackItems = getMockPlmBomItems(productId)
 
@@ -521,7 +575,10 @@ export function federationRouter(injector?: Injector): Router {
       )
 
       if (adapter) {
-        const result = await adapter.getProductBOM(productId)
+        const result = await adapter.getProductBOM(productId, { depth, effectiveAt })
+        if (sendAdapterError(res, result.error, 'Failed to get BOM', metrics, 'GET', '/products/:id/bom', startTime)) {
+          return
+        }
         return res.json({
           ok: true,
           data: {
@@ -541,6 +598,9 @@ export function federationRouter(injector?: Injector): Router {
         },
       })
     } catch (error) {
+      if (sendAdapterError(res, error, 'Failed to get BOM', metrics, 'GET', '/products/:id/bom', startTime)) {
+        return
+      }
       metrics.recordRequest(
         { adapter: 'plm', method: 'GET', endpoint: '/products/:id/bom', status: '500' },
         Date.now() - startTime
@@ -970,6 +1030,9 @@ export function federationRouter(injector?: Injector): Router {
               search,
               itemType,
             })
+            if (sendAdapterError(res, result.error, 'Failed to query products', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             const items = result.data.map((product: PLMProductWire) => mapPLMProduct(product))
 
@@ -990,7 +1053,13 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           if (operation === 'bom' && productId) {
-            const result = await adapter.getProductBOM(productId)
+            const depthValue = toNumberParam(filterParams.depth ?? filterParams.max_levels ?? filterParams.maxLevels)
+            const depth = typeof depthValue === 'number' ? Math.max(1, Math.floor(depthValue)) : undefined
+            const resolvedEffectiveAt = effectiveAt || toStringParam(filterParams.effective_at ?? filterParams.effectiveAt)
+            const result = await adapter.getProductBOM(productId, { depth, effectiveAt: resolvedEffectiveAt })
+            if (sendAdapterError(res, result.error, 'Failed to query BOM', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1031,6 +1100,9 @@ export function federationRouter(injector?: Injector): Router {
               role,
               includeMetadata,
             })
+            if (sendAdapterError(res, result.error, 'Failed to query documents', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1064,6 +1136,9 @@ export function federationRouter(injector?: Injector): Router {
               limit: pagination?.limit,
               offset: pagination?.offset,
             })
+            if (sendAdapterError(res, result.error, 'Failed to query approvals', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1095,6 +1170,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadProperties(resolvedFileId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD properties', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1124,6 +1202,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadViewState(resolvedFileId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD view state', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1154,6 +1235,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadReview(resolvedFileId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD review', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1183,6 +1267,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadHistory(resolvedFileId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD history', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1214,6 +1301,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadDiff(resolvedFileId, resolvedOtherId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD diff', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1245,6 +1335,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getCadMeshStats(resolvedFileId)
+            if (sendAdapterError(res, result.error, 'Failed to query CAD mesh stats', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1285,6 +1378,9 @@ export function federationRouter(injector?: Injector): Router {
               recursive: resolvedRecursive,
               maxLevels: resolvedMaxLevels,
             })
+            if (sendAdapterError(res, result.error, 'Failed to query where-used', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1315,6 +1411,9 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.getBomSubstitutes(resolvedBomLineId)
+            if (sendAdapterError(res, result.error, 'Failed to query substitutes', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1333,6 +1432,9 @@ export function federationRouter(injector?: Injector): Router {
 
           if (operation === 'bom_compare_schema') {
             const result = await adapter.getBomCompareSchema()
+            if (sendAdapterError(res, result.error, 'Failed to query BOM compare schema', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1395,6 +1497,9 @@ export function federationRouter(injector?: Injector): Router {
               includeRelationshipProps: resolvedRelProps,
               effectiveAt: resolvedEffectiveAt,
             })
+            if (sendAdapterError(res, result.error, 'Failed to query BOM compare', metrics, 'POST', `/plm/${operation}`, startTime)) {
+              return
+            }
 
             metrics.recordRequest(
               { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1432,6 +1537,9 @@ export function federationRouter(injector?: Injector): Router {
           data: mockData,
         })
       } catch (error) {
+        if (sendAdapterError(res, error, 'PLM query failed', metrics, 'POST', '/plm/query', startTime)) {
+          return
+        }
         metrics.recordRequest(
           { adapter: 'plm', method: 'POST', endpoint: `/plm/query`, status: '500' },
           Date.now() - startTime
@@ -1519,6 +1627,9 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           const result = await adapter.updateCadProperties(resolvedFileId, resolvedPayload)
+          if (sendAdapterError(res, result.error, 'Failed to update CAD properties', metrics, 'POST', `/plm/${operation}`, startTime)) {
+            return
+          }
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1558,6 +1669,9 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           const result = await adapter.updateCadViewState(resolvedFileId, resolvedPayload)
+          if (sendAdapterError(res, result.error, 'Failed to update CAD view state', metrics, 'POST', `/plm/${operation}`, startTime)) {
+            return
+          }
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1598,6 +1712,9 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           const result = await adapter.updateCadReview(resolvedFileId, resolvedPayload)
+          if (sendAdapterError(res, result.error, 'Failed to update CAD review', metrics, 'POST', `/plm/${operation}`, startTime)) {
+            return
+          }
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1630,6 +1747,9 @@ export function federationRouter(injector?: Injector): Router {
             resolvedSubstituteItemId,
             properties && typeof properties === 'object' ? properties : undefined
           )
+          if (sendAdapterError(res, result.error, 'Failed to add BOM substitute', metrics, 'POST', `/plm/${operation}`, startTime)) {
+            return
+          }
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1663,6 +1783,9 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           const result = await adapter.removeBomSubstitute(resolvedBomLineId, resolvedSubstituteId)
+          if (sendAdapterError(res, result.error, 'Failed to remove BOM substitute', metrics, 'POST', `/plm/${operation}`, startTime)) {
+            return
+          }
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
@@ -1683,6 +1806,9 @@ export function federationRouter(injector?: Injector): Router {
           },
         })
       } catch (error) {
+        if (sendAdapterError(res, error, 'PLM mutation failed', metrics, 'POST', '/plm/mutate', startTime)) {
+          return
+        }
         metrics.recordRequest(
           { adapter: 'plm', method: 'POST', endpoint: '/plm/mutate', status: '500' },
           Date.now() - startTime
@@ -1774,7 +1900,8 @@ export function federationRouter(injector?: Injector): Router {
             }
 
             const result = await adapter.searchDocuments(searchParams)
-            const items = result.data.map((doc: AdapterAthenaDocument) => mapAthenaDocument(doc))
+            const items: Array<ReturnType<typeof mapAthenaDocument>> = result.data
+              .map((doc: AdapterAthenaDocument) => mapAthenaDocument(doc))
             const total = result.metadata?.totalCount ?? items.length
 
             if (operation === 'documents') {
@@ -1789,7 +1916,7 @@ export function federationRouter(injector?: Injector): Router {
               })
             }
 
-            const results = items.map((doc, index) => ({
+            const results = items.map((doc: ReturnType<typeof mapAthenaDocument>, index: number) => ({
               id: doc.id,
               name: doc.name,
               score: 1 - index * 0.01,

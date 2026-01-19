@@ -51,7 +51,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter } from './routes/data-sources'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -557,7 +557,6 @@ export class MetaSheetServer {
     this.app.use('/api/admin', initAdminRoutes({
       pluginLoader: this.pluginLoader,
       snapshotService: this.snapshotService,
-      dataSourceManager: getDataSourceManager()
     }))
 
     // V2 测试端点
@@ -668,9 +667,11 @@ export class MetaSheetServer {
         return Array.from(storageCache.keys())
       },
     }
+    const pluginApis = this.pluginApis
+    const eventBus = this.eventBus
     const communication: PluginCommunication = {
-      async call<R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> {
-        const api = this.pluginApis.get(plugin)
+      call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
+        const api = pluginApis.get(plugin)
         const fn = api?.[method]
         if (!fn) {
           throw new Error(`Plugin method not found: ${plugin}.${method}`)
@@ -678,13 +679,13 @@ export class MetaSheetServer {
         return fn(...args) as Promise<R>
       },
       register: (name: string, api: Record<string, PluginApiMethod>) => {
-        this.pluginApis.set(name, api)
+        pluginApis.set(name, api)
       },
       on: (event: string, handler: (data: unknown) => void) => {
-        this.eventBus.on(event, handler)
+        eventBus.on(event, handler)
       },
       emit: (event: string, data?: unknown) => {
-        this.eventBus.emit(event, data)
+        eventBus.emit(event, data)
       },
     }
 

@@ -9,6 +9,7 @@ import type { ColumnType, Generated, JSONColumnType } from 'kysely'
 export type CreatedAt = ColumnType<Date, string | undefined, never>
 export type UpdatedAt = ColumnType<Date, string | undefined, Date | string>
 export type NullableTimestamp = ColumnType<Date, string | undefined, Date | string | null> | null
+type JsonObjectColumn = JSONColumnType<Record<string, unknown> | null, Record<string, unknown> | null, Record<string, unknown> | null>
 
 export interface Database {
   // Core tables
@@ -433,6 +434,7 @@ export interface BpmnUserTasksTable {
   variables: JSONColumnType<Record<string, unknown>>
   form_data: JSONColumnType<Record<string, unknown> | null, string | null, string | null>
   created_at: CreatedAt
+  claimed_at: NullableTimestamp
   completed_at: NullableTimestamp
 }
 
@@ -734,10 +736,10 @@ export interface CellsTable {
   sheet_id: string
   row_index: number
   column_index: number
-  value: JSONColumnType<Record<string, unknown> | null>
+  value: JsonObjectColumn
   data_type: string | null
   formula: string | null
-  computed_value: JSONColumnType<Record<string, unknown> | null> | null
+  computed_value: JsonObjectColumn | null
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -761,9 +763,9 @@ export interface CellVersionsTable {
   cell_id: string
   sheet_id: string
   version_number: number
-  value: JSONColumnType<Record<string, unknown> | null> | null
+  value: JsonObjectColumn | null
   formula: string | null
-  format: JSONColumnType<Record<string, unknown> | null> | null
+  format: JsonObjectColumn | null
   changed_by: string | null
   change_type: string | null
   change_summary: string | null

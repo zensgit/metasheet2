@@ -264,10 +264,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
         .values({
           id: instanceId,
           process_definition_id: definition.id,
+          process_definition_key: definition.key,
           business_key: businessKey || null,
           parent_process_instance_id: null,
           state: 'ACTIVE',
-          variables: JSON.stringify(variables) as string
+          variables: JSON.stringify(variables) as string,
+          tenant_id: tenantId || null
         })
         .execute()
 
@@ -425,6 +427,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
         due_date: props.dueDate ? new Date(props.dueDate as string | number | Date).toISOString() : null,
         follow_up_date: null,
         state: assignee ? 'RESERVED' : 'READY',
+        variables: JSON.stringify(instance?.variables || {}) as string,
+        form_data: null,
         completed_at: null
       })
       .execute()

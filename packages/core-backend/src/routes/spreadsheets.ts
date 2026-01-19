@@ -393,8 +393,7 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
                 format: null,
                 changed_by: getActorId(req) ?? null,
                 change_type: 'update',
-                change_summary: 'Cell updated',
-                created_at: new Date()
+                change_summary: 'Cell updated'
               })
               .execute()
 

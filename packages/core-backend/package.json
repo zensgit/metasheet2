@@ -10,6 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "dev:core": "tsx src/index.ts",
     "migrate": "tsx src/db/migrate.ts",
+    "db:migrate": "tsx src/db/migrate.ts",
     "db:list": "tsx src/db/migrate.ts --list",
     "db:reset": "tsx src/db/migrate.ts --reset",
     "db:rollback": "tsx src/db/migrate.ts --rollback",

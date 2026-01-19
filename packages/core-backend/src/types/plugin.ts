@@ -220,7 +220,7 @@ export interface PluginMetadata {
   version: string
   displayName?: string
   description?: string
-  author?: string
+  author?: string | { name?: string }
   path: string
 }
 
@@ -232,7 +232,7 @@ export interface PluginManifest {
   version: string
   displayName?: string
   description?: string
-  author?: string
+  author?: string | { name?: string }
   license?: string
   path?: string // Plugin file path (added during loading)
 
