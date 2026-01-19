@@ -27,6 +27,7 @@ import type {
   PluginCommunication,
   PluginStorage,
   PluginApiMethod,
+  PluginLifecycle,
 } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
@@ -711,14 +712,23 @@ export class MetaSheetServer {
     const plugins = this.pluginLoader.getPlugins()
     for (const [name, loaded] of plugins) {
       const lastAttempt = new Date().toISOString()
-      if (!loaded.plugin || typeof loaded.plugin.activate !== 'function') {
+      let pluginInstance: PluginLifecycle | null = loaded.plugin
+      if (typeof pluginInstance === 'function') {
+        const proto = (pluginInstance as { prototype?: { activate?: unknown; deactivate?: unknown } }).prototype
+        if (proto && (typeof proto.activate === 'function' || typeof proto.deactivate === 'function')) {
+          pluginInstance = new (pluginInstance as new () => PluginLifecycle)()
+          loaded.plugin = pluginInstance
+        }
+      }
+
+      if (!pluginInstance || typeof pluginInstance.activate !== 'function') {
         this.pluginStatus.set(name, { status: 'inactive', lastAttempt })
         continue
       }
 
       const context = this.createPluginContext(loaded)
       try {
-        await loaded.plugin.activate(context)
+        await pluginInstance.activate(context)
         this.pluginStatus.set(name, { status: 'active', lastAttempt })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
