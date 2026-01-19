@@ -10,6 +10,7 @@ Entry points:
 
 - Template: `docs/preprod-validation-report-template.md`
 - Current report: `docs/preprod-validation-report-20260119.md`
+- Attendance dev smoke: `docs/verification-attendance-dev-20260119.md`
 
 ## Daily / Pre-PR
 

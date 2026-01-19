@@ -4,15 +4,15 @@
 - Date: 2026-01-19
 - Owner: TBD
 - Environment: dev (local)
-- Release tag / commit: d485c1f3 (main)
+- Release tag / commit: be92b0e9 (main)
 - Scope: dev validation for grid/spreadsheets + attendance plugin (optional)
-- Status: pending (partial dev validation)
+- Status: in progress (dev validation)
 
 ## Build and Deploy
 - Build ID: N/A (local dev)
 - Image or artifact: N/A (local dev)
 - Deploy window: N/A (local dev)
-- Feature flags: RBAC_TOKEN_TRUST=true (dev token RBAC trust)
+- Feature flags: RBAC_BYPASS=true, RBAC_TOKEN_TRUST=true
 - Migration plan: run `pnpm --filter @metasheet/core-backend migrate` with `DATABASE_URL`
 - Rollback plan: reset dev DB (drop + re-migrate) if needed
 
@@ -42,7 +42,7 @@
 ### API
 - [x] Auth endpoints
 - [x] Spreadsheets endpoints
-- [ ] Attendance endpoints (if enabled)
+- [x] Attendance endpoints (if enabled)
 - [ ] WebSocket connection
 - [ ] OpenAPI / SDK compatibility
 
@@ -66,28 +66,34 @@
 
 ### UI and UX
 - [ ] Grid save / refresh
-- [ ] Attendance UI (if enabled)
+- [x] Attendance UI (if enabled)
 - [ ] Mobile layout
 
 ### Regression
-- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update
-- Areas deferred: UI login flows, attendance API workflows, WebSocket checks, performance
+- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update, attendance API flows (rules/punch/records/summary/requests/settings/shifts)
+- Areas deferred: UI login flows, grid save via UI, WebSocket checks, performance
 
 ## Commands Executed
 ```sh
 pnpm --filter @metasheet/core-backend migrate
-RBAC_TOKEN_TRUST=true PORT=7778 JWT_SECRET=dev-secret-key pnpm --filter @metasheet/core-backend dev
+RBAC_BYPASS=true RBAC_TOKEN_TRUST=true PORT=7778 JWT_SECRET=dev-secret-key pnpm --filter @metasheet/core-backend dev
 pnpm dev
 curl http://localhost:8899/grid
 curl http://localhost:8899/attendance
 curl http://localhost:7778/api/plugins
 curl http://localhost:7778/api/auth/dev-token
+curl http://localhost:7778/api/attendance/punch
+curl http://localhost:7778/api/attendance/records
+curl http://localhost:7778/api/attendance/summary
+curl http://localhost:7778/api/attendance/requests
+curl http://localhost:7778/api/attendance/rules/default
+curl http://localhost:7778/api/attendance/settings
 ```
 
 ## Findings
-- Issues: RBAC denies spreadsheets write unless `RBAC_TOKEN_TRUST=true` is set for dev token
+- Issues: Attendance plugin routes require `RBAC_BYPASS=true` unless permissions are seeded for the dev user
 - Risks: Frontend `.env.local` targets port 7778 while backend `.env` sets 8900; keep them aligned
-- Follow-ups: Run attendance API flows, UI grid save flow, WebSocket validation
+- Follow-ups: Grid save via UI, WebSocket validation, attendance request/review flows in UI
 
 ## Artifacts
 - Logs: local dev server logs in terminal

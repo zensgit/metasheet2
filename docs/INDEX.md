@@ -45,7 +45,8 @@
 | [verification-test-report.md](./verification-test-report.md) | 测试报告 |
 | [verification-index.md](./verification-index.md) | 验证索引（常用命令/产物） |
 | [preprod-validation-report-template.md](./preprod-validation-report-template.md) | 预发验证报告模板 |
-| [preprod-validation-report-20260119.md](./preprod-validation-report-20260119.md) | 预发验证报告（待填写） |
+| [preprod-validation-report-20260119.md](./preprod-validation-report-20260119.md) | 预发验证报告（dev进行中） |
+| [verification-attendance-dev-20260119.md](./verification-attendance-dev-20260119.md) | 考勤模块开发环境验证 |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |
@@ -54,6 +55,14 @@
 | [smoke-verify-run-2025-12-23.md](./smoke-verify-run-2025-12-23.md) | Smoke 验证（本地+CI） |
 | [next-week-execution-checklist-2025-12-20.md](./next-week-execution-checklist-2025-12-20.md) | 下周执行清单 |
 | [real-system-validation-checklist.md](./real-system-validation-checklist.md) | 真实系统验证 |
+
+---
+
+## 🧩 插件与模块
+
+| 文档 | 说明 |
+|------|------|
+| [attendance-plugin-design-20260119.md](./attendance-plugin-design-20260119.md) | 考勤插件设计说明 |
 
 **Phase 1 验证明细（2025-12-21/22）**:
 - `docs/phase1-stabilization-summary-2025-12-21.md`
