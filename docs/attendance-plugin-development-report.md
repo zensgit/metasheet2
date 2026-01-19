@@ -2,6 +2,11 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-19)
+- Closeout verification confirmed attendance routes require `attendance:*` grants in `user_permissions` (or admin role).
+- Validated dev-token compatibility by normalizing `userId`/`sub` to `id` during permission checks.
+- Logged UI/API smoke steps for attendance + grid in `docs/verification-attendance-dev-20260119.md`.
+
 ## Update (2026-01-17)
 - Added migration `zzzz20260117090000_add_attendance_permissions.ts` to seed attendance RBAC permissions and grant them to the `admin` role.
 - Documented a minimal enablement checklist for plugin activation and RBAC setup.

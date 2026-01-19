@@ -2,6 +2,17 @@
 
 Date: 2026-01-11
 
+## Update (2026-01-19)
+### Commands Executed
+- `RBAC_TOKEN_TRUST=true PORT=7778 pnpm --filter @metasheet/core-backend dev`
+- `pnpm --filter @metasheet/core-backend exec node -e "<grant attendance permissions in user_permissions>"`
+- Ad-hoc API smoke via dev-token (attendance summary/records/requests/holidays/shifts/assignments + grid create/read/delete).
+
+### Results
+- Attendance endpoints returned 200 after granting `attendance:*` in `user_permissions`.
+- Grid create/cells/delete returned 201/200 using the same dev token.
+- `/attendance` initially returned 403 for a non-admin user until permissions were granted; `/grid` loaded without 401/403.
+
 ## Update (2026-01-17)
 ### Commands Executed
 - `pnpm --filter @metasheet/core-backend test:integration`
