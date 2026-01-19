@@ -76,19 +76,20 @@ jobs:
         uses: ankane/setup-postgres@v1
         with:
           postgres-version: 14
+          user: postgres
       - name: Create test database
         run: |
           createdb -U postgres metasheet_test || true
 
       - name: Run DB migrations
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet_test
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
       - name: Start core backend (background)
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet_test
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           PORT: 8900
         run: |
           nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
