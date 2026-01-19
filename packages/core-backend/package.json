@@ -16,6 +16,7 @@
     "db:rollback": "tsx src/db/migrate.ts --rollback",
     "seed:demo": "echo 'Seeding demo data...' && exit 0",
     "seed:rbac": "tsx scripts/seed-rbac.ts",
+    "smoke:plugins": "tsx scripts/smoke-plugins.ts",
     "test": "vitest",
     "test:phase5": "vitest --config vitest.phase5.config.ts run",
     "test:unit": "vitest run packages/core-backend/tests/unit --reporter=dot",
