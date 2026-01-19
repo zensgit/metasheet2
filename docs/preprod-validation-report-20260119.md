@@ -3,22 +3,22 @@
 ## Summary
 - Date: 2026-01-19
 - Owner: TBD
-- Environment: pre-prod (TBD)
-- Release tag / commit: TBD
-- Scope: TBD
+- Environment: dev (local)
+- Release tag / commit: a50fe9df (main)
+- Scope: dev validation for grid/spreadsheets + attendance plugin (optional)
 - Status: pending
 
 ## Build and Deploy
-- Build ID: TBD
-- Image or artifact: TBD
-- Deploy window: TBD
+- Build ID: N/A (local dev)
+- Image or artifact: N/A (local dev)
+- Deploy window: N/A (local dev)
 - Feature flags: TBD
 - Migration plan: TBD
 - Rollback plan: TBD
 
 ## Environment Access
-- Web URL: TBD
-- API URL: TBD
+- Web URL: http://localhost:8899 (dev default, confirm)
+- API URL: http://localhost:8900 (dev default, confirm)
 - Admin URL: TBD
 - Observability links: TBD
 - Test accounts (roles only, no passwords): TBD
