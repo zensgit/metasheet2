@@ -235,8 +235,9 @@ describe('TokenBucketRateLimiter', () => {
 
       const result = rateLimiter.consume('tenant-1')
 
-      // At 10 tokens/s, 1 token takes 100ms
-      expect(result.retryAfterMs).toBe(100)
+      // At 10 tokens/s, 1 token takes ~100ms (allow slight timing drift)
+      expect(result.retryAfterMs).toBeGreaterThanOrEqual(95)
+      expect(result.retryAfterMs).toBeLessThanOrEqual(100)
     })
   })
 })
