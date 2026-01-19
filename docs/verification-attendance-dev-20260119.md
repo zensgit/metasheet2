@@ -5,7 +5,7 @@
 - Web: http://localhost:8899
 - API: http://localhost:7778
 - Plugin status: `plugin-attendance` active
-- Result: pass (API + UI smoke)
+- Result: pass (API + UI smoke + grid save + WebSocket handshake)
 
 ## Setup
 ```sh
@@ -39,10 +39,12 @@ pnpm dev
 - `/attendance` loaded with summary, calendar, adjustment form, and admin console.
 - Navigation links present; plugin view visible.
 
+## Additional Validation
+- Grid cell edit persisted: updated A1 to `E2E-UI-2` via UI, verified via `GET /api/spreadsheets/:id/sheets/:id/cells`.
+- WebSocket handshake: `GET /socket.io/?EIO=4&transport=polling` returned 200 with websocket upgrade advertised.
+
 ## Findings
 - Attendance plugin RBAC checks require `RBAC_BYPASS=true` for dev tokens unless permissions are seeded in DB.
 
 ## Follow-ups
-- Validate grid save via UI interaction.
-- Validate WebSocket updates.
 - Run end-to-end attendance request workflows in UI.

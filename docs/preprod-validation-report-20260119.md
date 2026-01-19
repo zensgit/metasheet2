@@ -6,7 +6,7 @@
 - Environment: dev (local)
 - Release tag / commit: be92b0e9 (main)
 - Scope: dev validation for grid/spreadsheets + attendance plugin (optional)
-- Status: in progress (dev validation)
+- Status: in progress (dev validation, grid save + WebSocket ok)
 
 ## Build and Deploy
 - Build ID: N/A (local dev)
@@ -43,7 +43,7 @@
 - [x] Auth endpoints
 - [x] Spreadsheets endpoints
 - [x] Attendance endpoints (if enabled)
-- [ ] WebSocket connection
+- [x] WebSocket connection
 - [ ] OpenAPI / SDK compatibility
 
 ### Data and Migrations
@@ -65,13 +65,13 @@
 - [ ] Plugin permission whitelist
 
 ### UI and UX
-- [ ] Grid save / refresh
+- [x] Grid save / refresh
 - [x] Attendance UI (if enabled)
 - [ ] Mobile layout
 
 ### Regression
-- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update, attendance API flows (rules/punch/records/summary/requests/settings/shifts)
-- Areas deferred: UI login flows, grid save via UI, WebSocket checks, performance
+- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update, grid UI save persisted, WebSocket handshake, attendance API flows (rules/punch/records/summary/requests/settings/shifts)
+- Areas deferred: UI login flows, attendance request/review flows in UI, OpenAPI/SDK compatibility, performance
 
 ## Commands Executed
 ```sh
@@ -88,12 +88,15 @@ curl http://localhost:7778/api/attendance/summary
 curl http://localhost:7778/api/attendance/requests
 curl http://localhost:7778/api/attendance/rules/default
 curl http://localhost:7778/api/attendance/settings
+curl http://localhost:7778/socket.io/?EIO=4&transport=polling
+# authenticated dev token used for spreadsheet cell verification
+curl http://localhost:7778/api/spreadsheets/:id/sheets/:id/cells
 ```
 
 ## Findings
 - Issues: Attendance plugin routes require `RBAC_BYPASS=true` unless permissions are seeded for the dev user
 - Risks: Frontend `.env.local` targets port 7778 while backend `.env` sets 8900; keep them aligned
-- Follow-ups: Grid save via UI, WebSocket validation, attendance request/review flows in UI
+- Follow-ups: Attendance request/review flows in UI, OpenAPI/SDK compatibility, mobile layout checks
 
 ## Artifacts
 - Logs: local dev server logs in terminal
