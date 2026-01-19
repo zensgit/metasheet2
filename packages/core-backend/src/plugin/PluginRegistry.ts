@@ -322,7 +322,10 @@ export class PluginRegistry extends EventEmitter {
     }
 
     if (options.author) {
-      results = results.filter(p => p.manifest.author?.includes(options.author!))
+      results = results.filter(p => {
+        const author = this.getAuthorName(p.manifest)
+        return author ? author.includes(options.author!) : false
+      })
     }
 
     if (options.tag) {
@@ -378,7 +381,8 @@ export class PluginRegistry extends EventEmitter {
       }
 
       // 作者匹配
-      if (manifest.author?.toLowerCase().includes(lowerKeyword)) {
+      const author = this.getAuthorName(manifest)
+      if (author?.toLowerCase().includes(lowerKeyword)) {
         score += 40
         matchedFields.push('author')
       }
@@ -657,8 +661,8 @@ export class PluginRegistry extends EventEmitter {
     }
 
     // 按作者索引
-    if (registration.manifest.author) {
-      const author = registration.manifest.author
+    const author = this.getAuthorName(registration.manifest)
+    if (author) {
       if (!this.pluginsByAuthor.has(author)) {
         this.pluginsByAuthor.set(author, new Set())
       }
@@ -682,8 +686,8 @@ export class PluginRegistry extends EventEmitter {
     }
 
     // 从作者索引中移除
-    if (registration.manifest.author) {
-      const author = registration.manifest.author
+    const author = this.getAuthorName(registration.manifest)
+    if (author) {
       const pluginSet = this.pluginsByAuthor.get(author)
       if (pluginSet) {
         pluginSet.delete(pluginName)
@@ -692,6 +696,11 @@ export class PluginRegistry extends EventEmitter {
         }
       }
     }
+  }
+
+  private getAuthorName(manifest: PluginManifest): string | undefined {
+    if (!manifest.author) return undefined
+    return typeof manifest.author === 'string' ? manifest.author : manifest.author.name
   }
 
   /**
