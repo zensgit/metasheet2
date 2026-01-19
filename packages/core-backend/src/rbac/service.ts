@@ -44,7 +44,13 @@ export async function userHasPermission(userId: string, code: string): Promise<b
        LIMIT 1`,
       [userId, code]
     )
-    return viaRole.rows.length > 0
+    if (viaRole.rows.length > 0) return true
+
+    const legacy = await pool.query('SELECT permissions FROM users WHERE id = $1', [userId])
+    const perms = Array.isArray(legacy.rows[0]?.permissions) ? legacy.rows[0].permissions : []
+    if (perms.includes(code)) return true
+    const resource = code.split(':')[0]
+    return perms.includes(`${resource}:*`) || perms.includes('*:*')
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {
@@ -77,8 +83,11 @@ export async function listUserPermissions(userId: string): Promise<string[]> {
       [userId]
     )
     const codes = rows.map((r: { code: string }) => r.code)
-    cache.set(key, { codes, exp: now + TTL_MS })
-    return codes
+    const legacy = await pool.query('SELECT permissions FROM users WHERE id = $1', [userId])
+    const legacyPerms = Array.isArray(legacy.rows[0]?.permissions) ? legacy.rows[0].permissions : []
+    const merged = Array.from(new Set([...codes, ...legacyPerms]))
+    cache.set(key, { codes: merged, exp: now + TTL_MS })
+    return merged
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowDegradation) {
       if (!rbacDegraded) {

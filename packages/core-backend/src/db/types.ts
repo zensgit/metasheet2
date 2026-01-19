@@ -666,7 +666,9 @@ export interface UsersTable {
   id: Generated<string>
   email: string
   name: string | null
-  password_hash: string | null
+  password_hash: string
+  role: string
+  permissions: JSONColumnType<string[]>
   avatar_url: string | null
   is_active: boolean
   is_admin: boolean

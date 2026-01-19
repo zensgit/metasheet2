@@ -216,7 +216,12 @@ export class AuthService {
         name,
         password_hash: passwordHash,
         role: 'user',
-        permissions: ['spreadsheet:read', 'spreadsheet:write']
+        permissions: [
+          'spreadsheet:read',
+          'spreadsheet:write',
+          'spreadsheets:read',
+          'spreadsheets:write'
+        ]
       })
 
       return newUser
@@ -326,15 +331,25 @@ export class AuthService {
     try {
       try {
         const pool = poolManager.get()
+        const permissionsJson = JSON.stringify(userData.permissions)
         const result = await pool.query(
           `INSERT INTO users (id, email, name, password_hash, role, permissions, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
            RETURNING id, email, name, role, permissions, created_at, updated_at`,
-          [userData.id, userData.email, userData.name, userData.password_hash, userData.role, userData.permissions]
+          [userData.id, userData.email, userData.name, userData.password_hash, userData.role, permissionsJson]
         )
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as User
+          if (userData.permissions.length > 0) {
+            const values = userData.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+            await pool.query(
+              `INSERT INTO user_permissions (user_id, permission_code)
+               VALUES ${values}
+               ON CONFLICT DO NOTHING`,
+              [userData.id, ...userData.permissions]
+            )
+          }
           return {
             id: row.id,
             email: row.email,

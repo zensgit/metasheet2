@@ -75,7 +75,12 @@ export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunctio
     const payload = jwt.verify(token, secret)
     // JWT payload is an object with user information
     if (typeof payload === 'object' && payload !== null) {
-      req.user = payload as Express.Request['user']
+      const normalized = payload as Record<string, unknown>
+      if (normalized.id == null) {
+        const fallbackId = normalized.userId ?? normalized.sub
+        if (fallbackId != null) normalized.id = fallbackId
+      }
+      req.user = normalized as Express.Request['user']
     }
     return next()
   } catch (err: unknown) {
