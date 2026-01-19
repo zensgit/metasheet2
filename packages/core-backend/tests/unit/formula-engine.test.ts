@@ -5,29 +5,19 @@
 
 import { describe, test, expect, beforeEach, vi, afterEach } from 'vitest'
 
-const mockDbRef = vi.hoisted(() => ({ current: undefined as any }))
-
-// Define mockDb variable
-let mockDb: any
-
-// Mock db module
-vi.mock('../../src/db/db', () => ({
-  get db() { return mockDbRef.current }
-}))
-
 import { FormulaEngine, type FormulaContext } from '../../src/formula/engine'
-import { createMockDb } from '../utils/test-db'
+import { createMockDb, type MockDB } from '../utils/test-db'
 import { TEST_IDS, TEST_CELLS } from '../utils/test-fixtures'
 import { PerformanceTracker } from '../utils/test-db'
 
 describe('Formula Engine', () => {
   let engine: FormulaEngine
   let context: FormulaContext
+  let mockDb: MockDB
 
   beforeEach(() => {
-    engine = new FormulaEngine()
     mockDb = createMockDb()
-    mockDbRef.current = mockDb
+    engine = new FormulaEngine({ db: mockDb })
 
     context = {
       sheetId: TEST_IDS.SHEET_1,
