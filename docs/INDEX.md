@@ -44,6 +44,8 @@
 |------|------|
 | [verification-test-report.md](./verification-test-report.md) | 测试报告 |
 | [verification-index.md](./verification-index.md) | 验证索引（常用命令/产物） |
+| [preprod-validation-report-template.md](./preprod-validation-report-template.md) | 预发验证报告模板 |
+| [preprod-validation-report-20260119.md](./preprod-validation-report-20260119.md) | 预发验证报告（待填写） |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |

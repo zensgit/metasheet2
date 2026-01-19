@@ -6,6 +6,11 @@ Entry points:
 - README: `README.md` (Documentation Quick Links)
 - Docs Index: `docs/INDEX.md` (测试和验证)
 
+## Pre-Prod / Staging
+
+- Template: `docs/preprod-validation-report-template.md`
+- Current report: `docs/preprod-validation-report-20260119.md`
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
