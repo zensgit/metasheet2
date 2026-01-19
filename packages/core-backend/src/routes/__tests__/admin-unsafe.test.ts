@@ -54,7 +54,7 @@ describe('Unsafe admin route in production', () => {
     expect(next).not.toHaveBeenCalled()
   })
 
-  it('should allow unsafe routes when ALLOW_UNSAFE_ADMIN=true', () => {
+  it('should allow unsafe routes when ALLOW_UNSAFE_ADMIN is true', () => {
     process.env.ALLOW_UNSAFE_ADMIN = 'true'
 
     mockRequest = {

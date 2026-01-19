@@ -263,7 +263,7 @@ router.post('/plugins/reload-all-unsafe', async (req: AuthenticatedRequest, res:
       return res.status(403).json({
         success: false,
         code: 'UNSAFE_DISABLED',
-        message: 'Unsafe admin route disabled. Set ALLOW_UNSAFE_ADMIN=true to enable (local only).'
+        message: 'Unsafe admin route disabled. Set ALLOW_UNSAFE_ADMIN to true to enable (local only).'
       })
     }
     const user = req.user
@@ -303,7 +303,7 @@ router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res:
       return res.status(403).json({
         success: false,
         code: 'UNSAFE_DISABLED',
-        message: 'Unsafe admin route disabled. Set ALLOW_UNSAFE_ADMIN=true to enable (local only).'
+        message: 'Unsafe admin route disabled. Set ALLOW_UNSAFE_ADMIN to true to enable (local only).'
       })
     }
     const user = req.user

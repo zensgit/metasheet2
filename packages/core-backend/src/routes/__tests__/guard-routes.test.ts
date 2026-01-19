@@ -50,7 +50,7 @@ describe('Production Guards', () => {
     expect(next).not.toHaveBeenCalled()
   })
 
-  it('allows fallback test route when ENABLE_FALLBACK_TEST=true', () => {
+  it('allows fallback test route when ENABLE_FALLBACK_TEST is true', () => {
     process.env.ENABLE_FALLBACK_TEST = 'true'
 
     mockRequest = {

@@ -415,7 +415,7 @@ export class MetaSheetServer {
     // Production safety guards
     if (process.env.NODE_ENV === 'production') {
       if (process.env.ALLOW_UNSAFE_ADMIN === 'true') {
-        this.logger.error('FATAL: ALLOW_UNSAFE_ADMIN=true in production')
+        this.logger.error('FATAL: ALLOW_UNSAFE_ADMIN set to true in production')
         process.exit(1)
       }
       if (process.env.ENABLE_FALLBACK_TEST === 'true') {
@@ -855,7 +855,7 @@ export class MetaSheetServer {
 
     // 初始化EventBusService (允许降级跳过以保证度量端可用)
     if (this.disableEventBus) {
-      this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS=true)')
+      this.logger.warn('Skipping EventBusService initialization (DISABLE_EVENT_BUS set to true)')
     } else {
       this.logger.info('Initializing EventBusService...')
       const coreAPI = this.createCoreAPI()
