@@ -12,15 +12,15 @@
 - Build ID: N/A (local dev)
 - Image or artifact: N/A (local dev)
 - Deploy window: N/A (local dev)
-- Feature flags: TBD
-- Migration plan: TBD
-- Rollback plan: TBD
+- Feature flags: None detected in repo (confirm env overrides)
+- Migration plan: run `pnpm --filter @metasheet/core-backend migrate` with `DATABASE_URL`
+- Rollback plan: reset dev DB (drop + re-migrate) if needed
 
 ## Environment Access
-- Web URL: http://localhost:8899 (dev default, confirm)
-- API URL: http://localhost:8900 (dev default, confirm)
-- Admin URL: TBD
-- Observability links: TBD
+- Web URL: http://localhost:8899 (default `VITE_PORT`, confirm)
+- API URL: http://localhost:8900 (default `PORT`), or `http://localhost:8899/api` via Vite proxy (target `VITE_API_URL`/`VITE_API_BASE`, fallback `http://127.0.0.1:7778`)
+- Admin URL: http://localhost:8900/api/admin (default)
+- Observability links: N/A (dev)
 - Test accounts (roles only, no passwords): TBD
 - Secrets note: do not paste secrets, use <redacted>
 
