@@ -71,6 +71,14 @@ pnpm dev
 - Logout endpoint not implemented; UI should clear JWT locally.
 - Admin UI delete: shifts + holidays confirmed; assignment delete still needs manual verification due to MCP automation timeouts.
 
+## Cleanup (2026-01-19)
+- Disabled test accounts and stripped permissions for `attn-login3@example.com`, `attn-login4@example.com`, `attn-ui-verify-1768822476@example.com`.
+- Removed `user_permissions`, `user_roles`, `user_orgs`, and attendance records/requests/assignments for the above users.
+- Updated test emails to `deleted+<id>@example.com` to free the original addresses.
+
+## Frontend Tests (2026-01-19)
+- `pnpm --filter @metasheet/web exec vitest run --watch=false` (4 files, 26 tests passed).
+
 ## Follow-ups
 - Validate admin UI delete flow for assignments.
 - Verify login UI flow (if exposed) and document logout UX (token clear).
