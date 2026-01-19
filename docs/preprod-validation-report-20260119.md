@@ -19,7 +19,7 @@
 ## Environment Access
 - Web URL: http://localhost:8899 (default `VITE_PORT`, confirm)
 - API URL: http://127.0.0.1:7778 (from `.env.local` `VITE_API_URL`)
-- Admin URL: http://127.0.0.1:7778/api/admin (if admin served on same origin); backend `PORT=8900` in `packages/core-backend/.env`
+- Admin URL: http://127.0.0.1:7778/api/admin (via Vite proxy) or http://localhost:8900/api/admin (direct)
 - Observability links: N/A (dev)
 - Test accounts (roles only, no passwords): TBD
 - Secrets note: do not paste secrets, use <redacted>
