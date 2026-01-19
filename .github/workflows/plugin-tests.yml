@@ -82,13 +82,13 @@ jobs:
 
       - name: Run DB migrations
         env:
-          DATABASE_URL: postgresql://postgres@localhost/metasheet_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet_test
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
       - name: Start core backend (background)
         env:
-          DATABASE_URL: postgresql://postgres@localhost/metasheet_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet_test
           PORT: 8900
         run: |
           nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
