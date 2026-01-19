@@ -6,7 +6,7 @@
 - Environment: dev (local)
 - Release tag / commit: be92b0e9 (main)
 - Scope: dev validation for grid/spreadsheets + attendance plugin (optional)
-- Status: in progress (dev validation, grid save + WebSocket ok)
+- Status: in progress (dev validation, grid save + WebSocket + attendance UI flow + mobile + OpenAPI ok)
 
 ## Build and Deploy
 - Build ID: N/A (local dev)
@@ -44,7 +44,7 @@
 - [x] Spreadsheets endpoints
 - [x] Attendance endpoints (if enabled)
 - [x] WebSocket connection
-- [ ] OpenAPI / SDK compatibility
+- [x] OpenAPI / SDK compatibility
 
 ### Data and Migrations
 - Migration IDs: zzzz20260113_create_spreadsheets_table, zzzz20260117120000_create_spreadsheet_grid_tables, zzzz20260114090000_create_attendance_tables, zzzz20260114100000_add_attendance_org_id, zzzz20260114120000_add_attendance_scheduling_tables, zzzz20260117090000_add_attendance_permissions
@@ -67,11 +67,11 @@
 ### UI and UX
 - [x] Grid save / refresh
 - [x] Attendance UI (if enabled)
-- [ ] Mobile layout
+- [x] Mobile layout
 
 ### Regression
-- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update, grid UI save persisted, WebSocket handshake, attendance API flows (rules/punch/records/summary/requests/settings/shifts)
-- Areas deferred: UI login flows, attendance request/review flows in UI, OpenAPI/SDK compatibility, performance
+- Areas covered: dev smoke (grid/attendance routes 200), plugins list shows attendance active, spreadsheets create + cell update, grid UI save persisted, WebSocket handshake, attendance API flows (rules/punch/records/summary/requests/settings/shifts), attendance UI request submit/approve, mobile layout checks, OpenAPI security validation + SDK match
+- Areas deferred: UI login flows, attendance admin edits/exports, performance
 
 ## Commands Executed
 ```sh
@@ -91,12 +91,14 @@ curl http://localhost:7778/api/attendance/settings
 curl http://localhost:7778/socket.io/?EIO=4&transport=polling
 # authenticated dev token used for spreadsheet cell verification
 curl http://localhost:7778/api/spreadsheets/:id/sheets/:id/cells
+pnpm dlx tsx packages/openapi/tools/validate.ts packages/openapi/src/openapi.yml
+cmp -s packages/openapi/dist/sdk.ts packages/openapi/dist-sdk/index.d.ts
 ```
 
 ## Findings
 - Issues: Attendance plugin routes require `RBAC_BYPASS=true` unless permissions are seeded for the dev user
 - Risks: Frontend `.env.local` targets port 7778 while backend `.env` sets 8900; keep them aligned
-- Follow-ups: Attendance request/review flows in UI, OpenAPI/SDK compatibility, mobile layout checks
+- Follow-ups: Attendance admin edits/exports, UI login flows, performance
 
 ## Artifacts
 - Logs: local dev server logs in terminal
