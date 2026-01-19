@@ -12,6 +12,7 @@
 | `phase5-fallback-trigger.sh` | 辅助 | 触发测试 fallback 路由 | 日志 | 失败不退出 |
 | `phase5-run-snapshot-migration.sh` | 基础 | 调用 TypeScript 迁移执行 | 日志 | 失败>0 |
 | `phase5-snapshot-migrate-and-restore.ts` | 基础 | Node 脚本：迁移→创建→恢复 | JSON 行 | 异常>0 |
+| `cleanup-attendance-test-users.mjs` | 开发/测试 | 清理考勤模块测试账号与相关记录 | 日志 | 失败>0 |
 
 ## 必需环境变量
 | 变量 | 用途 | 示例 |
@@ -30,6 +31,14 @@ DATABASE_URL=postgres://user:pass@host:5432/db FEATURE_CACHE=true CACHE_IMPL=mem
 ENABLE_FALLBACK_TEST=true COUNT_CACHE_MISS_AS_FALLBACK=false \
 ./packages/core-backend/scripts/phase5-full-validate.sh --view view_123 --reload-plugin example-plugin --output phase5-validation.json
 cat phase5-validation.json | jq .
+
+# 清理考勤测试账号（默认列表，可传参或环境变量覆盖）
+DATABASE_URL=postgres://user:pass@host:5432/db \
+pnpm --filter @metasheet/core-backend exec node scripts/cleanup-attendance-test-users.mjs
+ATTENDANCE_TEST_EMAILS="a@example.com,b@example.com" \
+pnpm --filter @metasheet/core-backend exec node scripts/cleanup-attendance-test-users.mjs
+pnpm --filter @metasheet/core-backend exec node scripts/cleanup-attendance-test-users.mjs \
+  a@example.com b@example.com --dry-run
 
 # CI 验证（最少）
 FEATURE_CACHE=true CACHE_IMPL=memory ENABLE_FALLBACK_TEST=true COUNT_CACHE_MISS_AS_FALLBACK=false \
@@ -77,4 +86,3 @@ Effective: Raw 减去 reason=miss（当 `COUNT_CACHE_MISS_AS_FALLBACK=false`）�
 
 ---
 如需扩展或新增脚本，请保持命名前缀 `phase5-` 并在上表补充说明。
-
