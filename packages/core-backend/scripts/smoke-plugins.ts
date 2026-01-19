@@ -12,11 +12,11 @@
 
 const ORIGIN = process.env.API_ORIGIN || 'http://localhost:8900'
 
-async function httpGetJson(url: string): Promise<any> {
+async function httpGetJson(url: string, headers: Record<string, string> = {}): Promise<any> {
   // Prefer global fetch (Node >=18)
   const g: any = globalThis as any
   if (typeof g.fetch === 'function') {
-    const res = await g.fetch(url, { method: 'GET' })
+    const res = await g.fetch(url, { method: 'GET', headers })
     const text = await res.text()
     try {
       return JSON.parse(text)
@@ -28,7 +28,7 @@ async function httpGetJson(url: string): Promise<any> {
   // Fallback to http/https
   const { request } = await import(url.startsWith('https') ? 'https' : 'http')
   return await new Promise((resolve, reject) => {
-    const req = request(url, { method: 'GET' }, (res: any) => {
+    const req = request(url, { method: 'GET', headers }, (res: any) => {
       const chunks: any[] = []
       res.on('data', (c: any) => chunks.push(c))
       res.on('end', () => {
@@ -42,10 +42,18 @@ async function httpGetJson(url: string): Promise<any> {
 }
 
 async function main() {
+  const tokenResp = await httpGetJson(`${ORIGIN}/api/auth/dev-token`)
+  const token = tokenResp?.token
+  if (!token) {
+    console.error('Failed to acquire dev token:', tokenResp)
+    process.exit(1)
+  }
+  const authHeaders = { Authorization: `Bearer ${token}` }
+
   const url = `${ORIGIN}/api/test/plugins/ping`
   process.stdout.write(`GET ${url}\n`)
   try {
-    const data = await httpGetJson(url)
+    const data = await httpGetJson(url, authHeaders)
     // Expect shape: { ok: true, pong: 'pong', stored: {...} }
     const ok = data && data.ok === true && data.pong === 'pong' && data.stored && typeof data.stored === 'object'
     if (!ok) {
@@ -57,7 +65,7 @@ async function main() {
     // Trigger denial route to validate metrics exposure path
     const denyUrl = `${ORIGIN}/api/test/plugins/deny`
     process.stdout.write(`GET ${denyUrl}\n`)
-    const denyResp = await httpGetJson(denyUrl)
+    const denyResp = await httpGetJson(denyUrl, authHeaders)
     if (!denyResp || denyResp.ok !== false || !denyResp.denied) {
       console.error('Denial route did not behave as expected', denyResp)
       process.exit(1)
