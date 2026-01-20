@@ -1637,6 +1637,11 @@ if [[ "$NODE_STATUS" -ne 0 ]]; then
   RUN_STATUS="fail"
 fi
 
+FAILURE_BUNDLE_PATH="n/a"
+if [[ "$NODE_STATUS" -ne 0 ]]; then
+  FAILURE_BUNDLE_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}-bundle.tgz"
+fi
+
 ITEM_NUMBER_USED=""
 if [[ -s "$ITEM_NUMBER_JSON" ]]; then
   ITEM_NUMBER_USED=$(python3 - <<'PY' "$ITEM_NUMBER_JSON"
@@ -1664,6 +1669,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Status: ${RUN_STATUS}
 - Error screenshot: ${ERROR_SCREENSHOT_PATH}
 - Error response: ${ERROR_RESPONSE_PATH}
+- Failure bundle: ${FAILURE_BUNDLE_PATH}
 
 ## Data
 - Search query: ${PLM_SEARCH_QUERY}
@@ -1707,7 +1713,27 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 REPORT_EOF
 
 if [[ "$NODE_STATUS" -ne 0 ]]; then
-  echo "Regression failed. See ${ERROR_SCREENSHOT_PATH} and ${ERROR_RESPONSE_PATH}." >&2
+  bundle_candidates=(
+    "$OUTPUT_DIR/plm-ui-regression-backend.log"
+    "$OUTPUT_DIR/plm-ui-regression-web.log"
+    "$ERROR_SCREENSHOT_PATH"
+    "$ERROR_RESPONSE_PATH"
+    "$SCREENSHOT_PATH"
+    "$ITEM_NUMBER_JSON"
+    "$REPORT_PATH"
+    "$PLM_BOM_TOOLS_JSON"
+    "${PLM_BOM_TOOLS_JSON%.json}.md"
+  )
+  bundle_files=()
+  for file in "${bundle_candidates[@]}"; do
+    if [[ -f "$file" ]]; then
+      bundle_files+=("${file#"$ROOT_DIR"/}")
+    fi
+  done
+  if [[ "${#bundle_files[@]}" -gt 0 ]]; then
+    tar -czf "$FAILURE_BUNDLE_PATH" -C "$ROOT_DIR" "${bundle_files[@]}" >/dev/null 2>&1 || true
+  fi
+  echo "Regression failed. See ${ERROR_SCREENSHOT_PATH} and ${ERROR_RESPONSE_PATH}. Bundle: ${FAILURE_BUNDLE_PATH}." >&2
   exit "$NODE_STATUS"
 fi
 
