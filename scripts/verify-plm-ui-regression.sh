@@ -1504,8 +1504,15 @@ function firstLineText(value) {
   await substitutesRequestPromise;
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
 
+  const currentProductId = ((await detailSection.locator('#plm-product-id').inputValue()) || '').trim();
   const documentsSection = page.locator('section:has-text("关联文档")');
+  const documentsRequestPromise = waitForPlmQueryResponse(
+    page,
+    'documents',
+    currentProductId ? { productId: currentProductId } : undefined
+  );
   await documentsSection.locator('button:has-text("刷新文档")').click();
+  await documentsRequestPromise;
   const docRows = documentsSection.locator('table tbody tr');
   await docRows.first().waitFor({ timeout: 60000 });
   await waitOptional(documentsSection.locator('table'), docName);
@@ -1528,7 +1535,13 @@ function firstLineText(value) {
   }
 
   const approvalsSection = page.locator('section:has(h2:has-text("审批"))');
+  const approvalsRequestPromise = waitForPlmQueryResponse(
+    page,
+    'approvals',
+    currentProductId ? { productId: currentProductId } : undefined
+  );
   await approvalsSection.locator('button:has-text("刷新审批")').click();
+  await approvalsRequestPromise;
   const approvalRows = approvalsSection.locator('table tbody tr');
   await approvalRows.first().waitFor({ timeout: 60000 });
   await waitOptional(approvalsSection.locator('table'), approvalTitle);
