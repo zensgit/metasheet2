@@ -755,7 +755,7 @@
                 </button>
               </div>
             </td>
-            <td>
+            <td :data-bom-line-id="item.id || ''">
               <div class="mono">{{ item.id || '-' }}</div>
               <div v-if="item.parent_item_id" class="muted">父: {{ item.parent_item_id }}</div>
             </td>

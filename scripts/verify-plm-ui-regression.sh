@@ -1342,21 +1342,27 @@ function firstLineText(value) {
       const bomSection = page.locator('section:has-text("BOM 结构")');
       const bomFirstRow = bomSection.locator('table tbody tr').first();
       if (await bomFirstRow.count()) {
-        const lineIdIndex = await resolveTableColumnIndex(bomSection, 'BOM 行 ID');
-        if (lineIdIndex < 0) {
-          console.warn('Skipping BOM line fallback; BOM 行 ID column missing.');
+        const lineIdCell = bomFirstRow.locator('td[data-bom-line-id]').first();
+        let lineIdText = '';
+        if (await lineIdCell.count()) {
+          lineIdText =
+            ((await lineIdCell.getAttribute('data-bom-line-id')) || '').trim() ||
+            firstLineText(await lineIdCell.textContent());
         } else {
-          const lineIdCell = bomFirstRow.locator('td').nth(lineIdIndex);
-          const lineIdText = firstLineText(await lineIdCell.textContent());
-          if (lineIdText) {
-            await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
+          const lineIdIndex = await resolveTableColumnIndex(bomSection, 'BOM 行 ID');
+          if (lineIdIndex >= 0) {
+            const fallbackCell = bomFirstRow.locator('td').nth(lineIdIndex);
+            lineIdText = firstLineText(await fallbackCell.textContent());
+          }
+        }
+        if (lineIdText) {
+          await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
           const filledValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
           if (!filledValue.trim()) {
             throw new Error('BOM line fallback did not fill input.');
           }
-          } else {
-            console.warn('Skipping BOM line fallback; line ID text missing.');
-          }
+        } else {
+          console.warn('Skipping BOM line fallback; line ID text missing.');
         }
       } else {
         console.warn('Skipping BOM line fallback; BOM rows missing.');
