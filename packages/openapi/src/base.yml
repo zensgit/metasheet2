@@ -114,7 +114,7 @@ components:
           format: date
         request_type:
           type: string
-          enum: [missed_check_in, missed_check_out, time_correction]
+          enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
         requested_in_at:
           type: string
           format: date-time
@@ -147,6 +147,129 @@ components:
         updated_at:
           type: string
           format: date-time
+    AttendanceLeaveType:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        code:
+          type: string
+        name:
+          type: string
+        requiresApproval:
+          type: boolean
+        requiresAttachment:
+          type: boolean
+        defaultMinutesPerDay:
+          type: integer
+        isActive:
+          type: boolean
+    AttendanceOvertimeRule:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        minMinutes:
+          type: integer
+        roundingMinutes:
+          type: integer
+        maxMinutesPerDay:
+          type: integer
+        requiresApproval:
+          type: boolean
+        isActive:
+          type: boolean
+    AttendanceApprovalStep:
+      type: object
+      properties:
+        name:
+          type: string
+        approverUserIds:
+          type: array
+          items:
+            type: string
+        approverRoleIds:
+          type: array
+          items:
+            type: string
+    AttendanceApprovalFlow:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        requestType:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceApprovalStep'
+        isActive:
+          type: boolean
+    AttendanceRotationRule:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        shiftSequence:
+          type: array
+          items:
+            type: string
+        isActive:
+          type: boolean
+    AttendanceRotationAssignment:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        rotationRuleId:
+          type: string
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        isActive:
+          type: boolean
+    AttendanceRotationAssignmentItem:
+      type: object
+      properties:
+        assignment:
+          $ref: '#/components/schemas/AttendanceRotationAssignment'
+        rotation:
+          $ref: '#/components/schemas/AttendanceRotationRule'
+    AttendanceRequestReportItem:
+      type: object
+      properties:
+        requestType:
+          type: string
+        status:
+          type: string
+        total:
+          type: integer
+        minutes:
+          type: integer
     AttendanceSummary:
       type: object
       properties:

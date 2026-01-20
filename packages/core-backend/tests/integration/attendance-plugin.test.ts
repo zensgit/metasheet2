@@ -68,6 +68,10 @@ describe('Attendance Plugin Integration', () => {
       if (!tableCheck.rows[0]?.name) return
       const approvalCheck = await pool.query(`SELECT to_regclass('public.approval_instances') AS name`)
       if (!approvalCheck.rows[0]?.name) return
+      const leaveCheck = await pool.query(`SELECT to_regclass('public.attendance_leave_types') AS name`)
+      if (!leaveCheck.rows[0]?.name) return
+      const overtimeCheck = await pool.query(`SELECT to_regclass('public.attendance_overtime_rules') AS name`)
+      if (!overtimeCheck.rows[0]?.name) return
     } catch {
       return
     } finally {
@@ -139,6 +143,111 @@ describe('Attendance Plugin Integration', () => {
     })
 
     expect(cancelRes.status).toBe(200)
+
+    const leaveTypeRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        code: 'annual',
+        name: 'Annual Leave',
+        requiresApproval: true,
+      }),
+    })
+
+    expect([201, 409]).toContain(leaveTypeRes.status)
+    let leaveTypeId = (leaveTypeRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    if (!leaveTypeId) {
+      const leaveListRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      const items = (leaveListRes.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+      leaveTypeId = items.find(item => item.code === 'annual')?.id
+    }
+
+    const overtimeRuleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Weekday OT',
+        minMinutes: 30,
+      }),
+    })
+
+    expect([201, 409]).toContain(overtimeRuleRes.status)
+    let overtimeRuleId = (overtimeRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    if (!overtimeRuleId) {
+      const overtimeListRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      const items = (overtimeListRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+      overtimeRuleId = items.find(item => item.name === 'Weekday OT')?.id
+    }
+
+    if (leaveTypeId) {
+      const leaveRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workDate,
+          requestType: 'leave',
+          leaveTypeId,
+          minutes: 120,
+        }),
+      })
+
+      expect(leaveRequestRes.status).toBe(201)
+      const leaveRequestId = (leaveRequestRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      if (leaveRequestId) {
+        const approveLeaveRes = await requestJson(`${baseUrl}/api/attendance/requests/${leaveRequestId}/approve`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ comment: 'approve leave' }),
+        })
+        expect(approveLeaveRes.status).toBe(200)
+      }
+    }
+
+    if (overtimeRuleId) {
+      const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          workDate,
+          requestType: 'overtime',
+          overtimeRuleId,
+          minutes: 90,
+        }),
+      })
+
+      expect(overtimeRequestRes.status).toBe(201)
+    }
+
+    const reportRes = await requestJson(`${baseUrl}/api/attendance/reports/requests?from=${workDate}&to=${workDate}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+
+    expect(reportRes.status).toBe(200)
 
     const pluginsRes = await requestJson(`${baseUrl}/api/plugins`)
     const payload = pluginsRes.body as { list?: unknown } | unknown

@@ -25,6 +25,13 @@ const DEFAULT_SHIFT = {
   roundingMinutes: DEFAULT_RULE.roundingMinutes,
   workingDays: [...DEFAULT_RULE.workingDays],
 }
+const REQUEST_TYPES = [
+  'missed_check_in',
+  'missed_check_out',
+  'time_correction',
+  'leave',
+  'overtime',
+]
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
@@ -278,6 +285,107 @@ function mapHolidayRow(row) {
   }
 }
 
+function normalizeJsonArray(value, fallback = []) {
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : fallback
+    } catch {
+      return fallback
+    }
+  }
+  return fallback
+}
+
+function normalizeStringArray(value) {
+  return normalizeJsonArray(value, []).map(item => String(item)).filter(Boolean)
+}
+
+function normalizeMetadata(value) {
+  if (!value) return {}
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof value === 'object' ? value : {}
+}
+
+function mapLeaveTypeRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    code: row.code,
+    name: row.name,
+    requiresApproval: row.requires_approval ?? true,
+    requiresAttachment: row.requires_attachment ?? false,
+    defaultMinutesPerDay: Number(row.default_minutes_per_day ?? 480),
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapOvertimeRuleRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    minMinutes: Number(row.min_minutes ?? 0),
+    roundingMinutes: Number(row.rounding_minutes ?? 15),
+    maxMinutesPerDay: Number(row.max_minutes_per_day ?? 600),
+    requiresApproval: row.requires_approval ?? true,
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapApprovalFlowRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    requestType: row.request_type,
+    steps: normalizeJsonArray(row.steps, []).filter(step => step && typeof step === 'object'),
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapRotationRuleRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    timezone: row.timezone ?? 'UTC',
+    shiftSequence: normalizeStringArray(row.shift_sequence),
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapRotationAssignmentRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    userId: row.user_id,
+    rotationRuleId: row.rotation_rule_id,
+    startDate: row.start_date,
+    endDate: row.end_date ?? null,
+    isActive: row.is_active ?? true,
+  }
+}
+
+function mapRotationRuleFromAssignmentRow(row) {
+  return mapRotationRuleRow({
+    id: row.rotation_rule_id,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.rotation_name,
+    timezone: row.rotation_timezone,
+    shift_sequence: row.rotation_shift_sequence,
+    is_active: row.rotation_is_active,
+  })
+}
+
 function toWorkDate(value, timeZone) {
   try {
     return new Intl.DateTimeFormat('en-CA', {
@@ -320,6 +428,37 @@ function roundMinutes(value, step) {
   if (!Number.isFinite(value) || value <= 0) return 0
   if (!Number.isFinite(step) || step <= 1) return Math.floor(value)
   return Math.floor(value / step) * step
+}
+
+function calculateDurationMinutes(startAt, endAt) {
+  if (!startAt || !endAt) return null
+  const diff = (endAt.getTime() - startAt.getTime()) / 60000
+  if (!Number.isFinite(diff) || diff <= 0) return null
+  return Math.floor(diff)
+}
+
+function applyOvertimeRule(minutes, rule) {
+  if (!rule) return minutes
+  const minMinutes = Math.max(0, Number(rule.minMinutes ?? 0))
+  const rounding = Math.max(1, Number(rule.roundingMinutes ?? 1))
+  const maxMinutes = Math.max(0, Number(rule.maxMinutesPerDay ?? 0))
+  let adjusted = minutes
+  if (Number.isFinite(minMinutes) && adjusted < minMinutes) adjusted = minMinutes
+  if (Number.isFinite(rounding) && rounding > 1) {
+    adjusted = Math.ceil(adjusted / rounding) * rounding
+  }
+  if (Number.isFinite(maxMinutes) && maxMinutes > 0) {
+    adjusted = Math.min(adjusted, maxMinutes)
+  }
+  return adjusted
+}
+
+function diffDays(fromDate, toDate) {
+  const from = new Date(`${fromDate}T00:00:00Z`)
+  const to = new Date(`${toDate}T00:00:00Z`)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 0
+  const diffMs = to.getTime() - from.getTime()
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24))
 }
 
 function computeMetrics(options) {
@@ -512,12 +651,134 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
   }
 }
 
+async function loadShiftById(db, orgId, shiftId) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 LIMIT 1',
+      [shiftId, targetOrg]
+    )
+    if (!rows.length) return null
+    return mapShiftRow(rows[0])
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function loadLeaveType(db, orgId, { id, code }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (!id && !code) return null
+  try {
+    const rows = await db.query(
+      `SELECT * FROM attendance_leave_types
+       WHERE org_id = $1 AND ${id ? 'id = $2' : 'code = $2'}
+       LIMIT 1`,
+      [targetOrg, id || code]
+    )
+    if (!rows.length) return null
+    return mapLeaveTypeRow(rows[0])
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function loadOvertimeRule(db, orgId, { id, name }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (!id && !name) return null
+  try {
+    const rows = await db.query(
+      `SELECT * FROM attendance_overtime_rules
+       WHERE org_id = $1 AND ${id ? 'id = $2' : 'name = $2'}
+       LIMIT 1`,
+      [targetOrg, id || name]
+    )
+    if (!rows.length) return null
+    return mapOvertimeRuleRow(rows[0])
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function loadApprovalFlow(db, orgId, { requestType, flowId }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    if (flowId) {
+      const rows = await db.query(
+        `SELECT * FROM attendance_approval_flows
+         WHERE org_id = $1 AND id = $2
+         LIMIT 1`,
+        [targetOrg, flowId]
+      )
+      if (!rows.length) return null
+      return mapApprovalFlowRow(rows[0])
+    }
+    if (!requestType) return null
+    const rows = await db.query(
+      `SELECT * FROM attendance_approval_flows
+       WHERE org_id = $1 AND request_type = $2 AND is_active = true
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [targetOrg, requestType]
+    )
+    if (!rows.length) return null
+    return mapApprovalFlowRow(rows[0])
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function loadRotationAssignment(db, orgId, userId, workDate) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+              r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
+              r.is_active AS rotation_is_active
+       FROM attendance_rotation_assignments a
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+       WHERE a.org_id = $1
+         AND a.user_id = $2
+         AND a.is_active = true
+         AND r.is_active = true
+         AND a.start_date <= $3
+         AND (a.end_date IS NULL OR a.end_date >= $3)
+       ORDER BY a.start_date DESC, a.created_at DESC
+       LIMIT 1`,
+      [targetOrg, userId, workDate]
+    )
+    if (!rows.length) return null
+    const row = rows[0]
+    const rotation = mapRotationRuleFromAssignmentRow(row)
+    if (!rotation.shiftSequence.length) return null
+    const offset = diffDays(row.start_date, workDate)
+    if (offset < 0) return null
+    const index = offset % rotation.shiftSequence.length
+    const shiftId = rotation.shiftSequence[index]
+    if (!shiftId) return null
+    const shift = await loadShiftById(db, targetOrg, shiftId)
+    if (!shift) return null
+    return {
+      assignment: mapRotationAssignmentRow(row),
+      rotation,
+      shift,
+    }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
 async function resolveWorkContext(options) {
   const { db, orgId, userId, workDate, defaultRule, holidayOverride } = options
   const rule = defaultRule ?? await loadDefaultRule(db, orgId)
   const holiday = holidayOverride ?? await loadHoliday(db, orgId, workDate)
+  const rotationInfo = userId ? await loadRotationAssignment(db, orgId, userId, workDate) : null
   const assignmentInfo = userId ? await loadShiftAssignment(db, orgId, userId, workDate) : null
-  const profile = assignmentInfo?.shift ?? rule
+  const profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? rule
   const weekday = getWeekdayFromDateKey(workDate)
   let isWorkingDay = profile.workingDays.includes(weekday)
   if (holiday) {
@@ -526,9 +787,11 @@ async function resolveWorkContext(options) {
   return {
     rule: profile,
     assignment: assignmentInfo?.assignment ?? null,
+    rotation: rotationInfo?.rotation ?? null,
+    rotationAssignment: rotationInfo?.assignment ?? null,
     holiday,
     isWorkingDay,
-    source: assignmentInfo ? 'shift' : 'rule',
+    source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
 }
 
@@ -866,6 +1129,54 @@ function createRbacHelpers(db, logger) {
   return { withPermission, canAccessOtherUsers }
 }
 
+function normalizeApprovalSteps(value) {
+  return normalizeJsonArray(value, [])
+    .map((step) => {
+      if (!step || typeof step !== 'object') return null
+      const name = typeof step.name === 'string' ? step.name : undefined
+      const approverUserIds = Array.isArray(step.approverUserIds)
+        ? step.approverUserIds.map(item => String(item)).filter(Boolean)
+        : []
+      const approverRoleIds = Array.isArray(step.approverRoleIds)
+        ? step.approverRoleIds.map(item => String(item)).filter(Boolean)
+        : []
+      return { name, approverUserIds, approverRoleIds }
+    })
+    .filter(Boolean)
+}
+
+async function userHasAnyRole(db, userId, roleIds, logger) {
+  if (!roleIds || roleIds.length === 0) return false
+  try {
+    const rows = await db.query(
+      'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = ANY($2) LIMIT 1',
+      [userId, roleIds]
+    )
+    return rows.length > 0
+  } catch (error) {
+    if (isDatabaseSchemaError(error) && allowRbacDegradation) {
+      if (!rbacDegraded) {
+        logger.warn('RBAC service degraded - user_roles table not found')
+        rbacDegraded = true
+      }
+      return true
+    }
+    throw error
+  }
+}
+
+async function isApproverAllowed(db, userId, step, logger) {
+  if (!step) return true
+  const approverUserIds = Array.isArray(step.approverUserIds) ? step.approverUserIds : []
+  const approverRoleIds = Array.isArray(step.approverRoleIds) ? step.approverRoleIds : []
+  if (approverUserIds.length === 0 && approverRoleIds.length === 0) return true
+  if (approverUserIds.includes(userId)) return true
+  if (approverRoleIds.length > 0) {
+    return userHasAnyRole(db, userId, approverRoleIds, logger)
+  }
+  return false
+}
+
 module.exports = {
   async activate(context) {
     const db = context.api.database
@@ -932,6 +1243,61 @@ module.exports = {
       orgId: z.string().optional(),
     })
     const holidayUpdateSchema = holidayCreateSchema.partial()
+
+    const leaveTypeCreateSchema = z.object({
+      code: z.string().min(1),
+      name: z.string().min(1),
+      requiresApproval: z.boolean().optional(),
+      requiresAttachment: z.boolean().optional(),
+      defaultMinutesPerDay: z.number().int().min(0).optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const leaveTypeUpdateSchema = leaveTypeCreateSchema.partial()
+
+    const overtimeRuleCreateSchema = z.object({
+      name: z.string().min(1),
+      minMinutes: z.number().int().min(0).optional(),
+      roundingMinutes: z.number().int().min(1).optional(),
+      maxMinutesPerDay: z.number().int().min(0).optional(),
+      requiresApproval: z.boolean().optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const overtimeRuleUpdateSchema = overtimeRuleCreateSchema.partial()
+
+    const approvalStepSchema = z.object({
+      name: z.string().optional(),
+      approverUserIds: z.array(z.string()).optional(),
+      approverRoleIds: z.array(z.string()).optional(),
+    })
+    const approvalFlowCreateSchema = z.object({
+      name: z.string().min(1),
+      requestType: z.enum(REQUEST_TYPES),
+      steps: z.array(approvalStepSchema).optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const approvalFlowUpdateSchema = approvalFlowCreateSchema.partial()
+
+    const rotationRuleCreateSchema = z.object({
+      name: z.string().min(1),
+      timezone: z.string().optional(),
+      shiftSequence: z.array(z.string()).optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const rotationRuleUpdateSchema = rotationRuleCreateSchema.partial()
+
+    const rotationAssignmentCreateSchema = z.object({
+      userId: z.string().min(1),
+      rotationRuleId: z.string().min(1),
+      startDate: z.string().min(1),
+      endDate: z.string().nullable().optional(),
+      isActive: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const rotationAssignmentUpdateSchema = rotationAssignmentCreateSchema.partial()
 
     context.api.http.addRoute(
       'POST',
@@ -1208,15 +1574,95 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/reports/requests',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          orgId: z.string().optional(),
+          from: z.string().optional(),
+          to: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const targetUserId = parsed.data.userId ?? requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+
+        const orgId = getOrgId(req)
+        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
+        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+
+        try {
+          const rows = await db.query(
+            `SELECT request_type, status,
+                    COUNT(*)::int AS total,
+                    COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+             FROM attendance_requests
+             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
+             GROUP BY request_type, status
+             ORDER BY request_type, status`,
+            [targetUserId, orgId, from, to]
+          )
+
+          const items = rows.map(row => ({
+            requestType: row.request_type,
+            status: row.status,
+            total: Number(row.total ?? 0),
+            minutes: Number(row.total_minutes ?? 0),
+          }))
+
+          res.json({ ok: true, data: { items, from, to } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance requests report failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load request report' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
       withPermission('attendance:write', async (req, res) => {
         const schema = z.object({
           workDate: z.string(),
-          requestType: z.enum(['missed_check_in', 'missed_check_out', 'time_correction']),
+          requestType: z.enum(REQUEST_TYPES),
           requestedInAt: z.string().optional(),
           requestedOutAt: z.string().optional(),
           reason: z.string().optional(),
+          leaveTypeId: z.string().optional(),
+          leaveTypeCode: z.string().optional(),
+          overtimeRuleId: z.string().optional(),
+          overtimeRuleName: z.string().optional(),
+          minutes: z.coerce.number().int().min(0).optional(),
+          attachmentUrl: z.string().optional(),
+          approvalFlowId: z.string().optional(),
           orgId: z.string().optional(),
         })
 
@@ -1232,24 +1678,115 @@ module.exports = {
           return
         }
 
+        const orgId = getOrgId(req)
         const requestedInAt = parseDateInput(parsed.data.requestedInAt)
         const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
+        if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
+          return
+        }
 
-        if (parsed.data.requestType === 'missed_check_in' && !requestedInAt) {
+        const requestType = parsed.data.requestType
+        if (requestType === 'missed_check_in' && !requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt required' } })
           return
         }
-        if (parsed.data.requestType === 'missed_check_out' && !requestedOutAt) {
+        if (requestType === 'missed_check_out' && !requestedOutAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt required' } })
           return
         }
-        if (parsed.data.requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
+        if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt or requestedOutAt required' } })
           return
         }
 
+        let durationMinutes = parsed.data.minutes ?? null
+        if (!durationMinutes) {
+          durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
+        }
+
+        let leaveType = null
+        let overtimeRule = null
+        if (requestType === 'leave') {
+          leaveType = await loadLeaveType(db, orgId, {
+            id: parsed.data.leaveTypeId,
+            code: parsed.data.leaveTypeCode,
+          })
+          if (!leaveType) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+            return
+          }
+          if (!leaveType.isActive) {
+            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Leave type inactive' } })
+            return
+          }
+          if (!durationMinutes) {
+            durationMinutes = leaveType.defaultMinutesPerDay
+          }
+        } else if (requestType === 'overtime') {
+          overtimeRule = await loadOvertimeRule(db, orgId, {
+            id: parsed.data.overtimeRuleId,
+            name: parsed.data.overtimeRuleName,
+          })
+          if (!overtimeRule) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
+            return
+          }
+          if (!overtimeRule.isActive) {
+            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Overtime rule inactive' } })
+            return
+          }
+          if (!durationMinutes) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required for overtime' } })
+            return
+          }
+          durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
+        }
+
+        if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required' } })
+          return
+        }
+
+        const approvalFlow = await loadApprovalFlow(db, orgId, {
+          requestType,
+          flowId: parsed.data.approvalFlowId,
+        })
+        const metadata = {}
+        if (durationMinutes) metadata.minutes = durationMinutes
+        if (leaveType) {
+          metadata.leaveType = {
+            id: leaveType.id,
+            code: leaveType.code,
+            name: leaveType.name,
+            requiresApproval: leaveType.requiresApproval,
+            requiresAttachment: leaveType.requiresAttachment,
+            defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
+          }
+        }
+        if (overtimeRule) {
+          metadata.overtimeRule = {
+            id: overtimeRule.id,
+            name: overtimeRule.name,
+            minMinutes: overtimeRule.minMinutes,
+            roundingMinutes: overtimeRule.roundingMinutes,
+            maxMinutesPerDay: overtimeRule.maxMinutesPerDay,
+            requiresApproval: overtimeRule.requiresApproval,
+          }
+        }
+        if (parsed.data.attachmentUrl) {
+          metadata.attachmentUrl = parsed.data.attachmentUrl
+        }
+        if (approvalFlow) {
+          metadata.approvalFlow = {
+            id: approvalFlow.id,
+            name: approvalFlow.name,
+            steps: approvalFlow.steps,
+            currentStep: 0,
+          }
+        }
+
         const approvalId = `apv_${randomUUID()}`
-        const orgId = getOrgId(req)
 
         try {
           const request = await db.transaction(async (trx) => {
@@ -1260,20 +1797,21 @@ module.exports = {
 
             const rows = await trx.query(
               `INSERT INTO attendance_requests
-               (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
               [
                 randomUUID(),
                 userId,
                 orgId,
                 parsed.data.workDate,
-                parsed.data.requestType,
+                requestType,
                 requestedInAt,
                 requestedOutAt,
                 parsed.data.reason ?? null,
                 'pending',
                 approvalId,
+                JSON.stringify(metadata),
               ]
             )
 
@@ -1284,7 +1822,7 @@ module.exports = {
             orgId,
             userId,
             workDate: parsed.data.workDate,
-            requestType: parsed.data.requestType,
+            requestType,
           })
           res.status(201).json({ ok: true, data: { request } })
         } catch (error) {
@@ -1435,13 +1973,38 @@ module.exports = {
           }
 
           const approval = approvalRows[0]
-          const newStatus = action === 'approve' ? 'approved' : 'rejected'
+          const requestMetadata = normalizeMetadata(requestRow.metadata)
+          const flowMeta = normalizeMetadata(requestMetadata.approvalFlow)
+          const flowSteps = normalizeApprovalSteps(flowMeta.steps)
+          const rawStepIndex = Number(flowMeta.currentStep ?? 0)
+          const currentStepIndex = flowSteps.length > 0
+            ? Math.min(Math.max(Number.isFinite(rawStepIndex) ? rawStepIndex : 0, 0), flowSteps.length - 1)
+            : 0
+          const currentStep = flowSteps[currentStepIndex]
+
+          if (action === 'approve') {
+            const canApprove = await isApproverAllowed(trx, requesterId, currentStep, logger)
+            if (!canApprove) {
+              throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+            }
+          }
+
+          const isFinalApproval = action !== 'approve' || flowSteps.length === 0 || currentStepIndex >= flowSteps.length - 1
+          const newStatus = action === 'approve'
+            ? (isFinalApproval ? 'approved' : 'pending')
+            : 'rejected'
           const newVersion = Number(approval.version ?? 0) + 1
 
           await trx.query(
             'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
             [newStatus, newVersion, approvalId]
           )
+
+          const recordMetadata = {
+            ...(parsed.data.metadata ?? {}),
+            stepIndex: currentStepIndex,
+            stepName: currentStep?.name ?? null,
+          }
 
           await trx.query(
             `INSERT INTO approval_records
@@ -1457,23 +2020,43 @@ module.exports = {
               newStatus,
               approval.version,
               newVersion,
-              JSON.stringify(parsed.data.metadata ?? {}),
+              JSON.stringify(recordMetadata),
               req.ip ?? null,
               req.get('user-agent') ?? null,
             ]
           )
 
           const resolvedAt = new Date()
-          await trx.query(
-            `UPDATE attendance_requests
-             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
-             WHERE id = $1`,
-            [requestId, newStatus, requesterId, resolvedAt]
-          )
+          const nextMetadata = { ...requestMetadata }
+          if (flowMeta.id || flowMeta.name || flowSteps.length > 0) {
+            nextMetadata.approvalFlow = {
+              id: flowMeta.id,
+              name: flowMeta.name,
+              steps: flowSteps,
+              currentStep: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
+            }
+          }
+
+          if (isFinalApproval) {
+            await trx.query(
+              `UPDATE attendance_requests
+               SET status = $2, resolved_by = $3, resolved_at = $4, metadata = $5::jsonb, updated_at = now()
+               WHERE id = $1`,
+              [requestId, newStatus, requesterId, resolvedAt, JSON.stringify(nextMetadata)]
+            )
+          } else {
+            await trx.query(
+              `UPDATE attendance_requests
+               SET metadata = $2::jsonb, updated_at = now()
+               WHERE id = $1`,
+              [requestId, JSON.stringify(nextMetadata)]
+            )
+          }
 
           let record = null
           const orgId = requestRow.org_id ?? DEFAULT_ORG_ID
-          if (action === 'approve') {
+          const requestType = requestRow.request_type
+          if (action === 'approve' && isFinalApproval) {
             const baseRule = await loadDefaultRule(trx, orgId)
             const context = await resolveWorkContext({
               db: trx,
@@ -1483,21 +2066,33 @@ module.exports = {
               defaultRule: baseRule,
             })
             const timezone = context.rule.timezone
-            const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
-            const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
-            record = await upsertAttendanceRecord({
-              userId: requestRow.user_id,
-              orgId,
-              workDate: requestRow.work_date,
-              timezone,
-              rule: context.rule,
-              updateFirstInAt,
-              updateLastOutAt,
-              mode: 'override',
-              statusOverride: 'adjusted',
-              isWorkday: context.isWorkingDay,
-              client: trx,
-            })
+            if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
+              const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
+              const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
+              record = await upsertAttendanceRecord({
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+                timezone,
+                rule: context.rule,
+                updateFirstInAt,
+                updateLastOutAt,
+                mode: 'override',
+                statusOverride: 'adjusted',
+                isWorkday: context.isWorkingDay,
+                client: trx,
+              })
+            }
+
+            const eventMeta = {
+              requestId,
+              requestType,
+              minutes: requestMetadata.minutes ?? null,
+              leaveType: requestMetadata.leaveType ?? null,
+              overtimeRule: requestMetadata.overtimeRule ?? null,
+              requested_in_at: requestRow.requested_in_at,
+              requested_out_at: requestRow.requested_out_at,
+            }
 
             await trx.query(
               `INSERT INTO attendance_events
@@ -1513,16 +2108,22 @@ module.exports = {
                 'request',
                 timezone,
                 JSON.stringify({}),
-                JSON.stringify({
-                  requestId,
-                  requested_in_at: requestRow.requested_in_at,
-                  requested_out_at: requestRow.requested_out_at,
-                }),
+                JSON.stringify(eventMeta),
               ]
             )
           }
 
-          return { requestId, status: newStatus, record, orgId, userId: requestRow.user_id }
+          return {
+            requestId,
+            status: isFinalApproval ? newStatus : 'pending',
+            record,
+            orgId,
+            userId: requestRow.user_id,
+            approvalStep: {
+              index: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
+              total: flowSteps.length,
+            },
+          }
         })
 
         emitEvent('attendance.resolved', {
@@ -1674,6 +2275,1130 @@ module.exports = {
       'POST',
       '/api/attendance/requests/:id/cancel',
       withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/leave-types',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          isActive: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          isActive: typeof req.query.isActive === 'string' ? req.query.isActive : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const orgId = getOrgId(req)
+        const params = [orgId]
+        let activeFilter = ''
+        if (parsed.data.isActive !== undefined) {
+          params.push(parseBoolean(parsed.data.isActive, true))
+          activeFilter = `AND is_active = $${params.length}`
+        }
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_leave_types
+             WHERE org_id = $1 ${activeFilter}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          params.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT * FROM attendance_leave_types
+             WHERE org_id = $1 ${activeFilter}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapLeaveTypeRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave types query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load leave types' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/leave-types',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = leaveTypeCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          code: parsed.data.code,
+          name: parsed.data.name,
+          requiresApproval: parsed.data.requiresApproval ?? true,
+          requiresAttachment: parsed.data.requiresAttachment ?? false,
+          defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? 480,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_leave_types
+             (id, org_id, code, name, requires_approval, requires_attachment, default_minutes_per_day, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.code,
+              payload.name,
+              payload.requiresApproval,
+              payload.requiresAttachment,
+              payload.defaultMinutesPerDay,
+              payload.isActive,
+            ]
+          )
+
+          const leaveType = mapLeaveTypeRow(rows[0])
+          emitEvent('attendance.leaveType.created', { orgId, leaveTypeId: leaveType.id })
+          res.status(201).json({ ok: true, data: leaveType })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Leave type code already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave type creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create leave type' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/leave-types/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = leaveTypeUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const leaveTypeId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_leave_types WHERE id = $1 AND org_id = $2',
+            [leaveTypeId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const payload = {
+            code: parsed.data.code ?? existing.code,
+            name: parsed.data.name ?? existing.name,
+            requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
+            requiresAttachment: parsed.data.requiresAttachment ?? existing.requires_attachment,
+            defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? existing.default_minutes_per_day,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_leave_types
+             SET code = $3,
+                 name = $4,
+                 requires_approval = $5,
+                 requires_attachment = $6,
+                 default_minutes_per_day = $7,
+                 is_active = $8,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              leaveTypeId,
+              orgId,
+              payload.code,
+              payload.name,
+              payload.requiresApproval,
+              payload.requiresAttachment,
+              payload.defaultMinutesPerDay,
+              payload.isActive,
+            ]
+          )
+
+          const leaveType = mapLeaveTypeRow(rows[0])
+          emitEvent('attendance.leaveType.updated', { orgId, leaveTypeId: leaveType.id })
+          res.json({ ok: true, data: leaveType })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Leave type code already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave type update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update leave type' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/leave-types/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const leaveTypeId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_leave_types WHERE id = $1 AND org_id = $2 RETURNING id',
+            [leaveTypeId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+            return
+          }
+          emitEvent('attendance.leaveType.deleted', { orgId, leaveTypeId })
+          res.json({ ok: true, data: { id: leaveTypeId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave type delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete leave type' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/overtime-rules',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          isActive: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          isActive: typeof req.query.isActive === 'string' ? req.query.isActive : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const orgId = getOrgId(req)
+        const params = [orgId]
+        let activeFilter = ''
+        if (parsed.data.isActive !== undefined) {
+          params.push(parseBoolean(parsed.data.isActive, true))
+          activeFilter = `AND is_active = $${params.length}`
+        }
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_overtime_rules
+             WHERE org_id = $1 ${activeFilter}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          params.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT * FROM attendance_overtime_rules
+             WHERE org_id = $1 ${activeFilter}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapOvertimeRuleRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rules query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load overtime rules' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/overtime-rules',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = overtimeRuleCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          name: parsed.data.name,
+          minMinutes: parsed.data.minMinutes ?? 0,
+          roundingMinutes: parsed.data.roundingMinutes ?? 15,
+          maxMinutesPerDay: parsed.data.maxMinutesPerDay ?? 600,
+          requiresApproval: parsed.data.requiresApproval ?? true,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_overtime_rules
+             (id, org_id, name, min_minutes, rounding_minutes, max_minutes_per_day, requires_approval, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.name,
+              payload.minMinutes,
+              payload.roundingMinutes,
+              payload.maxMinutesPerDay,
+              payload.requiresApproval,
+              payload.isActive,
+            ]
+          )
+
+          const overtimeRule = mapOvertimeRuleRow(rows[0])
+          emitEvent('attendance.overtimeRule.created', { orgId, overtimeRuleId: overtimeRule.id })
+          res.status(201).json({ ok: true, data: overtimeRule })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Overtime rule name already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rule creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create overtime rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/overtime-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = overtimeRuleUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const overtimeRuleId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_overtime_rules WHERE id = $1 AND org_id = $2',
+            [overtimeRuleId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            minMinutes: parsed.data.minMinutes ?? existing.min_minutes,
+            roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
+            maxMinutesPerDay: parsed.data.maxMinutesPerDay ?? existing.max_minutes_per_day,
+            requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_overtime_rules
+             SET name = $3,
+                 min_minutes = $4,
+                 rounding_minutes = $5,
+                 max_minutes_per_day = $6,
+                 requires_approval = $7,
+                 is_active = $8,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              overtimeRuleId,
+              orgId,
+              payload.name,
+              payload.minMinutes,
+              payload.roundingMinutes,
+              payload.maxMinutesPerDay,
+              payload.requiresApproval,
+              payload.isActive,
+            ]
+          )
+
+          const overtimeRule = mapOvertimeRuleRow(rows[0])
+          emitEvent('attendance.overtimeRule.updated', { orgId, overtimeRuleId: overtimeRule.id })
+          res.json({ ok: true, data: overtimeRule })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Overtime rule name already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rule update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update overtime rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/overtime-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const overtimeRuleId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_overtime_rules WHERE id = $1 AND org_id = $2 RETURNING id',
+            [overtimeRuleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
+            return
+          }
+          emitEvent('attendance.overtimeRule.deleted', { orgId, overtimeRuleId })
+          res.json({ ok: true, data: { id: overtimeRuleId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rule delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete overtime rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/approval-flows',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          requestType: z.string().optional(),
+          isActive: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          requestType: typeof req.query.requestType === 'string' ? req.query.requestType : undefined,
+          isActive: typeof req.query.isActive === 'string' ? req.query.isActive : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const orgId = getOrgId(req)
+        const params = [orgId]
+        let filters = ''
+        if (parsed.data.requestType) {
+          params.push(parsed.data.requestType)
+          filters += ` AND request_type = $${params.length}`
+        }
+        if (parsed.data.isActive !== undefined) {
+          params.push(parseBoolean(parsed.data.isActive, true))
+          filters += ` AND is_active = $${params.length}`
+        }
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_approval_flows
+             WHERE org_id = $1 ${filters}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          params.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT * FROM attendance_approval_flows
+             WHERE org_id = $1 ${filters}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapApprovalFlowRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flows query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load approval flows' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/approval-flows',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = approvalFlowCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const steps = normalizeApprovalSteps(parsed.data.steps)
+        const payload = {
+          name: parsed.data.name,
+          requestType: parsed.data.requestType,
+          steps,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_approval_flows
+             (id, org_id, name, request_type, steps, is_active)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.name,
+              payload.requestType,
+              JSON.stringify(payload.steps),
+              payload.isActive,
+            ]
+          )
+
+          const flow = mapApprovalFlowRow(rows[0])
+          emitEvent('attendance.approvalFlow.created', { orgId, approvalFlowId: flow.id })
+          res.status(201).json({ ok: true, data: flow })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Approval flow already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/approval-flows/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = approvalFlowUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const flowId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_approval_flows WHERE id = $1 AND org_id = $2',
+            [flowId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const steps = parsed.data.steps ? normalizeApprovalSteps(parsed.data.steps) : normalizeApprovalSteps(existing.steps)
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            requestType: parsed.data.requestType ?? existing.request_type,
+            steps,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_approval_flows
+             SET name = $3,
+                 request_type = $4,
+                 steps = $5::jsonb,
+                 is_active = $6,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              flowId,
+              orgId,
+              payload.name,
+              payload.requestType,
+              JSON.stringify(payload.steps),
+              payload.isActive,
+            ]
+          )
+
+          const flow = mapApprovalFlowRow(rows[0])
+          emitEvent('attendance.approvalFlow.updated', { orgId, approvalFlowId: flow.id })
+          res.json({ ok: true, data: flow })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Approval flow already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/approval-flows/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const flowId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_approval_flows WHERE id = $1 AND org_id = $2 RETURNING id',
+            [flowId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+          emitEvent('attendance.approvalFlow.deleted', { orgId, approvalFlowId: flowId })
+          res.json({ ok: true, data: { id: flowId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rotation-rules',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          isActive: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+          isActive: typeof req.query.isActive === 'string' ? req.query.isActive : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const orgId = getOrgId(req)
+        const params = [orgId]
+        let activeFilter = ''
+        if (parsed.data.isActive !== undefined) {
+          params.push(parseBoolean(parsed.data.isActive, true))
+          activeFilter = `AND is_active = $${params.length}`
+        }
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_rotation_rules
+             WHERE org_id = $1 ${activeFilter}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          params.push(pageSize, offset)
+          const rows = await db.query(
+            `SELECT * FROM attendance_rotation_rules
+             WHERE org_id = $1 ${activeFilter}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1} OFFSET $${params.length}`,
+            params
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapRotationRuleRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rules query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation rules' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/rotation-rules',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = rotationRuleCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const shiftSequence = normalizeStringArray(parsed.data.shiftSequence)
+        if (shiftSequence.length === 0) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
+          return
+        }
+        const payload = {
+          name: parsed.data.name,
+          timezone: parsed.data.timezone ?? 'UTC',
+          shiftSequence,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_rotation_rules
+             (id, org_id, name, timezone, shift_sequence, is_active)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.name,
+              payload.timezone,
+              JSON.stringify(payload.shiftSequence),
+              payload.isActive,
+            ]
+          )
+
+          const rule = mapRotationRuleRow(rows[0])
+          emitEvent('attendance.rotationRule.created', { orgId, rotationRuleId: rule.id })
+          res.status(201).json({ ok: true, data: rule })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/rotation-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = rotationRuleUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const ruleId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [ruleId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const shiftSequence = parsed.data.shiftSequence
+            ? normalizeStringArray(parsed.data.shiftSequence)
+            : normalizeStringArray(existing.shift_sequence)
+          if (shiftSequence.length === 0) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
+            return
+          }
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            timezone: parsed.data.timezone ?? existing.timezone,
+            shiftSequence,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_rotation_rules
+             SET name = $3,
+                 timezone = $4,
+                 shift_sequence = $5::jsonb,
+                 is_active = $6,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              ruleId,
+              orgId,
+              payload.name,
+              payload.timezone,
+              JSON.stringify(payload.shiftSequence),
+              payload.isActive,
+            ]
+          )
+
+          const rule = mapRotationRuleRow(rows[0])
+          emitEvent('attendance.rotationRule.updated', { orgId, rotationRuleId: rule.id })
+          res.json({ ok: true, data: rule })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/rotation-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2 RETURNING id',
+            [ruleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+          emitEvent('attendance.rotationRule.deleted', { orgId, rotationRuleId: ruleId })
+          res.json({ ok: true, data: { id: ruleId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rotation-assignments',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const orgId = getOrgId(req)
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_rotation_assignments
+             WHERE org_id = $1`,
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+                    r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
+                    r.is_active AS rotation_is_active
+             FROM attendance_rotation_assignments a
+             JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+             WHERE a.org_id = $1
+             ORDER BY a.start_date DESC, a.created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+
+          const items = rows.map(row => ({
+            assignment: mapRotationAssignmentRow(row),
+            rotation: mapRotationRuleFromAssignmentRow(row),
+          }))
+
+          res.json({
+            ok: true,
+            data: {
+              items,
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation assignments query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation assignments' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/rotation-assignments',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = rotationAssignmentCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          userId: parsed.data.userId,
+          rotationRuleId: parsed.data.rotationRuleId,
+          startDate: parsed.data.startDate,
+          endDate: parsed.data.endDate ?? null,
+          isActive: parsed.data.isActive ?? true,
+        }
+
+        try {
+          const ruleRows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [payload.rotationRuleId, orgId]
+          )
+          if (!ruleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          const rows = await db.query(
+            `INSERT INTO attendance_rotation_assignments
+             (id, org_id, user_id, rotation_rule_id, start_date, end_date, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.userId,
+              payload.rotationRuleId,
+              payload.startDate,
+              payload.endDate,
+              payload.isActive,
+            ]
+          )
+
+          const assignment = mapRotationAssignmentRow(rows[0])
+          const rotation = mapRotationRuleRow(ruleRows[0])
+          emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
+          res.status(201).json({ ok: true, data: { assignment, rotation } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation assignment creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rotation assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/rotation-assignments/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = rotationAssignmentUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const assignmentId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2',
+            [assignmentId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+
+          const existing = existingRows[0]
+          const payload = {
+            userId: parsed.data.userId ?? existing.user_id,
+            rotationRuleId: parsed.data.rotationRuleId ?? existing.rotation_rule_id,
+            startDate: parsed.data.startDate ?? existing.start_date,
+            endDate: parsed.data.endDate ?? existing.end_date,
+            isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          const ruleRows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [payload.rotationRuleId, orgId]
+          )
+          if (!ruleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_rotation_assignments
+             SET user_id = $3,
+                 rotation_rule_id = $4,
+                 start_date = $5,
+                 end_date = $6,
+                 is_active = $7,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              assignmentId,
+              orgId,
+              payload.userId,
+              payload.rotationRuleId,
+              payload.startDate,
+              payload.endDate,
+              payload.isActive,
+            ]
+          )
+
+          const assignment = mapRotationAssignmentRow(rows[0])
+          const rotation = mapRotationRuleRow(ruleRows[0])
+          emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
+          res.json({ ok: true, data: { assignment, rotation } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation assignment update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rotation assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/rotation-assignments/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const assignmentId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 RETURNING id',
+            [assignmentId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation assignment not found' } })
+            return
+          }
+          emitEvent('attendance.rotationAssignment.deleted', { orgId, rotationAssignmentId: assignmentId })
+          res.json({ ok: true, data: { id: assignmentId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation assignment delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete rotation assignment' } })
+        }
+      })
     )
 
     context.api.http.addRoute(

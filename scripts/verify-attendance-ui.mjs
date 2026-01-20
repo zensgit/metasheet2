@@ -61,6 +61,19 @@ async function clickAndWaitForStatus(page, buttonName) {
   return waitForStatusChange(page, before)
 }
 
+async function selectFirstOption(select) {
+  const options = await select.locator('option').all()
+  for (const option of options) {
+    const value = await option.getAttribute('value')
+    const disabled = await option.getAttribute('disabled')
+    if (value && !disabled) {
+      await select.selectOption(value)
+      return value
+    }
+  }
+  return null
+}
+
 async function updateMinPunchInterval(page, targetValue) {
   const adminNotice = page.locator('text=Admin permissions required to manage attendance settings.')
   if (await adminNotice.count()) {
@@ -115,6 +128,41 @@ async function performPunch(page, buttonName, successText) {
   logInfo(`${buttonName} confirmed`)
 }
 
+async function createLeaveType(page) {
+  const codeInput = page.locator('#attendance-leave-code')
+  if (await codeInput.count() === 0) {
+    logInfo('Leave type inputs not found; skipping')
+    return null
+  }
+  await codeInput.scrollIntoViewIfNeeded()
+  const code = `LV${Date.now().toString().slice(-6)}`
+  await codeInput.fill(code)
+  await page.locator('#attendance-leave-name').fill(`Auto Leave ${code}`)
+  const statusText = await clickAndWaitForStatus(page, 'Create leave type')
+  if (await isStatusError(page)) {
+    throw new Error(`Leave type creation failed: ${statusText || 'Unknown error'}`)
+  }
+  logInfo('Leave type created')
+  return code
+}
+
+async function createOvertimeRule(page) {
+  const nameInput = page.locator('#attendance-overtime-name')
+  if (await nameInput.count() === 0) {
+    logInfo('Overtime rule inputs not found; skipping')
+    return null
+  }
+  await nameInput.scrollIntoViewIfNeeded()
+  const name = `Auto OT ${Date.now().toString().slice(-4)}`
+  await nameInput.fill(name)
+  const statusText = await clickAndWaitForStatus(page, 'Create rule')
+  if (await isStatusError(page)) {
+    throw new Error(`Overtime rule creation failed: ${statusText || 'Unknown error'}`)
+  }
+  logInfo('Overtime rule created')
+  return name
+}
+
 async function submitAndCancelRequest(page) {
   logInfo('Submitting adjustment request')
   const now = new Date()
@@ -157,6 +205,60 @@ async function submitAndCancelRequest(page) {
     throw new Error(`Unexpected cancel status: ${cancelStatus || 'Missing status'}`)
   }
   logInfo('Request cancellation confirmed')
+}
+
+async function submitLeaveRequest(page) {
+  logInfo('Submitting leave request')
+  const now = new Date()
+  await page.locator('#attendance-request-type').selectOption('leave')
+  const leaveSelect = page.locator('#attendance-request-leave-type')
+  if (await leaveSelect.count()) {
+    await selectFirstOption(leaveSelect)
+  }
+  const workDateInput = page.locator('#attendance-request-work-date')
+  if (await workDateInput.count()) {
+    await workDateInput.fill(formatLocalDate(now))
+  }
+  const minutesInput = page.locator('#attendance-request-minutes')
+  if (await minutesInput.count()) {
+    await minutesInput.fill('60')
+  }
+  const submitStatus = await clickAndWaitForStatus(page, 'Submit request')
+  if (await isStatusError(page)) {
+    throw new Error(`Leave request submit failed: ${submitStatus || 'Unknown error'}`)
+  }
+  const cancelStatus = await clickAndWaitForStatus(page, 'Cancel')
+  if (await isStatusError(page)) {
+    throw new Error(`Leave request cancel failed: ${cancelStatus || 'Unknown error'}`)
+  }
+  logInfo('Leave request flow confirmed')
+}
+
+async function submitOvertimeRequest(page) {
+  logInfo('Submitting overtime request')
+  const now = new Date()
+  await page.locator('#attendance-request-type').selectOption('overtime')
+  const ruleSelect = page.locator('#attendance-request-overtime-rule')
+  if (await ruleSelect.count()) {
+    await selectFirstOption(ruleSelect)
+  }
+  const workDateInput = page.locator('#attendance-request-work-date')
+  if (await workDateInput.count()) {
+    await workDateInput.fill(formatLocalDate(now))
+  }
+  const minutesInput = page.locator('#attendance-request-minutes')
+  if (await minutesInput.count()) {
+    await minutesInput.fill('90')
+  }
+  const submitStatus = await clickAndWaitForStatus(page, 'Submit request')
+  if (await isStatusError(page)) {
+    throw new Error(`Overtime request submit failed: ${submitStatus || 'Unknown error'}`)
+  }
+  const cancelStatus = await clickAndWaitForStatus(page, 'Cancel')
+  if (await isStatusError(page)) {
+    throw new Error(`Overtime request cancel failed: ${cancelStatus || 'Unknown error'}`)
+  }
+  logInfo('Overtime request flow confirmed')
 }
 
 async function exportCsv(page) {
@@ -216,6 +318,9 @@ async function run() {
       }
     }
 
+    await createLeaveType(page)
+    await createOvertimeRule(page)
+
     const refreshButton = page.getByRole('button', { name: 'Refresh' })
     if (await refreshButton.count()) {
       await refreshButton.first().click()
@@ -226,6 +331,8 @@ async function run() {
     await performPunch(page, 'Check In', 'Check in recorded.')
     await performPunch(page, 'Check Out', 'Check out recorded.')
     await submitAndCancelRequest(page)
+    await submitLeaveRequest(page)
+    await submitOvertimeRequest(page)
     await exportCsv(page)
     if (previousInterval && previousInterval !== '0') {
       await updateMinPunchInterval(page, previousInterval)

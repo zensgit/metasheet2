@@ -152,10 +152,40 @@
                 <option value="missed_check_in">Missed check-in</option>
                 <option value="missed_check_out">Missed check-out</option>
                 <option value="time_correction">Time correction</option>
+                <option value="leave">Leave</option>
+                <option value="overtime">Overtime</option>
+              </select>
+            </label>
+            <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-leave-type">
+              <span>Leave type</span>
+              <select
+                id="attendance-request-leave-type"
+                name="requestLeaveType"
+                v-model="requestForm.leaveTypeId"
+                :disabled="leaveTypes.length === 0"
+              >
+                <option value="" disabled>Select leave type</option>
+                <option v-for="item in leaveTypes" :key="item.id" :value="item.id">
+                  {{ item.name }}
+                </option>
+              </select>
+            </label>
+            <label v-if="isOvertimeRequest" class="attendance__field" for="attendance-request-overtime-rule">
+              <span>Overtime rule</span>
+              <select
+                id="attendance-request-overtime-rule"
+                name="requestOvertimeRule"
+                v-model="requestForm.overtimeRuleId"
+                :disabled="overtimeRules.length === 0"
+              >
+                <option value="" disabled>Select rule</option>
+                <option v-for="rule in overtimeRules" :key="rule.id" :value="rule.id">
+                  {{ rule.name }}
+                </option>
               </select>
             </label>
             <label class="attendance__field" for="attendance-request-in">
-              <span>Requested in</span>
+              <span>{{ isLeaveOrOvertimeRequest ? 'Start' : 'Requested in' }}</span>
               <input
                 id="attendance-request-in"
                 name="requestedInAt"
@@ -164,12 +194,32 @@
               />
             </label>
             <label class="attendance__field" for="attendance-request-out">
-              <span>Requested out</span>
+              <span>{{ isLeaveOrOvertimeRequest ? 'End' : 'Requested out' }}</span>
               <input
                 id="attendance-request-out"
                 name="requestedOutAt"
                 v-model="requestForm.requestedOutAt"
                 type="datetime-local"
+              />
+            </label>
+            <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
+              <span>Duration (min)</span>
+              <input
+                id="attendance-request-minutes"
+                name="requestMinutes"
+                v-model="requestForm.minutes"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-attachment">
+              <span>Attachment URL</span>
+              <input
+                id="attendance-request-attachment"
+                name="requestAttachment"
+                v-model="requestForm.attachmentUrl"
+                type="text"
+                placeholder="Optional"
               />
             </label>
             <label class="attendance__field attendance__field--full" for="attendance-request-reason">
@@ -201,6 +251,11 @@
                     {{ item.status }}
                   </span>
                 </div>
+                <div class="attendance__request-meta" v-if="item.metadata">
+                  <span v-if="item.metadata.leaveType">Leave: {{ item.metadata.leaveType.name }}</span>
+                  <span v-if="item.metadata.overtimeRule">Overtime: {{ item.metadata.overtimeRule.name }}</span>
+                  <span v-if="item.metadata.minutes">Minutes: {{ item.metadata.minutes }}</span>
+                </div>
                 <div class="attendance__request-meta">
                   <span>In: {{ formatDateTime(item.requested_in_at) }}</span>
                   <span>Out: {{ formatDateTime(item.requested_out_at) }}</span>
@@ -212,6 +267,36 @@
                 </div>
               </li>
             </ul>
+          </div>
+        </div>
+
+        <div class="attendance__card">
+          <div class="attendance__requests-header">
+            <h3>Request Report</h3>
+            <button class="attendance__btn" :disabled="reportLoading" @click="loadRequestReport">
+              {{ reportLoading ? 'Loading...' : 'Reload report' }}
+            </button>
+          </div>
+          <div v-if="requestReport.length === 0" class="attendance__empty">No report data.</div>
+          <div v-else class="attendance__table-wrapper">
+            <table class="attendance__table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Total</th>
+                  <th>Minutes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in requestReport" :key="`${row.requestType}-${row.status}`">
+                  <td>{{ formatRequestType(row.requestType) }}</td>
+                  <td>{{ row.status }}</td>
+                  <td>{{ row.total }}</td>
+                  <td>{{ row.minutes }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
@@ -394,6 +479,517 @@
               <button class="attendance__btn attendance__btn--primary" :disabled="ruleLoading" @click="saveRule">
                 {{ ruleLoading ? 'Saving...' : 'Save rule' }}
               </button>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Leave Types</h4>
+                <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
+                  {{ leaveTypeLoading ? 'Loading...' : 'Reload leave types' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-leave-code">
+                  <span>Code</span>
+                  <input id="attendance-leave-code" name="leaveCode" v-model="leaveTypeForm.code" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-leave-name">
+                  <span>Name</span>
+                  <input id="attendance-leave-name" name="leaveName" v-model="leaveTypeForm.name" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-leave-minutes">
+                  <span>Minutes / day</span>
+                  <input
+                    id="attendance-leave-minutes"
+                    name="leaveMinutes"
+                    v-model.number="leaveTypeForm.defaultMinutesPerDay"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-leave-approval">
+                  <span>Requires approval</span>
+                  <input
+                    id="attendance-leave-approval"
+                    name="leaveRequiresApproval"
+                    v-model="leaveTypeForm.requiresApproval"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-leave-attachment">
+                  <span>Requires attachment</span>
+                  <input
+                    id="attendance-leave-attachment"
+                    name="leaveRequiresAttachment"
+                    v-model="leaveTypeForm.requiresAttachment"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-leave-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-leave-active"
+                    name="leaveActive"
+                    v-model="leaveTypeForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="leaveTypeSaving" @click="saveLeaveType">
+                  {{ leaveTypeSaving ? 'Saving...' : leaveTypeEditingId ? 'Update leave type' : 'Create leave type' }}
+                </button>
+                <button
+                  v-if="leaveTypeEditingId"
+                  class="attendance__btn"
+                  :disabled="leaveTypeSaving"
+                  @click="resetLeaveTypeForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="leaveTypes.length === 0" class="attendance__empty">No leave types yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Code</th>
+                      <th>Name</th>
+                      <th>Approval</th>
+                      <th>Attachment</th>
+                      <th>Minutes</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in leaveTypes" :key="item.id">
+                      <td>{{ item.code }}</td>
+                      <td>{{ item.name }}</td>
+                      <td>{{ item.requiresApproval ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.requiresAttachment ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.defaultMinutesPerDay }}</td>
+                      <td>{{ item.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editLeaveType(item)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteLeaveType(item.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Overtime Rules</h4>
+                <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
+                  {{ overtimeRuleLoading ? 'Loading...' : 'Reload overtime rules' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-overtime-name">
+                  <span>Name</span>
+                  <input id="attendance-overtime-name" name="overtimeName" v-model="overtimeRuleForm.name" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-overtime-min">
+                  <span>Min minutes</span>
+                  <input
+                    id="attendance-overtime-min"
+                    name="overtimeMinMinutes"
+                    v-model.number="overtimeRuleForm.minMinutes"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-overtime-rounding">
+                  <span>Rounding</span>
+                  <input
+                    id="attendance-overtime-rounding"
+                    name="overtimeRounding"
+                    v-model.number="overtimeRuleForm.roundingMinutes"
+                    type="number"
+                    min="1"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-overtime-max">
+                  <span>Max / day</span>
+                  <input
+                    id="attendance-overtime-max"
+                    name="overtimeMax"
+                    v-model.number="overtimeRuleForm.maxMinutesPerDay"
+                    type="number"
+                    min="0"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-approval">
+                  <span>Requires approval</span>
+                  <input
+                    id="attendance-overtime-approval"
+                    name="overtimeRequiresApproval"
+                    v-model="overtimeRuleForm.requiresApproval"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-overtime-active"
+                    name="overtimeActive"
+                    v-model="overtimeRuleForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="overtimeRuleSaving"
+                  @click="saveOvertimeRule"
+                >
+                  {{ overtimeRuleSaving ? 'Saving...' : overtimeRuleEditingId ? 'Update rule' : 'Create rule' }}
+                </button>
+                <button
+                  v-if="overtimeRuleEditingId"
+                  class="attendance__btn"
+                  :disabled="overtimeRuleSaving"
+                  @click="resetOvertimeRuleForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="overtimeRules.length === 0" class="attendance__empty">No overtime rules yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Min</th>
+                      <th>Rounding</th>
+                      <th>Max</th>
+                      <th>Approval</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="rule in overtimeRules" :key="rule.id">
+                      <td>{{ rule.name }}</td>
+                      <td>{{ rule.minMinutes }}</td>
+                      <td>{{ rule.roundingMinutes }}</td>
+                      <td>{{ rule.maxMinutesPerDay }}</td>
+                      <td>{{ rule.requiresApproval ? 'Yes' : 'No' }}</td>
+                      <td>{{ rule.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editOvertimeRule(rule)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteOvertimeRule(rule.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Approval Flows</h4>
+                <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
+                  {{ approvalFlowLoading ? 'Loading...' : 'Reload flows' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-approval-name">
+                  <span>Name</span>
+                  <input
+                    id="attendance-approval-name"
+                    name="approvalName"
+                    v-model="approvalFlowForm.name"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-approval-type">
+                  <span>Request type</span>
+                  <select id="attendance-approval-type" name="approvalType" v-model="approvalFlowForm.requestType">
+                    <option value="missed_check_in">Missed check-in</option>
+                    <option value="missed_check_out">Missed check-out</option>
+                    <option value="time_correction">Time correction</option>
+                    <option value="leave">Leave</option>
+                    <option value="overtime">Overtime</option>
+                  </select>
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-approval-active"
+                    name="approvalActive"
+                    v-model="approvalFlowForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
+                  <span>Steps (JSON)</span>
+                  <textarea
+                    id="attendance-approval-steps"
+                    name="approvalSteps"
+                    v-model="approvalFlowForm.steps"
+                    rows="3"
+                    placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="approvalFlowSaving"
+                  @click="saveApprovalFlow"
+                >
+                  {{ approvalFlowSaving ? 'Saving...' : approvalFlowEditingId ? 'Update flow' : 'Create flow' }}
+                </button>
+                <button
+                  v-if="approvalFlowEditingId"
+                  class="attendance__btn"
+                  :disabled="approvalFlowSaving"
+                  @click="resetApprovalFlowForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="approvalFlows.length === 0" class="attendance__empty">No approval flows yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Request</th>
+                      <th>Steps</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="flow in approvalFlows" :key="flow.id">
+                      <td>{{ flow.name }}</td>
+                      <td>{{ formatRequestType(flow.requestType) }}</td>
+                      <td>{{ flow.steps.length }}</td>
+                      <td>{{ flow.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editApprovalFlow(flow)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteApprovalFlow(flow.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Rotation Rules</h4>
+                <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
+                  {{ rotationRuleLoading ? 'Loading...' : 'Reload rotation rules' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-rotation-name">
+                  <span>Name</span>
+                  <input
+                    id="attendance-rotation-name"
+                    name="rotationName"
+                    v-model="rotationRuleForm.name"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-rotation-timezone">
+                  <span>Timezone</span>
+                  <input
+                    id="attendance-rotation-timezone"
+                    name="rotationTimezone"
+                    v-model="rotationRuleForm.timezone"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
+                  <span>Shift sequence (IDs)</span>
+                  <input
+                    id="attendance-rotation-sequence"
+                    name="rotationSequence"
+                    v-model="rotationRuleForm.shiftSequence"
+                    type="text"
+                    placeholder="shiftId1, shiftId2"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-rotation-active"
+                    name="rotationActive"
+                    v-model="rotationRuleForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="rotationRuleSaving"
+                  @click="saveRotationRule"
+                >
+                  {{ rotationRuleSaving ? 'Saving...' : rotationRuleEditingId ? 'Update rotation' : 'Create rotation' }}
+                </button>
+                <button
+                  v-if="rotationRuleEditingId"
+                  class="attendance__btn"
+                  :disabled="rotationRuleSaving"
+                  @click="resetRotationRuleForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="rotationRules.length === 0" class="attendance__empty">No rotation rules yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Timezone</th>
+                      <th>Sequence</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="rule in rotationRules" :key="rule.id">
+                      <td>{{ rule.name }}</td>
+                      <td>{{ rule.timezone }}</td>
+                      <td>{{ rule.shiftSequence.join(', ') }}</td>
+                      <td>{{ rule.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editRotationRule(rule)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteRotationRule(rule.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Rotation Assignments</h4>
+                <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
+                  {{ rotationAssignmentLoading ? 'Loading...' : 'Reload rotations' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-rotation-user">
+                  <span>User ID</span>
+                  <input
+                    id="attendance-rotation-user"
+                    name="rotationUserId"
+                    v-model="rotationAssignmentForm.userId"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-rotation-rule">
+                  <span>Rotation rule</span>
+                  <select
+                    id="attendance-rotation-rule"
+                    name="rotationRuleId"
+                    v-model="rotationAssignmentForm.rotationRuleId"
+                    :disabled="rotationRules.length === 0"
+                  >
+                    <option value="" disabled>Select rotation</option>
+                    <option v-for="rule in rotationRules" :key="rule.id" :value="rule.id">
+                      {{ rule.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-rotation-start">
+                  <span>Start date</span>
+                  <input
+                    id="attendance-rotation-start"
+                    name="rotationStartDate"
+                    v-model="rotationAssignmentForm.startDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-rotation-end">
+                  <span>End date</span>
+                  <input
+                    id="attendance-rotation-end"
+                    name="rotationEndDate"
+                    v-model="rotationAssignmentForm.endDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
+                  <span>Active</span>
+                  <input
+                    id="attendance-rotation-active"
+                    name="rotationActive"
+                    v-model="rotationAssignmentForm.isActive"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="rotationAssignmentSaving"
+                  @click="saveRotationAssignment"
+                >
+                  {{ rotationAssignmentSaving ? 'Saving...' : rotationAssignmentEditingId ? 'Update assignment' : 'Create assignment' }}
+                </button>
+                <button
+                  v-if="rotationAssignmentEditingId"
+                  class="attendance__btn"
+                  :disabled="rotationAssignmentSaving"
+                  @click="resetRotationAssignmentForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="rotationAssignments.length === 0" class="attendance__empty">No rotation assignments yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Rotation</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in rotationAssignments" :key="item.assignment.id">
+                      <td>{{ item.assignment.userId }}</td>
+                      <td>{{ item.rotation.name }}</td>
+                      <td>{{ item.assignment.startDate }}</td>
+                      <td>{{ item.assignment.endDate || '--' }}</td>
+                      <td>{{ item.assignment.isActive ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editRotationAssignment(item)">Edit</button>
+                        <button
+                          class="attendance__btn attendance__btn--danger"
+                          @click="deleteRotationAssignment(item.assignment.id)"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             <div class="attendance__admin-section">
@@ -790,6 +1386,14 @@ interface AttendanceRequest {
   requested_in_at: string | null
   requested_out_at: string | null
   status: string
+  metadata?: Record<string, any>
+}
+
+interface AttendanceRequestReportItem {
+  requestType: string
+  status: string
+  total: number
+  minutes: number
 }
 
 interface AttendanceSettings {
@@ -857,6 +1461,67 @@ interface AttendanceHoliday {
   isWorkingDay: boolean
 }
 
+interface AttendanceLeaveType {
+  id: string
+  orgId?: string
+  code: string
+  name: string
+  requiresApproval: boolean
+  requiresAttachment: boolean
+  defaultMinutesPerDay: number
+  isActive: boolean
+}
+
+interface AttendanceOvertimeRule {
+  id: string
+  orgId?: string
+  name: string
+  minMinutes: number
+  roundingMinutes: number
+  maxMinutesPerDay: number
+  requiresApproval: boolean
+  isActive: boolean
+}
+
+interface AttendanceApprovalStep {
+  name?: string
+  approverUserIds?: string[]
+  approverRoleIds?: string[]
+}
+
+interface AttendanceApprovalFlow {
+  id: string
+  orgId?: string
+  name: string
+  requestType: string
+  steps: AttendanceApprovalStep[]
+  isActive: boolean
+}
+
+interface AttendanceRotationRule {
+  id: string
+  orgId?: string
+  name: string
+  timezone: string
+  shiftSequence: string[]
+  isActive: boolean
+}
+
+interface AttendanceRotationAssignment {
+  id: string
+  orgId?: string
+  userId: string
+  rotationRuleId: string
+  startDate: string
+  endDate: string | null
+  isActive: boolean
+}
+
+interface AttendanceRotationAssignmentItem {
+  assignment: AttendanceRotationAssignment
+  rotation: AttendanceRotationRule
+}
+
 interface CalendarDay {
   key: string
   day: number
@@ -886,16 +1551,38 @@ const assignmentLoading = ref(false)
 const assignmentSaving = ref(false)
 const holidayLoading = ref(false)
 const holidaySaving = ref(false)
+const reportLoading = ref(false)
+const leaveTypeLoading = ref(false)
+const leaveTypeSaving = ref(false)
+const overtimeRuleLoading = ref(false)
+const overtimeRuleSaving = ref(false)
+const approvalFlowLoading = ref(false)
+const approvalFlowSaving = ref(false)
+const rotationRuleLoading = ref(false)
+const rotationRuleSaving = ref(false)
+const rotationAssignmentLoading = ref(false)
+const rotationAssignmentSaving = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
 const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
 const holidays = ref<AttendanceHoliday[]>([])
+const requestReport = ref<AttendanceRequestReportItem[]>([])
+const leaveTypes = ref<AttendanceLeaveType[]>([])
+const overtimeRules = ref<AttendanceOvertimeRule[]>([])
+const approvalFlows = ref<AttendanceApprovalFlow[]>([])
+const rotationRules = ref<AttendanceRotationRule[]>([])
+const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
 const holidayEditingId = ref<string | null>(null)
+const leaveTypeEditingId = ref<string | null>(null)
+const overtimeRuleEditingId = ref<string | null>(null)
+const approvalFlowEditingId = ref<string | null>(null)
+const rotationRuleEditingId = ref<string | null>(null)
+const rotationAssignmentEditingId = ref<string | null>(null)
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -986,7 +1673,15 @@ const requestForm = reactive({
   requestedInAt: '',
   requestedOutAt: '',
   reason: '',
+  leaveTypeId: '',
+  overtimeRuleId: '',
+  minutes: '',
+  attachmentUrl: '',
 })
+
+const isLeaveRequest = computed(() => requestForm.requestType === 'leave')
+const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
+const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
 
 const settingsForm = reactive({
   autoAbsenceEnabled: false,
@@ -1035,6 +1730,46 @@ const holidayForm = reactive({
   isWorkingDay: false,
 })
 
+const leaveTypeForm = reactive({
+  code: '',
+  name: '',
+  requiresApproval: true,
+  requiresAttachment: false,
+  defaultMinutesPerDay: 480,
+  isActive: true,
+})
+
+const overtimeRuleForm = reactive({
+  name: '',
+  minMinutes: 0,
+  roundingMinutes: 15,
+  maxMinutesPerDay: 600,
+  requiresApproval: true,
+  isActive: true,
+})
+
+const approvalFlowForm = reactive({
+  name: '',
+  requestType: 'leave',
+  steps: '',
+  isActive: true,
+})
+
+const rotationRuleForm = reactive({
+  name: '',
+  timezone: defaultTimezone,
+  shiftSequence: '',
+  isActive: true,
+})
+
+const rotationAssignmentForm = reactive({
+  userId: '',
+  rotationRuleId: '',
+  startDate: toDateInput(today),
+  endDate: '',
+  isActive: true,
+})
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
@@ -1072,6 +1807,8 @@ function formatRequestType(value: string): string {
     missed_check_in: 'Missed check-in',
     missed_check_out: 'Missed check-out',
     time_correction: 'Time correction',
+    leave: 'Leave request',
+    overtime: 'Overtime request',
   }
   return map[value] ?? value
 }
@@ -1100,6 +1837,28 @@ function parseWorkingDaysInput(value: string): number[] {
     .map(item => Number(item.trim()))
     .filter(item => Number.isFinite(item) && item >= 0 && item <= 6)
   return days.length > 0 ? days : [1, 2, 3, 4, 5]
+}
+
+function parseShiftSequenceInput(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
+  if (!value.trim()) return []
+  try {
+    const parsed = JSON.parse(value)
+    if (!Array.isArray(parsed)) return null
+    return parsed.filter(item => item && typeof item === 'object') as AttendanceApprovalStep[]
+  } catch {
+    return null
+  }
+}
+
+function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
+  return JSON.stringify(steps ?? [], null, 2)
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {
@@ -1187,13 +1946,35 @@ async function loadRequests() {
   requests.value = data.data.items
 }
 
+async function loadRequestReport() {
+  reportLoading.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+    })
+    const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load request report')
+    }
+    requestReport.value = data.data.items || []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load request report', 'error')
+  } finally {
+    reportLoading.value = false
+  }
+}
+
 async function refreshAll() {
   if (!attendancePluginActive.value) return
   loading.value = true
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   try {
-    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadHolidays()])
+    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
     setStatus(error?.message || 'Refresh failed', 'error')
   } finally {
@@ -1215,12 +1996,18 @@ async function submitRequest() {
   requestSubmitting.value = true
   try {
     const orgValue = normalizedOrgId()
+    const minutesValue = String(requestForm.minutes ?? '').trim()
+    const minutes = minutesValue.length > 0 ? Number(minutesValue) : undefined
     const payload = {
       workDate: requestForm.workDate,
       requestType: requestForm.requestType,
       requestedInAt: requestForm.requestedInAt || undefined,
       requestedOutAt: requestForm.requestedOutAt || undefined,
       reason: requestForm.reason || undefined,
+      leaveTypeId: requestForm.leaveTypeId || undefined,
+      overtimeRuleId: requestForm.overtimeRuleId || undefined,
+      minutes: Number.isFinite(minutes) ? minutes : undefined,
+      attachmentUrl: requestForm.attachmentUrl || undefined,
       orgId: orgValue,
     }
     const response = await apiFetch('/api/attendance/requests', {
@@ -1472,6 +2259,533 @@ async function saveRule() {
     setStatus(error?.message || 'Failed to save rule', 'error')
   } finally {
     ruleLoading.value = false
+  }
+}
+
+function resetLeaveTypeForm() {
+  leaveTypeEditingId.value = null
+  leaveTypeForm.code = ''
+  leaveTypeForm.name = ''
+  leaveTypeForm.requiresApproval = true
+  leaveTypeForm.requiresAttachment = false
+  leaveTypeForm.defaultMinutesPerDay = 480
+  leaveTypeForm.isActive = true
+}
+
+function editLeaveType(item: AttendanceLeaveType) {
+  leaveTypeEditingId.value = item.id
+  leaveTypeForm.code = item.code
+  leaveTypeForm.name = item.name
+  leaveTypeForm.requiresApproval = item.requiresApproval
+  leaveTypeForm.requiresAttachment = item.requiresAttachment
+  leaveTypeForm.defaultMinutesPerDay = item.defaultMinutesPerDay
+  leaveTypeForm.isActive = item.isActive
+}
+
+async function loadLeaveTypes() {
+  leaveTypeLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/leave-types?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load leave types')
+    }
+    adminForbidden.value = false
+    leaveTypes.value = data.data.items || []
+    if (!requestForm.leaveTypeId && leaveTypes.value.length > 0) {
+      requestForm.leaveTypeId = leaveTypes.value[0].id
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load leave types', 'error')
+  } finally {
+    leaveTypeLoading.value = false
+  }
+}
+
+async function saveLeaveType() {
+  leaveTypeSaving.value = true
+  const isEditing = Boolean(leaveTypeEditingId.value)
+  try {
+    if (!leaveTypeForm.code.trim() || !leaveTypeForm.name.trim()) {
+      throw new Error('Code and name are required')
+    }
+    const payload = {
+      code: leaveTypeForm.code.trim(),
+      name: leaveTypeForm.name.trim(),
+      requiresApproval: leaveTypeForm.requiresApproval,
+      requiresAttachment: leaveTypeForm.requiresAttachment,
+      defaultMinutesPerDay: Number(leaveTypeForm.defaultMinutesPerDay) || 0,
+      isActive: leaveTypeForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/leave-types/${leaveTypeEditingId.value}`
+      : '/api/attendance/leave-types'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save leave type')
+    }
+    adminForbidden.value = false
+    await loadLeaveTypes()
+    resetLeaveTypeForm()
+    setStatus(isEditing ? 'Leave type updated.' : 'Leave type created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save leave type', 'error')
+  } finally {
+    leaveTypeSaving.value = false
+  }
+}
+
+async function deleteLeaveType(id: string) {
+  if (!window.confirm('Delete this leave type?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/leave-types/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete leave type')
+    }
+    adminForbidden.value = false
+    await loadLeaveTypes()
+    setStatus('Leave type deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete leave type', 'error')
+  }
+}
+
+function resetOvertimeRuleForm() {
+  overtimeRuleEditingId.value = null
+  overtimeRuleForm.name = ''
+  overtimeRuleForm.minMinutes = 0
+  overtimeRuleForm.roundingMinutes = 15
+  overtimeRuleForm.maxMinutesPerDay = 600
+  overtimeRuleForm.requiresApproval = true
+  overtimeRuleForm.isActive = true
+}
+
+function editOvertimeRule(item: AttendanceOvertimeRule) {
+  overtimeRuleEditingId.value = item.id
+  overtimeRuleForm.name = item.name
+  overtimeRuleForm.minMinutes = item.minMinutes
+  overtimeRuleForm.roundingMinutes = item.roundingMinutes
+  overtimeRuleForm.maxMinutesPerDay = item.maxMinutesPerDay
+  overtimeRuleForm.requiresApproval = item.requiresApproval
+  overtimeRuleForm.isActive = item.isActive
+}
+
+async function loadOvertimeRules() {
+  overtimeRuleLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/overtime-rules?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load overtime rules')
+    }
+    adminForbidden.value = false
+    overtimeRules.value = data.data.items || []
+    if (!requestForm.overtimeRuleId && overtimeRules.value.length > 0) {
+      requestForm.overtimeRuleId = overtimeRules.value[0].id
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load overtime rules', 'error')
+  } finally {
+    overtimeRuleLoading.value = false
+  }
+}
+
+async function saveOvertimeRule() {
+  overtimeRuleSaving.value = true
+  const isEditing = Boolean(overtimeRuleEditingId.value)
+  try {
+    if (!overtimeRuleForm.name.trim()) {
+      throw new Error('Name is required')
+    }
+    const payload = {
+      name: overtimeRuleForm.name.trim(),
+      minMinutes: Number(overtimeRuleForm.minMinutes) || 0,
+      roundingMinutes: Number(overtimeRuleForm.roundingMinutes) || 1,
+      maxMinutesPerDay: Number(overtimeRuleForm.maxMinutesPerDay) || 0,
+      requiresApproval: overtimeRuleForm.requiresApproval,
+      isActive: overtimeRuleForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/overtime-rules/${overtimeRuleEditingId.value}`
+      : '/api/attendance/overtime-rules'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save overtime rule')
+    }
+    adminForbidden.value = false
+    await loadOvertimeRules()
+    resetOvertimeRuleForm()
+    setStatus(isEditing ? 'Overtime rule updated.' : 'Overtime rule created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save overtime rule', 'error')
+  } finally {
+    overtimeRuleSaving.value = false
+  }
+}
+
+async function deleteOvertimeRule(id: string) {
+  if (!window.confirm('Delete this overtime rule?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/overtime-rules/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete overtime rule')
+    }
+    adminForbidden.value = false
+    await loadOvertimeRules()
+    setStatus('Overtime rule deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete overtime rule', 'error')
+  }
+}
+
+function resetApprovalFlowForm() {
+  approvalFlowEditingId.value = null
+  approvalFlowForm.name = ''
+  approvalFlowForm.requestType = 'leave'
+  approvalFlowForm.steps = ''
+  approvalFlowForm.isActive = true
+}
+
+function editApprovalFlow(flow: AttendanceApprovalFlow) {
+  approvalFlowEditingId.value = flow.id
+  approvalFlowForm.name = flow.name
+  approvalFlowForm.requestType = flow.requestType
+  approvalFlowForm.steps = formatApprovalSteps(flow.steps)
+  approvalFlowForm.isActive = flow.isActive
+}
+
+async function loadApprovalFlows() {
+  approvalFlowLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/approval-flows?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load approval flows')
+    }
+    adminForbidden.value = false
+    approvalFlows.value = data.data.items || []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load approval flows', 'error')
+  } finally {
+    approvalFlowLoading.value = false
+  }
+}
+
+async function saveApprovalFlow() {
+  approvalFlowSaving.value = true
+  const isEditing = Boolean(approvalFlowEditingId.value)
+  try {
+    if (!approvalFlowForm.name.trim()) {
+      throw new Error('Name is required')
+    }
+    const steps = parseApprovalStepsInput(approvalFlowForm.steps)
+    if (steps === null) {
+      throw new Error('Invalid steps JSON')
+    }
+    const payload = {
+      name: approvalFlowForm.name.trim(),
+      requestType: approvalFlowForm.requestType,
+      steps,
+      isActive: approvalFlowForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/approval-flows/${approvalFlowEditingId.value}`
+      : '/api/attendance/approval-flows'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save approval flow')
+    }
+    adminForbidden.value = false
+    await loadApprovalFlows()
+    resetApprovalFlowForm()
+    setStatus(isEditing ? 'Approval flow updated.' : 'Approval flow created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save approval flow', 'error')
+  } finally {
+    approvalFlowSaving.value = false
+  }
+}
+
+async function deleteApprovalFlow(id: string) {
+  if (!window.confirm('Delete this approval flow?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/approval-flows/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete approval flow')
+    }
+    adminForbidden.value = false
+    await loadApprovalFlows()
+    setStatus('Approval flow deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete approval flow', 'error')
+  }
+}
+
+function resetRotationRuleForm() {
+  rotationRuleEditingId.value = null
+  rotationRuleForm.name = ''
+  rotationRuleForm.timezone = defaultTimezone
+  rotationRuleForm.shiftSequence = ''
+  rotationRuleForm.isActive = true
+}
+
+function editRotationRule(rule: AttendanceRotationRule) {
+  rotationRuleEditingId.value = rule.id
+  rotationRuleForm.name = rule.name
+  rotationRuleForm.timezone = rule.timezone
+  rotationRuleForm.shiftSequence = rule.shiftSequence.join(', ')
+  rotationRuleForm.isActive = rule.isActive
+}
+
+async function loadRotationRules() {
+  rotationRuleLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/rotation-rules?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load rotation rules')
+    }
+    adminForbidden.value = false
+    rotationRules.value = data.data.items || []
+    if (!rotationAssignmentForm.rotationRuleId && rotationRules.value.length > 0) {
+      rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load rotation rules', 'error')
+  } finally {
+    rotationRuleLoading.value = false
+  }
+}
+
+async function saveRotationRule() {
+  rotationRuleSaving.value = true
+  const isEditing = Boolean(rotationRuleEditingId.value)
+  try {
+    if (!rotationRuleForm.name.trim()) {
+      throw new Error('Name is required')
+    }
+    const shiftSequence = parseShiftSequenceInput(rotationRuleForm.shiftSequence)
+    if (shiftSequence.length === 0) {
+      throw new Error('Shift sequence required')
+    }
+    const payload = {
+      name: rotationRuleForm.name.trim(),
+      timezone: rotationRuleForm.timezone.trim() || defaultTimezone,
+      shiftSequence,
+      isActive: rotationRuleForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/rotation-rules/${rotationRuleEditingId.value}`
+      : '/api/attendance/rotation-rules'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save rotation rule')
+    }
+    adminForbidden.value = false
+    await loadRotationRules()
+    resetRotationRuleForm()
+    setStatus(isEditing ? 'Rotation rule updated.' : 'Rotation rule created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save rotation rule', 'error')
+  } finally {
+    rotationRuleSaving.value = false
+  }
+}
+
+async function deleteRotationRule(id: string) {
+  if (!window.confirm('Delete this rotation rule?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/rotation-rules/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete rotation rule')
+    }
+    adminForbidden.value = false
+    await loadRotationRules()
+    await loadRotationAssignments()
+    setStatus('Rotation rule deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete rotation rule', 'error')
+  }
+}
+
+function resetRotationAssignmentForm() {
+  rotationAssignmentEditingId.value = null
+  rotationAssignmentForm.userId = ''
+  rotationAssignmentForm.rotationRuleId = rotationRules.value[0]?.id ?? ''
+  rotationAssignmentForm.startDate = toDateInput(today)
+  rotationAssignmentForm.endDate = ''
+  rotationAssignmentForm.isActive = true
+}
+
+function editRotationAssignment(item: AttendanceRotationAssignmentItem) {
+  rotationAssignmentEditingId.value = item.assignment.id
+  rotationAssignmentForm.userId = item.assignment.userId
+  rotationAssignmentForm.rotationRuleId = item.assignment.rotationRuleId
+  rotationAssignmentForm.startDate = item.assignment.startDate
+  rotationAssignmentForm.endDate = item.assignment.endDate ?? ''
+  rotationAssignmentForm.isActive = item.assignment.isActive
+}
+
+async function loadRotationAssignments() {
+  rotationAssignmentLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/rotation-assignments?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load rotation assignments')
+    }
+    adminForbidden.value = false
+    rotationAssignments.value = data.data.items || []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load rotation assignments', 'error')
+  } finally {
+    rotationAssignmentLoading.value = false
+  }
+}
+
+async function saveRotationAssignment() {
+  rotationAssignmentSaving.value = true
+  const isEditing = Boolean(rotationAssignmentEditingId.value)
+  try {
+    if (!rotationAssignmentForm.userId.trim()) {
+      throw new Error('User ID is required')
+    }
+    if (!rotationAssignmentForm.rotationRuleId) {
+      throw new Error('Rotation rule is required')
+    }
+    const endDate = rotationAssignmentForm.endDate.trim()
+    const payload = {
+      userId: rotationAssignmentForm.userId.trim(),
+      rotationRuleId: rotationAssignmentForm.rotationRuleId,
+      startDate: rotationAssignmentForm.startDate,
+      endDate: endDate.length > 0 ? endDate : null,
+      isActive: rotationAssignmentForm.isActive,
+      orgId: normalizedOrgId(),
+    }
+    const endpoint = isEditing
+      ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
+      : '/api/attendance/rotation-assignments'
+    const response = await apiFetch(endpoint, {
+      method: isEditing ? 'PUT' : 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save rotation assignment')
+    }
+    adminForbidden.value = false
+    await loadRotationAssignments()
+    resetRotationAssignmentForm()
+    setStatus(isEditing ? 'Rotation assignment updated.' : 'Rotation assignment created.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save rotation assignment', 'error')
+  } finally {
+    rotationAssignmentSaving.value = false
+  }
+}
+
+async function deleteRotationAssignment(id: string) {
+  if (!window.confirm('Delete this rotation assignment?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/rotation-assignments/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete rotation assignment')
+    }
+    adminForbidden.value = false
+    await loadRotationAssignments()
+    setStatus('Rotation assignment deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete rotation assignment', 'error')
   }
 }
 
@@ -1786,7 +3100,18 @@ async function deleteHoliday(id: string) {
 }
 
 async function loadAdminData() {
-  await Promise.all([loadSettings(), loadRule(), loadShifts(), loadAssignments(), loadHolidays()])
+  await Promise.all([
+    loadSettings(),
+    loadRule(),
+    loadLeaveTypes(),
+    loadOvertimeRules(),
+    loadApprovalFlows(),
+    loadRotationRules(),
+    loadShifts(),
+    loadAssignments(),
+    loadRotationAssignments(),
+    loadHolidays(),
+  ])
 }
 
 onMounted(() => {
