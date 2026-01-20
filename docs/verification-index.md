@@ -14,6 +14,9 @@ Entry points:
 
 ## Daily / Pre-PR
 
+- Attendance plugin extension (leave/overtime/approval/rotation):
+  - Report: `docs/attendance-plugin-verification-report-20260120-2.md`
+
 - Verification summary (latest):
   - Report: `docs/verification-summary-2026-01-18.md`
   - Previous: `docs/verification-summary-2026-01-17.md`
@@ -441,6 +444,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260118_172926.png`
   - Report: `docs/verification-plm-ui-regression-20260120_090142.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_090142.png`
+  - Report: `docs/verification-plm-ui-regression-20260120_093613.md`
+  - Artifact: `artifacts/plm-ui-regression-20260120_093613.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
