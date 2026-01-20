@@ -102,6 +102,8 @@ export interface BOMItem {
   component_id: string
   component_name: string
   component_code: string
+  find_num?: string | number
+  refdes?: string
   quantity: number
   unit: string
   level: number
@@ -348,9 +350,11 @@ interface YuantusSearchResponse {
 interface YuantusItem {
   id: string
   type?: string
+  item_type_id?: string
   state?: string
   created_on?: string
   modified_on?: string
+  item_number?: string
   properties?: Record<string, unknown>
 }
 
@@ -878,7 +882,12 @@ export class PLMAdapter extends HTTPAdapter {
     const createdAt = this.toIsoString(hit.created_at)
     const updatedAt = this.toIsoString(hit.updated_at) || createdAt
 
-    const itemType = hit.item_type_id || (props.item_type as string | undefined) || (props.itemType as string | undefined) || (props.type as string | undefined)
+    const itemType =
+      hit.item_type_id ||
+      (props.item_type_id as string | undefined) ||
+      (props.item_type as string | undefined) ||
+      (props.itemType as string | undefined) ||
+      (props.type as string | undefined)
 
     return {
       id: String(hit.id),
@@ -900,14 +909,26 @@ export class PLMAdapter extends HTTPAdapter {
     const props = item.properties || {}
     const name = String(props.name || props.item_name || props.title || '')
     const partNumber = String(
-      props.item_number || props.part_number || props.number || props.code || props.internal_reference || ''
+      item.item_number ||
+        props.item_number ||
+        props.part_number ||
+        props.number ||
+        props.code ||
+        props.internal_reference ||
+        ''
     )
     const revision = String(props.revision || props.version || props.rev || props.version_label || '')
     const status = String(item.state || props.state || '')
     const description = props.description ? String(props.description) : undefined
     const createdAt = this.toIsoString(item.created_on || props.created_at || props.created_on || props.create_date)
     const updatedAt = this.toIsoString(item.modified_on || props.updated_at || props.modified_on || props.write_date) || createdAt
-    const itemType = item.type || (props.item_type as string | undefined) || (props.itemType as string | undefined) || (props.type as string | undefined)
+    const itemType =
+      item.type ||
+      item.item_type_id ||
+      (props.item_type_id as string | undefined) ||
+      (props.item_type as string | undefined) ||
+      (props.itemType as string | undefined) ||
+      (props.type as string | undefined)
 
     return {
       id: String(item.id),
@@ -995,7 +1016,13 @@ export class PLMAdapter extends HTTPAdapter {
     )
     const createdAt = base.created_at ? base.created_at : this.toIsoString(hit.created_at)
     const updatedAt = base.updated_at ? base.updated_at : (this.toIsoString(hit.updated_at) || createdAt)
-    const itemType = base.itemType || hit.item_type_id
+    const hitItemType =
+      hit.item_type_id ||
+      (hitProps.item_type_id as string | undefined) ||
+      (hitProps.item_type as string | undefined) ||
+      (hitProps.itemType as string | undefined) ||
+      (hitProps.type as string | undefined)
+    const itemType = base.itemType || hitItemType
 
     return {
       ...base,
@@ -1119,7 +1146,13 @@ export class PLMAdapter extends HTTPAdapter {
         method: 'POST',
         data: { type: itemType, action: 'get', id },
       })
-      const item = result.data[0]
+      if (result.error) {
+        throw result.error
+      }
+      const rawItem = result.data[0]
+      const item = rawItem && typeof rawItem === 'object' && 'items' in rawItem && Array.isArray((rawItem as { items?: YuantusItem[] }).items)
+        ? (rawItem as { items?: YuantusItem[] }).items?.[0]
+        : (rawItem as YuantusItem | undefined)
       if (!item) {
         const hit = await this.fetchYuantusSearchHit(id, itemType)
         if (!hit) return null
@@ -1130,6 +1163,9 @@ export class PLMAdapter extends HTTPAdapter {
               method: 'POST',
               data: { type: itemType, action: 'get', id: hit.id },
             })
+            if (detailResult.error) {
+              throw detailResult.error
+            }
             const detailItem = detailResult.data[0]
             if (detailItem) {
               return this.mergeYuantusProductDetail(this.mapYuantusItemFields(detailItem), hit)
@@ -1207,7 +1243,10 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
-  async getProductBOM(productId: string): Promise<QueryResult<BOMItem>> {
+  async getProductBOM(
+    productId: string,
+    options?: { depth?: number; effectiveAt?: string }
+  ): Promise<QueryResult<BOMItem>> {
     if (this.mockMode) {
       return {
         data: [
@@ -1218,7 +1257,14 @@ export class PLMAdapter extends HTTPAdapter {
       };
     }
     if (this.apiMode === 'yuantus') {
-      const result = await this.query<YuantusBomNode>(`/api/v1/bom/${productId}/tree`, [{ depth: 2 }])
+      const params: Record<string, unknown> = {}
+      if (typeof options?.depth === 'number') {
+        params.depth = options.depth
+      }
+      if (options?.effectiveAt) {
+        params.effective_date = options.effectiveAt
+      }
+      const result = await this.query<YuantusBomNode>(`/api/v1/bom/${productId}/tree`, [params])
       const root = result.data[0]
       if (!root) {
         return { data: [], metadata: { totalCount: 0 }, error: result.error }
@@ -1483,7 +1529,7 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: [], error: new Error('BOM substitutes are not supported for this PLM API mode') }
     }
 
-    return this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes`, { id: substituteId })
+    return this.delete<BOMSubstituteMutationResponse>(`/api/v1/bom/${bomLineId}/substitutes/${substituteId}`, {})
   }
 
   async getCadProperties(fileId: string): Promise<QueryResult<CadPropertiesResponse>> {
@@ -1707,9 +1753,18 @@ export class PLMAdapter extends HTTPAdapter {
       const sequence = this.toNumber(relationship.find_num ?? relProps.find_num, 0)
       const unit = String(relationship.uom ?? relProps.uom ?? relProps.unit ?? 'EA')
       const componentName = String(child.name ?? childProps.name ?? childProps.item_name ?? '')
-      const componentCode = String(child.item_number ?? childProps.item_number ?? childProps.code ?? childProps.internal_reference ?? '')
+      const componentCode = String(
+        child.item_number ||
+          childProps.item_number ||
+          childProps.part_number ||
+          childProps.code ||
+          childProps.internal_reference ||
+          ''
+      )
       const createdAt = this.toIsoString(relationship.created_on ?? child.created_on) || new Date().toISOString()
       const updatedAt = this.toIsoString(relationship.modified_on ?? child.modified_on) || new Date().toISOString()
+      const findNum = relationship.find_num ?? relProps.find_num
+      const refdes = relationship.refdes ?? relProps.refdes
 
       items.push({
         id: String(relationship.id ?? `${rootId}:${child.id}`),
@@ -1718,6 +1773,8 @@ export class PLMAdapter extends HTTPAdapter {
         component_id: String(child.id ?? relationship.related_id ?? ''),
         component_name: componentName,
         component_code: componentCode,
+        find_num: findNum,
+        refdes: refdes ? String(refdes) : undefined,
         quantity,
         unit,
         level,
