@@ -465,6 +465,25 @@ function includesNormalizedToken(actualTokens, expectedTokens) {
   return expectedTokens.some((token) => actualTokens.includes(token));
 }
 
+function matchesPlmQuery(request, operation, expectedFields) {
+  if (!request || request.method() !== 'POST') return false;
+  const url = request.url() || '';
+  if (!url.includes('/api/federation/plm/query')) return false;
+  let payload = {};
+  try {
+    payload = JSON.parse(request.postData() || '{}');
+  } catch (_err) {
+    return false;
+  }
+  if (payload.operation !== operation) return false;
+  if (expectedFields) {
+    for (const [key, value] of Object.entries(expectedFields)) {
+      if (value && payload[key] !== value) return false;
+    }
+  }
+  return true;
+}
+
 async function resolveTableColumnIndex(section, headerLabel) {
   const headers = section.locator('thead th');
   const count = await headers.count();
@@ -954,7 +973,11 @@ function firstLineText(value) {
     console.warn('Skipping where-used quick pick check; selector missing.');
   }
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
+  const whereUsedRequestPromise = page.waitForResponse((response) =>
+    matchesPlmQuery(response.request(), 'where_used', { itemId: whereUsedId })
+  );
   await whereUsedSection.locator('button:has-text("查询")').click();
+  await whereUsedRequestPromise;
   await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
   const whereUsedPathHeader = whereUsedSection.locator('table thead th', { hasText: '路径 ID' });
   if ((await whereUsedPathHeader.count()) === 0) {
@@ -1235,7 +1258,11 @@ function firstLineText(value) {
   }
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
+  const compareRequestPromise = page.waitForResponse((response) =>
+    matchesPlmQuery(response.request(), 'bom_compare', { leftId: compareLeftId, rightId: compareRightId })
+  );
   await compareSection.locator('button:has-text("对比")').click();
+  await compareRequestPromise;
   await waitOptional(compareSection.locator('table'), compareExpect);
   const compareDetailSection = compareSection.locator('[data-compare-detail="true"]');
   const compareChangedRows = compareSection.locator('.compare-section:has(h3:has-text("变更")) table tbody tr');
