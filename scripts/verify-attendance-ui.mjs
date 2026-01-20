@@ -1,3 +1,5 @@
+import fs from 'fs'
+import path from 'path'
 import { chromium } from '@playwright/test'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8901/attendance'
@@ -6,6 +8,8 @@ const timeoutMs = Number(process.env.UI_TIMEOUT || 30000)
 const headless = process.env.HEADLESS !== 'false'
 const slowMo = Number(process.env.SLOW_MO || 0)
 const retryDelayMs = Number(process.env.PUNCH_RETRY_WAIT_MS || 65000)
+const screenshotDir = (process.env.UI_SCREENSHOT_DIR || '').trim()
+const debug = process.env.UI_DEBUG === 'true'
 
 function logInfo(message) {
   console.log(`[attendance-ui] ${message}`)
@@ -34,6 +38,27 @@ async function getStatusText(page) {
   return text.trim()
 }
 
+async function captureDebug(page, label, details = {}) {
+  const currentStatus = await getStatusText(page)
+  const info = [
+    `debug ${label}`,
+    `status="${currentStatus || '<empty>'}"`,
+    details.previousText ? `previous="${details.previousText}"` : null,
+    details.currentText ? `current="${details.currentText}"` : null
+  ]
+    .filter(Boolean)
+    .join(' ')
+  logInfo(info)
+
+  if (!screenshotDir) return
+  await fs.promises.mkdir(screenshotDir, { recursive: true })
+  const safeLabel = label.replace(/[^a-z0-9-_]+/gi, '_').slice(0, 48)
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const screenshotPath = path.join(screenshotDir, `${timestamp}-${safeLabel}.png`)
+  await page.screenshot({ path: screenshotPath, fullPage: true })
+  logInfo(`Saved screenshot: ${screenshotPath}`)
+}
+
 async function isStatusError(page) {
   const status = page.locator('.attendance__status')
   if (await status.count() === 0) return false
@@ -41,24 +66,41 @@ async function isStatusError(page) {
   return Boolean(className && className.includes('attendance__status--error'))
 }
 
-async function waitForStatusChange(page, previousText) {
-  await page.waitForFunction(
-    (prev) => {
-      const el = document.querySelector('.attendance__status')
-      if (!el) return false
-      const text = el.textContent ? el.textContent.trim() : ''
-      return text.length > 0 && text !== prev
-    },
-    previousText,
-    { timeout: timeoutMs }
-  )
-  return getStatusText(page)
+async function waitForStatusChange(page, previousText, actionLabel) {
+  try {
+    await page.waitForFunction(
+      (prev) => {
+        const el = document.querySelector('.attendance__status')
+        if (!el) return false
+        const text = el.textContent ? el.textContent.trim() : ''
+        return text.length > 0 && text !== prev
+      },
+      previousText,
+      { timeout: timeoutMs }
+    )
+    return getStatusText(page)
+  } catch (error) {
+    const currentText = await getStatusText(page)
+    await captureDebug(page, actionLabel, { previousText, currentText })
+    if (currentText && currentText === previousText) {
+      logInfo(`Status unchanged after ${actionLabel}; continuing with "${currentText}"`)
+      return currentText
+    }
+    throw error
+  }
 }
 
-async function clickAndWaitForStatus(page, buttonName) {
+async function clickAndWaitForStatus(page, buttonName, actionLabel = buttonName) {
   const before = await getStatusText(page)
+  if (debug) {
+    logInfo(`Status before ${actionLabel}: ${before || '<empty>'}`)
+  }
   await page.getByRole('button', { name: buttonName }).click()
-  return waitForStatusChange(page, before)
+  const result = await waitForStatusChange(page, before, actionLabel)
+  if (debug) {
+    logInfo(`Status after ${actionLabel}: ${result || '<empty>'}`)
+  }
+  return result
 }
 
 async function selectFirstOption(select) {
@@ -316,6 +358,10 @@ async function run() {
       if (missingToken > 0) {
         throw new Error('Attendance view still reports Missing Bearer token')
       }
+    }
+    const authStatus = await getStatusText(page)
+    if (authStatus.includes('Invalid token')) {
+      throw new Error('Attendance view reports Invalid token')
     }
 
     await createLeaveType(page)

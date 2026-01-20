@@ -1350,7 +1350,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 
@@ -1862,8 +1862,15 @@ function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {
-  statusMessage.value = message
   statusKind.value = kind
+  if (statusMessage.value === message && message) {
+    statusMessage.value = ''
+    void nextTick(() => {
+      statusMessage.value = message
+    })
+  } else {
+    statusMessage.value = message
+  }
   if (!message) return
   window.setTimeout(() => {
     if (statusMessage.value === message) {
