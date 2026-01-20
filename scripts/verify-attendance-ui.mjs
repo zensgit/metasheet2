@@ -11,6 +11,22 @@ function logInfo(message) {
   console.log(`[attendance-ui] ${message}`)
 }
 
+function formatLocalDate(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function formatLocalDateTime(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day}T${hours}:${minutes}`
+}
+
 async function getStatusText(page) {
   const status = page.locator('.attendance__status')
   if (await status.count() === 0) return ''
@@ -99,6 +115,50 @@ async function performPunch(page, buttonName, successText) {
   logInfo(`${buttonName} confirmed`)
 }
 
+async function submitAndCancelRequest(page) {
+  logInfo('Submitting adjustment request')
+  const now = new Date()
+  const workDateInput = page.locator('#attendance-request-work-date')
+  const requestTypeSelect = page.locator('#attendance-request-type')
+  const requestedInInput = page.locator('#attendance-request-in')
+  const reasonInput = page.locator('#attendance-request-reason')
+
+  if (await workDateInput.count()) {
+    await workDateInput.fill(formatLocalDate(now))
+  }
+  if (await requestTypeSelect.count()) {
+    await requestTypeSelect.selectOption('missed_check_in')
+  }
+  if (await requestedInInput.count()) {
+    const requestedInAt = new Date(now.getTime() - 5 * 60000)
+    await requestedInInput.fill(formatLocalDateTime(requestedInAt))
+  }
+  if (await reasonInput.count()) {
+    await reasonInput.fill('UI smoke cancel')
+  }
+
+  const submitStatus = await clickAndWaitForStatus(page, 'Submit request')
+  if (await isStatusError(page)) {
+    throw new Error(`Request submit failed: ${submitStatus || 'Unknown error'}`)
+  }
+  if (!submitStatus.includes('Request submitted.')) {
+    throw new Error(`Unexpected request status: ${submitStatus || 'Missing status'}`)
+  }
+
+  const pendingChip = page.locator('.attendance__status-chip--pending')
+  await pendingChip.first().waitFor({ timeout: timeoutMs })
+
+  logInfo('Cancelling adjustment request')
+  const cancelStatus = await clickAndWaitForStatus(page, 'Cancel')
+  if (await isStatusError(page)) {
+    throw new Error(`Request cancel failed: ${cancelStatus || 'Unknown error'}`)
+  }
+  if (!cancelStatus.includes('Request cancelled.')) {
+    throw new Error(`Unexpected cancel status: ${cancelStatus || 'Missing status'}`)
+  }
+  logInfo('Request cancellation confirmed')
+}
+
 async function exportCsv(page) {
   logInfo('Exporting CSV')
   const statusText = await clickAndWaitForStatus(page, 'Export CSV')
@@ -165,6 +225,7 @@ async function run() {
     const previousInterval = await updateMinPunchInterval(page, '0')
     await performPunch(page, 'Check In', 'Check in recorded.')
     await performPunch(page, 'Check Out', 'Check out recorded.')
+    await submitAndCancelRequest(page)
     await exportCsv(page)
     if (previousInterval && previousInterval !== '0') {
       await updateMinPunchInterval(page, previousInterval)
