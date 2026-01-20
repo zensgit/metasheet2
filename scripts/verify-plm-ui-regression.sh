@@ -1316,7 +1316,24 @@ function includesNormalizedToken(actualTokens, expectedTokens) {
         console.warn('Skipping BOM line quick pick; option value missing.');
       }
     } else {
-      console.warn('Skipping BOM line quick pick; no options.');
+      console.warn('Skipping BOM line quick pick; no options. Falling back to BOM table.');
+      const bomSection = page.locator('section:has-text("BOM 结构")');
+      const bomFirstRow = bomSection.locator('table tbody tr').first();
+      if (await bomFirstRow.count()) {
+        const lineIdCell = bomFirstRow.locator('td').nth(5).locator('.muted.mono');
+        const lineIdText = ((await lineIdCell.textContent()) || '').trim();
+        if (lineIdText) {
+          await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
+          const filledValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
+          if (!filledValue.trim()) {
+            throw new Error('BOM line fallback did not fill input.');
+          }
+        } else {
+          console.warn('Skipping BOM line fallback; line ID text missing.');
+        }
+      } else {
+        console.warn('Skipping BOM line fallback; BOM rows missing.');
+      }
     }
   } else {
     console.warn('Skipping BOM line quick pick; selector missing.');
