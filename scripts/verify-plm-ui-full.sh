@@ -40,8 +40,53 @@ if [[ ! -f "$BOM_MD" ]]; then
   exit 1
 fi
 
+if [[ -z "${PLM_BOM_FIND_NUM:-}" ]]; then
+  PLM_BOM_FIND_NUM="$(python3 - <<'PY' "$BOM_JSON"
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    data = {}
+
+fixtures = data.get("fixtures") or {}
+parent_id = fixtures.get("parent_a") or ""
+child_id = fixtures.get("bom_child_id") or fixtures.get("child_x") or ""
+parents = ((data.get("where_used") or {}).get("data") or {}).get("parents") or []
+
+def find_match():
+    for entry in parents:
+        rel = entry.get("relationship") or {}
+        parent = entry.get("parent") or {}
+        child = entry.get("child") or {}
+        if parent_id and parent.get("id") != parent_id:
+            continue
+        if child_id and child.get("id") != child_id:
+            continue
+        value = rel.get("find_num")
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+find_num = find_match()
+if not find_num:
+    for entry in parents:
+        rel = entry.get("relationship") or {}
+        value = rel.get("find_num")
+        if value not in (None, ""):
+            find_num = str(value)
+            break
+
+print(find_num)
+PY
+  )"
+fi
+
 echo "[2/2] Running PLM UI regression..."
 STAMP="$UI_STAMP" OUTPUT_DIR="$OUTPUT_DIR" REPORT_DIR="$REPORT_DIR" PLM_BOM_TOOLS_JSON="$BOM_JSON" \
+  PLM_BOM_FIND_NUM="$PLM_BOM_FIND_NUM" \
   bash scripts/verify-plm-ui-regression.sh
 
 cleanup_status="skipped"
@@ -156,6 +201,7 @@ Run BOM tools seed + PLM UI regression in a single workflow.
 ## Environment
 - PLM base: ${PLM_BASE_URL}
 - Tenant/org: ${PLM_TENANT_ID} / ${PLM_ORG_ID}
+- BOM find_num: ${PLM_BOM_FIND_NUM:-auto}
 
 ## Steps
 1. BOM tools seed
