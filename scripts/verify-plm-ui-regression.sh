@@ -25,6 +25,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-artifacts}"
 REPORT_DIR="${REPORT_DIR:-docs}"
 STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
 PLM_BOM_TOOLS_JSON="${PLM_BOM_TOOLS_JSON:-}"
+PLM_HEALTH_URLS="${PLM_HEALTH_URLS:-/api/v1/health,/health}"
 
 PLM_SEARCH_QUERY="${PLM_SEARCH_QUERY:-}"
 PLM_PRODUCT_ID="${PLM_PRODUCT_ID:-}"
@@ -352,17 +353,22 @@ start_web() {
 
 check_plm_health() {
   local ok=0
-  local endpoints=("${PLM_BASE_URL}/api/v1/health" "${PLM_BASE_URL}/health")
+  local endpoints=()
+  IFS=',' read -r -a endpoints <<< "$PLM_HEALTH_URLS"
   for endpoint in "${endpoints[@]}"; do
-    if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${endpoint}" >/dev/null 2>&1; then
+    local url="$endpoint"
+    if [[ "$endpoint" =~ ^/ ]]; then
+      url="${PLM_BASE_URL}${endpoint}"
+    fi
+    if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${url}" >/dev/null 2>&1; then
       ok=1
-      echo "PLM health OK: ${endpoint}"
+      echo "PLM health OK: ${url}"
       break
     fi
   done
   if [[ "$ok" -eq 0 ]]; then
     echo "PLM health check failed for ${PLM_BASE_URL}." >&2
-    echo "Tried: ${endpoints[*]}" >&2
+    echo "Tried: ${PLM_HEALTH_URLS}" >&2
     exit 1
   fi
 }
@@ -1654,6 +1660,7 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - PLM_TENANT_ID: ${PLM_TENANT_ID}
 - PLM_ORG_ID: ${PLM_ORG_ID}
 - BOM tools source: ${PLM_BOM_TOOLS_JSON}
+- PLM_HEALTH_URLS: ${PLM_HEALTH_URLS}
 - Status: ${RUN_STATUS}
 - Error screenshot: ${ERROR_SCREENSHOT_PATH}
 - Error response: ${ERROR_RESPONSE_PATH}
