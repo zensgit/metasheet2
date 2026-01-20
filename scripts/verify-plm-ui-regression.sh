@@ -46,6 +46,74 @@ PLM_DOCUMENT_REVISION="${PLM_DOCUMENT_REVISION:-}"
 PLM_APPROVAL_TITLE="${PLM_APPROVAL_TITLE:-}"
 PLM_APPROVAL_PRODUCT_NUMBER="${PLM_APPROVAL_PRODUCT_NUMBER:-}"
 
+port_open() {
+  python3 - <<'PY' "$1" "$2" >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket()
+sock.settimeout(0.5)
+try:
+    sock.connect((host, port))
+except Exception:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+ensure_smoke_db() {
+  if [[ "$AUTO_START" != "true" ]]; then
+    return 0
+  fi
+
+  local host port
+  mapfile -t db_parts < <(python3 - <<'PY' "$SMOKE_DATABASE_URL"
+from urllib.parse import urlparse
+import sys
+
+url = sys.argv[1]
+parsed = urlparse(url)
+print(parsed.hostname or "")
+print(parsed.port or "")
+PY
+  )
+  host="${db_parts[0]:-}"
+  port="${db_parts[1]:-}"
+
+  if [[ -z "$host" || -z "$port" ]]; then
+    return 0
+  fi
+  if [[ "$host" != "127.0.0.1" && "$host" != "localhost" ]]; then
+    return 0
+  fi
+  if port_open "$host" "$port"; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Dev postgres not reachable and docker is not available." >&2
+    return 1
+  fi
+  if [[ ! -f "$ROOT_DIR/docker/dev-postgres.yml" ]]; then
+    echo "Missing docker/dev-postgres.yml; cannot auto-start dev database." >&2
+    return 1
+  fi
+
+  echo "Starting dev postgres (docker/dev-postgres.yml)..."
+  (cd "$ROOT_DIR" && docker compose -f docker/dev-postgres.yml up -d)
+  for _ in {1..30}; do
+    if port_open "$host" "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Dev postgres still not reachable on ${host}:${port}." >&2
+  return 1
+}
+
 if [[ ! -x "$TSX_BIN" ]]; then
   TSX_BIN="tsx"
 fi
@@ -239,6 +307,7 @@ WEB_PID=""
 
 start_backend() {
   echo "Starting core-backend..."
+  ensure_smoke_db
   PORT="$(python3 - <<'PY'
 from urllib.parse import urlparse
 import os
