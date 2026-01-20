@@ -1999,9 +1999,61 @@ function shiftMonth(delta: number) {
   refreshAll()
 }
 
+function validateRequestForm(): string | null {
+  if (!requestForm.workDate) return 'Work date is required'
+
+  const requestType = requestForm.requestType
+  const hasIn = Boolean(requestForm.requestedInAt)
+  const hasOut = Boolean(requestForm.requestedOutAt)
+
+  if (hasIn && hasOut) {
+    const inTime = new Date(requestForm.requestedInAt).getTime()
+    const outTime = new Date(requestForm.requestedOutAt).getTime()
+    if (Number.isFinite(inTime) && Number.isFinite(outTime) && outTime <= inTime) {
+      return 'End time must be after start time'
+    }
+  }
+
+  if (requestType === 'missed_check_in' && !hasIn) {
+    return 'Requested in time is required'
+  }
+  if (requestType === 'missed_check_out' && !hasOut) {
+    return 'Requested out time is required'
+  }
+  if (requestType === 'time_correction' && !hasIn && !hasOut) {
+    return 'Provide requested in or out time'
+  }
+
+  if (requestType === 'leave') {
+    if (!requestForm.leaveTypeId) return 'Leave type is required'
+    const leaveType = leaveTypes.value.find(item => item.id === requestForm.leaveTypeId)
+    if (leaveType?.requiresAttachment && !requestForm.attachmentUrl.trim()) {
+      return 'Attachment URL required for this leave type'
+    }
+  }
+
+  if (requestType === 'overtime') {
+    if (!requestForm.overtimeRuleId) return 'Overtime rule is required'
+    const minutesValue = String(requestForm.minutes ?? '').trim()
+    const minutes = minutesValue.length > 0 ? Number(minutesValue) : Number.NaN
+    const hasMinutes = Number.isFinite(minutes) && minutes > 0
+    const hasRange = hasIn && hasOut
+    if (!hasMinutes && !hasRange) {
+      return 'Overtime duration required'
+    }
+  }
+
+  return null
+}
+
 async function submitRequest() {
   requestSubmitting.value = true
   try {
+    const validationMessage = validateRequestForm()
+    if (validationMessage) {
+      setStatus(validationMessage, 'error')
+      return
+    }
     const orgValue = normalizedOrgId()
     const minutesValue = String(requestForm.minutes ?? '').trim()
     const minutes = minutesValue.length > 0 ? Number(minutesValue) : undefined

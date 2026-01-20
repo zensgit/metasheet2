@@ -72,6 +72,16 @@ describe('Attendance Plugin Integration', () => {
       if (!leaveCheck.rows[0]?.name) return
       const overtimeCheck = await pool.query(`SELECT to_regclass('public.attendance_overtime_rules') AS name`)
       if (!overtimeCheck.rows[0]?.name) return
+      const shiftCheck = await pool.query(`SELECT to_regclass('public.attendance_shifts') AS name`)
+      if (!shiftCheck.rows[0]?.name) return
+      const assignmentCheck = await pool.query(`SELECT to_regclass('public.attendance_shift_assignments') AS name`)
+      if (!assignmentCheck.rows[0]?.name) return
+      const holidayCheck = await pool.query(`SELECT to_regclass('public.attendance_holidays') AS name`)
+      if (!holidayCheck.rows[0]?.name) return
+      const rotationRuleCheck = await pool.query(`SELECT to_regclass('public.attendance_rotation_rules') AS name`)
+      if (!rotationRuleCheck.rows[0]?.name) return
+      const rotationAssignmentCheck = await pool.query(`SELECT to_regclass('public.attendance_rotation_assignments') AS name`)
+      if (!rotationAssignmentCheck.rows[0]?.name) return
     } catch {
       return
     } finally {
@@ -240,6 +250,109 @@ describe('Attendance Plugin Integration', () => {
 
       expect(overtimeRequestRes.status).toBe(201)
     }
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Test Shift',
+        timezone: 'UTC',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'attendance-test',
+        shiftId,
+        startDate: workDate,
+        isActive: true,
+      }),
+    })
+
+    expect(assignmentRes.status).toBe(201)
+    const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(assignmentId).toBeTruthy()
+
+    const holidayDate = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString().slice(0, 10)
+    const holidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: holidayDate,
+        name: 'Test Holiday',
+        isWorkingDay: false,
+      }),
+    })
+
+    expect([201, 409]).toContain(holidayRes.status)
+    let holidayId = (holidayRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    if (!holidayId) {
+      const holidayListRes = await requestJson(
+        `${baseUrl}/api/attendance/holidays?from=${holidayDate}&to=${holidayDate}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      const items = (holidayListRes.body as { data?: { items?: { id?: string }[] } } | undefined)?.data?.items ?? []
+      holidayId = items[0]?.id
+    }
+    expect(holidayId).toBeTruthy()
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Test Rotation',
+        timezone: 'UTC',
+        shiftSequence: [shiftId],
+        isActive: true,
+      }),
+    })
+
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+
+    const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'attendance-test',
+        rotationRuleId,
+        startDate: workDate,
+        isActive: true,
+      }),
+    })
+
+    expect(rotationAssignmentRes.status).toBe(201)
+    const rotationAssignmentId = (rotationAssignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(rotationAssignmentId).toBeTruthy()
 
     const reportRes = await requestJson(`${baseUrl}/api/attendance/reports/requests?from=${workDate}&to=${workDate}`, {
       headers: {
