@@ -43,6 +43,7 @@ export PLM_TENANT_ID=tenant-1
 export PLM_ORG_ID=org-1
 export PLM_USERNAME=admin
 export PLM_PASSWORD=admin
+export PLM_HEALTH_URLS=/api/v1/health,/health
 ```
 
 ## Verification

@@ -520,6 +520,8 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260120_172726.md`
   - Report: `docs/verification-plm-ui-full-20260120_175542.md`
   - Report: `docs/verification-plm-ui-full-20260120_193428.md`
+- PLM UI docs updates:
+  - Report: `docs/verification-plm-ui-docs-20260120_200100.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`
