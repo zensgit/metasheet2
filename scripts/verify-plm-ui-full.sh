@@ -31,23 +31,29 @@ fi
 
 PLM_HEALTH_RETRY="${PLM_HEALTH_RETRY:-0}"
 PLM_HEALTH_INTERVAL="${PLM_HEALTH_INTERVAL:-2}"
+PLM_HEALTH_URLS="${PLM_HEALTH_URLS:-/api/v1/health,/health}"
 
 check_plm_health() {
   local retries="$1"
   local interval="$2"
-  local endpoints=("${PLM_BASE_URL}/api/v1/health" "${PLM_BASE_URL}/health")
+  local endpoints=()
+  IFS=',' read -r -a endpoints <<< "$PLM_HEALTH_URLS"
   local attempt=0
 
   while true; do
     for endpoint in "${endpoints[@]}"; do
-      if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${endpoint}" >/dev/null 2>&1; then
-        echo "PLM health OK: ${endpoint}"
+      local url="$endpoint"
+      if [[ "$endpoint" =~ ^/ ]]; then
+        url="${PLM_BASE_URL}${endpoint}"
+      fi
+      if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${url}" >/dev/null 2>&1; then
+        echo "PLM health OK: ${url}"
         return 0
       fi
     done
     if [[ "$attempt" -ge "$retries" ]]; then
       echo "PLM health check failed for ${PLM_BASE_URL} after ${attempt} retries." >&2
-      echo "Tried: ${endpoints[*]}" >&2
+      echo "Tried: ${PLM_HEALTH_URLS}" >&2
       return 1
     fi
     attempt=$((attempt + 1))
