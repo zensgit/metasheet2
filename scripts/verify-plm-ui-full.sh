@@ -66,25 +66,43 @@ BOM_MD="$OUTPUT_DIR/plm-bom-tools-${BOM_STAMP}.md"
 UI_REPORT="$REPORT_DIR/verification-plm-ui-regression-${UI_STAMP}.md"
 UI_SCREENSHOT="$OUTPUT_DIR/plm-ui-regression-${UI_STAMP}.png"
 FULL_REPORT="$REPORT_DIR/verification-plm-ui-full-${RUN_STAMP}.md"
+FAILURE_BUNDLE_PATH="n/a"
+BOM_RESULT="pass"
+UI_RESULT="skipped"
+RUN_STATUS="pass"
+EXIT_STATUS=0
 
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 
 echo "[1/2] Running PLM BOM tools seed..."
 check_plm_health "$PLM_HEALTH_RETRY" "$PLM_HEALTH_INTERVAL"
+set +e
 STAMP="$BOM_STAMP" OUTPUT_DIR="$OUTPUT_DIR" OUTPUT_BASENAME="plm-bom-tools" PLM_CLEANUP="false" \
   bash scripts/verify-plm-bom-tools.sh
+BOM_STATUS=$?
+set -e
+
+if [[ "$BOM_STATUS" -ne 0 ]]; then
+  BOM_RESULT="fail"
+  RUN_STATUS="fail"
+  EXIT_STATUS="$BOM_STATUS"
+fi
 
 if [[ ! -f "$BOM_JSON" ]]; then
   echo "Expected BOM tools JSON not found: $BOM_JSON" >&2
-  exit 1
+  BOM_RESULT="fail (missing BOM JSON)"
+  RUN_STATUS="fail"
+  EXIT_STATUS=1
 fi
 
 if [[ ! -f "$BOM_MD" ]]; then
   echo "Expected BOM tools report not found: $BOM_MD" >&2
-  exit 1
+  BOM_RESULT="fail (missing BOM report)"
+  RUN_STATUS="fail"
+  EXIT_STATUS=1
 fi
 
-if [[ -z "${PLM_BOM_FIND_NUM:-}" ]]; then
+if [[ "$RUN_STATUS" == "pass" && -z "${PLM_BOM_FIND_NUM:-}" ]]; then
   PLM_BOM_FIND_NUM="$(python3 - <<'PY' "$BOM_JSON"
 import json
 import sys
@@ -129,12 +147,24 @@ PY
 fi
 
 echo "[2/2] Running PLM UI regression..."
-STAMP="$UI_STAMP" OUTPUT_DIR="$OUTPUT_DIR" REPORT_DIR="$REPORT_DIR" PLM_BOM_TOOLS_JSON="$BOM_JSON" \
-  PLM_BOM_FIND_NUM="$PLM_BOM_FIND_NUM" \
-  bash scripts/verify-plm-ui-regression.sh
+if [[ "$RUN_STATUS" == "pass" ]]; then
+  set +e
+  STAMP="$UI_STAMP" OUTPUT_DIR="$OUTPUT_DIR" REPORT_DIR="$REPORT_DIR" PLM_BOM_TOOLS_JSON="$BOM_JSON" \
+    PLM_BOM_FIND_NUM="$PLM_BOM_FIND_NUM" \
+    bash scripts/verify-plm-ui-regression.sh
+  UI_STATUS=$?
+  set -e
+  if [[ "$UI_STATUS" -ne 0 ]]; then
+    UI_RESULT="fail"
+    RUN_STATUS="fail"
+    EXIT_STATUS="$UI_STATUS"
+  else
+    UI_RESULT="pass"
+  fi
+fi
 
 cleanup_status="skipped"
-if [[ "$PLM_CLEANUP" == "true" ]]; then
+if [[ "$PLM_CLEANUP" == "true" && -f "$BOM_JSON" ]]; then
   echo "Cleaning up PLM fixtures..."
   PLM_TOKEN="${PLM_API_TOKEN:-${PLM_AUTH_TOKEN:-${PLM_TOKEN:-}}}"
   if [[ -z "$PLM_TOKEN" ]]; then
@@ -236,6 +266,10 @@ PY
   fi
 fi
 
+if [[ "$RUN_STATUS" != "pass" ]]; then
+  FAILURE_BUNDLE_PATH="$OUTPUT_DIR/plm-ui-full-${RUN_STAMP}-bundle.tgz"
+fi
+
 cat > "$FULL_REPORT" <<REPORT_EOF
 # Verification: PLM UI Full Regression - ${RUN_STAMP}
 
@@ -246,6 +280,10 @@ Run BOM tools seed + PLM UI regression in a single workflow.
 - PLM base: ${PLM_BASE_URL}
 - Tenant/org: ${PLM_TENANT_ID} / ${PLM_ORG_ID}
 - BOM find_num: ${PLM_BOM_FIND_NUM:-auto}
+- Status: ${RUN_STATUS}
+- BOM status: ${BOM_RESULT}
+- UI status: ${UI_RESULT}
+- Failure bundle: ${FAILURE_BUNDLE_PATH}
 
 ## Steps
 1. BOM tools seed
@@ -261,3 +299,29 @@ Run BOM tools seed + PLM UI regression in a single workflow.
 REPORT_EOF
 
 echo "Report: $FULL_REPORT"
+
+if [[ "$RUN_STATUS" != "pass" ]]; then
+  bundle_candidates=(
+    "$BOM_JSON"
+    "$BOM_MD"
+    "$UI_REPORT"
+    "$UI_SCREENSHOT"
+    "$FULL_REPORT"
+    "$OUTPUT_DIR/plm-ui-regression-${UI_STAMP}-bundle.tgz"
+    "$OUTPUT_DIR/plm-ui-regression-${UI_STAMP}-error.png"
+    "$OUTPUT_DIR/plm-ui-regression-last-response-${UI_STAMP}.json"
+    "$OUTPUT_DIR/plm-ui-regression-backend.log"
+    "$OUTPUT_DIR/plm-ui-regression-web.log"
+  )
+  bundle_files=()
+  for file in "${bundle_candidates[@]}"; do
+    if [[ -f "$file" ]]; then
+      bundle_files+=("${file#"$ROOT_DIR"/}")
+    fi
+  done
+  if [[ "${#bundle_files[@]}" -gt 0 ]]; then
+    tar -czf "$FAILURE_BUNDLE_PATH" -C "$ROOT_DIR" "${bundle_files[@]}" >/dev/null 2>&1 || true
+  fi
+  echo "PLM UI full regression failed. Bundle: ${FAILURE_BUNDLE_PATH}." >&2
+  exit "$EXIT_STATUS"
+fi
