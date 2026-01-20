@@ -1419,7 +1419,11 @@ function firstLineText(value) {
     console.warn('Skipping substitute quick pick; selector missing.');
   }
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
+  const substitutesRequestPromise = page.waitForResponse((response) =>
+    matchesPlmQuery(response.request(), 'substitutes', { bomLineId })
+  );
   await substitutesSection.locator('button:has-text("查询")').click();
+  await substitutesRequestPromise;
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
 
   const documentsSection = page.locator('section:has-text("关联文档")');
