@@ -1331,6 +1331,21 @@
             placeholder="输入子件 ID"
           />
         </label>
+        <label for="plm-where-used-quick-pick">
+          快速选择
+          <select
+            id="plm-where-used-quick-pick"
+            v-model="whereUsedQuickPick"
+            name="plmWhereUsedQuickPick"
+            :disabled="!whereUsedQuickOptions.length"
+            @change="applyWhereUsedQuickPick"
+          >
+            <option value="">从 BOM / 搜索结果选择</option>
+            <option v-for="option in whereUsedQuickOptions" :key="option.key" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
         <label for="plm-where-used-recursive">
           递归
           <select
@@ -1737,6 +1752,21 @@
             placeholder="左侧 item/version ID"
           />
         </label>
+        <label for="plm-compare-left-quick-pick">
+          左侧快选
+          <select
+            id="plm-compare-left-quick-pick"
+            v-model="compareLeftQuickPick"
+            name="plmCompareLeftQuickPick"
+            :disabled="!compareQuickOptions.length"
+            @change="applyCompareQuickPick('left')"
+          >
+            <option value="">从搜索结果选择</option>
+            <option v-for="option in compareQuickOptions" :key="`left-${option.key}`" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
         <label for="plm-compare-right-id">
           右侧 ID
           <input
@@ -1745,6 +1775,21 @@
             name="plmCompareRightId"
             placeholder="右侧 item/version ID"
           />
+        </label>
+        <label for="plm-compare-right-quick-pick">
+          右侧快选
+          <select
+            id="plm-compare-right-quick-pick"
+            v-model="compareRightQuickPick"
+            name="plmCompareRightQuickPick"
+            :disabled="!compareQuickOptions.length"
+            @change="applyCompareQuickPick('right')"
+          >
+            <option value="">从搜索结果选择</option>
+            <option v-for="option in compareQuickOptions" :key="`right-${option.key}`" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
         </label>
         <label for="plm-compare-max-levels">
           最大层级
@@ -2245,6 +2290,21 @@
             placeholder="输入 BOM 行 ID"
           />
         </label>
+        <label for="plm-bom-line-quick-pick">
+          BOM 行快选
+          <select
+            id="plm-bom-line-quick-pick"
+            v-model="bomLineQuickPick"
+            name="plmBomLineQuickPick"
+            :disabled="!bomLineOptions.length"
+            @change="applyBomLineQuickPick"
+          >
+            <option value="">从 BOM 选择</option>
+            <option v-for="option in bomLineOptions" :key="option.key" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
         <label for="plm-substitutes-filter">
           过滤
           <input
@@ -2287,6 +2347,21 @@
             name="plmSubstituteItemId"
             placeholder="输入替代件 Item ID"
           />
+        </label>
+        <label for="plm-substitute-quick-pick">
+          替代件快选
+          <select
+            id="plm-substitute-quick-pick"
+            v-model="substituteQuickPick"
+            name="plmSubstituteQuickPick"
+            :disabled="!substituteQuickOptions.length"
+            @change="applySubstituteQuickPick"
+          >
+            <option value="">从 BOM / 搜索结果选择</option>
+            <option v-for="option in substituteQuickOptions" :key="option.key" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
         </label>
         <label for="plm-substitute-rank">
           优先级
@@ -2492,6 +2567,12 @@ type DeepLinkPreset = {
   label: string
   panels: string[]
   params?: Record<string, string | number | boolean>
+}
+
+type QuickPickOption = {
+  key: string
+  value: string
+  label: string
 }
 
 type FilterPreset = {
@@ -2738,6 +2819,7 @@ const approvalColumnOptions = [
 ]
 
 const whereUsedItemId = ref('')
+const whereUsedQuickPick = ref('')
 const whereUsedRecursive = ref(true)
 const whereUsedMaxLevels = ref(DEFAULT_WHERE_USED_MAX_LEVELS)
 const whereUsedView = ref<'table' | 'tree'>('table')
@@ -3025,6 +3107,8 @@ const whereUsedTreePathIdsCount = computed(() => whereUsedTreePathIdsList.value.
 
 const compareLeftId = ref('')
 const compareRightId = ref('')
+const compareLeftQuickPick = ref('')
+const compareRightQuickPick = ref('')
 const compareMode = ref('')
 const compareMaxLevels = ref(DEFAULT_COMPARE_MAX_LEVELS)
 const compareLineKey = ref(DEFAULT_COMPARE_LINE_KEY)
@@ -3384,11 +3468,13 @@ const compareLineKeyOptions = computed(() => {
 const compareModeOptions = computed(() => compareSchema.value?.compare_modes || [])
 
 const bomLineId = ref('')
+const bomLineQuickPick = ref('')
 const substitutes = ref<any | null>(null)
 const substitutesLoading = ref(false)
 const substitutesError = ref('')
 const substitutesFilter = ref('')
 const substituteItemId = ref('')
+const substituteQuickPick = ref('')
 const substituteRank = ref('')
 const substituteNote = ref('')
 const substitutesActionStatus = ref('')
@@ -3578,6 +3664,90 @@ const bomSelectedChildIds = computed(() => {
   }
   return list
 })
+
+function buildQuickPickLabel(source: string, main: string, name: string, id: string): string {
+  const mainLabel = main && main !== '-' ? main : id
+  const nameLabel = name && name !== '-' ? name : ''
+  const base = [mainLabel, nameLabel].filter(Boolean).join(' · ')
+  const suffix = id && id !== mainLabel ? ` (${id})` : ''
+  return `${source}: ${base || id}${suffix}`
+}
+
+function mergeQuickPickOptions(options: QuickPickOption[]): QuickPickOption[] {
+  const seen = new Set<string>()
+  const merged: QuickPickOption[] = []
+  for (const option of options) {
+    if (!option?.value || seen.has(option.value)) continue
+    seen.add(option.value)
+    merged.push(option)
+  }
+  return merged
+}
+
+const searchResultOptions = computed<QuickPickOption[]>(() => {
+  const options: QuickPickOption[] = []
+  const seen = new Set<string>()
+  for (const item of searchResults.value) {
+    const { id } = resolveItemKey(item)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const number = getItemNumber(item)
+    const name = getItemName(item)
+    options.push({
+      key: `search:${id}`,
+      value: id,
+      label: buildQuickPickLabel('搜索', number, name, id),
+    })
+  }
+  return options
+})
+
+const bomChildOptions = computed<QuickPickOption[]>(() => {
+  const options: QuickPickOption[] = []
+  const seen = new Set<string>()
+  const source = bomFilteredItems.value.length ? bomFilteredItems.value : bomItems.value
+  for (const item of source) {
+    const childId = resolveBomChildId(item)
+    if (!childId || seen.has(childId)) continue
+    seen.add(childId)
+    const code = resolveBomChildNumber(item) || childId
+    const name = String(item?.component_name || '')
+    options.push({
+      key: `bom-child:${childId}`,
+      value: childId,
+      label: buildQuickPickLabel('BOM', code, name, childId),
+    })
+  }
+  return options
+})
+
+const bomLineOptions = computed<QuickPickOption[]>(() => {
+  const options: QuickPickOption[] = []
+  const seen = new Set<string>()
+  const source = bomFilteredItems.value.length ? bomFilteredItems.value : bomItems.value
+  for (const item of source) {
+    const lineId = resolveBomLineId(item)
+    if (!lineId || seen.has(lineId)) continue
+    seen.add(lineId)
+    const childId = resolveBomChildId(item)
+    const code = resolveBomChildNumber(item) || childId || lineId
+    const name = String(item?.component_name || '')
+    options.push({
+      key: `bom-line:${lineId}`,
+      value: lineId,
+      label: buildQuickPickLabel('BOM 行', code, name, lineId),
+    })
+  }
+  return options
+})
+
+const whereUsedQuickOptions = computed(() =>
+  mergeQuickPickOptions([...bomChildOptions.value, ...searchResultOptions.value])
+)
+const substituteQuickOptions = computed(() =>
+  mergeQuickPickOptions([...bomChildOptions.value, ...searchResultOptions.value])
+)
+const compareQuickOptions = computed(() => searchResultOptions.value)
 
 const bomSelectedCount = computed(() => bomSelectedLineIds.value.size)
 
@@ -4598,6 +4768,16 @@ function applyWhereUsedFromBom(item: any) {
   }
 }
 
+function applyWhereUsedQuickPick() {
+  const value = whereUsedQuickPick.value
+  if (!value) return
+  whereUsedItemId.value = value
+  whereUsedError.value = ''
+  scheduleQuerySync({ whereUsedItemId: value })
+  setDeepLinkMessage(`已填入 Where-Used 子件 ID：${value}`)
+  whereUsedQuickPick.value = ''
+}
+
 function applySubstitutesFromBom(item: any) {
   const lineId = resolveBomLineId(item)
   if (!lineId) {
@@ -4613,6 +4793,28 @@ function applySubstitutesFromBom(item: any) {
   if (!substitutesLoading.value) {
     void loadSubstitutes()
   }
+}
+
+function applyBomLineQuickPick() {
+  const value = bomLineQuickPick.value
+  if (!value) return
+  bomLineId.value = value
+  substitutesError.value = ''
+  substitutesActionStatus.value = ''
+  substitutesActionError.value = ''
+  scheduleQuerySync({ bomLineId: value })
+  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${value}`)
+  bomLineQuickPick.value = ''
+}
+
+function applySubstituteQuickPick() {
+  const value = substituteQuickPick.value
+  if (!value) return
+  substituteItemId.value = value
+  substitutesActionStatus.value = ''
+  substitutesActionError.value = ''
+  setDeepLinkMessage(`已填入替代件 ID：${value}`)
+  substituteQuickPick.value = ''
 }
 
 function applyProductFromBom(item: any) {
@@ -5033,6 +5235,24 @@ function applyCompareFromProduct(side: 'left' | 'right') {
     compareRightId: compareRightId.value || undefined,
   })
   setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${productId.value}`)
+}
+
+function applyCompareQuickPick(side: 'left' | 'right') {
+  const value = side === 'left' ? compareLeftQuickPick.value : compareRightQuickPick.value
+  if (!value) return
+  if (side === 'left') {
+    compareLeftId.value = value
+    compareLeftQuickPick.value = ''
+  } else {
+    compareRightId.value = value
+    compareRightQuickPick.value = ''
+  }
+  compareError.value = ''
+  scheduleQuerySync({
+    compareLeftId: compareLeftId.value || undefined,
+    compareRightId: compareRightId.value || undefined,
+  })
+  setDeepLinkMessage(`已填入对比${side === 'left' ? '左' : '右'}侧 ID：${value}`)
 }
 
 function swapCompareSides() {
