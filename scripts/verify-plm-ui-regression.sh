@@ -484,6 +484,30 @@ function matchesPlmQuery(request, operation, expectedFields) {
   return true;
 }
 
+function waitForPlmQueryResponse(page, operation, expectedFields) {
+  return page.waitForResponse((response) =>
+    matchesPlmQuery(response.request(), operation, expectedFields)
+  );
+}
+
+function waitForBomResponse(page, productId, bomDepth, bomEffectiveAt) {
+  const encodedProductId = encodeURIComponent(productId);
+  const encodedDepth = encodeURIComponent(bomDepth);
+  return page.waitForResponse((response) => {
+    const url = response.url();
+    if (!url.includes(`/api/federation/plm/products/${encodedProductId}/bom`)) {
+      return false;
+    }
+    if (!url.includes(`depth=${encodedDepth}`)) {
+      return false;
+    }
+    if (bomEffectiveAt && !url.includes('effective_at=')) {
+      return false;
+    }
+    return true;
+  });
+}
+
 async function resolveTableColumnIndex(section, headerLabel) {
   const headers = section.locator('thead th');
   const count = await headers.count();
@@ -598,19 +622,7 @@ function firstLineText(value) {
   if (bomEffectiveAt) {
     await bomSection.locator('#plm-bom-effective-at').fill(bomEffectiveAt);
   }
-  const bomRequestPromise = page.waitForResponse((response) => {
-    const url = response.url();
-    if (!url.includes(`/api/federation/plm/products/${encodeURIComponent(productId)}/bom`)) {
-      return false;
-    }
-    if (!url.includes(`depth=${encodeURIComponent(bomDepth)}`)) {
-      return false;
-    }
-    if (bomEffectiveAt && !url.includes('effective_at=')) {
-      return false;
-    }
-    return true;
-  });
+  const bomRequestPromise = waitForBomResponse(page, productId, bomDepth, bomEffectiveAt);
   await bomSection.locator('button:has-text("刷新 BOM")').click();
   await bomRequestPromise;
   const bomRows = bomSection.locator('table tbody tr');
@@ -973,9 +985,7 @@ function firstLineText(value) {
     console.warn('Skipping where-used quick pick check; selector missing.');
   }
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
-  const whereUsedRequestPromise = page.waitForResponse((response) =>
-    matchesPlmQuery(response.request(), 'where_used', { itemId: whereUsedId })
-  );
+  const whereUsedRequestPromise = waitForPlmQueryResponse(page, 'where_used', { itemId: whereUsedId });
   await whereUsedSection.locator('button:has-text("查询")').click();
   await whereUsedRequestPromise;
   await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
@@ -1258,9 +1268,10 @@ function firstLineText(value) {
   }
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
-  const compareRequestPromise = page.waitForResponse((response) =>
-    matchesPlmQuery(response.request(), 'bom_compare', { leftId: compareLeftId, rightId: compareRightId })
-  );
+  const compareRequestPromise = waitForPlmQueryResponse(page, 'bom_compare', {
+    leftId: compareLeftId,
+    rightId: compareRightId,
+  });
   await compareSection.locator('button:has-text("对比")').click();
   await compareRequestPromise;
   await waitOptional(compareSection.locator('table'), compareExpect);
@@ -1419,9 +1430,7 @@ function firstLineText(value) {
     console.warn('Skipping substitute quick pick; selector missing.');
   }
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
-  const substitutesRequestPromise = page.waitForResponse((response) =>
-    matchesPlmQuery(response.request(), 'substitutes', { bomLineId })
-  );
+  const substitutesRequestPromise = waitForPlmQueryResponse(page, 'substitutes', { bomLineId });
   await substitutesSection.locator('button:has-text("查询")').click();
   await substitutesRequestPromise;
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
