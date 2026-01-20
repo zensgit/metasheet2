@@ -14,6 +14,7 @@
 - Punches: check-in/out with min-interval, IP allowlist, and geo-fence validation.
 - Records and summary: daily rollups with status + calendar view.
 - Adjustments: request + approve/reject workflow.
+- Adjustments: request cancellation endpoint and UI action for pending requests.
 - Admin settings: auto-absence scheduling and attendance settings.
 - Scheduling: shifts, assignments, holidays.
 - Export: CSV export for attendance records.

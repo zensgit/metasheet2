@@ -206,6 +206,7 @@
                   <span>Out: {{ formatDateTime(item.requested_out_at) }}</span>
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
+                  <button class="attendance__btn" @click="cancelRequest(item.id)">Cancel</button>
                   <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">Approve</button>
                   <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">Reject</button>
                 </div>
@@ -1258,6 +1259,23 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
   }
 }
 
+async function cancelRequest(id: string) {
+  try {
+    const response = await apiFetch(`/api/attendance/requests/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Request cancel failed')
+    }
+    setStatus('Request cancelled.')
+    await loadRequests()
+  } catch (error: any) {
+    setStatus(error?.message || 'Request cancel failed', 'error')
+  }
+}
+
 async function changeRecordsPage(delta: number) {
   const next = recordsPage.value + delta
   if (next < 1 || next > recordsTotalPages.value) return
@@ -2127,6 +2145,11 @@ watch(orgId, () => {
 .attendance__status-chip--rejected {
   background: #ffebee;
   color: #c62828;
+}
+
+.attendance__status-chip--cancelled {
+  background: #eceff1;
+  color: #546e7a;
 }
 
 .attendance__table {

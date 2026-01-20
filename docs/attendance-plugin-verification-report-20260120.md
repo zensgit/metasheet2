@@ -21,7 +21,7 @@ curl http://localhost:8900/api/plugins
 - Migration: succeeded (`zzzz20260119150000_add_bpmn_user_task_fields` applied).
 - Plugin status: `plugin-attendance` reported `active`.
 - UI smoke: `verify-attendance-ui.mjs` passed (check-in/out + export).
-- Integration test: `test:integration:attendance` passed.
+- Integration test: `test:integration:attendance` passed (includes request create + cancel).
 - Dev servers: started for verification and stopped after completion.
 
 ## Warnings / Notes

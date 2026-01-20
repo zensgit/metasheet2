@@ -66,6 +66,8 @@ describe('Attendance Plugin Integration', () => {
       await pool.query('SELECT 1')
       const tableCheck = await pool.query(`SELECT to_regclass('public.attendance_events') AS name`)
       if (!tableCheck.rows[0]?.name) return
+      const approvalCheck = await pool.query(`SELECT to_regclass('public.approval_instances') AS name`)
+      if (!approvalCheck.rows[0]?.name) return
     } catch {
       return
     } finally {
@@ -108,6 +110,35 @@ describe('Attendance Plugin Integration', () => {
     })
 
     expect(punchRes.status).not.toBe(404)
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workDate,
+        requestType: 'missed_check_in',
+        requestedInAt: new Date().toISOString(),
+      }),
+    })
+
+    expect(requestRes.status).toBe(201)
+    const requestId = (requestRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+    expect(requestId).toBeTruthy()
+
+    const cancelRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/cancel`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ comment: 'cancel for test' }),
+    })
+
+    expect(cancelRes.status).toBe(200)
 
     const pluginsRes = await requestJson(`${baseUrl}/api/plugins`)
     const payload = pluginsRes.body as { list?: unknown } | unknown

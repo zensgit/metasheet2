@@ -1546,6 +1546,118 @@ module.exports = {
       }
     }
 
+    async function cancelRequest(req, res) {
+      const parsed = resolveSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+        return
+      }
+
+      const requesterId = getUserId(req)
+      if (!requesterId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return
+      }
+
+      const requestId = req.params.id
+
+      try {
+        const result = await db.transaction(async (trx) => {
+          const requestRows = await trx.query(
+            'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+            [requestId]
+          )
+          if (requestRows.length === 0) {
+            throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+          }
+
+          const requestRow = requestRows[0]
+          if (requestRow.status !== 'pending') {
+            throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
+          }
+
+          if (requestRow.user_id !== requesterId) {
+            const allowed = await canAccessOtherUsers(requesterId)
+            if (!allowed) {
+              throw new HttpError(403, 'FORBIDDEN', 'No access to cancel request')
+            }
+          }
+
+          const approvalId = requestRow.approval_instance_id
+          if (approvalId) {
+            const approvalRows = await trx.query(
+              'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+              [approvalId]
+            )
+            if (approvalRows.length > 0) {
+              const approval = approvalRows[0]
+              const newStatus = 'cancelled'
+              const newVersion = Number(approval.version ?? 0) + 1
+
+              await trx.query(
+                'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
+                [newStatus, newVersion, approvalId]
+              )
+
+              await trx.query(
+                `INSERT INTO approval_records
+                 (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)`,
+                [
+                  approvalId,
+                  'revoke',
+                  requesterId,
+                  getUserLabel(req, requesterId),
+                  parsed.data.comment ?? null,
+                  approval.status,
+                  newStatus,
+                  approval.version,
+                  newVersion,
+                  JSON.stringify(parsed.data.metadata ?? {}),
+                  req.ip ?? null,
+                  req.get('user-agent') ?? null,
+                ]
+              )
+            }
+          }
+
+          const resolvedAt = new Date()
+          await trx.query(
+            `UPDATE attendance_requests
+             SET status = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
+             WHERE id = $1`,
+            [requestId, 'cancelled', requesterId, resolvedAt]
+          )
+
+          return {
+            requestId,
+            status: 'cancelled',
+            orgId: requestRow.org_id ?? DEFAULT_ORG_ID,
+            userId: requestRow.user_id,
+          }
+        })
+
+        emitEvent('attendance.request.cancelled', {
+          requestId: result.requestId,
+          status: result.status,
+          orgId: result.orgId,
+          userId: result.userId,
+        })
+        res.json({ ok: true, data: result })
+      } catch (error) {
+        if (error instanceof HttpError) {
+          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+          return
+        }
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+          return
+        }
+        logger.error('Attendance request cancellation failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel request' } })
+      }
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/approve',
@@ -1556,6 +1668,12 @@ module.exports = {
       'POST',
       '/api/attendance/requests/:id/reject',
       withPermission('attendance:approve', async (req, res) => resolveRequest(req, res, 'reject'))
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/requests/:id/cancel',
+      withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
     )
 
     context.api.http.addRoute(
