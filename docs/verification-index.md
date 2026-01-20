@@ -14,6 +14,9 @@ Entry points:
 
 ## Daily / Pre-PR
 
+- Attendance plugin extension (leave/overtime/approval/rotation):
+  - Report: `docs/attendance-plugin-verification-report-20260120-2.md`
+
 - Verification summary (latest):
   - Report: `docs/verification-summary-2026-01-18.md`
   - Previous: `docs/verification-summary-2026-01-17.md`
@@ -439,6 +442,10 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260118_125754.png`
   - Report: `docs/verification-plm-ui-regression-20260118_172926.md`
   - Artifact: `artifacts/plm-ui-regression-20260118_172926.png`
+  - Report: `docs/verification-plm-ui-regression-20260120_090142.md`
+  - Artifact: `artifacts/plm-ui-regression-20260120_090142.png`
+  - Report: `docs/verification-plm-ui-regression-20260120_093613.md`
+  - Artifact: `artifacts/plm-ui-regression-20260120_093613.png`
   - Report: `docs/verification-plm-ui-regression-20260120_103212.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_103212.png`
   - Report: `docs/verification-plm-ui-regression-20260120_105030.md`
@@ -457,6 +464,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260120_131712.png`
   - Report: `docs/verification-plm-ui-regression-20260120_154958.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_154958.png`
+  - Report: `docs/verification-plm-ui-regression-20260120_155920.md`
+  - Artifact: `artifacts/plm-ui-regression-20260120_155920.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -489,6 +498,7 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260116_224702.md`
   - Report: `docs/verification-plm-ui-full-20260116_230221.md`
   - Report: `docs/verification-plm-ui-full-20260117_000120.md`
+  - Report: `docs/verification-plm-ui-full-20260120_090142.md`
 - PLM UI deep-link autoload:
   - Script: `scripts/verify-plm-ui-deeplink.sh`
   - Report: `docs/verification-plm-ui-deeplink-20260108_131533.md`

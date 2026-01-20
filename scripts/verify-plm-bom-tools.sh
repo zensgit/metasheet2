@@ -254,6 +254,10 @@ CHILD_X_NUMBER="UI-CMP-X-$TS"
 CHILD_Y_NUMBER="UI-CMP-Y-$TS"
 CHILD_Z_NUMBER="UI-CMP-Z-$TS"
 SUB_PART_NUMBER="UI-CMP-S-$TS"
+CHILD_X_FIND_NUM_A="010"
+CHILD_X_REFDES_A="R0"
+CHILD_X_FIND_NUM_B="020"
+CHILD_X_REFDES_B="R1,R2"
 
 PARENT_A=$(create_part "$PARENT_A_NUMBER" "UI Compare A")
 PARENT_B=$(create_part "$PARENT_B_NUMBER" "UI Compare B")
@@ -267,10 +271,10 @@ if [[ -z "$PARENT_A" || -z "$PARENT_B" || -z "$CHILD_X" || -z "$CHILD_Y" || -z "
   exit 1
 fi
 
-add_child "$PARENT_A" "$CHILD_X" "{\"child_id\":\"$CHILD_X\",\"quantity\":1,\"uom\":\"EA\",\"find_num\":\"010\"}" >/dev/null
+add_child "$PARENT_A" "$CHILD_X" "{\"child_id\":\"$CHILD_X\",\"quantity\":1,\"uom\":\"EA\",\"find_num\":\"$CHILD_X_FIND_NUM_A\",\"refdes\":\"$CHILD_X_REFDES_A\"}" >/dev/null
 add_child "$PARENT_A" "$CHILD_Y" "{\"child_id\":\"$CHILD_Y\",\"quantity\":1,\"uom\":\"EA\"}" >/dev/null
 
-add_child "$PARENT_B" "$CHILD_X" "{\"child_id\":\"$CHILD_X\",\"quantity\":2,\"uom\":\"EA\",\"find_num\":\"020\",\"refdes\":\"R1,R2\"}" >/dev/null
+add_child "$PARENT_B" "$CHILD_X" "{\"child_id\":\"$CHILD_X\",\"quantity\":2,\"uom\":\"EA\",\"find_num\":\"$CHILD_X_FIND_NUM_B\",\"refdes\":\"$CHILD_X_REFDES_B\"}" >/dev/null
 add_child "$PARENT_B" "$CHILD_Z" "{\"child_id\":\"$CHILD_Z\",\"quantity\":1,\"uom\":\"EA\"}" >/dev/null
 
 BOM_LINE_X=$(get_bom_line_id "$PARENT_B" "$CHILD_X")
@@ -325,6 +329,15 @@ ECO_ID=$(echo "$ECO_RESP" | python3 -c 'import json,sys; print(json.load(sys.std
 ECO_STATE=$(echo "$ECO_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))')
 if [[ -z "$ECO_ID" ]]; then
   echo "Failed to create ECO: $ECO_RESP" >&2
+  exit 1
+fi
+
+REINDEX_RESP=$(curl -sS -X POST "$PLM_BASE_URL/api/v1/search/reindex" "${HEADERS[@]}" \
+  -H 'content-type: application/json' \
+  -d '{"item_type_id":"Part","reset":false,"limit":200,"batch_size":200}')
+REINDEX_OK=$(echo "$REINDEX_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))')
+if [[ "$REINDEX_OK" != "True" && "$REINDEX_OK" != "true" ]]; then
+  echo "Failed to reindex search: $REINDEX_RESP" >&2
   exit 1
 fi
 
@@ -401,12 +414,13 @@ resp_subs=$(curl -sS -X POST "${API_BASE}/api/federation/plm/query" \
   -H "Authorization: Bearer $METASHEET_TOKEN" \
   -d "$payload_subs")
 
-python3 - <<'PY' "$resp_where" "$resp_compare" "$resp_subs" "$report_json" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A" "$PARENT_A_NUMBER" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$SUB_REL_ID"
+python3 - <<'PY' "$resp_where" "$resp_compare" "$resp_subs" "$report_json" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A" "$PARENT_A_NUMBER" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$SUB_REL_ID" "$CHILD_X_FIND_NUM_A" "$CHILD_X_REFDES_A"
 import json,sys
 where_raw, compare_raw, subs_raw, out = sys.argv[1:5]
 doc_file_id, doc_filename, doc_role, doc_version, doc_attachment_id = sys.argv[5:10]
 eco_id, eco_name, eco_state, product_id, product_number = sys.argv[10:15]
 parent_b, child_x, child_y, child_z, sub_part, bom_line, sub_rel_id = sys.argv[15:22]
+child_x_find_num, child_x_refdes = sys.argv[22:24]
 def load(raw):
     try:
         return json.loads(raw)
@@ -416,6 +430,12 @@ data = {
   "where_used": load(where_raw),
   "bom_compare": load(compare_raw),
   "substitutes": load(subs_raw),
+  "bom": {
+    "parent_id": product_id,
+    "child_id": child_x,
+    "find_num": child_x_find_num,
+    "refdes": child_x_refdes,
+  },
   "documents": {
     "item_id": product_id,
     "file_id": doc_file_id,
@@ -438,6 +458,8 @@ data = {
     "child_y": child_y,
     "child_z": child_z,
     "bom_child_id": child_x,
+    "bom_child_find_num": child_x_find_num,
+    "bom_child_refdes": child_x_refdes,
     "substitute": sub_part,
     "bom_line_id": bom_line,
     "substitute_rel_id": sub_rel_id,

@@ -548,7 +548,14 @@ function firstLineText(value) {
 
   const searchSection = page.locator('section:has-text("产品搜索")');
   await page.fill('#plm-search-query', searchQuery);
+  const searchRequestPromise = page.waitForResponse((response) => {
+    if (!response.url().includes('/api/federation/plm/query')) return false;
+    if (response.request().method() !== 'POST') return false;
+    const postData = response.request().postData() || '';
+    return postData.includes('"operation":"products"');
+  });
   await page.click('button:has-text("搜索")');
+  await searchRequestPromise;
   const rows = searchSection.locator('table tbody tr');
   await rows.first().waitFor({ timeout: 60000 });
   const rowCount = await rows.count();

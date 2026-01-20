@@ -74,6 +74,11 @@ export interface Database {
   attendance_shifts: AttendanceShiftsTable
   attendance_shift_assignments: AttendanceShiftAssignmentsTable
   attendance_holidays: AttendanceHolidaysTable
+  attendance_leave_types: AttendanceLeaveTypesTable
+  attendance_overtime_rules: AttendanceOvertimeRulesTable
+  attendance_approval_flows: AttendanceApprovalFlowsTable
+  attendance_rotation_rules: AttendanceRotationRulesTable
+  attendance_rotation_assignments: AttendanceRotationAssignmentsTable
   // Meta tables
   meta_sheets: MetaSheetsTable
   meta_fields: MetaFieldsTable
@@ -875,7 +880,7 @@ export interface AttendanceRequestsTable {
   user_id: string
   org_id: string
   work_date: ColumnType<string, string | undefined, string>
-  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction'
+  request_type: 'missed_check_in' | 'missed_check_out' | 'time_correction' | 'leave' | 'overtime'
   requested_in_at: NullableTimestamp
   requested_out_at: NullableTimestamp
   reason: string | null
@@ -937,6 +942,66 @@ export interface AttendanceHolidaysTable {
   holiday_date: ColumnType<string, string | undefined, string>
   name: string | null
   is_working_day: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceLeaveTypesTable {
+  id: Generated<string>
+  org_id: string
+  code: string
+  name: string
+  requires_approval: boolean
+  requires_attachment: boolean
+  default_minutes_per_day: number
+  is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceOvertimeRulesTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  min_minutes: number
+  rounding_minutes: number
+  max_minutes_per_day: number
+  requires_approval: boolean
+  is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceApprovalFlowsTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  request_type: string
+  steps: JSONColumnType<Array<Record<string, unknown>> | null>
+  is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRotationRulesTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  timezone: string
+  shift_sequence: JSONColumnType<string[] | null>
+  is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRotationAssignmentsTable {
+  id: Generated<string>
+  org_id: string
+  user_id: string
+  rotation_rule_id: string
+  start_date: ColumnType<string, string | undefined, string>
+  end_date: ColumnType<string | null, string | undefined, string | null>
+  is_active: boolean
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
