@@ -17,6 +17,31 @@ PLM_ORG_ID="${PLM_ORG_ID:-org-1}"
 PLM_USERNAME="${PLM_USERNAME:-admin}"
 PLM_PASSWORD="${PLM_PASSWORD:-admin}"
 PLM_ITEM_TYPE="${PLM_ITEM_TYPE:-Part}"
+PLM_HEALTH_RETRY="${PLM_HEALTH_RETRY:-0}"
+PLM_HEALTH_INTERVAL="${PLM_HEALTH_INTERVAL:-2}"
+
+check_plm_health() {
+  local retries="$1"
+  local interval="$2"
+  local endpoints=("${PLM_BASE_URL}/api/v1/health" "${PLM_BASE_URL}/health")
+  local attempt=0
+
+  while true; do
+    for endpoint in "${endpoints[@]}"; do
+      if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${endpoint}" >/dev/null 2>&1; then
+        echo "PLM health OK: ${endpoint}"
+        return 0
+      fi
+    done
+    if [[ "$attempt" -ge "$retries" ]]; then
+      echo "PLM health check failed for ${PLM_BASE_URL} after ${attempt} retries." >&2
+      echo "Tried: ${endpoints[*]}" >&2
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep "$interval"
+  done
+}
 
 BOM_JSON="$OUTPUT_DIR/plm-bom-tools-${BOM_STAMP}.json"
 BOM_MD="$OUTPUT_DIR/plm-bom-tools-${BOM_STAMP}.md"
@@ -27,6 +52,7 @@ FULL_REPORT="$REPORT_DIR/verification-plm-ui-full-${RUN_STAMP}.md"
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 
 echo "[1/2] Running PLM BOM tools seed..."
+check_plm_health "$PLM_HEALTH_RETRY" "$PLM_HEALTH_INTERVAL"
 STAMP="$BOM_STAMP" OUTPUT_DIR="$OUTPUT_DIR" OUTPUT_BASENAME="plm-bom-tools" PLM_CLEANUP="false" \
   bash scripts/verify-plm-bom-tools.sh
 

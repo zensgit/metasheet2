@@ -19,6 +19,7 @@ API_TOKEN=${1:-}
 BASE_URL=${2:-http://localhost:8900}
 EVIDENCE_DIR="docs/sprint2/evidence"
 TS=$(date +%Y%m%d_%H%M%S)
+VIEW_ID=${VIEW_ID:-v-demo}
 
 if [[ -z "$API_TOKEN" ]]; then
   echo "Usage: $0 <API_TOKEN> [BASE_URL]" >&2
@@ -34,7 +35,7 @@ log() { echo -e "\n=== $* ==="; }
 fail=0
 
 log "Create Snapshot"
-create_status=$(curl -sS -o /tmp/snap.res -w '%{http_code}' -H "Authorization: Bearer $API_TOKEN" -H 'x-user-id: staging-validator' -H 'Content-Type: application/json' -X POST "$BASE_URL/api/snapshots" --data '{"view_id":"v-demo","name":"staging-validate","description":"sprint2","snapshot_type":"manual","metadata":{}}' || true)
+create_status=$(curl -sS -o /tmp/snap.res -w '%{http_code}' -H "Authorization: Bearer $API_TOKEN" -H 'x-user-id: staging-validator' -H 'Content-Type: application/json' -X POST "$BASE_URL/api/snapshots" --data "{\"view_id\":\"$VIEW_ID\",\"name\":\"staging-validate\",\"description\":\"sprint2\",\"snapshot_type\":\"manual\",\"metadata\":{}}" || true)
 SNAP_JSON=$(cat /tmp/snap.res)
 echo "$SNAP_JSON" > "$EVIDENCE_DIR/snapshot-create-$TS.json"
 assert "[ $create_status -eq 201 ]" "Snapshot create status 201"
@@ -122,7 +123,7 @@ assert "[ $RULE_STATUS -eq 200 -o $RULE_STATUS -eq 201 ]" "Rule create status 20
 RULE_ID=$(echo "$RULE_JSON" | jq -r '.rule.id // .rule?._id // empty')
 
 log "Evaluate Rule (dry-run)"
-EVAL_STATUS=$(auth -X POST "$BASE_URL/api/admin/safety/rules/evaluate" --data "{\"entity_type\":\"snapshot\",\"entity_id\":\"$SNAP_ID\",\"operation\":\"restore\",\"properties\":{\"protection_level\":\"critical\"}}" -o /tmp/rule.eval -w '%{http_code}' || true)
+EVAL_STATUS=$(auth -X POST "$BASE_URL/api/admin/safety/rules/evaluate" --data "{\"entity_type\":\"snapshot\",\"entity_id\":\"$SNAP_ID\",\"operation\":\"restore\",\"properties\":{\"protection_level\":\"critical\",\"operation\":\"restore\"}}" -o /tmp/rule.eval -w '%{http_code}' || true)
 cat /tmp/rule.eval > "$EVIDENCE_DIR/rule-eval-$TS.json"
 assert "[ $EVAL_STATUS -eq 200 ]" "Rule eval status 200"
 if command -v jq >/dev/null 2>&1; then
