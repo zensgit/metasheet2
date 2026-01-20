@@ -447,6 +447,24 @@ async function waitOptional(scope, text) {
   await scope.getByText(text, { exact: false }).first().waitFor({ timeout: 60000 });
 }
 
+function normalizeBomToken(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim().replace(/^0+(?=\d)/, '');
+}
+
+function normalizeBomTokenList(value) {
+  return String(value || '')
+    .split(/[,\s/]+/)
+    .map((token) => normalizeBomToken(token))
+    .filter((token) => token.length);
+}
+
+function includesNormalizedToken(actualTokens, expectedTokens) {
+  if (!expectedTokens.length) return true;
+  if (!actualTokens.length) return false;
+  return expectedTokens.some((token) => actualTokens.includes(token));
+}
+
 (async () => {
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -568,8 +586,12 @@ async function waitOptional(scope, text) {
   }
   const findNumCell = bomTargetRow.locator('td').nth(5);
   const findNumText = ((await findNumCell.textContent()) || '').trim();
-  if (bomFindNum && !findNumText.includes(String(bomFindNum))) {
-    throw new Error(`BOM find_num mismatch. Expected ${bomFindNum}, got ${findNumText || '-'}`);
+  if (bomFindNum) {
+    const actualTokens = normalizeBomTokenList(findNumText);
+    const expectedTokens = normalizeBomTokenList(bomFindNum);
+    if (!includesNormalizedToken(actualTokens, expectedTokens)) {
+      throw new Error(`BOM find_num mismatch. Expected ${bomFindNum}, got ${findNumText || '-'}`);
+    }
   }
   if (bomRefdes) {
     const refdesCell = bomTargetRow.locator('td').nth(6);
@@ -578,7 +600,9 @@ async function waitOptional(scope, text) {
       throw new Error(`BOM refdes mismatch. Expected ${bomRefdes}, got ${refdesText || '-'}`);
     }
   }
-  const bomFilterValue = bomFindNum || bomChildId;
+  const bomFilterValue = bomFindNum
+    ? (normalizeBomTokenList(bomFindNum)[0] || bomFindNum)
+    : bomChildId;
   if (bomFilterValue) {
     await bomSection.locator('#plm-bom-filter').fill(String(bomFilterValue));
     const filteredRows = bomSection.locator('table tbody tr');
@@ -886,6 +910,27 @@ async function waitOptional(scope, text) {
   }
 
   const whereUsedSection = page.locator('section:has(#plm-where-used-item-id)');
+  const whereUsedQuickSelect = whereUsedSection.locator('#plm-where-used-quick-pick');
+  if (await whereUsedQuickSelect.count()) {
+    const quickOptions = whereUsedQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await whereUsedSection.locator('#plm-where-used-item-id').fill('');
+        await whereUsedQuickSelect.selectOption(optionValue);
+        const quickValue = await whereUsedSection.locator('#plm-where-used-item-id').inputValue();
+        if (!quickValue.trim()) {
+          throw new Error('Where-used quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping where-used quick pick check; option value missing.');
+      }
+    } else {
+      console.warn('Skipping where-used quick pick check; no options.');
+    }
+  } else {
+    console.warn('Skipping where-used quick pick check; selector missing.');
+  }
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
   await whereUsedSection.locator('button:has-text("查询")').click();
   await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
@@ -1126,6 +1171,46 @@ async function waitOptional(scope, text) {
   }
 
   const compareSection = page.locator('section:has-text("BOM 对比")');
+  const compareLeftQuickSelect = compareSection.locator('#plm-compare-left-quick-pick');
+  if (await compareLeftQuickSelect.count()) {
+    const compareOptions = compareLeftQuickSelect.locator('option');
+    if ((await compareOptions.count()) > 1) {
+      const optionValue = await compareOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await compareLeftQuickSelect.selectOption(optionValue);
+        const leftValue = await compareSection.locator('#plm-compare-left-id').inputValue();
+        if (!leftValue.trim()) {
+          throw new Error('Compare left quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping compare left quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping compare left quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping compare left quick pick; selector missing.');
+  }
+  const compareRightQuickSelect = compareSection.locator('#plm-compare-right-quick-pick');
+  if (await compareRightQuickSelect.count()) {
+    const compareOptions = compareRightQuickSelect.locator('option');
+    if ((await compareOptions.count()) > 1) {
+      const optionValue = await compareOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await compareRightQuickSelect.selectOption(optionValue);
+        const rightValue = await compareSection.locator('#plm-compare-right-id').inputValue();
+        if (!rightValue.trim()) {
+          throw new Error('Compare right quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping compare right quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping compare right quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping compare right quick pick; selector missing.');
+  }
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
   await compareSection.locator('button:has-text("对比")').click();
@@ -1216,6 +1301,46 @@ async function waitOptional(scope, text) {
   }
 
   const substitutesSection = page.locator('section:has-text("替代件")');
+  const bomLineQuickSelect = substitutesSection.locator('#plm-bom-line-quick-pick');
+  if (await bomLineQuickSelect.count()) {
+    const quickOptions = bomLineQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await bomLineQuickSelect.selectOption(optionValue);
+        const lineValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
+        if (!lineValue.trim()) {
+          throw new Error('BOM line quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping BOM line quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping BOM line quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping BOM line quick pick; selector missing.');
+  }
+  const substituteQuickSelect = substitutesSection.locator('#plm-substitute-quick-pick');
+  if (await substituteQuickSelect.count()) {
+    const quickOptions = substituteQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await substituteQuickSelect.selectOption(optionValue);
+        const substituteValue = await substitutesSection.locator('#plm-substitute-item-id').inputValue();
+        if (!substituteValue.trim()) {
+          throw new Error('Substitute quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping substitute quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping substitute quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping substitute quick pick; selector missing.');
+  }
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
   await substitutesSection.locator('button:has-text("查询")').click();
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
