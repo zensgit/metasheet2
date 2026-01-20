@@ -46,6 +46,74 @@ PLM_DOCUMENT_REVISION="${PLM_DOCUMENT_REVISION:-}"
 PLM_APPROVAL_TITLE="${PLM_APPROVAL_TITLE:-}"
 PLM_APPROVAL_PRODUCT_NUMBER="${PLM_APPROVAL_PRODUCT_NUMBER:-}"
 
+port_open() {
+  python3 - <<'PY' "$1" "$2" >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket()
+sock.settimeout(0.5)
+try:
+    sock.connect((host, port))
+except Exception:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+ensure_smoke_db() {
+  if [[ "$AUTO_START" != "true" ]]; then
+    return 0
+  fi
+
+  local host port
+  mapfile -t db_parts < <(python3 - <<'PY' "$SMOKE_DATABASE_URL"
+from urllib.parse import urlparse
+import sys
+
+url = sys.argv[1]
+parsed = urlparse(url)
+print(parsed.hostname or "")
+print(parsed.port or "")
+PY
+  )
+  host="${db_parts[0]:-}"
+  port="${db_parts[1]:-}"
+
+  if [[ -z "$host" || -z "$port" ]]; then
+    return 0
+  fi
+  if [[ "$host" != "127.0.0.1" && "$host" != "localhost" ]]; then
+    return 0
+  fi
+  if port_open "$host" "$port"; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Dev postgres not reachable and docker is not available." >&2
+    return 1
+  fi
+  if [[ ! -f "$ROOT_DIR/docker/dev-postgres.yml" ]]; then
+    echo "Missing docker/dev-postgres.yml; cannot auto-start dev database." >&2
+    return 1
+  fi
+
+  echo "Starting dev postgres (docker/dev-postgres.yml)..."
+  (cd "$ROOT_DIR" && docker compose -f docker/dev-postgres.yml up -d)
+  for _ in {1..30}; do
+    if port_open "$host" "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Dev postgres still not reachable on ${host}:${port}." >&2
+  return 1
+}
+
 if [[ ! -x "$TSX_BIN" ]]; then
   TSX_BIN="tsx"
 fi
@@ -56,6 +124,8 @@ fi
 
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}.png"
+ERROR_SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}-error.png"
+ERROR_RESPONSE_PATH="$OUTPUT_DIR/plm-ui-regression-last-response-${STAMP}.json"
 REPORT_PATH="$REPORT_DIR/verification-plm-ui-regression-${STAMP}.md"
 ITEM_NUMBER_JSON="$OUTPUT_DIR/plm-ui-regression-item-number-${STAMP}.json"
 
@@ -239,6 +309,7 @@ WEB_PID=""
 
 start_backend() {
   echo "Starting core-backend..."
+  ensure_smoke_db
   PORT="$(python3 - <<'PY'
 from urllib.parse import urlparse
 import os
@@ -279,6 +350,23 @@ start_web() {
   exit 1
 }
 
+check_plm_health() {
+  local ok=0
+  local endpoints=("${PLM_BASE_URL}/api/v1/health" "${PLM_BASE_URL}/health")
+  for endpoint in "${endpoints[@]}"; do
+    if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${endpoint}" >/dev/null 2>&1; then
+      ok=1
+      echo "PLM health OK: ${endpoint}"
+      break
+    fi
+  done
+  if [[ "$ok" -eq 0 ]]; then
+    echo "PLM health check failed for ${PLM_BASE_URL}." >&2
+    echo "Tried: ${endpoints[*]}" >&2
+    exit 1
+  fi
+}
+
 if ! curl -fsS "${API_BASE}/health" >/dev/null 2>&1; then
   if [[ "$AUTO_START" != "true" ]]; then
     echo "Core backend not running at ${API_BASE}." >&2
@@ -296,6 +384,8 @@ if ! curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
   fi
   start_web
 fi
+
+check_plm_health
 
 cleanup() {
   if [[ -n "$WEB_PID" ]]; then
@@ -337,6 +427,7 @@ fi
 
 cat > /tmp/plm_ui_regression.js <<'JS_EOF'
 const { chromium } = require('@playwright/test');
+const fs = require('fs');
 
 const token = process.env.METASHEET_TOKEN;
 const searchQuery = process.env.PLM_SEARCH_QUERY;
@@ -361,6 +452,8 @@ const approvalProductNumber = process.env.PLM_APPROVAL_PRODUCT_NUMBER || '';
 const fallbackItemNumber = process.env.PLM_ITEM_NUMBER_ONLY || approvalProductNumber || searchQuery;
 const url = process.env.UI_BASE || 'http://localhost:8899/plm';
 const screenshotPath = process.env.SCREENSHOT_PATH;
+const errorScreenshotPath = process.env.ERROR_SCREENSHOT_PATH;
+const errorResponsePath = process.env.ERROR_RESPONSE_PATH;
 const itemNumberPath = process.env.ITEM_NUMBER_PATH;
 const headless = process.env.HEADLESS !== 'false';
 
@@ -378,6 +471,103 @@ async function waitOptional(scope, text) {
   await scope.getByText(text, { exact: false }).first().waitFor({ timeout: 60000 });
 }
 
+function normalizeBomToken(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim().replace(/^0+(?=\d)/, '');
+}
+
+function normalizeBomTokenList(value) {
+  return String(value || '')
+    .split(/[,\s/]+/)
+    .map((token) => normalizeBomToken(token))
+    .filter((token) => token.length);
+}
+
+function includesNormalizedToken(actualTokens, expectedTokens) {
+  if (!expectedTokens.length) return true;
+  if (!actualTokens.length) return false;
+  return expectedTokens.some((token) => actualTokens.includes(token));
+}
+
+function matchesPlmQuery(request, operation, expectedFields) {
+  if (!request || request.method() !== 'POST') return false;
+  const url = request.url() || '';
+  if (!url.includes('/api/federation/plm/query')) return false;
+  let payload = {};
+  try {
+    payload = JSON.parse(request.postData() || '{}');
+  } catch (_err) {
+    return false;
+  }
+  if (payload.operation !== operation) return false;
+  if (expectedFields) {
+    for (const [key, value] of Object.entries(expectedFields)) {
+      if (value && payload[key] !== value) return false;
+    }
+  }
+  return true;
+}
+
+function waitForPlmQueryResponse(page, operation, expectedFields) {
+  return page.waitForResponse((response) =>
+    matchesPlmQuery(response.request(), operation, expectedFields)
+  );
+}
+
+function waitForProductResponse(page, expectedId) {
+  const encodedId = expectedId ? encodeURIComponent(expectedId) : null;
+  return page.waitForResponse((response) => {
+    if (response.request().method() !== 'GET') return false;
+    const url = response.url();
+    if (!url.includes('/api/federation/plm/products/')) return false;
+    if (url.includes('/bom')) return false;
+    if (encodedId && !url.includes(`/api/federation/plm/products/${encodedId}`)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function waitForBomResponse(page, productId, bomDepth, bomEffectiveAt) {
+  const encodedProductId = encodeURIComponent(productId);
+  const encodedDepth = encodeURIComponent(bomDepth);
+  return page.waitForResponse((response) => {
+    const url = response.url();
+    if (!url.includes(`/api/federation/plm/products/${encodedProductId}/bom`)) {
+      return false;
+    }
+    if (!url.includes(`depth=${encodedDepth}`)) {
+      return false;
+    }
+    if (bomEffectiveAt && !url.includes('effective_at=')) {
+      return false;
+    }
+    return true;
+  });
+}
+
+async function resolveTableColumnIndex(section, headerLabel) {
+  const headers = section.locator('thead th');
+  const count = await headers.count();
+  const normalizedLabel = headerLabel.replace(/\s+/g, '');
+  for (let i = 0; i < count; i += 1) {
+    const text = ((await headers.nth(i).textContent()) || '').replace(/\s+/g, '');
+    if (!text) continue;
+    if (text === normalizedLabel || text.includes(normalizedLabel)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function firstLineText(value) {
+  const lines = String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length);
+  return lines[0] || '';
+}
+
 (async () => {
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -386,52 +576,83 @@ async function waitOptional(scope, text) {
   }, token);
 
   const page = await context.newPage();
+  let lastPlmResponse = null;
   const dialogMessages = [];
+  page.on('response', async (response) => {
+    const url = response.url() || '';
+    if (!url.includes('/api/federation/plm/')) return;
+    try {
+      const body = await response.text();
+      lastPlmResponse = {
+        url,
+        status: response.status(),
+        body: body.slice(0, 4000),
+      };
+    } catch (error) {
+      lastPlmResponse = {
+        url,
+        status: response.status(),
+        error: String(error),
+      };
+    }
+  });
   page.on('dialog', async (dialog) => {
     dialogMessages.push(dialog.message());
     await dialog.accept();
   });
-  await page.goto(url, { waitUntil: 'networkidle' });
-  await page.reload({ waitUntil: 'networkidle' });
+  try {
+    await page.goto(url, { waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'networkidle' });
 
-  const searchSection = page.locator('section:has-text("产品搜索")');
-  await page.fill('#plm-search-query', searchQuery);
-  await page.click('button:has-text("搜索")');
-  const rows = searchSection.locator('table tbody tr');
-  await rows.first().waitFor({ timeout: 60000 });
-  const rowCount = await rows.count();
-  let targetRow = null;
-  for (let i = 0; i < rowCount; i += 1) {
-    const text = await rows.nth(i).textContent();
-    if (text && text.includes(searchQuery)) {
-      targetRow = rows.nth(i);
-      break;
+    const searchSection = page.locator('section:has-text("产品搜索")');
+    await page.fill('#plm-search-query', searchQuery);
+    const searchRequestPromise = page.waitForResponse((response) => {
+      if (!response.url().includes('/api/federation/plm/query')) return false;
+      if (response.request().method() !== 'POST') return false;
+      const postData = response.request().postData() || '';
+      return postData.includes('"operation":"products"');
+    });
+    await page.click('button:has-text("搜索")');
+    await searchRequestPromise;
+    const rows = searchSection.locator('table tbody tr');
+    await rows.first().waitFor({ timeout: 60000 });
+    const rowCount = await rows.count();
+    let targetRow = null;
+    for (let i = 0; i < rowCount; i += 1) {
+      const text = await rows.nth(i).textContent();
+      if (text && text.includes(searchQuery)) {
+        targetRow = rows.nth(i);
+        break;
+      }
     }
-  }
-  if (!targetRow) {
-    throw new Error(`Search result row not found for query: ${searchQuery}`);
-  }
-  await targetRow.locator('button:has-text("使用")').click();
-  await waitOptional(searchSection, searchQuery);
+    if (!targetRow) {
+      throw new Error(`Search result row not found for query: ${searchQuery}`);
+    }
+    const selectRequestPromise = waitForProductResponse(page, productId);
+    await targetRow.locator('button:has-text("使用")').click();
+    await selectRequestPromise;
+    await waitOptional(searchSection, searchQuery);
 
-  const detailSection = page.locator('section:has-text("PLM 产品详情")');
-  const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
-  await partNumberCell.first().waitFor({ timeout: 60000 });
-  let itemNumberValue = ((await partNumberCell.first().textContent()) || '').trim();
-  if (!itemNumberValue || itemNumberValue === '-') {
-    itemNumberValue = (fallbackItemNumber || '').trim();
-  }
-  if (!itemNumberValue) {
-    throw new Error('Missing item number for item-number-only load.');
-  }
-  await detailSection.locator('#plm-product-id').fill('');
-  await detailSection.locator('#plm-item-number').fill(itemNumberValue);
-  await detailSection.locator('button:has-text("加载产品")').click();
-  await page.waitForFunction(() => {
-    const el = document.querySelector('#plm-product-id');
-    return el && el.value && el.value.trim().length > 0;
-  }, null, { timeout: 60000 });
-  await waitOptional(detailSection, itemNumberValue);
+    const detailSection = page.locator('section:has-text("PLM 产品详情")');
+    const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
+    await partNumberCell.first().waitFor({ timeout: 60000 });
+    let itemNumberValue = ((await partNumberCell.first().textContent()) || '').trim();
+    if (!itemNumberValue || itemNumberValue === '-') {
+      itemNumberValue = (fallbackItemNumber || '').trim();
+    }
+    if (!itemNumberValue) {
+      throw new Error('Missing item number for item-number-only load.');
+    }
+    await detailSection.locator('#plm-product-id').fill('');
+    await detailSection.locator('#plm-item-number').fill(itemNumberValue);
+    const loadRequestPromise = waitForProductResponse(page);
+    await detailSection.locator('button:has-text("加载产品")').click();
+    await loadRequestPromise;
+    await page.waitForFunction(() => {
+      const el = document.querySelector('#plm-product-id');
+      return el && el.value && el.value.trim().length > 0;
+    }, null, { timeout: 60000 });
+    await waitOptional(detailSection, itemNumberValue);
 
   const copyIdButton = detailSection.locator('button:has-text("复制 ID")');
   await copyIdButton.click();
@@ -470,19 +691,7 @@ async function waitOptional(scope, text) {
   if (bomEffectiveAt) {
     await bomSection.locator('#plm-bom-effective-at').fill(bomEffectiveAt);
   }
-  const bomRequestPromise = page.waitForResponse((response) => {
-    const url = response.url();
-    if (!url.includes(`/api/federation/plm/products/${encodeURIComponent(productId)}/bom`)) {
-      return false;
-    }
-    if (!url.includes(`depth=${encodeURIComponent(bomDepth)}`)) {
-      return false;
-    }
-    if (bomEffectiveAt && !url.includes('effective_at=')) {
-      return false;
-    }
-    return true;
-  });
+  const bomRequestPromise = waitForBomResponse(page, productId, bomDepth, bomEffectiveAt);
   await bomSection.locator('button:has-text("刷新 BOM")').click();
   await bomRequestPromise;
   const bomRows = bomSection.locator('table tbody tr');
@@ -499,8 +708,12 @@ async function waitOptional(scope, text) {
   }
   const findNumCell = bomTargetRow.locator('td').nth(5);
   const findNumText = ((await findNumCell.textContent()) || '').trim();
-  if (bomFindNum && !findNumText.includes(String(bomFindNum))) {
-    throw new Error(`BOM find_num mismatch. Expected ${bomFindNum}, got ${findNumText || '-'}`);
+  if (bomFindNum) {
+    const actualTokens = normalizeBomTokenList(findNumText);
+    const expectedTokens = normalizeBomTokenList(bomFindNum);
+    if (!includesNormalizedToken(actualTokens, expectedTokens)) {
+      throw new Error(`BOM find_num mismatch. Expected ${bomFindNum}, got ${findNumText || '-'}`);
+    }
   }
   if (bomRefdes) {
     const refdesCell = bomTargetRow.locator('td').nth(6);
@@ -509,7 +722,9 @@ async function waitOptional(scope, text) {
       throw new Error(`BOM refdes mismatch. Expected ${bomRefdes}, got ${refdesText || '-'}`);
     }
   }
-  const bomFilterValue = bomFindNum || bomChildId;
+  const bomFilterValue = bomFindNum
+    ? (normalizeBomTokenList(bomFindNum)[0] || bomFindNum)
+    : bomChildId;
   if (bomFilterValue) {
     await bomSection.locator('#plm-bom-filter').fill(String(bomFilterValue));
     const filteredRows = bomSection.locator('table tbody tr');
@@ -817,8 +1032,31 @@ async function waitOptional(scope, text) {
   }
 
   const whereUsedSection = page.locator('section:has(#plm-where-used-item-id)');
+  const whereUsedQuickSelect = whereUsedSection.locator('#plm-where-used-quick-pick');
+  if (await whereUsedQuickSelect.count()) {
+    const quickOptions = whereUsedQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await whereUsedSection.locator('#plm-where-used-item-id').fill('');
+        await whereUsedQuickSelect.selectOption(optionValue);
+        const quickValue = await whereUsedSection.locator('#plm-where-used-item-id').inputValue();
+        if (!quickValue.trim()) {
+          throw new Error('Where-used quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping where-used quick pick check; option value missing.');
+      }
+    } else {
+      console.warn('Skipping where-used quick pick check; no options.');
+    }
+  } else {
+    console.warn('Skipping where-used quick pick check; selector missing.');
+  }
   await whereUsedSection.locator('#plm-where-used-item-id').fill(whereUsedId);
+  const whereUsedRequestPromise = waitForPlmQueryResponse(page, 'where_used', { itemId: whereUsedId });
   await whereUsedSection.locator('button:has-text("查询")').click();
+  await whereUsedRequestPromise;
   await waitOptional(whereUsedSection.locator('table'), whereUsedExpect);
   const whereUsedPathHeader = whereUsedSection.locator('table thead th', { hasText: '路径 ID' });
   if ((await whereUsedPathHeader.count()) === 0) {
@@ -1057,9 +1295,54 @@ async function waitOptional(scope, text) {
   }
 
   const compareSection = page.locator('section:has-text("BOM 对比")');
+  const compareLeftQuickSelect = compareSection.locator('#plm-compare-left-quick-pick');
+  if (await compareLeftQuickSelect.count()) {
+    const compareOptions = compareLeftQuickSelect.locator('option');
+    if ((await compareOptions.count()) > 1) {
+      const optionValue = await compareOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await compareLeftQuickSelect.selectOption(optionValue);
+        const leftValue = await compareSection.locator('#plm-compare-left-id').inputValue();
+        if (!leftValue.trim()) {
+          throw new Error('Compare left quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping compare left quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping compare left quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping compare left quick pick; selector missing.');
+  }
+  const compareRightQuickSelect = compareSection.locator('#plm-compare-right-quick-pick');
+  if (await compareRightQuickSelect.count()) {
+    const compareOptions = compareRightQuickSelect.locator('option');
+    if ((await compareOptions.count()) > 1) {
+      const optionValue = await compareOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await compareRightQuickSelect.selectOption(optionValue);
+        const rightValue = await compareSection.locator('#plm-compare-right-id').inputValue();
+        if (!rightValue.trim()) {
+          throw new Error('Compare right quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping compare right quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping compare right quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping compare right quick pick; selector missing.');
+  }
   await compareSection.locator('#plm-compare-left-id').fill(compareLeftId);
   await compareSection.locator('#plm-compare-right-id').fill(compareRightId);
+  const compareRequestPromise = waitForPlmQueryResponse(page, 'bom_compare', {
+    leftId: compareLeftId,
+    rightId: compareRightId,
+  });
   await compareSection.locator('button:has-text("对比")').click();
+  await compareRequestPromise;
   await waitOptional(compareSection.locator('table'), compareExpect);
   const compareDetailSection = compareSection.locator('[data-compare-detail="true"]');
   const compareChangedRows = compareSection.locator('.compare-section:has(h3:has-text("变更")) table tbody tr');
@@ -1147,12 +1430,89 @@ async function waitOptional(scope, text) {
   }
 
   const substitutesSection = page.locator('section:has-text("替代件")');
+  const bomLineQuickSelect = substitutesSection.locator('#plm-bom-line-quick-pick');
+  if (await bomLineQuickSelect.count()) {
+    const quickOptions = bomLineQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await bomLineQuickSelect.selectOption(optionValue);
+        const lineValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
+        if (!lineValue.trim()) {
+          throw new Error('BOM line quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping BOM line quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping BOM line quick pick; no options. Falling back to BOM table.');
+      const bomSection = page.locator('section:has-text("BOM 结构")');
+      const bomFirstRow = bomSection.locator('table tbody tr').first();
+      if (await bomFirstRow.count()) {
+        const lineIdCell = bomFirstRow.locator('td[data-bom-line-id]').first();
+        let lineIdText = '';
+        if (await lineIdCell.count()) {
+          lineIdText =
+            ((await lineIdCell.getAttribute('data-bom-line-id')) || '').trim() ||
+            firstLineText(await lineIdCell.textContent());
+        } else {
+          const lineIdIndex = await resolveTableColumnIndex(bomSection, 'BOM 行 ID');
+          if (lineIdIndex >= 0) {
+            const fallbackCell = bomFirstRow.locator('td').nth(lineIdIndex);
+            lineIdText = firstLineText(await fallbackCell.textContent());
+          }
+        }
+        if (lineIdText) {
+          await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
+          const filledValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
+          if (!filledValue.trim()) {
+            throw new Error('BOM line fallback did not fill input.');
+          }
+        } else {
+          console.warn('Skipping BOM line fallback; line ID text missing.');
+        }
+      } else {
+        console.warn('Skipping BOM line fallback; BOM rows missing.');
+      }
+    }
+  } else {
+    console.warn('Skipping BOM line quick pick; selector missing.');
+  }
+  const substituteQuickSelect = substitutesSection.locator('#plm-substitute-quick-pick');
+  if (await substituteQuickSelect.count()) {
+    const quickOptions = substituteQuickSelect.locator('option');
+    if ((await quickOptions.count()) > 1) {
+      const optionValue = await quickOptions.nth(1).getAttribute('value');
+      if (optionValue) {
+        await substituteQuickSelect.selectOption(optionValue);
+        const substituteValue = await substitutesSection.locator('#plm-substitute-item-id').inputValue();
+        if (!substituteValue.trim()) {
+          throw new Error('Substitute quick pick did not fill input.');
+        }
+      } else {
+        console.warn('Skipping substitute quick pick; option value missing.');
+      }
+    } else {
+      console.warn('Skipping substitute quick pick; no options.');
+    }
+  } else {
+    console.warn('Skipping substitute quick pick; selector missing.');
+  }
   await substitutesSection.locator('#plm-bom-line-id').fill(bomLineId);
+  const substitutesRequestPromise = waitForPlmQueryResponse(page, 'substitutes', { bomLineId });
   await substitutesSection.locator('button:has-text("查询")').click();
+  await substitutesRequestPromise;
   await waitOptional(substitutesSection.locator('table'), substituteExpect);
 
+  const currentProductId = ((await detailSection.locator('#plm-product-id').inputValue()) || '').trim();
   const documentsSection = page.locator('section:has-text("关联文档")');
+  const documentsRequestPromise = waitForPlmQueryResponse(
+    page,
+    'documents',
+    currentProductId ? { productId: currentProductId } : undefined
+  );
   await documentsSection.locator('button:has-text("刷新文档")').click();
+  await documentsRequestPromise;
   const docRows = documentsSection.locator('table tbody tr');
   await docRows.first().waitFor({ timeout: 60000 });
   await waitOptional(documentsSection.locator('table'), docName);
@@ -1175,7 +1535,13 @@ async function waitOptional(scope, text) {
   }
 
   const approvalsSection = page.locator('section:has(h2:has-text("审批"))');
+  const approvalsRequestPromise = waitForPlmQueryResponse(
+    page,
+    'approvals',
+    currentProductId ? { productId: currentProductId } : undefined
+  );
   await approvalsSection.locator('button:has-text("刷新审批")').click();
+  await approvalsRequestPromise;
   const approvalRows = approvalsSection.locator('table tbody tr');
   await approvalRows.first().waitFor({ timeout: 60000 });
   await waitOptional(approvalsSection.locator('table'), approvalTitle);
@@ -1201,12 +1567,34 @@ async function waitOptional(scope, text) {
     fs.writeFileSync(itemNumberPath, JSON.stringify({ item_number: itemNumberValue }, null, 2));
   }
 
-  await page.waitForTimeout(1000);
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  await browser.close();
+    await page.waitForTimeout(1000);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await browser.close();
+  } catch (error) {
+    if (errorScreenshotPath) {
+      try {
+        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+      } catch (screenshotError) {
+        console.warn('Failed to capture error screenshot', screenshotError);
+      }
+    }
+    if (errorResponsePath) {
+      try {
+        fs.writeFileSync(
+          errorResponsePath,
+          JSON.stringify({ error: String(error), lastResponse: lastPlmResponse }, null, 2)
+        );
+      } catch (writeError) {
+        console.warn('Failed to write response snapshot', writeError);
+      }
+    }
+    await browser.close();
+    throw error;
+  }
 })();
 JS_EOF
 
+set +e
 NODE_PATH="$ROOT_DIR/node_modules" \
 METASHEET_TOKEN="$METASHEET_TOKEN" \
 PLM_SEARCH_QUERY="$PLM_SEARCH_QUERY" \
@@ -1230,9 +1618,18 @@ PLM_APPROVAL_TITLE="$PLM_APPROVAL_TITLE" \
 PLM_APPROVAL_PRODUCT_NUMBER="$PLM_APPROVAL_PRODUCT_NUMBER" \
 UI_BASE="$UI_BASE" \
 SCREENSHOT_PATH="$SCREENSHOT_PATH" \
+ERROR_SCREENSHOT_PATH="$ERROR_SCREENSHOT_PATH" \
+ERROR_RESPONSE_PATH="$ERROR_RESPONSE_PATH" \
 ITEM_NUMBER_PATH="$ITEM_NUMBER_JSON" \
 HEADLESS="$HEADLESS" \
 node /tmp/plm_ui_regression.js
+NODE_STATUS=$?
+set -e
+
+RUN_STATUS="pass"
+if [[ "$NODE_STATUS" -ne 0 ]]; then
+  RUN_STATUS="fail"
+fi
 
 ITEM_NUMBER_USED=""
 if [[ -s "$ITEM_NUMBER_JSON" ]]; then
@@ -1257,6 +1654,9 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - PLM_TENANT_ID: ${PLM_TENANT_ID}
 - PLM_ORG_ID: ${PLM_ORG_ID}
 - BOM tools source: ${PLM_BOM_TOOLS_JSON}
+- Status: ${RUN_STATUS}
+- Error screenshot: ${ERROR_SCREENSHOT_PATH}
+- Error response: ${ERROR_RESPONSE_PATH}
 
 ## Data
 - Search query: ${PLM_SEARCH_QUERY}
@@ -1298,6 +1698,11 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Screenshot: ${SCREENSHOT_PATH}
 - Item number artifact: ${ITEM_NUMBER_JSON}
 REPORT_EOF
+
+if [[ "$NODE_STATUS" -ne 0 ]]; then
+  echo "Regression failed. See ${ERROR_SCREENSHOT_PATH} and ${ERROR_RESPONSE_PATH}." >&2
+  exit "$NODE_STATUS"
+fi
 
 python3 - <<'PY_EOF' "$REPORT_PATH" "$SCREENSHOT_PATH"
 import sys
