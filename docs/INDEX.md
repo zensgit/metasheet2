@@ -47,6 +47,7 @@
 | [preprod-validation-report-template.md](./preprod-validation-report-template.md) | 预发验证报告模板 |
 | [preprod-validation-report-20260119.md](./preprod-validation-report-20260119.md) | 预发验证报告（dev进行中） |
 | [verification-attendance-dev-20260119.md](./verification-attendance-dev-20260119.md) | 考勤模块开发环境验证 |
+| [attendance-plugin-verification-report-20260120.md](./attendance-plugin-verification-report-20260120.md) | 考勤插件验证报告 (2026-01-20) |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |
@@ -63,6 +64,7 @@
 | 文档 | 说明 |
 |------|------|
 | [attendance-plugin-design-20260119.md](./attendance-plugin-design-20260119.md) | 考勤插件设计说明 |
+| [attendance-plugin-development-report-20260120.md](./attendance-plugin-development-report-20260120.md) | 考勤插件开发报告 (2026-01-20) |
 
 **Phase 1 验证明细（2025-12-21/22）**:
 - `docs/phase1-stabilization-summary-2025-12-21.md`
