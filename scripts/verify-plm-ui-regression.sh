@@ -465,6 +465,28 @@ function includesNormalizedToken(actualTokens, expectedTokens) {
   return expectedTokens.some((token) => actualTokens.includes(token));
 }
 
+async function resolveTableColumnIndex(section, headerLabel) {
+  const headers = section.locator('thead th');
+  const count = await headers.count();
+  const normalizedLabel = headerLabel.replace(/\s+/g, '');
+  for (let i = 0; i < count; i += 1) {
+    const text = ((await headers.nth(i).textContent()) || '').replace(/\s+/g, '');
+    if (!text) continue;
+    if (text === normalizedLabel || text.includes(normalizedLabel)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function firstLineText(value) {
+  const lines = String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length);
+  return lines[0] || '';
+}
+
 (async () => {
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
@@ -1320,16 +1342,21 @@ function includesNormalizedToken(actualTokens, expectedTokens) {
       const bomSection = page.locator('section:has-text("BOM 结构")');
       const bomFirstRow = bomSection.locator('table tbody tr').first();
       if (await bomFirstRow.count()) {
-        const lineIdCell = bomFirstRow.locator('td').nth(5).locator('.muted.mono');
-        const lineIdText = ((await lineIdCell.textContent()) || '').trim();
-        if (lineIdText) {
-          await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
+        const lineIdIndex = await resolveTableColumnIndex(bomSection, 'BOM 行 ID');
+        if (lineIdIndex < 0) {
+          console.warn('Skipping BOM line fallback; BOM 行 ID column missing.');
+        } else {
+          const lineIdCell = bomFirstRow.locator('td').nth(lineIdIndex);
+          const lineIdText = firstLineText(await lineIdCell.textContent());
+          if (lineIdText) {
+            await substitutesSection.locator('#plm-bom-line-id').fill(lineIdText);
           const filledValue = await substitutesSection.locator('#plm-bom-line-id').inputValue();
           if (!filledValue.trim()) {
             throw new Error('BOM line fallback did not fill input.');
           }
-        } else {
-          console.warn('Skipping BOM line fallback; line ID text missing.');
+          } else {
+            console.warn('Skipping BOM line fallback; line ID text missing.');
+          }
         }
       } else {
         console.warn('Skipping BOM line fallback; BOM rows missing.');
