@@ -1,0 +1,30 @@
+FROM node:20-slim AS builder
+
+WORKDIR /app
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY tsconfig.json ./
+COPY packages ./packages
+COPY plugins ./plugins
+COPY apps ./apps
+COPY scripts ./scripts
+
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @metasheet/core-backend build
+RUN pnpm prune --prod
+
+FROM node:20-slim AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=8900
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/core-backend/dist ./packages/core-backend/dist
+COPY --from=builder /app/packages/core-backend/package.json ./packages/core-backend/package.json
+COPY --from=builder /app/plugins ./plugins
+
+EXPOSE 8900
+CMD ["node", "packages/core-backend/dist/index.js"]
