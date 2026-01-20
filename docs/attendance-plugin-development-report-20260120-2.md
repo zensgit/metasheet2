@@ -41,3 +41,4 @@
 ## Tests & Scripts
 - Updated integration test: `packages/core-backend/tests/integration/attendance-plugin.test.ts`.
 - Enhanced UI smoke script: `scripts/verify-attendance-ui.mjs` to cover leave/overtime flows.
+- UI smoke runbook: start backend with `JWT_SECRET=dev-secret-key`, generate token via `JWT_SECRET=dev-secret-key node scripts/gen-dev-token.js`, and run with optional `UI_TIMEOUT`, `UI_DEBUG`, `UI_SCREENSHOT_DIR`.
