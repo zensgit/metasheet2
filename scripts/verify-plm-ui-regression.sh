@@ -124,6 +124,8 @@ fi
 
 mkdir -p "$OUTPUT_DIR" "$REPORT_DIR"
 SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}.png"
+ERROR_SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}-error.png"
+ERROR_RESPONSE_PATH="$OUTPUT_DIR/plm-ui-regression-last-response-${STAMP}.json"
 REPORT_PATH="$REPORT_DIR/verification-plm-ui-regression-${STAMP}.md"
 ITEM_NUMBER_JSON="$OUTPUT_DIR/plm-ui-regression-item-number-${STAMP}.json"
 
@@ -348,6 +350,23 @@ start_web() {
   exit 1
 }
 
+check_plm_health() {
+  local ok=0
+  local endpoints=("${PLM_BASE_URL}/api/v1/health" "${PLM_BASE_URL}/health")
+  for endpoint in "${endpoints[@]}"; do
+    if curl -fsS -H "x-tenant-id: ${PLM_TENANT_ID}" -H "x-org-id: ${PLM_ORG_ID}" "${endpoint}" >/dev/null 2>&1; then
+      ok=1
+      echo "PLM health OK: ${endpoint}"
+      break
+    fi
+  done
+  if [[ "$ok" -eq 0 ]]; then
+    echo "PLM health check failed for ${PLM_BASE_URL}." >&2
+    echo "Tried: ${endpoints[*]}" >&2
+    exit 1
+  fi
+}
+
 if ! curl -fsS "${API_BASE}/health" >/dev/null 2>&1; then
   if [[ "$AUTO_START" != "true" ]]; then
     echo "Core backend not running at ${API_BASE}." >&2
@@ -365,6 +384,8 @@ if ! curl -fsS "${WEB_BASE}/" >/dev/null 2>&1; then
   fi
   start_web
 fi
+
+check_plm_health
 
 cleanup() {
   if [[ -n "$WEB_PID" ]]; then
@@ -406,6 +427,7 @@ fi
 
 cat > /tmp/plm_ui_regression.js <<'JS_EOF'
 const { chromium } = require('@playwright/test');
+const fs = require('fs');
 
 const token = process.env.METASHEET_TOKEN;
 const searchQuery = process.env.PLM_SEARCH_QUERY;
@@ -430,6 +452,8 @@ const approvalProductNumber = process.env.PLM_APPROVAL_PRODUCT_NUMBER || '';
 const fallbackItemNumber = process.env.PLM_ITEM_NUMBER_ONLY || approvalProductNumber || searchQuery;
 const url = process.env.UI_BASE || 'http://localhost:8899/plm';
 const screenshotPath = process.env.SCREENSHOT_PATH;
+const errorScreenshotPath = process.env.ERROR_SCREENSHOT_PATH;
+const errorResponsePath = process.env.ERROR_RESPONSE_PATH;
 const itemNumberPath = process.env.ITEM_NUMBER_PATH;
 const headless = process.env.HEADLESS !== 'false';
 
@@ -490,6 +514,20 @@ function waitForPlmQueryResponse(page, operation, expectedFields) {
   );
 }
 
+function waitForProductResponse(page, expectedId) {
+  const encodedId = expectedId ? encodeURIComponent(expectedId) : null;
+  return page.waitForResponse((response) => {
+    if (response.request().method() !== 'GET') return false;
+    const url = response.url();
+    if (!url.includes('/api/federation/plm/products/')) return false;
+    if (url.includes('/bom')) return false;
+    if (encodedId && !url.includes(`/api/federation/plm/products/${encodedId}`)) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function waitForBomResponse(page, productId, bomDepth, bomEffectiveAt) {
   const encodedProductId = encodeURIComponent(productId);
   const encodedDepth = encodeURIComponent(bomDepth);
@@ -538,59 +576,83 @@ function firstLineText(value) {
   }, token);
 
   const page = await context.newPage();
+  let lastPlmResponse = null;
   const dialogMessages = [];
+  page.on('response', async (response) => {
+    const url = response.url() || '';
+    if (!url.includes('/api/federation/plm/')) return;
+    try {
+      const body = await response.text();
+      lastPlmResponse = {
+        url,
+        status: response.status(),
+        body: body.slice(0, 4000),
+      };
+    } catch (error) {
+      lastPlmResponse = {
+        url,
+        status: response.status(),
+        error: String(error),
+      };
+    }
+  });
   page.on('dialog', async (dialog) => {
     dialogMessages.push(dialog.message());
     await dialog.accept();
   });
-  await page.goto(url, { waitUntil: 'networkidle' });
-  await page.reload({ waitUntil: 'networkidle' });
+  try {
+    await page.goto(url, { waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'networkidle' });
 
-  const searchSection = page.locator('section:has-text("产品搜索")');
-  await page.fill('#plm-search-query', searchQuery);
-  const searchRequestPromise = page.waitForResponse((response) => {
-    if (!response.url().includes('/api/federation/plm/query')) return false;
-    if (response.request().method() !== 'POST') return false;
-    const postData = response.request().postData() || '';
-    return postData.includes('"operation":"products"');
-  });
-  await page.click('button:has-text("搜索")');
-  await searchRequestPromise;
-  const rows = searchSection.locator('table tbody tr');
-  await rows.first().waitFor({ timeout: 60000 });
-  const rowCount = await rows.count();
-  let targetRow = null;
-  for (let i = 0; i < rowCount; i += 1) {
-    const text = await rows.nth(i).textContent();
-    if (text && text.includes(searchQuery)) {
-      targetRow = rows.nth(i);
-      break;
+    const searchSection = page.locator('section:has-text("产品搜索")');
+    await page.fill('#plm-search-query', searchQuery);
+    const searchRequestPromise = page.waitForResponse((response) => {
+      if (!response.url().includes('/api/federation/plm/query')) return false;
+      if (response.request().method() !== 'POST') return false;
+      const postData = response.request().postData() || '';
+      return postData.includes('"operation":"products"');
+    });
+    await page.click('button:has-text("搜索")');
+    await searchRequestPromise;
+    const rows = searchSection.locator('table tbody tr');
+    await rows.first().waitFor({ timeout: 60000 });
+    const rowCount = await rows.count();
+    let targetRow = null;
+    for (let i = 0; i < rowCount; i += 1) {
+      const text = await rows.nth(i).textContent();
+      if (text && text.includes(searchQuery)) {
+        targetRow = rows.nth(i);
+        break;
+      }
     }
-  }
-  if (!targetRow) {
-    throw new Error(`Search result row not found for query: ${searchQuery}`);
-  }
-  await targetRow.locator('button:has-text("使用")').click();
-  await waitOptional(searchSection, searchQuery);
+    if (!targetRow) {
+      throw new Error(`Search result row not found for query: ${searchQuery}`);
+    }
+    const selectRequestPromise = waitForProductResponse(page, productId);
+    await targetRow.locator('button:has-text("使用")').click();
+    await selectRequestPromise;
+    await waitOptional(searchSection, searchQuery);
 
-  const detailSection = page.locator('section:has-text("PLM 产品详情")');
-  const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
-  await partNumberCell.first().waitFor({ timeout: 60000 });
-  let itemNumberValue = ((await partNumberCell.first().textContent()) || '').trim();
-  if (!itemNumberValue || itemNumberValue === '-') {
-    itemNumberValue = (fallbackItemNumber || '').trim();
-  }
-  if (!itemNumberValue) {
-    throw new Error('Missing item number for item-number-only load.');
-  }
-  await detailSection.locator('#plm-product-id').fill('');
-  await detailSection.locator('#plm-item-number').fill(itemNumberValue);
-  await detailSection.locator('button:has-text("加载产品")').click();
-  await page.waitForFunction(() => {
-    const el = document.querySelector('#plm-product-id');
-    return el && el.value && el.value.trim().length > 0;
-  }, null, { timeout: 60000 });
-  await waitOptional(detailSection, itemNumberValue);
+    const detailSection = page.locator('section:has-text("PLM 产品详情")');
+    const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
+    await partNumberCell.first().waitFor({ timeout: 60000 });
+    let itemNumberValue = ((await partNumberCell.first().textContent()) || '').trim();
+    if (!itemNumberValue || itemNumberValue === '-') {
+      itemNumberValue = (fallbackItemNumber || '').trim();
+    }
+    if (!itemNumberValue) {
+      throw new Error('Missing item number for item-number-only load.');
+    }
+    await detailSection.locator('#plm-product-id').fill('');
+    await detailSection.locator('#plm-item-number').fill(itemNumberValue);
+    const loadRequestPromise = waitForProductResponse(page);
+    await detailSection.locator('button:has-text("加载产品")').click();
+    await loadRequestPromise;
+    await page.waitForFunction(() => {
+      const el = document.querySelector('#plm-product-id');
+      return el && el.value && el.value.trim().length > 0;
+    }, null, { timeout: 60000 });
+    await waitOptional(detailSection, itemNumberValue);
 
   const copyIdButton = detailSection.locator('button:has-text("复制 ID")');
   await copyIdButton.click();
@@ -1492,12 +1554,34 @@ function firstLineText(value) {
     fs.writeFileSync(itemNumberPath, JSON.stringify({ item_number: itemNumberValue }, null, 2));
   }
 
-  await page.waitForTimeout(1000);
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  await browser.close();
+    await page.waitForTimeout(1000);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    await browser.close();
+  } catch (error) {
+    if (errorScreenshotPath) {
+      try {
+        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+      } catch (screenshotError) {
+        console.warn('Failed to capture error screenshot', screenshotError);
+      }
+    }
+    if (errorResponsePath) {
+      try {
+        fs.writeFileSync(
+          errorResponsePath,
+          JSON.stringify({ error: String(error), lastResponse: lastPlmResponse }, null, 2)
+        );
+      } catch (writeError) {
+        console.warn('Failed to write response snapshot', writeError);
+      }
+    }
+    await browser.close();
+    throw error;
+  }
 })();
 JS_EOF
 
+set +e
 NODE_PATH="$ROOT_DIR/node_modules" \
 METASHEET_TOKEN="$METASHEET_TOKEN" \
 PLM_SEARCH_QUERY="$PLM_SEARCH_QUERY" \
@@ -1521,9 +1605,18 @@ PLM_APPROVAL_TITLE="$PLM_APPROVAL_TITLE" \
 PLM_APPROVAL_PRODUCT_NUMBER="$PLM_APPROVAL_PRODUCT_NUMBER" \
 UI_BASE="$UI_BASE" \
 SCREENSHOT_PATH="$SCREENSHOT_PATH" \
+ERROR_SCREENSHOT_PATH="$ERROR_SCREENSHOT_PATH" \
+ERROR_RESPONSE_PATH="$ERROR_RESPONSE_PATH" \
 ITEM_NUMBER_PATH="$ITEM_NUMBER_JSON" \
 HEADLESS="$HEADLESS" \
 node /tmp/plm_ui_regression.js
+NODE_STATUS=$?
+set -e
+
+RUN_STATUS="pass"
+if [[ "$NODE_STATUS" -ne 0 ]]; then
+  RUN_STATUS="fail"
+fi
 
 ITEM_NUMBER_USED=""
 if [[ -s "$ITEM_NUMBER_JSON" ]]; then
@@ -1548,6 +1641,9 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - PLM_TENANT_ID: ${PLM_TENANT_ID}
 - PLM_ORG_ID: ${PLM_ORG_ID}
 - BOM tools source: ${PLM_BOM_TOOLS_JSON}
+- Status: ${RUN_STATUS}
+- Error screenshot: ${ERROR_SCREENSHOT_PATH}
+- Error response: ${ERROR_RESPONSE_PATH}
 
 ## Data
 - Search query: ${PLM_SEARCH_QUERY}
@@ -1589,6 +1685,11 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Screenshot: ${SCREENSHOT_PATH}
 - Item number artifact: ${ITEM_NUMBER_JSON}
 REPORT_EOF
+
+if [[ "$NODE_STATUS" -ne 0 ]]; then
+  echo "Regression failed. See ${ERROR_SCREENSHOT_PATH} and ${ERROR_RESPONSE_PATH}." >&2
+  exit "$NODE_STATUS"
+fi
 
 python3 - <<'PY_EOF' "$REPORT_PATH" "$SCREENSHOT_PATH"
 import sys
