@@ -67,6 +67,7 @@ UI_REPORT="$REPORT_DIR/verification-plm-ui-regression-${UI_STAMP}.md"
 UI_SCREENSHOT="$OUTPUT_DIR/plm-ui-regression-${UI_STAMP}.png"
 FULL_REPORT="$REPORT_DIR/verification-plm-ui-full-${RUN_STAMP}.md"
 FAILURE_BUNDLE_PATH="n/a"
+FULL_BUNDLE_ALWAYS="${FULL_BUNDLE_ALWAYS:-false}"
 BOM_RESULT="pass"
 UI_RESULT="skipped"
 RUN_STATUS="pass"
@@ -266,7 +267,7 @@ PY
   fi
 fi
 
-if [[ "$RUN_STATUS" != "pass" ]]; then
+if [[ "$RUN_STATUS" != "pass" || "$FULL_BUNDLE_ALWAYS" == "true" ]]; then
   FAILURE_BUNDLE_PATH="$OUTPUT_DIR/plm-ui-full-${RUN_STAMP}-bundle.tgz"
 fi
 
@@ -284,6 +285,7 @@ Run BOM tools seed + PLM UI regression in a single workflow.
 - BOM status: ${BOM_RESULT}
 - UI status: ${UI_RESULT}
 - Failure bundle: ${FAILURE_BUNDLE_PATH}
+- FULL_BUNDLE_ALWAYS: ${FULL_BUNDLE_ALWAYS}
 
 ## Steps
 1. BOM tools seed
@@ -300,7 +302,7 @@ REPORT_EOF
 
 echo "Report: $FULL_REPORT"
 
-if [[ "$RUN_STATUS" != "pass" ]]; then
+if [[ "$RUN_STATUS" != "pass" || "$FULL_BUNDLE_ALWAYS" == "true" ]]; then
   bundle_candidates=(
     "$BOM_JSON"
     "$BOM_MD"
@@ -322,6 +324,12 @@ if [[ "$RUN_STATUS" != "pass" ]]; then
   if [[ "${#bundle_files[@]}" -gt 0 ]]; then
     tar -czf "$FAILURE_BUNDLE_PATH" -C "$ROOT_DIR" "${bundle_files[@]}" >/dev/null 2>&1 || true
   fi
+  if [[ "$RUN_STATUS" == "pass" ]]; then
+    echo "PLM UI full regression bundle created: ${FAILURE_BUNDLE_PATH}."
+  fi
+fi
+
+if [[ "$RUN_STATUS" != "pass" ]]; then
   echo "PLM UI full regression failed. Bundle: ${FAILURE_BUNDLE_PATH}." >&2
   exit "$EXIT_STATUS"
 fi
