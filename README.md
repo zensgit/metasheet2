@@ -73,6 +73,18 @@ pnpm run dev
 
 **📘 Detailed Instructions**: See [Quick Start Guide](claudedocs/QUICK_START_GUIDE.md) for complete setup instructions
 
+### Docker Deployment (GHCR)
+
+For containerized deployment (build images on GitHub and run on your cloud host), see:
+
+- `docs/deployment/docker-ghcr.md`
+
+Local containers using the included compose file:
+
+```bash
+pnpm docker:dev
+```
+
 ### Environment Variables
 
 Key environment variables for observability (Phase 5):

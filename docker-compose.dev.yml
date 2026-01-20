@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: metasheet-dev-postgres
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: metasheet
+      POSTGRES_PASSWORD: metasheet
+      POSTGRES_DB: metasheet
+    volumes:
+      - metasheet-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metasheet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: metasheet-dev-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - metasheet-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: metasheet-dev-backend
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 8900
+      JWT_SECRET: dev-secret
+      DATABASE_URL: postgres://metasheet:metasheet@postgres:5432/metasheet
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8900:8900"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: metasheet-dev-web
+    ports:
+      - "8899:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  metasheet-postgres-data:
+    driver: local
+  metasheet-redis-data:
+    driver: local

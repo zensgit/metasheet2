@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: metasheet-postgres
+    env_file:
+      - ./docker/app.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - metasheet-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metasheet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: metasheet-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - metasheet-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-backend:${IMAGE_TAG:-latest}
+    container_name: metasheet-backend
+    env_file:
+      - ./docker/app.env
+    ports:
+      - "8900:8900"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-web:${IMAGE_TAG:-latest}
+    container_name: metasheet-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  metasheet-postgres-data:
+    driver: local
+  metasheet-redis-data:
+    driver: local
