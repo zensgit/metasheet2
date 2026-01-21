@@ -120,6 +120,9 @@ Entry points:
 - PLM UI integration:
   - Report: `docs/verification-plm-ui-20251231_1540.md`
   - Notes: includes substitutes verification and token retry behavior (query/select/insert/update/delete)
+  - Report: `docs/plm-ui-integration-report-20260120.md`
+  - Report: `docs/verification-plm-ui-full-20260120_235839.md`
+  - Report: `docs/verification-plm-ui-regression-20260120_235839.md`
 - PLM UI update (updatedAt fallback):
   - Report: `docs/verification-plm-ui-20260104_1220.md`
 - PLM UI verification (product + docs):
@@ -480,10 +483,6 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260120_200741.png`
   - Report: `docs/verification-plm-ui-regression-20260120_202035.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_202035.png`
-  - Report: `docs/verification-plm-ui-regression-20260120_204826.md`
-  - Artifact: `artifacts/plm-ui-regression-20260120_204826.png`
-  - Report: `docs/verification-plm-ui-regression-20260120_204129.md`
-  - Artifact: `artifacts/plm-ui-regression-20260120_204129.png`
   - Report: `docs/verification-plm-ui-regression-20260120_172726.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_172726.png`
   - Report: `docs/verification-plm-ui-regression-20260120_175542.md`
@@ -494,10 +493,8 @@ Entry points:
   - Artifact: `artifacts/plm-ui-regression-20260120_200741.png`
   - Report: `docs/verification-plm-ui-regression-20260120_202035.md`
   - Artifact: `artifacts/plm-ui-regression-20260120_202035.png`
-  - Report: `docs/verification-plm-ui-regression-20260120_204129.md`
-  - Artifact: `artifacts/plm-ui-regression-20260120_204129.png`
-  - Report: `docs/verification-plm-ui-regression-20260120_204826.md`
-  - Artifact: `artifacts/plm-ui-regression-20260120_204826.png`
+  - Report: `docs/verification-plm-ui-regression-20260120_235839.md`
+  - Artifact: `artifacts/plm-ui-regression-20260120_235839.png`
 - PLM CAD UI (metadata panel):
   - Report: `docs/verification-plm-cad-ui-20260110_1941.md`
   - Artifact: `artifacts/plm-cad-ui-20260110_1941.png`
@@ -524,6 +521,7 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260117_224348.md`
   - Report: `docs/verification-plm-ui-full-20260116_220926.md`
   - Report: `docs/verification-plm-ui-full-20260116_222036.md`
+  - Report: `docs/verification-plm-ui-full-20260120_235839.md`
   - Report: `docs/verification-plm-ui-full-20260116_222236.md`
   - Report: `docs/verification-plm-ui-full-20260116_223428.md`
   - Report: `docs/verification-plm-ui-full-20260116_224234.md`
@@ -538,8 +536,6 @@ Entry points:
   - Report: `docs/verification-plm-ui-full-20260120_193428.md`
   - Report: `docs/verification-plm-ui-full-20260120_200741.md`
   - Report: `docs/verification-plm-ui-full-20260120_202035.md`
-  - Report: `docs/verification-plm-ui-full-20260120_204826.md`
-  - Report: `docs/verification-plm-ui-full-20260120_204129.md`
 - PLM UI docs updates:
   - Report: `docs/verification-plm-ui-docs-20260120_200100.md`
 - PLM UI deep-link autoload:
