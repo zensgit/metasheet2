@@ -502,6 +502,8 @@ Entry points:
   - Artifact: `artifacts/plm-cad-ui-20260110_1946.png`
   - Report: `docs/verification-plm-cad-ui-20260121_090207.md`
   - Artifact: `artifacts/plm-cad-ui-20260121_090207.png`
+  - Report: `docs/verification-plm-cad-ui-20260121_134825.md`
+  - Artifact: `artifacts/plm-cad-ui-20260121_134825.png`
 - PLM UI full regression (BOM tools + UI regression):
   - Script: `scripts/verify-plm-ui-full.sh`
   - Report: `docs/verification-plm-ui-full-20260110_170622.md`
