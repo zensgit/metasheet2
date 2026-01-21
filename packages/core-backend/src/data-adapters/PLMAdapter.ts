@@ -1773,7 +1773,7 @@ export class PLMAdapter extends HTTPAdapter {
         component_id: String(child.id ?? relationship.related_id ?? ''),
         component_name: componentName,
         component_code: componentCode,
-        find_num: findNum,
+        find_num: findNum ? String(findNum) : undefined,
         refdes: refdes ? String(refdes) : undefined,
         quantity,
         unit,
