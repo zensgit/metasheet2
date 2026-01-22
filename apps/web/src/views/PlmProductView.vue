@@ -1569,6 +1569,9 @@
           </div>
         </label>
       </div>
+      <p v-if="!whereUsedItemId" class="hint">
+        提示：可从 BOM / 对比 / 替代件面板点击 Where-Used 自动填入。
+      </p>
       <p v-if="whereUsedError" class="status error">{{ whereUsedError }}</p>
       <div v-if="!whereUsed" class="empty">
         暂无 where-used 数据
@@ -1889,6 +1892,9 @@
           />
         </label>
       </div>
+      <p v-if="!compareLeftId && !compareRightId" class="hint">
+        提示：左右 ID 支持 item / version，可用“左/右=当前产品”或快选填入。
+      </p>
       <p v-if="compareSchemaLoading" class="status">对比字段加载中...</p>
       <p v-else-if="compareSchemaError" class="status error">{{ compareSchemaError }}（已回退默认字段）</p>
       <p v-if="compareError" class="status error">{{ compareError }}</p>
@@ -2315,6 +2321,7 @@
           />
         </label>
       </div>
+      <p v-if="!bomLineId" class="hint">提示：从 BOM 或 BOM 对比表中点击“替代件”可自动填入。</p>
       <div v-if="bomLineId" class="context-row">
         <span class="context-title">BOM 行</span>
         <span class="mono">{{ bomLineId }}</span>

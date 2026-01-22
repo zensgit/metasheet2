@@ -1435,7 +1435,7 @@ function firstLineText(value) {
     console.warn('Skipping compare detail validation; no compare rows available.');
   }
 
-  const substitutesSection = page.locator('section:has-text("替代件")');
+  const substitutesSection = page.locator('section:has(h2:has-text("替代件"))');
   const bomLineQuickSelect = substitutesSection.locator('#plm-bom-line-quick-pick');
   if (await bomLineQuickSelect.count()) {
     const quickOptions = bomLineQuickSelect.locator('option');
