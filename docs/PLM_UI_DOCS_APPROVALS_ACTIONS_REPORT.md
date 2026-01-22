@@ -24,5 +24,5 @@ Improve document/approval usability with quick actions and dedicated deep links.
 - Approval history panel shows stage/status/comment/user timestamps for the selected ECO.
 
 ## Verification
-- UI regression: `docs/verification-plm-ui-regression-20260122_164425.md`
+- UI regression: `docs/verification-plm-ui-regression-20260122_222956.md`
 - Screenshot: `artifacts/plm-ui-regression-20260116_113652.png`
