@@ -1168,6 +1168,15 @@
             placeholder="标题/发起人/产品"
           />
         </label>
+        <label for="plm-approvals-comment">
+          审批备注
+          <input
+            id="plm-approvals-comment"
+            v-model.trim="approvalComment"
+            name="plmApprovalsComment"
+            placeholder="拒绝必填，可选用于通过"
+          />
+        </label>
         <label for="plm-approvals-sort">
           排序
           <select id="plm-approvals-sort" v-model="approvalSortKey" name="plmApprovalsSort">
@@ -1198,6 +1207,8 @@
           <span>{{ col.label }}</span>
         </label>
       </div>
+      <p v-if="approvalActionError" class="status error">{{ approvalActionError }}</p>
+      <p v-else-if="approvalActionStatus" class="status">{{ approvalActionStatus }}</p>
       <p v-if="approvalsError" class="status error">{{ approvalsError }}</p>
       <div v-if="!approvals.length" class="empty">
         暂无审批数据
@@ -1245,11 +1256,84 @@
               <div class="inline-actions">
                 <button class="btn ghost mini" @click="applyProductFromApproval(approval)">切换产品</button>
                 <button class="btn ghost mini" @click="copyApprovalId(approval)">复制 ID</button>
+                <button class="btn ghost mini" @click="loadApprovalHistory(approval)">记录</button>
+                <button
+                  v-if="isApprovalPending(approval)"
+                  class="btn ghost mini"
+                  :disabled="approvalActingId === getApprovalId(approval) || getApprovalId(approval) === '-'"
+                  @click="approveApproval(approval)"
+                >
+                  通过
+                </button>
+                <button
+                  v-if="isApprovalPending(approval)"
+                  class="btn ghost mini"
+                  :disabled="approvalActingId === getApprovalId(approval) || getApprovalId(approval) === '-'"
+                  @click="rejectApproval(approval)"
+                >
+                  拒绝
+                </button>
               </div>
             </td>
           </tr>
         </tbody>
       </table>
+      <div class="compare-detail" data-approval-history="true">
+        <div class="compare-detail-header">
+          <h3>审批记录</h3>
+          <div class="compare-detail-actions">
+            <span v-if="approvalHistoryLabel" class="muted mono">{{ approvalHistoryLabel }}</span>
+            <button
+              class="btn ghost mini"
+              :disabled="!approvalHistoryFor || approvalHistoryLoading"
+              @click="loadApprovalHistory()"
+            >
+              刷新记录
+            </button>
+            <button class="btn ghost mini" :disabled="!approvalHistoryFor" @click="clearApprovalHistory">
+              清空
+            </button>
+          </div>
+        </div>
+        <p v-if="approvalHistoryError" class="status error">{{ approvalHistoryError }}</p>
+        <div v-if="!approvalHistoryFor" class="empty">选择审批记录查看详情</div>
+        <div v-else-if="approvalHistoryLoading" class="status">审批记录加载中...</div>
+        <div v-else-if="!approvalHistoryRows.length" class="empty">暂无审批记录</div>
+        <table v-else class="data-table compact">
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>阶段</th>
+              <th>审批类型</th>
+              <th>角色</th>
+              <th>用户</th>
+              <th>备注</th>
+              <th>批准时间</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in approvalHistoryRows" :key="entry.id">
+              <td>
+                <span class="tag" :class="approvalStatusClass(getApprovalHistoryStatus(entry))">
+                  {{ getApprovalHistoryStatus(entry) }}
+                </span>
+              </td>
+              <td class="mono">{{ getApprovalHistoryStage(entry) }}</td>
+              <td>{{ getApprovalHistoryType(entry) }}</td>
+              <td>{{ getApprovalHistoryRole(entry) }}</td>
+              <td class="mono">{{ getApprovalHistoryUser(entry) }}</td>
+              <td>{{ getApprovalHistoryComment(entry) }}</td>
+              <td>{{ formatTime(getApprovalHistoryApprovedAt(entry)) }}</td>
+              <td>{{ formatTime(getApprovalHistoryCreatedAt(entry)) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <details v-if="approvalHistoryFor" class="json-block">
+          <summary>原始数据</summary>
+          <pre>{{ formatJson(approvalHistory) }}</pre>
+        </details>
+      </div>
       <details class="field-map">
         <summary>字段对照清单</summary>
         <table class="data-table">
@@ -2798,6 +2882,15 @@ const approvals = ref<any[]>([])
 const approvalsStatus = ref<'all' | 'pending' | 'approved' | 'rejected'>(DEFAULT_APPROVAL_STATUS)
 const approvalsLoading = ref(false)
 const approvalsError = ref('')
+const approvalComment = ref('')
+const approvalActionStatus = ref('')
+const approvalActionError = ref('')
+const approvalActingId = ref('')
+const approvalHistoryFor = ref('')
+const approvalHistoryLabel = ref('')
+const approvalHistory = ref<any[]>([])
+const approvalHistoryLoading = ref(false)
+const approvalHistoryError = ref('')
 const approvalsFilter = ref('')
 const approvalSortKey = ref<'created' | 'title' | 'status' | 'requester' | 'product'>('created')
 const approvalSortDir = ref<'asc' | 'desc'>('desc')
@@ -4054,6 +4147,17 @@ const approvalsSorted = computed(() =>
   sortRows(approvalsFiltered.value, approvalSortKey.value, approvalSortDir.value, approvalSortConfig)
 )
 
+const approvalHistoryRows = computed(() => {
+  const rows = approvalHistory.value || []
+  const sorted = [...rows]
+  sorted.sort((left: any, right: any) => {
+    const leftTime = Date.parse(getApprovalHistoryApprovedAt(left) || getApprovalHistoryCreatedAt(left) || '')
+    const rightTime = Date.parse(getApprovalHistoryApprovedAt(right) || getApprovalHistoryCreatedAt(right) || '')
+    return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime)
+  })
+  return sorted
+})
+
 const compareSummary = computed(() => bomCompare.value?.summary || {})
 const compareAdded = computed(() => bomCompare.value?.added || [])
 const compareRemoved = computed(() => bomCompare.value?.removed || [])
@@ -4292,6 +4396,15 @@ function resetAll() {
   approvalSortKey.value = 'created'
   approvalSortDir.value = 'desc'
   approvalsError.value = ''
+  approvalComment.value = ''
+  approvalActionStatus.value = ''
+  approvalActionError.value = ''
+  approvalActingId.value = ''
+  approvalHistoryFor.value = ''
+  approvalHistoryLabel.value = ''
+  approvalHistory.value = []
+  approvalHistoryError.value = ''
+  approvalHistoryLoading.value = false
   approvalsFilter.value = ''
   approvalColumns.value = { ...defaultApprovalColumns }
   whereUsedItemId.value = ''
@@ -6053,6 +6166,161 @@ async function copyApprovalId(entry: Record<string, any>) {
     return
   }
   setDeepLinkMessage(`已复制审批 ID：${value}`)
+}
+
+async function loadApprovalHistory(entry?: Record<string, any>) {
+  const approvalId = entry ? getApprovalId(entry) : approvalHistoryFor.value
+  if (!approvalId || approvalId === '-') {
+    approvalHistoryError.value = '缺少审批 ID'
+    return
+  }
+  approvalHistoryFor.value = approvalId
+  approvalHistoryLabel.value = entry
+    ? `${getApprovalTitle(entry)} (${approvalId})`
+    : approvalHistoryLabel.value || approvalId
+  approvalHistoryLoading.value = true
+  approvalHistoryError.value = ''
+  try {
+    const result = await apiPost<{ ok: boolean; data?: { items?: any[] }; error?: { message?: string } }>(
+      '/api/federation/plm/query',
+      {
+        operation: 'approval_history',
+        approvalId,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '加载审批记录失败')
+    }
+    approvalHistory.value = result.data?.items || []
+  } catch (error: any) {
+    handleAuthError(error)
+    approvalHistoryError.value = error?.message || '加载审批记录失败'
+  } finally {
+    approvalHistoryLoading.value = false
+  }
+}
+
+function clearApprovalHistory() {
+  approvalHistoryFor.value = ''
+  approvalHistoryLabel.value = ''
+  approvalHistory.value = []
+  approvalHistoryError.value = ''
+  approvalHistoryLoading.value = false
+}
+
+function isApprovalPending(entry: Record<string, any>): boolean {
+  return getApprovalStatus(entry).toLowerCase() === 'pending'
+}
+
+async function approveApproval(entry: Record<string, any>) {
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    approvalActionError.value = '审批记录缺少 ID'
+    return
+  }
+  approvalActingId.value = approvalId
+  approvalActionStatus.value = ''
+  approvalActionError.value = ''
+  try {
+    const comment = approvalComment.value.trim()
+    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'approval_approve',
+        approvalId,
+        comment: comment || undefined,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '审批通过失败')
+    }
+    approvalActionStatus.value = `已通过审批 ${approvalId}`
+    approvalComment.value = ''
+    await loadApprovals()
+    if (approvalHistoryFor.value === approvalId) {
+      await loadApprovalHistory()
+    }
+  } catch (error: any) {
+    handleAuthError(error)
+    approvalActionError.value = error?.message || '审批通过失败'
+  } finally {
+    approvalActingId.value = ''
+  }
+}
+
+async function rejectApproval(entry: Record<string, any>) {
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    approvalActionError.value = '审批记录缺少 ID'
+    return
+  }
+  const comment = approvalComment.value.trim()
+  if (!comment) {
+    approvalActionError.value = '拒绝需要填写原因'
+    return
+  }
+  if (!window.confirm(`确认拒绝审批 ${approvalId}？`)) {
+    return
+  }
+  approvalActingId.value = approvalId
+  approvalActionStatus.value = ''
+  approvalActionError.value = ''
+  try {
+    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'approval_reject',
+        approvalId,
+        comment,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '审批拒绝失败')
+    }
+    approvalActionStatus.value = `已拒绝审批 ${approvalId}`
+    approvalComment.value = ''
+    await loadApprovals()
+    if (approvalHistoryFor.value === approvalId) {
+      await loadApprovalHistory()
+    }
+  } catch (error: any) {
+    handleAuthError(error)
+    approvalActionError.value = error?.message || '审批拒绝失败'
+  } finally {
+    approvalActingId.value = ''
+  }
+}
+
+function getApprovalHistoryStatus(entry: Record<string, any>): string {
+  return normalizeText(entry?.status || entry?.state, '-')
+}
+
+function getApprovalHistoryStage(entry: Record<string, any>): string {
+  return normalizeText(entry?.stage_id || entry?.stageId, '-')
+}
+
+function getApprovalHistoryType(entry: Record<string, any>): string {
+  return normalizeText(entry?.approval_type || entry?.approvalType, '-')
+}
+
+function getApprovalHistoryRole(entry: Record<string, any>): string {
+  return normalizeText(entry?.required_role || entry?.requiredRole, '-')
+}
+
+function getApprovalHistoryUser(entry: Record<string, any>): string {
+  return normalizeText(entry?.user_id || entry?.userId, '-')
+}
+
+function getApprovalHistoryComment(entry: Record<string, any>): string {
+  return normalizeText(entry?.comment, '-')
+}
+
+function getApprovalHistoryApprovedAt(entry: Record<string, any>): string {
+  return normalizeText(entry?.approved_at || entry?.approvedAt, '')
+}
+
+function getApprovalHistoryCreatedAt(entry: Record<string, any>): string {
+  return normalizeText(entry?.created_at || entry?.createdAt, '')
 }
 
 function getSubstitutePart(entry: Record<string, any>): Record<string, any> {
