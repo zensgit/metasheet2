@@ -85,6 +85,7 @@ node /tmp/attendance-enable.js
 ## Findings
 - `/api/plugins` reports attendance plugin as `active`, but `/api/attendance/settings` returns `{"ok":false,"error":"Not enabled"}`.
 - Attendance UI route is reachable and shows plugin status loading state, but enablement is still pending.
+- Playwright visited `/admin/plugins` and `/settings/plugins` but did not find an Attendance enable toggle (no plugin row detected).
 - Role display mismatch observed: admin at DB, token shows user; may need app-level refresh.
 
 ## Artifacts
