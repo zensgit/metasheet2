@@ -37,7 +37,7 @@ services:
     env_file:
       - ./docker/app.env
     ports:
-      - "8900:8900"
+      - "127.0.0.1:8900:8900"
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,7 +49,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-web:${IMAGE_TAG:-latest}
     container_name: metasheet-web
     ports:
-      - "8080:80"
+      - "8081:80"
     depends_on:
       - backend
     restart: unless-stopped

@@ -1523,7 +1523,7 @@ export function federationRouter(injector?: Injector): Router {
           Date.now() - startTime
         )
 
-        const mockData = getMockPLMData(operation, productId, pagination, {
+        const mockData = getMockPLMData(operation, productId, { limit: pagination?.limit ?? 10, offset: pagination?.offset ?? 0 }, {
           itemId,
           bomLineId,
           fileId,
@@ -1970,7 +1970,7 @@ export function federationRouter(injector?: Injector): Router {
         }
 
         // Mock Athena query response
-        const mockData = getMockAthenaData(operation, documentId, query, pagination)
+        const mockData = getMockAthenaData(operation, documentId, query, { limit: pagination?.limit ?? 10, offset: pagination?.offset ?? 0 })
 
         return res.json({
           ok: true,
