@@ -93,6 +93,7 @@
 | **[admin-api-security.md](./admin-api-security.md)** | 安全实施 ⚠️ 生产必读 |
 | [production-readiness-checklist.md](./production-readiness-checklist.md) | 上线清单 |
 | [next-steps-guide.md](./next-steps-guide.md) | 后续步骤 |
+| [operations/deploy-ghcr.md](./operations/deploy-ghcr.md) | GHCR 部署脚本说明 |
 
 **相关脚本**:
 - `scripts/setup-monitoring.sh` - 一键监控栈部署
