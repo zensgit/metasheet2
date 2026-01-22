@@ -46,6 +46,10 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.16.1 --activate
           pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

@@ -40,6 +40,10 @@ jobs:
           run_install: false
       - name: Show pnpm version
         run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
 
       - name: Get pnpm store directory
         id: pnpm-cache

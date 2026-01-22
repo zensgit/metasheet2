@@ -43,5 +43,8 @@ jobs:
           version: 10.16.1
           run_install: false
       - run: pnpm -v
+      - run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @metasheet/core-backend test:cache
