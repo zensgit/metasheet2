@@ -1889,8 +1889,6 @@ export class PLMAdapter extends HTTPAdapter {
       )
       const createdAt = this.toIsoString(relationship.created_on ?? child.created_on) || new Date().toISOString()
       const updatedAt = this.toIsoString(relationship.modified_on ?? child.modified_on) || new Date().toISOString()
-      const findNum = relationship.find_num ?? relProps.find_num
-      const refdes = relationship.refdes ?? relProps.refdes
 
       items.push({
         id: String(relationship.id ?? `${rootId}:${child.id}`),
@@ -1899,8 +1897,6 @@ export class PLMAdapter extends HTTPAdapter {
         component_id: String(child.id ?? relationship.related_id ?? ''),
         component_name: componentName,
         component_code: componentCode,
-        find_num: findNum ? String(findNum) : undefined,
-        refdes: refdes ? String(refdes) : undefined,
         quantity,
         unit,
         find_num: findNum ?? undefined,
