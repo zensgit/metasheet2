@@ -40,8 +40,8 @@ jobs:
           node-version: '20'
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.16.1
           run_install: false
+      - run: pnpm -v
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @metasheet/core-backend test:cache
-
