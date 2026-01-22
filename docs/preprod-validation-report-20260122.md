@@ -6,13 +6,13 @@
 - Environment: pre-prod
 - Release tag / commit: 92ae0962
 - Scope: login, grid, attendance plugin load, plugin list, API token
-- Status: pass with notes (attendance UI disabled)
+- Status: pass with notes (attendance feature flag disabled)
 
 ## Build and Deploy
 - Build ID: TBD
 - Image or artifact: ghcr.io/zensgit/metasheet2-backend:latest
 - Deploy window: TBD
-- Feature flags: attendance UI disabled by default
+- Feature flags: attendance feature flag disabled in API responses
 - Migration plan: TBD
 - Rollback plan: TBD
 
@@ -66,7 +66,7 @@
 
 ### UI and UX
 - [x] Grid save / refresh
-- [ ] Attendance UI (disabled)
+- [ ] Attendance UI (feature flag not enabled)
 - [ ] Mobile layout
 
 ### Regression
@@ -75,11 +75,14 @@
 
 ## Commands Executed
 ```sh
-# Manual validation via live environment (no local commands recorded)
+# Manual validation via live environment (token not recorded)
+curl http://142.171.239.56:8081/api/plugins
+curl http://142.171.239.56:8081/api/attendance/settings
 ```
 
 ## Findings
-- Attendance plugin loads and API responds, but returns "Not enabled" until UI toggle is enabled.
+- `/api/plugins` reports attendance plugin as `active`, but `/api/attendance/settings` returns `{"ok":false,"error":"Not enabled"}`.
+- Attendance UI remains unavailable until the feature flag or server-side enablement is set.
 - Role display mismatch observed: admin at DB, token shows user; may need app-level refresh.
 
 ## Artifacts
