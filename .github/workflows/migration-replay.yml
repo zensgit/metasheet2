@@ -8,6 +8,8 @@ on:
       - 'feat/**'
     paths:
       - 'packages/core-backend/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/migration-replay.yml'
 
 jobs:

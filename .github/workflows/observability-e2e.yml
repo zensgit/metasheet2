@@ -10,6 +10,8 @@ on:
     paths:
       - 'packages/core-backend/**'
       - 'apps/web/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/observability-e2e.yml'
   push:
     branches:
@@ -17,6 +19,8 @@ on:
     paths:
       - 'packages/core-backend/**'
       - 'apps/web/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/observability-e2e.yml'
 
 jobs:

@@ -11,6 +11,8 @@ on:
       - 'packages/core-backend/src/guards/**'
       - 'packages/core-backend/src/routes/admin-routes.ts'
       - 'scripts/test-safety-guard-e2e.sh'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/safety-guard-e2e.yml'
   push:
     branches:
@@ -19,6 +21,8 @@ on:
       - 'packages/core-backend/src/guards/**'
       - 'packages/core-backend/src/routes/admin-routes.ts'
       - 'scripts/test-safety-guard-e2e.sh'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/safety-guard-e2e.yml'
 
 jobs:

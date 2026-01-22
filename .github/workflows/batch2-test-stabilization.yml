@@ -8,12 +8,16 @@ on:
       - 'plugins/plugin-telemetry-otel/**'
       - 'packages/core-backend/**'
       - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   pull_request:
     branches: [ main ]
     paths:
       - 'plugins/plugin-telemetry-otel/**'
       - 'packages/core-backend/**'
       - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
 
 jobs:
   telemetry-plugin:

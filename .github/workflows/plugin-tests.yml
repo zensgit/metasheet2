@@ -7,6 +7,8 @@ on:
       - 'packages/core-backend/**'
       - 'plugins/**'
       - 'apps/web/src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/plugin-tests.yml'
   pull_request:
     branches: [main, develop]
@@ -14,6 +16,8 @@ on:
       - 'packages/core-backend/**'
       - 'plugins/**'
       - 'apps/web/src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/plugin-tests.yml'
 
 jobs:
