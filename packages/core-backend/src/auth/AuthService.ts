@@ -9,6 +9,7 @@ import * as crypto from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
+import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 
 export interface User {
   id: string
@@ -122,7 +123,7 @@ export class AuthService {
         return null
       }
 
-      return user
+      return this.sanitizeUser(user)
     } catch (error) {
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
@@ -186,8 +187,8 @@ export class AuthService {
       await this.updateLastLogin(user.id)
 
       // 返回用户信息（不包含密码hash）
-      const { password_hash: _password_hash, ...safeUser } = user
-      return { user: safeUser as User, token }
+      const safeUser = this.sanitizeUser(user)
+      return { user: safeUser, token }
     } catch (error) {
       this.logger.error('Login error', error instanceof Error ? error : undefined)
       return null
@@ -246,12 +247,13 @@ export class AuthService {
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
+          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
           return {
             id: row.id,
             email: row.email,
             name: row.name,
-            role: row.role,
-            permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            role: resolved.role,
+            permissions: resolved.permissions,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -296,12 +298,13 @@ export class AuthService {
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
+          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
           return {
             id: row.id,
             email: row.email,
             name: row.name,
-            role: row.role,
-            permissions: Array.isArray(row.permissions) ? row.permissions : [],
+            role: resolved.role,
+            permissions: resolved.permissions,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -315,6 +318,35 @@ export class AuthService {
       this.logger.error('Get user by email error', error instanceof Error ? error : undefined)
       return null
     }
+  }
+
+  private sanitizeUser(user: User & { password_hash?: string }): User {
+    const { password_hash: _password_hash, ...safeUser } = user
+    return safeUser as User
+  }
+
+  private async resolveRbacProfile(
+    userId: string,
+    fallbackRole: string,
+    fallbackPermissions: string[]
+  ): Promise<{ role: string; permissions: string[] }> {
+    let role = fallbackRole
+    let permissions = fallbackPermissions
+
+    try {
+      const admin = await isRbacAdmin(userId)
+      if (admin) role = 'admin'
+    } catch (error) {
+      this.logger.warn('RBAC role lookup failed', error instanceof Error ? error : undefined)
+    }
+
+    try {
+      permissions = await listUserPermissions(userId)
+    } catch (error) {
+      this.logger.warn('RBAC permission lookup failed', error instanceof Error ? error : undefined)
+    }
+
+    return { role, permissions }
   }
 
   /**
