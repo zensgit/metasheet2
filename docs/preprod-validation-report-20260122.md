@@ -106,6 +106,11 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - RBAC mismatch persists: DB `user_roles` shows `admin@metasheet.app` has role `admin`, but `/api/auth/me` returns role `user` with limited permissions.
 - Security finding: `/api/auth/me` response includes `password_hash` field; should be removed or redacted.
 
+## Update (2026-01-23, later)
+- Auth fix deployed (backend image digest `sha256:36ef28a7febdfecb2e4badf03b5aaae71e5d3f75d515ba09990c0783a992c958`).
+- `/api/auth/me` now returns `role: admin` for `admin@metasheet.app`.
+- `password_hash` no longer present in `/api/auth/me` response.
+
 ## Artifacts
 - Logs: N/A
 - Screenshots: `/tmp/attendance-page.png`
