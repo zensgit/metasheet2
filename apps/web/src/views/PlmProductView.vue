@@ -1292,9 +1292,10 @@
         <table v-else class="data-table">
           <thead>
             <tr>
+              <th>替代件编号</th>
+              <th>替代件名称</th>
               <th>替代件 ID</th>
-              <th>名称</th>
-              <th>原件 ID</th>
+              <th>BOM 行 ID</th>
               <th>优先级</th>
               <th>备注</th>
               <th>关系 ID</th>
@@ -1303,12 +1304,13 @@
           </thead>
           <tbody>
             <tr v-for="entry in substitutesRows" :key="entry.id">
-              <td>{{ entry.substitute_part?.id || entry.substitute_part?.item_number || entry.id }}</td>
-              <td>{{ entry.substitute_part?.name || '-' }}</td>
-              <td>{{ entry.part?.id || entry.part?.item_number || '-' }}</td>
-              <td>{{ entry.rank ?? entry.relationship?.properties?.rank ?? '-' }}</td>
-              <td>{{ entry.relationship?.properties?.note || entry.relationship?.properties?.comment || '-' }}</td>
-              <td>{{ entry.relationship?.id || '-' }}</td>
+              <td>{{ getSubstitutePartNumber(entry) || '-' }}</td>
+              <td>{{ getSubstitutePartName(entry) || '-' }}</td>
+              <td class="mono">{{ getSubstitutePartId(entry) || '-' }}</td>
+              <td class="mono">{{ getSubstituteLineId(entry) || '-' }}</td>
+              <td>{{ getSubstituteProp(entry, 'rank', ['priority']) }}</td>
+              <td>{{ getSubstituteProp(entry, 'note', ['comment']) }}</td>
+              <td class="mono">{{ entry.relationship?.id || '-' }}</td>
               <td>
                 <button class="btn ghost" :disabled="substitutesMutating" @click="removeSubstitute(entry)">
                   删除
@@ -1855,11 +1857,10 @@ const substitutesRows = computed(() => {
   if (!needle) return list
   return list.filter((entry: any) => {
     const tokens = [
-      entry?.substitute_part?.item_number,
-      entry?.substitute_part?.name,
-      entry?.part?.item_number,
-      entry?.part?.name,
-      entry?.id,
+      getSubstitutePartNumber(entry),
+      getSubstitutePartName(entry),
+      getSubstitutePartId(entry),
+      getSubstituteLineId(entry),
       entry?.relationship?.id,
     ]
     return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
@@ -2813,6 +2814,46 @@ function getWhereUsedRefdes(entry: Record<string, any>): string {
   return getWhereUsedLineValue(entry, 'refdes', ['ref_des'])
 }
 
+function getSubstitutePart(entry: Record<string, any> | null): Record<string, any> | null {
+  if (!entry) return null
+  return entry.substitute_part || entry.part || null
+}
+
+function getSubstitutePartId(entry: Record<string, any> | null): string {
+  const part = getSubstitutePart(entry)
+  return part?.id || entry?.relationship?.related_id || entry?.id || ''
+}
+
+function getSubstitutePartNumber(entry: Record<string, any> | null): string {
+  const part = getSubstitutePart(entry)
+  return part?.item_number || part?.itemNumber || part?.code || ''
+}
+
+function getSubstitutePartName(entry: Record<string, any> | null): string {
+  const part = getSubstitutePart(entry)
+  return part?.name || ''
+}
+
+function getSubstituteLineId(entry: Record<string, any> | null): string {
+  return entry?.relationship?.source_id || substitutes.value?.bom_line_id || ''
+}
+
+function getSubstituteProp(
+  entry: Record<string, any> | null,
+  key: string,
+  fallbackKeys: string[] = []
+): string {
+  const relProps = entry?.relationship?.properties || {}
+  const candidates = [
+    entry?.[key],
+    relProps?.[key],
+    ...fallbackKeys.map((alt) => relProps?.[alt]),
+  ]
+  const value = candidates.find((item) => item !== undefined && item !== null && item !== '')
+  if (value === undefined || value === null || value === '') return '-'
+  return String(value)
+}
+
 function normalizeEffectiveAt(value: string): string | undefined {
   if (!value) return undefined
   const date = new Date(value)
@@ -3646,17 +3687,14 @@ function exportBomCompareCsv() {
 }
 
 function exportSubstitutesCsv() {
-  const headers = ['bom_line_id', 'substitute_id', 'substitute_number', 'substitute_name', 'part_id', 'part_number', 'part_name', 'rank', 'note', 'relationship_id']
+  const headers = ['bom_line_id', 'substitute_id', 'substitute_number', 'substitute_name', 'rank', 'note', 'relationship_id']
   const rows = substitutesRows.value.map((entry: any) => [
-    String(substitutes.value?.bom_line_id || ''),
-    String(entry.substitute_part?.id || entry.id || ''),
-    String(entry.substitute_part?.item_number || ''),
-    String(entry.substitute_part?.name || ''),
-    String(entry.part?.id || ''),
-    String(entry.part?.item_number || ''),
-    String(entry.part?.name || ''),
-    String(entry.rank ?? entry.relationship?.properties?.rank ?? ''),
-    String(entry.relationship?.properties?.note || entry.relationship?.properties?.comment || ''),
+    String(getSubstituteLineId(entry) || ''),
+    String(getSubstitutePartId(entry) || ''),
+    String(getSubstitutePartNumber(entry) || ''),
+    String(getSubstitutePartName(entry) || ''),
+    String(getSubstituteProp(entry, 'rank', ['priority']) || ''),
+    String(getSubstituteProp(entry, 'note', ['comment']) || ''),
     String(entry.relationship?.id || ''),
   ])
   downloadCsv(`plm-substitutes-${Date.now()}.csv`, headers, rows)
