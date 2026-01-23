@@ -1399,9 +1399,10 @@ const defaultDocumentColumns = {
   preview: true,
   download: true,
   cad: true,
-}
-const documentColumns = ref({ ...defaultDocumentColumns })
-const documentColumnOptions = [
+} as const
+type DocumentColumnKey = keyof typeof defaultDocumentColumns
+const documentColumns = ref<Record<DocumentColumnKey, boolean>>({ ...defaultDocumentColumns })
+const documentColumnOptions: Array<{ key: DocumentColumnKey; label: string }> = [
   { key: 'type', label: '类型' },
   { key: 'revision', label: '版本' },
   { key: 'role', label: '角色' },
@@ -1449,9 +1450,10 @@ const defaultApprovalColumns = {
   requester: true,
   created: true,
   product: true,
-}
-const approvalColumns = ref({ ...defaultApprovalColumns })
-const approvalColumnOptions = [
+} as const
+type ApprovalColumnKey = keyof typeof defaultApprovalColumns
+const approvalColumns = ref<Record<ApprovalColumnKey, boolean>>({ ...defaultApprovalColumns })
+const approvalColumnOptions: Array<{ key: ApprovalColumnKey; label: string }> = [
   { key: 'status', label: '状态' },
   { key: 'type', label: '类型' },
   { key: 'requester', label: '发起人' },
@@ -1792,7 +1794,7 @@ const documentsFiltered = computed(() => {
   })
 })
 
-const documentSortConfig = {
+const documentSortConfig: SortConfig = {
   name: { type: 'string', accessor: (doc: any) => doc.name },
   type: { type: 'string', accessor: (doc: any) => doc.document_type },
   revision: { type: 'string', accessor: (doc: any) => doc.engineering_revision },
@@ -1824,7 +1826,7 @@ const approvalsFiltered = computed(() => {
   })
 })
 
-const approvalSortConfig = {
+const approvalSortConfig: SortConfig = {
   created: { type: 'date', accessor: (entry: any) => entry.created_at },
   title: { type: 'string', accessor: (entry: any) => entry.title },
   status: { type: 'string', accessor: (entry: any) => entry.status },
@@ -2820,8 +2822,25 @@ function parseQueryNumber(value?: string): number | undefined {
   return parsed
 }
 
+function normalizeQueryRecord(
+  query: Record<string, unknown>
+): Record<string, string | string[] | undefined> {
+  const normalized: Record<string, string | string[] | undefined> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (typeof value === 'string') {
+      normalized[key] = value
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      normalized[key] = String(value)
+    } else if (Array.isArray(value)) {
+      const items = value.filter((item) => typeof item === 'string') as string[]
+      if (items.length > 0) normalized[key] = items
+    }
+  }
+  return normalized
+}
+
 function syncQueryParams(patch: Record<string, string | number | boolean | undefined>) {
-  const nextQuery: Record<string, string | string[] | undefined> = { ...route.query }
+  const nextQuery = normalizeQueryRecord(route.query as Record<string, unknown>)
   let changed = false
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined || value === null || value === '') {
@@ -2995,10 +3014,11 @@ function mergeImportedPresets(entries: unknown[]): number {
   const existing = new Map(customDeepLinkPresets.value.map((entry) => [entry.key, entry]))
   let importedCount = 0
   for (const entry of entries) {
-    const label = String(entry?.label || '').trim()
-    const panels = sanitizePresetPanels(entry?.panels)
+    const candidate = entry as Record<string, unknown> | null
+    const label = String(candidate?.label || '').trim()
+    const panels = sanitizePresetPanels(candidate?.panels)
     if (!label || !panels.length) continue
-    const key = String(entry?.key || '').trim() || `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const key = String(candidate?.key || '').trim() || `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`
     if (existing.has(key)) continue
     existing.set(key, { key, label, panels })
     importedCount += 1
@@ -3375,7 +3395,7 @@ type SortDirection = 'asc' | 'desc'
 type SortType = 'string' | 'number' | 'date'
 type SortConfig = Record<string, { type: SortType; accessor: (row: any) => unknown }>
 
-function loadStoredColumns(key: string, defaults: Record<string, boolean>): Record<string, boolean> {
+function loadStoredColumns<T extends Record<string, boolean>>(key: string, defaults: T): T {
   if (typeof localStorage === 'undefined') {
     return { ...defaults }
   }
@@ -3384,13 +3404,13 @@ function loadStoredColumns(key: string, defaults: Record<string, boolean>): Reco
     if (!raw) return { ...defaults }
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return { ...defaults }
-    const merged = { ...defaults }
+    const merged: Record<string, boolean> = { ...defaults }
     for (const [column, enabled] of Object.entries(parsed as Record<string, unknown>)) {
       if (column in defaults) {
         merged[column] = Boolean(enabled)
       }
     }
-    return merged
+    return merged as T
   } catch (_err) {
     return { ...defaults }
   }

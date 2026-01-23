@@ -9,6 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@univerjs/core": "^0.5.4",
+    "@univerjs/design": "^0.5.4",
+    "@univerjs/presets": "^0.5.4",
+    "@univerjs/sheets": "^0.5.4",
+    "@univerjs/sheets-ui": "^0.5.4",
+    "@univerjs/ui": "^0.5.4",
     "@element-plus/icons-vue": "^2.3.2",
     "axios": "^1.8.0",
     "element-plus": "^2.10.1",

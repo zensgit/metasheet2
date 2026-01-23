@@ -5,8 +5,8 @@
         <span class="brand-text">MetaSheet</span>
       </div>
       <div class="nav-links">
-        <router-link to="/grid" class="nav-link">Grid</router-link>
-        <router-link to="/kanban" class="nav-link">Kanban</router-link>
+        <router-link :to="{ path: '/grid', query: { source: 'meta' } }" class="nav-link">Grid</router-link>
+        <router-link :to="{ path: '/kanban', query: { source: 'meta' } }" class="nav-link">Kanban</router-link>
         <router-link to="/calendar" class="nav-link">Calendar</router-link>
         <router-link to="/gallery" class="nav-link">Gallery</router-link>
         <router-link to="/form" class="nav-link">Form</router-link>

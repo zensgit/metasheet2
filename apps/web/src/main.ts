@@ -15,24 +15,38 @@ import GalleryView from './views/GalleryView.vue'
 import FormView from './views/FormView.vue'
 import PlmProductView from './views/PlmProductView.vue'
 import AttendanceView from './views/AttendanceView.vue'
+import UniverGridPOC from './views/UniverGridPOC.vue'
+import UniverKanbanPOC from './views/UniverKanbanPOC.vue'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
-    redirect: '/grid'
+    redirect: { path: '/grid', query: { source: 'meta' } }
   },
   {
     path: '/grid',
     name: 'grid',
-    component: GridView,
+    component: UniverGridPOC,
     meta: { title: 'Grid View' }
+  },
+  {
+    path: '/grid-legacy',
+    name: 'grid-legacy',
+    component: GridView,
+    meta: { title: 'Grid (Legacy)' }
   },
   {
     path: '/kanban',
     name: 'kanban',
-    component: KanbanView,
+    component: UniverKanbanPOC,
     meta: { title: 'Kanban View' }
+  },
+  {
+    path: '/kanban-legacy',
+    name: 'kanban-legacy',
+    component: KanbanView,
+    meta: { title: 'Kanban (Legacy)' }
   },
   {
     path: '/calendar',

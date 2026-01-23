@@ -343,6 +343,9 @@ const demoHint = computed(() => {
   }
 })
 
+const DEFAULT_SOURCE = 'meta'
+const DEFAULT_SHEET_ID = 'univer_demo_meta'
+
 type OverlayState =
   | {
       kind: 'select'
@@ -564,6 +567,85 @@ function toStr(value: unknown): string | undefined {
   return undefined
 }
 
+function normalizeQueryRecord(
+  query: Record<string, unknown>
+): Record<string, string | string[] | undefined> {
+  const normalized: Record<string, string | string[] | undefined> = {}
+  for (const [key, value] of Object.entries(query)) {
+    if (typeof value === 'string') {
+      normalized[key] = value
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      normalized[key] = String(value)
+    } else if (Array.isArray(value)) {
+      const items = value.filter((item) => typeof item === 'string') as string[]
+      if (items.length > 0) normalized[key] = items
+    }
+  }
+  return normalized
+}
+
+async function resolveInitialSheetId(): Promise<string | null> {
+  try {
+    const res = await apiFetch('/api/univer-meta/sheets')
+    const json = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      data?: { sheets?: Array<{ id?: string; name?: string }> }
+    }
+    if (res.ok && json.ok && Array.isArray(json.data?.sheets) && json.data!.sheets!.length > 0) {
+      const first = json.data!.sheets!.find((s) => typeof s.id === 'string' && s.id.trim().length > 0)
+      if (first?.id) return first.id
+    }
+  } catch {
+    // ignore and fallback
+  }
+
+  try {
+    const res = await apiFetch('/api/univer-meta/sheets', {
+      method: 'POST',
+      body: JSON.stringify({ name: '默认表', description: '自动创建的默认表' }),
+    })
+    const json = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      data?: { sheet?: { id?: string } }
+    }
+    if (res.ok && json.ok && json.data?.sheet?.id) {
+      return json.data.sheet.id
+    }
+  } catch {
+    // ignore and fallback
+  }
+
+  return DEFAULT_SHEET_ID
+}
+
+async function ensureMetaQueryDefaults(): Promise<void> {
+  const nextQuery = normalizeQueryRecord(route.query as Record<string, unknown>)
+  const source = toStr(nextQuery.source)?.toLowerCase()
+  let changed = false
+
+  if (!source) {
+    nextQuery.source = DEFAULT_SOURCE
+    changed = true
+  }
+
+  const effectiveSource = (toStr(nextQuery.source) || DEFAULT_SOURCE).toLowerCase()
+  if (effectiveSource === 'meta') {
+    const sheetId = toStr(nextQuery.sheetId)
+    const viewId = toStr(nextQuery.viewId)
+    if (!sheetId && !viewId) {
+      const resolved = await resolveInitialSheetId()
+      if (resolved) {
+        nextQuery.sheetId = resolved
+        changed = true
+      }
+    }
+  }
+
+  if (changed) {
+    await router.replace({ query: nextQuery }).catch(() => null)
+  }
+}
+
 function queueCommentSummaryRefresh(recordIds?: string[]) {
   if (commentSummaryTimer) window.clearTimeout(commentSummaryTimer)
   commentSummaryTimer = window.setTimeout(() => {
@@ -738,7 +820,7 @@ async function loadAvailableViews(sheetId: string) {
 
 function handleViewChange() {
   const nextViewId = selectedViewId.value
-  const query = { ...route.query }
+  const query = normalizeQueryRecord(route.query as Record<string, unknown>)
   if (nextViewId) {
     query.viewId = nextViewId
     delete query.sheetId
@@ -1500,7 +1582,7 @@ const loadMore = async () => {
 
     suppressChanges = true
     if (sheetRowCount < nextRowCount) {
-      sheet.setRowCount(nextRowCount)
+      ;(sheet as any).setRowCount(nextRowCount)
       sheetRowCount = nextRowCount
     }
 
@@ -1544,7 +1626,7 @@ const loadMore = async () => {
         baseOffset.value += evictCount
         loadedCount.value = mapping.rowIndexToRecordId.length
         const windowRowCount = resolveWindowRowCount(total, loadedCount.value, windowing)
-        sheet.setRowCount(windowRowCount)
+        ;(sheet as any).setRowCount(windowRowCount)
         sheetRowCount = windowRowCount
       }
     }
@@ -1575,17 +1657,19 @@ const loadMore = async () => {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await ensureMetaQueryDefaults()
+
   const hostEl = containerRef.value
   if (!hostEl) return
 
   const embed = createUniverEmbed(
     hostEl,
-    (mountEl) =>
+    (mountEl: HTMLElement) =>
       createUniver({
         theme: defaultTheme,
         locale: LocaleType.ZH_CN,
-        locales: buildUniverSheetsLocales(),
+        locales: buildUniverSheetsLocales() as any,
         presets: [UniverSheetsCorePreset({ container: mountEl })],
       }),
     { exposeToWindow: true },
@@ -1612,13 +1696,13 @@ onMounted(() => {
     getViewId: () => viewId.value,
     getApiPrefix,
     mapping,
-    setStatus: (text, kind) => {
+    setStatus: (text: string, kind: 'ok' | 'error') => {
       statusText.value = text
       statusKind.value = kind
     },
     onRecords: applyComputedRecords,
     onRelatedRecords: handleRelatedRecords,
-    onConflict: (serverVersion) => {
+    onConflict: (serverVersion: number) => {
       hasConflict.value = true
       conflictServerVersion.value = serverVersion
       statusText.value = 'Version conflict'
@@ -1627,7 +1711,8 @@ onMounted(() => {
     flushDelayMs: 120,
   })
 
-  const disposable = univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event) => {
+  const univer = univerAPI!
+  const disposable = univer.addEvent(univer.Event.CommandExecuted, (event: any) => {
     if (event.id === SetSelectionsOperation.id) {
       const selections = (event.params as { selections?: Array<{ primary?: { actualRow?: number; actualColumn?: number } | null }> })
         ?.selections
