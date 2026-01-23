@@ -111,6 +111,14 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - `/api/auth/me` now returns `role: admin` for `admin@metasheet.app`.
 - `password_hash` no longer present in `/api/auth/me` response.
 
+## UI Validation (2026-01-23)
+- Automated UI run with Playwright (token injected to localStorage).
+- Attendance page loads and refresh succeeds.
+- Check-in succeeds (`Check in recorded.`).
+- Adjustment request submitted and appears in recent list.
+- Admin console accessible (no forbidden message).
+- Screenshot: `/tmp/attendance-ui.png`
+
 ## Artifacts
 - Logs: N/A
 - Screenshots: `/tmp/attendance-page.png`
