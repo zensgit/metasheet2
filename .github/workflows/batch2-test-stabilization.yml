@@ -1,6 +1,7 @@
 name: Batch2 Test Stabilization
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feat/batch2-test-stabilization
