@@ -80,12 +80,16 @@
 curl http://142.171.239.56:8081/api/plugins
 curl http://142.171.239.56:8081/api/attendance/settings
 node /tmp/attendance-enable.js
+# Server-local validation (backend direct)
+curl http://127.0.0.1:8900/api/auth/login
+curl http://127.0.0.1:8900/api/attendance/settings
 ```
 
 ## Findings
 - `/api/plugins` reports attendance plugin as `active`, but `/api/attendance/settings` returns `{"ok":false,"error":"Not enabled"}`.
 - Attendance UI route is reachable and shows plugin status loading state, but enablement is still pending.
 - Playwright visited `/admin/plugins` and `/settings/plugins` but did not find an Attendance enable toggle (no plugin row detected).
+- Direct backend call on `127.0.0.1:8900` also returns `404 {"ok":false,"error":"Not enabled"}`, so this is not a proxy-only issue.
 - Role display mismatch observed: admin at DB, token shows user; may need app-level refresh.
 
 ## Artifacts
