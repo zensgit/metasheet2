@@ -713,6 +713,33 @@
           </select>
         </label>
       </div>
+      <div class="form-grid compact">
+        <label for="plm-approvals-batch-comment">
+          批量备注
+          <input
+            id="plm-approvals-batch-comment"
+            v-model.trim="approvalsBatchComment"
+            name="plmApprovalsBatchComment"
+            placeholder="拒绝时必填"
+          />
+        </label>
+        <div class="inline-actions">
+          <button
+            class="btn"
+            :disabled="approvalsBatchLoading || !approvalsSelectedIds.length"
+            @click="batchApprovals('approve')"
+          >
+            {{ approvalsBatchLoading ? '处理中...' : '批量通过' }}
+          </button>
+          <button
+            class="btn ghost"
+            :disabled="approvalsBatchLoading || !approvalsSelectedIds.length"
+            @click="batchApprovals('reject')"
+          >
+            批量拒绝
+          </button>
+        </div>
+      </div>
       <div class="toggle-grid">
         <span class="toggle-label">显示列</span>
         <label v-for="col in approvalColumnOptions" :key="col.key" class="checkbox-field" :for="`plm-approval-column-${col.key}`">
@@ -726,11 +753,15 @@
         </label>
       </div>
       <p v-if="approvalsError" class="status error">{{ approvalsError }}</p>
+      <p v-if="approvalsBatchStatus" class="status">{{ approvalsBatchStatus }}</p>
+      <p v-if="approvalsBatchError" class="status error">{{ approvalsBatchError }}</p>
       <div v-if="!approvals.length" class="empty">
         暂无审批数据
         <span class="empty-hint">（可调整状态筛选或创建 ECO 流程）</span>
       </div>
-      <p v-else class="status">共 {{ approvals.length }} 条，展示 {{ approvalsSorted.length }} 条</p>
+      <p v-else class="status">
+        共 {{ approvals.length }} 条，展示 {{ approvalsSorted.length }} 条，已选 {{ approvalsSelectedIds.length }} 条
+      </p>
       <div v-if="approvals.length && !approvalsSorted.length" class="empty">
         暂无匹配项
         <span class="empty-hint">（可清空过滤条件）</span>
@@ -738,6 +769,14 @@
       <table v-else class="data-table">
         <thead>
           <tr>
+            <th>
+              <input
+                type="checkbox"
+                :checked="approvalsAllSelected"
+                @change="toggleApprovalSelectAll"
+                aria-label="全选审批"
+              />
+            </th>
             <th>标题</th>
             <th v-if="approvalColumns.status">状态</th>
             <th v-if="approvalColumns.type">类型</th>
@@ -748,6 +787,14 @@
         </thead>
         <tbody>
           <tr v-for="approval in approvalsSorted" :key="approval.id">
+            <td>
+              <input
+                type="checkbox"
+                :checked="Boolean(approvalsSelected[approval.id])"
+                @change="toggleApprovalSelection(approval.id, ($event.target as HTMLInputElement).checked)"
+                :aria-label="`选择审批 ${approval.title || approval.id}`"
+              />
+            </td>
             <td>{{ approval.title }}</td>
             <td v-if="approvalColumns.status">
               <span class="tag" :class="approvalStatusClass(approval.status)">{{ approval.status }}</span>
@@ -2408,7 +2455,7 @@ const builtInDeepLinkPresets = [
   { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
   { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
   { key: 'eco-impact', label: 'ECO 影响 + Redline', panels: ['eco-impact', 'eco-bom'] },
-  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes', 'eco-impact', 'eco-bom'] },
+  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'eco-impact', 'eco-bom', 'substitutes'] },
 ]
 const deepLinkPresets = computed(() => [...builtInDeepLinkPresets, ...customDeepLinkPresets.value])
 
@@ -3865,22 +3912,6 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('documentFilter', documentFilter.value)
   append('approvalsStatus', approvalsStatus.value !== DEFAULT_APPROVAL_STATUS ? approvalsStatus.value : undefined)
   append('approvalsFilter', approvalsFilter.value)
-  append('ecoImpactId', ecoImpactId.value)
-  append('ecoImpactMaxLevels', ecoImpactMaxLevels.value !== DEFAULT_ECO_MAX_LEVELS ? ecoImpactMaxLevels.value : undefined)
-  append('ecoImpactCompareMode', ecoImpactCompareMode.value)
-  append('ecoImpactIncludeChildFields', ecoImpactIncludeChildFields.value !== true ? ecoImpactIncludeChildFields.value : undefined)
-  append('ecoImpactIncludeFiles', ecoImpactIncludeFiles.value !== false ? ecoImpactIncludeFiles.value : undefined)
-  append('ecoImpactIncludeBomDiff', ecoImpactIncludeBomDiff.value !== true ? ecoImpactIncludeBomDiff.value : undefined)
-  append('ecoImpactIncludeVersionDiff', ecoImpactIncludeVersionDiff.value !== true ? ecoImpactIncludeVersionDiff.value : undefined)
-  append('ecoImpactEffectiveAt', ecoImpactEffectiveAt.value)
-  append('ecoImpactRelationshipProps', ecoImpactRelationshipProps.value !== DEFAULT_COMPARE_REL_PROPS ? ecoImpactRelationshipProps.value : undefined)
-  append('ecoBomDiffId', ecoBomDiffId.value)
-  append('ecoBomDiffMaxLevels', ecoBomDiffMaxLevels.value !== DEFAULT_ECO_MAX_LEVELS ? ecoBomDiffMaxLevels.value : undefined)
-  append('ecoBomDiffCompareMode', ecoBomDiffCompareMode.value)
-  append('ecoBomDiffIncludeChildFields', ecoBomDiffIncludeChildFields.value !== true ? ecoBomDiffIncludeChildFields.value : undefined)
-  append('ecoBomDiffEffectiveAt', ecoBomDiffEffectiveAt.value)
-  append('ecoBomDiffRelationshipProps', ecoBomDiffRelationshipProps.value !== DEFAULT_COMPARE_REL_PROPS ? ecoBomDiffRelationshipProps.value : undefined)
-  append('ecoBomDiffFilter', ecoBomDiffFilter.value)
   append('whereUsedItemId', whereUsedItemId.value)
   append('whereUsedRecursive', whereUsedRecursive.value !== true ? whereUsedRecursive.value : undefined)
   append('whereUsedMaxLevels', whereUsedMaxLevels.value !== DEFAULT_WHERE_USED_MAX_LEVELS ? whereUsedMaxLevels.value : undefined)
@@ -3908,8 +3939,6 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
       Boolean(cadFileId.value) ||
       Boolean(whereUsedItemId.value) ||
       Boolean(compareLeftId.value && compareRightId.value) ||
-      Boolean(ecoImpactId.value) ||
-      Boolean(ecoBomDiffId.value) ||
       Boolean(bomLineId.value) ||
       Boolean(searchQuery.value)
     if (shouldAutoload) {
