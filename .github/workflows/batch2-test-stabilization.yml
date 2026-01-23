@@ -1,6 +1,7 @@
 name: Batch2 Test Stabilization
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - feat/batch2-test-stabilization
@@ -8,12 +9,16 @@ on:
       - 'plugins/plugin-telemetry-otel/**'
       - 'packages/core-backend/**'
       - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   pull_request:
     branches: [ main ]
     paths:
       - 'plugins/plugin-telemetry-otel/**'
       - 'packages/core-backend/**'
       - 'packages/claudedocs/BATCH2_DESIGN_REPORT.md'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
 
 jobs:
   telemetry-plugin:
@@ -40,8 +45,11 @@ jobs:
           node-version: '20'
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.16.1
           run_install: false
+      - run: pnpm -v
+      - run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @metasheet/core-backend test:cache
-

@@ -15,6 +15,7 @@
         <router-link to="/plm" class="nav-link">PLM</router-link>
       </div>
     </nav>
+    <!-- CI trigger: lockfile update -->
     <main class="app-main">
       <router-view />
     </main>

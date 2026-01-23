@@ -64,6 +64,19 @@ export interface ApprovalRecord {
   created_at: string
 }
 
+export interface ApprovalHistoryEntry {
+  id: string
+  eco_id?: string
+  stage_id?: string
+  approval_type?: string
+  required_role?: string
+  user_id?: string | number | null
+  status?: string
+  comment?: string | null
+  approved_at?: string | null
+  created_at?: string | null
+}
+
 export interface ApprovalQueryOptions {
   status?: string
   limit?: number
@@ -106,6 +119,8 @@ export interface BOMItem {
   refdes?: string
   quantity: number
   unit: string
+  find_num?: string | number
+  refdes?: string | string[]
   level: number
   sequence: number
   created_at: string
@@ -441,6 +456,19 @@ interface YuantusEco {
   requester_name?: string
   created_at?: string
   updated_at?: string
+}
+
+interface YuantusEcoApprovalRecord {
+  id?: string
+  eco_id?: string
+  stage_id?: string
+  approval_type?: string
+  required_role?: string
+  user_id?: string | number | null
+  status?: string
+  comment?: string | null
+  approved_at?: string | null
+  created_at?: string | null
 }
 
 export class PLMAdapter extends HTTPAdapter {
@@ -1125,6 +1153,21 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  private mapYuantusApprovalHistory(entry: YuantusEcoApprovalRecord): ApprovalHistoryEntry {
+    return {
+      id: String(entry.id || ''),
+      eco_id: entry.eco_id ? String(entry.eco_id) : undefined,
+      stage_id: entry.stage_id ? String(entry.stage_id) : undefined,
+      approval_type: entry.approval_type,
+      required_role: entry.required_role,
+      user_id: entry.user_id ?? null,
+      status: entry.status,
+      comment: entry.comment ?? null,
+      approved_at: entry.approved_at ?? null,
+      created_at: entry.created_at ?? null,
+    }
+  }
+
   private async fetchYuantusFileMetadata(fileId: string): Promise<YuantusFileMetadata | null> {
     if (!fileId) return null
     try {
@@ -1142,17 +1185,25 @@ export class PLMAdapter extends HTTPAdapter {
     }
     if (this.apiMode === 'yuantus') {
       const itemType = options?.itemType || this.yuantusItemType
-      const result = await this.select<YuantusItem>('/api/v1/aml/apply', {
-        method: 'POST',
-        data: { type: itemType, action: 'get', id },
-      })
-      if (result.error) {
-        throw result.error
+      let item: YuantusItem | undefined
+      try {
+        const result = await this.select<YuantusItem>('/api/v1/aml/apply', {
+          method: 'POST',
+          data: { type: itemType, action: 'get', id },
+        })
+        if (result.error) {
+          throw result.error
+        }
+        const rawItem = result.data[0]
+        item = rawItem && typeof rawItem === 'object' && 'items' in rawItem && Array.isArray((rawItem as { items?: YuantusItem[] }).items)
+          ? (rawItem as { items?: YuantusItem[] }).items?.[0]
+          : (rawItem as YuantusItem | undefined)
+      } catch (error) {
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status && ![400, 404, 422].includes(status)) {
+          throw error
+        }
       }
-      const rawItem = result.data[0]
-      const item = rawItem && typeof rawItem === 'object' && 'items' in rawItem && Array.isArray((rawItem as { items?: YuantusItem[] }).items)
-        ? (rawItem as { items?: YuantusItem[] }).items?.[0]
-        : (rawItem as YuantusItem | undefined)
       if (!item) {
         const hit = await this.fetchYuantusSearchHit(id, itemType)
         if (!hit) return null
@@ -1243,10 +1294,7 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
-  async getProductBOM(
-    productId: string,
-    options?: { depth?: number; effectiveAt?: string }
-  ): Promise<QueryResult<BOMItem>> {
+  async getProductBOM(productId: string, options?: { depth?: number; effectiveAt?: string }): Promise<QueryResult<BOMItem>> {
     if (this.mockMode) {
       return {
         data: [
@@ -1258,10 +1306,10 @@ export class PLMAdapter extends HTTPAdapter {
     }
     if (this.apiMode === 'yuantus') {
       const params: Record<string, unknown> = {}
-      if (typeof options?.depth === 'number') {
-        params.depth = options.depth
-      }
+      const depth = typeof options?.depth === 'number' ? options.depth : 2
+      params.depth = depth
       if (options?.effectiveAt) {
+        params.effective_at = options.effectiveAt
         params.effective_date = options.effectiveAt
       }
       const result = await this.query<YuantusBomNode>(`/api/v1/bom/${productId}/tree`, [params])
@@ -1336,6 +1384,82 @@ export class PLMAdapter extends HTTPAdapter {
     if (options?.offset) params.skip = options.offset
 
     return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
+  }
+
+  async getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>> {
+    if (this.mockMode) {
+      return {
+        data: [
+          {
+            id: 'approval-1',
+            eco_id: approvalId,
+            stage_id: 'stage-1',
+            approval_type: 'mandatory',
+            required_role: 'admin',
+            user_id: '1',
+            status: 'approved',
+            comment: 'Mock approval',
+            approved_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          },
+        ],
+        metadata: { totalCount: 1 },
+      }
+    }
+
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Approval history is not supported for this PLM API mode') }
+    }
+
+    const result = await this.query<YuantusEcoApprovalRecord>(`/api/v1/eco/${approvalId}/approvals`)
+    const mapped = result.data.map((entry) => this.mapYuantusApprovalHistory(entry))
+
+    return {
+      data: mapped,
+      metadata: { totalCount: mapped.length },
+      error: result.error,
+    }
+  }
+
+  async approveApproval(approvalId: string, comment?: string): Promise<QueryResult<Record<string, unknown>>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: approvalId,
+          status: 'approved',
+          comment: comment || null,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Approval actions are not supported for this PLM API mode') }
+    }
+    const payload = comment ? { comment } : {}
+    return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/approve`, {
+      method: 'POST',
+      data: payload,
+    })
+  }
+
+  async rejectApproval(approvalId: string, comment: string): Promise<QueryResult<Record<string, unknown>>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: approvalId,
+          status: 'rejected',
+          comment,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Approval actions are not supported for this PLM API mode') }
+    }
+    return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/reject`, {
+      method: 'POST',
+      data: { comment },
+    })
   }
 
   async getWhereUsed(
@@ -1750,7 +1874,9 @@ export class PLMAdapter extends HTTPAdapter {
       const relProps = relationship.properties || {}
       const childProps = child.properties || {}
       const quantity = this.toNumber(relationship.quantity ?? relProps.quantity, 0)
-      const sequence = this.toNumber(relationship.find_num ?? relProps.find_num, 0)
+      const findNum = relationship.find_num ?? relProps.find_num ?? relProps.findNum
+      const refdes = relationship.refdes ?? relProps.refdes ?? relProps.refDes
+      const sequence = this.toNumber(findNum, 0)
       const unit = String(relationship.uom ?? relProps.uom ?? relProps.unit ?? 'EA')
       const componentName = String(child.name ?? childProps.name ?? childProps.item_name ?? '')
       const componentCode = String(
@@ -1763,8 +1889,6 @@ export class PLMAdapter extends HTTPAdapter {
       )
       const createdAt = this.toIsoString(relationship.created_on ?? child.created_on) || new Date().toISOString()
       const updatedAt = this.toIsoString(relationship.modified_on ?? child.modified_on) || new Date().toISOString()
-      const findNum = relationship.find_num ?? relProps.find_num
-      const refdes = relationship.refdes ?? relProps.refdes
 
       items.push({
         id: String(relationship.id ?? `${rootId}:${child.id}`),
@@ -1773,10 +1897,10 @@ export class PLMAdapter extends HTTPAdapter {
         component_id: String(child.id ?? relationship.related_id ?? ''),
         component_name: componentName,
         component_code: componentCode,
-        find_num: findNum ? String(findNum) : undefined,
-        refdes: refdes ? String(refdes) : undefined,
         quantity,
         unit,
+        find_num: findNum ?? undefined,
+        refdes: refdes ?? undefined,
         level,
         sequence,
         created_at: createdAt,

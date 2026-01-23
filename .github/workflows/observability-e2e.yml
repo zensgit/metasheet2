@@ -10,6 +10,8 @@ on:
     paths:
       - 'packages/core-backend/**'
       - 'apps/web/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/observability-e2e.yml'
   push:
     branches:
@@ -17,6 +19,8 @@ on:
     paths:
       - 'packages/core-backend/**'
       - 'apps/web/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/observability-e2e.yml'
 
 jobs:
@@ -44,7 +48,12 @@ jobs:
       - name: Enable corepack / setup pnpm
         run: |
           corepack enable
-          pnpm -v || npm i -g pnpm@8
+          corepack prepare pnpm@10.16.1 --activate
+          pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

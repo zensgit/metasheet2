@@ -1,6 +1,7 @@
 /**
  * MetaSheet Backend Core
  * 后端核心服务器入口
+ * CI trigger for pnpm lockfile sync
  */
 
 import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';

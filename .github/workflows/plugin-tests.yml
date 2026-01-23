@@ -1,12 +1,15 @@
 name: Plugin System Tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, develop]
     paths:
       - 'packages/core-backend/**'
       - 'plugins/**'
       - 'apps/web/src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/plugin-tests.yml'
   pull_request:
     branches: [main, develop]
@@ -14,6 +17,8 @@ on:
       - 'packages/core-backend/**'
       - 'plugins/**'
       - 'apps/web/src/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/plugin-tests.yml'
 
 jobs:
@@ -36,8 +41,14 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.16.1
           run_install: false
+      - name: Show pnpm version
+        run: pnpm -v
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> $GITHUB_ENV
 
       - name: Get pnpm store directory
         id: pnpm-cache
