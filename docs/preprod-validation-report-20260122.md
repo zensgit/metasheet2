@@ -99,7 +99,9 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - After hotfix, both endpoints now return `200`:
   - `GET /api/attendance/settings` → ok + default settings
   - `GET /api/attendance/summary` → ok + empty summary
-- Action pending: redeploy backend once GHCR latest includes commit `85e4a5fa`; this will replace the hotfix with a permanent fix.
+- GHCR `metasheet2-backend:latest` updated (digest `sha256:e000261bfab1cdf72e01fea6b39ab7a6e9ea7c6fcb46953e5759dbaa7efaa93c`) and includes the `/internal/test` scope fix.
+- Redeployed backend with the updated image; temporary hotfix is no longer required.
+- Post-redeploy verification: both attendance endpoints remain `200` with expected payloads.
 
 ## Artifacts
 - Logs: N/A
