@@ -437,6 +437,7 @@ const viewId = computed(() => {
   const id = route.params.viewId
   return typeof id === 'string' ? id : 'calendar1'
 })
+const storageKey = computed(() => `calendar:${viewId.value}`)
 
 // Services
 const viewManager = ViewManager.getInstance()
@@ -467,6 +468,55 @@ const config = ref<CalendarConfig>({
   updatedAt: new Date(),
   createdBy: 'system'
 })
+
+type StoredCalendarEvent = Omit<CalendarEvent, 'start' | 'end' | 'startDate' | 'endDate'> & {
+  start?: string
+  end?: string
+  startDate?: string
+  endDate?: string
+}
+
+function serializeEvents(events: CalendarEvent[]): StoredCalendarEvent[] {
+  return events.map((event) => ({
+    ...event,
+    start: event.start ? event.start.toISOString() : undefined,
+    end: event.end ? event.end.toISOString() : undefined,
+    startDate: event.startDate ? event.startDate.toISOString() : undefined,
+    endDate: event.endDate ? event.endDate.toISOString() : undefined
+  }))
+}
+
+function deserializeEvents(events: StoredCalendarEvent[]): CalendarEvent[] {
+  return events.map((event) => ({
+    ...event,
+    start: event.start ? new Date(event.start) : new Date(),
+    end: event.end ? new Date(event.end) : new Date(),
+    startDate: event.startDate ? new Date(event.startDate) : new Date(),
+    endDate: event.endDate ? new Date(event.endDate) : undefined
+  }))
+}
+
+function loadEventsFromStorage(): CalendarEvent[] | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(storageKey.value)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return null
+    return deserializeEvents(parsed as StoredCalendarEvent[])
+  } catch {
+    return null
+  }
+}
+
+function saveEventsToStorage() {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(storageKey.value, JSON.stringify(serializeEvents(events.value)))
+  } catch {
+    // ignore storage failures
+  }
+}
 
 // UI State
 const currentDate = ref(new Date())
@@ -604,9 +654,16 @@ async function loadEvents() {
     // Load events
     const response = await viewManager.loadViewData(viewId.value)
     events.value = transformDataToEvents(response.data)
+    saveEventsToStorage()
   } catch (err) {
     console.error('Failed to load calendar:', err)
-    error.value = '加载日历数据失败'
+    const cached = loadEventsFromStorage()
+    if (cached && cached.length > 0) {
+      events.value = cached
+      error.value = ''
+    } else {
+      error.value = '加载日历数据失败'
+    }
   } finally {
     loading.value = false
   }
@@ -860,15 +917,23 @@ function closeEventModal() {
 }
 
 function editEvent() {
-  // Implement event editing
-  console.log('Edit event:', selectedEvent.value)
+  const current = selectedEvent.value
+  if (!current) return
+  const nextTitle = window.prompt('编辑事件标题', current.title)
+  if (nextTitle !== null) {
+    current.title = nextTitle.trim() || current.title
+    saveEventsToStorage()
+  }
   closeEventModal()
 }
 
 function deleteEvent() {
   if (confirm('确定要删除这个事件吗？')) {
-    // Implement event deletion
-    console.log('Delete event:', selectedEvent.value)
+    const current = selectedEvent.value
+    if (current) {
+      events.value = events.value.filter(event => event.id !== current.id)
+      saveEventsToStorage()
+    }
     closeEventModal()
   }
 }

@@ -53,10 +53,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useAuth } from '../composables/useAuth'
-import { getApiBase } from '../utils/api'
 
 interface Card {
   id: string
@@ -76,8 +74,12 @@ const columns = ref<Column[]>([])
 const loading = ref(true)
 const error = ref('')
 const draggedCard = ref<{ card: Card; fromColumn: string } | null>(null)
-const etag = ref<string>('')
-const { buildAuthHeaders } = useAuth()
+const route = useRoute()
+const viewId = computed(() => {
+  const id = route.params.viewId
+  return typeof id === 'string' ? id : 'kanban1'
+})
+const storageKey = computed(() => `kanban:${viewId.value}`)
 
 function debounce<T extends (...args: any[]) => any>(fn: T, wait = 400) {
   let t: number | undefined
@@ -87,14 +89,43 @@ function debounce<T extends (...args: any[]) => any>(fn: T, wait = 400) {
   }
 }
 
+function loadFromStorage(): Column[] | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(storageKey.value)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return null
+    return parsed as Column[]
+  } catch {
+    return null
+  }
+}
+
+const persistColumns = debounce(() => {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(storageKey.value, JSON.stringify(columns.value))
+  } catch {
+    // ignore storage failures
+  }
+}, 300)
+
 // 获取看板数据
 async function fetchKanbanData() {
+  const cached = loadFromStorage()
+  if (cached && cached.length > 0) {
+    columns.value = cached
+    loading.value = false
+    return
+  }
   try {
     const response = await fetch('http://localhost:8900/api/kanban/board1')
     const result = await response.json()
 
     if (result.success && result.data) {
       columns.value = result.data.sort((a: Column, b: Column) => a.order - b.order)
+      persistColumns()
     } else {
       // 使用模拟数据
       columns.value = [
@@ -125,6 +156,7 @@ async function fetchKanbanData() {
           order: 3
         }
       ]
+      persistColumns()
     }
   } catch (err) {
     console.error('Failed to fetch kanban data:', err)
@@ -153,6 +185,7 @@ async function fetchKanbanData() {
         order: 3
       }
     ]
+    persistColumns()
   } finally {
     loading.value = false
   }
@@ -194,6 +227,7 @@ function handleDrop(event: DragEvent, toColumnId: string) {
 
   // TODO: 发送更新到服务器
   console.log(`Moved card ${card.id} from ${fromColumn} to ${toColumnId}`)
+  persistColumns()
 }
 
 // 添加新列
@@ -205,6 +239,7 @@ function addColumn() {
     order: columns.value.length + 1
   }
   columns.value.push(newColumn)
+  persistColumns()
 }
 
 // 添加新卡片
@@ -218,6 +253,7 @@ function addCard(columnId: string) {
       status: columnId
     }
     column.cards.push(newCard)
+    persistColumns()
   }
 }
 
@@ -234,6 +270,14 @@ function getStatusLabel(status: string): string {
 onMounted(() => {
   fetchKanbanData()
 })
+
+watch(
+  () => storageKey.value,
+  () => {
+    const cached = loadFromStorage()
+    if (cached) columns.value = cached
+  }
+)
 </script>
 
 <style scoped>
