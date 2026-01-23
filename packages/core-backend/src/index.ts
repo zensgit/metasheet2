@@ -534,7 +534,7 @@ export class MetaSheetServer {
     try {
       import('./routes/fallback-test')
         .then(m => {
-          if (m?.default) this.app.use(m.default)
+          if (m?.default) this.app.use('/internal/test', m.default)
         })
         .catch(() => { /* fallback-test route not available */ })
     } catch { /* dynamic import error */ }
