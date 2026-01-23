@@ -2399,13 +2399,16 @@ const deepLinkPanelOptions = [
   { key: 'cad', label: 'CAD 元数据' },
   { key: 'where-used', label: 'Where-Used' },
   { key: 'compare', label: 'BOM 对比' },
+  { key: 'eco-impact', label: 'ECO 影响' },
+  { key: 'eco-bom', label: 'ECO Redline' },
   { key: 'substitutes', label: '替代件' },
 ]
 const builtInDeepLinkPresets = [
   { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
   { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
   { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
-  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
+  { key: 'eco-impact', label: 'ECO 影响 + Redline', panels: ['eco-impact', 'eco-bom'] },
+  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes', 'eco-impact', 'eco-bom'] },
 ]
 const deepLinkPresets = computed(() => [...builtInDeepLinkPresets, ...customDeepLinkPresets.value])
 
@@ -2484,7 +2487,34 @@ function resetAll() {
   approvalSortDir.value = 'desc'
   approvalsError.value = ''
   approvalsFilter.value = ''
+  approvalsSelected.value = {}
+  approvalsBatchComment.value = ''
+  approvalsBatchStatus.value = ''
+  approvalsBatchError.value = ''
+  approvalsBatchLoading.value = false
   approvalColumns.value = { ...defaultApprovalColumns }
+  ecoImpactId.value = ''
+  ecoImpact.value = null
+  ecoImpactError.value = ''
+  ecoImpactLoading.value = false
+  ecoImpactMaxLevels.value = DEFAULT_ECO_MAX_LEVELS
+  ecoImpactEffectiveAt.value = ''
+  ecoImpactCompareMode.value = ''
+  ecoImpactRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
+  ecoImpactIncludeChildFields.value = true
+  ecoImpactIncludeFiles.value = false
+  ecoImpactIncludeBomDiff.value = true
+  ecoImpactIncludeVersionDiff.value = true
+  ecoBomDiffId.value = ''
+  ecoBomDiff.value = null
+  ecoBomDiffError.value = ''
+  ecoBomDiffLoading.value = false
+  ecoBomDiffMaxLevels.value = DEFAULT_ECO_MAX_LEVELS
+  ecoBomDiffEffectiveAt.value = ''
+  ecoBomDiffCompareMode.value = ''
+  ecoBomDiffRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
+  ecoBomDiffIncludeChildFields.value = true
+  ecoBomDiffFilter.value = ''
   whereUsedItemId.value = ''
   whereUsedRecursive.value = true
   whereUsedMaxLevels.value = DEFAULT_WHERE_USED_MAX_LEVELS
@@ -2527,6 +2557,22 @@ function resetAll() {
     documentFilter: '',
     approvalsStatus: '',
     approvalsFilter: '',
+    ecoImpactId: '',
+    ecoImpactMaxLevels: undefined,
+    ecoImpactCompareMode: '',
+    ecoImpactIncludeChildFields: undefined,
+    ecoImpactIncludeFiles: undefined,
+    ecoImpactIncludeBomDiff: undefined,
+    ecoImpactIncludeVersionDiff: undefined,
+    ecoImpactEffectiveAt: '',
+    ecoImpactRelationshipProps: '',
+    ecoBomDiffId: '',
+    ecoBomDiffMaxLevels: undefined,
+    ecoBomDiffCompareMode: '',
+    ecoBomDiffIncludeChildFields: undefined,
+    ecoBomDiffEffectiveAt: '',
+    ecoBomDiffRelationshipProps: '',
+    ecoBomDiffFilter: '',
     whereUsedItemId: '',
     whereUsedRecursive: undefined,
     whereUsedMaxLevels: undefined,
@@ -2973,6 +3019,8 @@ async function updateCadReview() {
 async function loadApprovals() {
   approvalsLoading.value = true
   approvalsError.value = ''
+  approvalsBatchStatus.value = ''
+  approvalsBatchError.value = ''
   try {
     const filters: Record<string, unknown> = {}
     if (approvalsStatus.value !== 'all') {
@@ -2991,11 +3039,155 @@ async function loadApprovals() {
       throw new Error(result.error?.message || '加载审批失败')
     }
     approvals.value = result.data?.items || []
+    approvalsSelected.value = {}
   } catch (error: any) {
     handleAuthError(error)
     approvalsError.value = error?.message || '加载审批失败'
   } finally {
     approvalsLoading.value = false
+  }
+}
+
+function toggleApprovalSelection(id: string, value?: boolean) {
+  const nextValue = typeof value === 'boolean' ? value : !approvalsSelected.value[id]
+  approvalsSelected.value = { ...approvalsSelected.value, [id]: nextValue }
+}
+
+function toggleApprovalSelectAll() {
+  const shouldSelectAll = !approvalsAllSelected.value
+  const next: Record<string, boolean> = {}
+  for (const entry of approvalsSorted.value) {
+    next[entry.id] = shouldSelectAll
+  }
+  approvalsSelected.value = next
+}
+
+async function batchApprovals(mode: 'approve' | 'reject') {
+  if (!approvalsSelectedIds.value.length) {
+    approvalsBatchError.value = '请先选择审批项'
+    return
+  }
+  if (mode === 'reject' && !approvalsBatchComment.value.trim()) {
+    approvalsBatchError.value = '拒绝需要填写备注'
+    return
+  }
+
+  approvalsBatchLoading.value = true
+  approvalsBatchError.value = ''
+  approvalsBatchStatus.value = ''
+  try {
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/mutate',
+      {
+        operation: 'approvals_batch',
+        ecoIds: approvalsSelectedIds.value,
+        mode,
+        comment: approvalsBatchComment.value.trim() || undefined,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || '批量审批失败')
+    }
+    const summary = result.data?.summary || {}
+    approvalsBatchStatus.value = `批量${mode === 'approve' ? '通过' : '拒绝'}完成：成功 ${summary.ok ?? 0}，失败 ${summary.failed ?? 0}`
+    approvalsBatchComment.value = ''
+    await loadApprovals()
+  } catch (error: any) {
+    handleAuthError(error)
+    approvalsBatchError.value = error?.message || '批量审批失败'
+  } finally {
+    approvalsBatchLoading.value = false
+  }
+}
+
+async function loadEcoImpact() {
+  if (!ecoImpactId.value) return
+  syncQueryParams({
+    ecoImpactId: ecoImpactId.value,
+    ecoImpactMaxLevels: ecoImpactMaxLevels.value,
+    ecoImpactCompareMode: ecoImpactCompareMode.value || undefined,
+    ecoImpactIncludeChildFields: ecoImpactIncludeChildFields.value,
+    ecoImpactIncludeFiles: ecoImpactIncludeFiles.value,
+    ecoImpactIncludeBomDiff: ecoImpactIncludeBomDiff.value,
+    ecoImpactIncludeVersionDiff: ecoImpactIncludeVersionDiff.value,
+    ecoImpactEffectiveAt: ecoImpactEffectiveAt.value || undefined,
+    ecoImpactRelationshipProps: ecoImpactRelationshipProps.value || undefined,
+  })
+  ecoImpactLoading.value = true
+  ecoImpactError.value = ''
+  try {
+    const relProps = ecoImpactRelationshipProps.value
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const effectiveAt = normalizeEffectiveAt(ecoImpactEffectiveAt.value)
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/query',
+      {
+        operation: 'eco_impact',
+        ecoId: ecoImpactId.value,
+        maxLevels: ecoImpactMaxLevels.value,
+        compareMode: ecoImpactCompareMode.value || undefined,
+        includeChildFields: ecoImpactIncludeChildFields.value,
+        includeFiles: ecoImpactIncludeFiles.value,
+        includeBomDiff: ecoImpactIncludeBomDiff.value,
+        includeVersionDiff: ecoImpactIncludeVersionDiff.value,
+        includeRelationshipProps: relProps.length ? relProps : undefined,
+        effectiveAt,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || 'ECO 影响分析失败')
+    }
+    ecoImpact.value = result.data
+  } catch (error: any) {
+    handleAuthError(error)
+    ecoImpactError.value = error?.message || 'ECO 影响分析失败'
+  } finally {
+    ecoImpactLoading.value = false
+  }
+}
+
+async function loadEcoBomDiff() {
+  if (!ecoBomDiffId.value) return
+  syncQueryParams({
+    ecoBomDiffId: ecoBomDiffId.value,
+    ecoBomDiffMaxLevels: ecoBomDiffMaxLevels.value,
+    ecoBomDiffCompareMode: ecoBomDiffCompareMode.value || undefined,
+    ecoBomDiffIncludeChildFields: ecoBomDiffIncludeChildFields.value,
+    ecoBomDiffEffectiveAt: ecoBomDiffEffectiveAt.value || undefined,
+    ecoBomDiffRelationshipProps: ecoBomDiffRelationshipProps.value || undefined,
+    ecoBomDiffFilter: ecoBomDiffFilter.value || undefined,
+  })
+  ecoBomDiffLoading.value = true
+  ecoBomDiffError.value = ''
+  try {
+    const relProps = ecoBomDiffRelationshipProps.value
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+    const effectiveAt = normalizeEffectiveAt(ecoBomDiffEffectiveAt.value)
+    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
+      '/api/federation/plm/query',
+      {
+        operation: 'eco_bom_diff',
+        ecoId: ecoBomDiffId.value,
+        maxLevels: ecoBomDiffMaxLevels.value,
+        compareMode: ecoBomDiffCompareMode.value || undefined,
+        includeChildFields: ecoBomDiffIncludeChildFields.value,
+        includeRelationshipProps: relProps.length ? relProps : undefined,
+        effectiveAt,
+      }
+    )
+    if (!result.ok) {
+      throw new Error(result.error?.message || 'ECO BOM Redline 加载失败')
+    }
+    ecoBomDiff.value = result.data
+  } catch (error: any) {
+    handleAuthError(error)
+    ecoBomDiffError.value = error?.message || 'ECO BOM Redline 加载失败'
+  } finally {
+    ecoBomDiffLoading.value = false
   }
 }
 
