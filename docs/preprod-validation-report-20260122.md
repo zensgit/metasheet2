@@ -6,13 +6,13 @@
 - Environment: pre-prod
 - Release tag / commit: 92ae0962
 - Scope: login, grid, attendance plugin load, plugin list, API token
-- Status: pass with notes (attendance UI disabled)
+- Status: pass with notes (attendance enablement pending)
 
 ## Build and Deploy
 - Build ID: TBD
 - Image or artifact: ghcr.io/zensgit/metasheet2-backend:latest
 - Deploy window: TBD
-- Feature flags: attendance UI disabled by default
+- Feature flags: attendance enablement pending (API returns Not enabled)
 - Migration plan: TBD
 - Rollback plan: TBD
 
@@ -66,7 +66,8 @@
 
 ### UI and UX
 - [x] Grid save / refresh
-- [ ] Attendance UI (disabled)
+- [x] Attendance UI reachable (loads plugin status)
+- [ ] Attendance UI enabled (pending)
 - [ ] Mobile layout
 
 ### Regression
@@ -75,16 +76,21 @@
 
 ## Commands Executed
 ```sh
-# Manual validation via live environment (no local commands recorded)
+# Manual validation via live environment (token not recorded)
+curl http://142.171.239.56:8081/api/plugins
+curl http://142.171.239.56:8081/api/attendance/settings
+node /tmp/attendance-enable.js
 ```
 
 ## Findings
-- Attendance plugin loads and API responds, but returns "Not enabled" until UI toggle is enabled.
+- `/api/plugins` reports attendance plugin as `active`, but `/api/attendance/settings` returns `{"ok":false,"error":"Not enabled"}`.
+- Attendance UI route is reachable and shows plugin status loading state, but enablement is still pending.
+- Playwright visited `/admin/plugins` and `/settings/plugins` but did not find an Attendance enable toggle (no plugin row detected).
 - Role display mismatch observed: admin at DB, token shows user; may need app-level refresh.
 
 ## Artifacts
-- Logs: TBD
-- Screenshots: TBD
+- Logs: N/A
+- Screenshots: `/tmp/attendance-page.png`
 - Test runs: TBD
 
 ## Sign-Off
