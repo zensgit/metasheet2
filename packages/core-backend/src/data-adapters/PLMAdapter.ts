@@ -119,8 +119,6 @@ export interface BOMItem {
   refdes?: string
   quantity: number
   unit: string
-  find_num?: string | number
-  refdes?: string | string[]
   level: number
   sequence: number
   created_at: string
@@ -1890,6 +1888,13 @@ export class PLMAdapter extends HTTPAdapter {
       const createdAt = this.toIsoString(relationship.created_on ?? child.created_on) || new Date().toISOString()
       const updatedAt = this.toIsoString(relationship.modified_on ?? child.modified_on) || new Date().toISOString()
 
+      const findNumValue = findNum === null || findNum === undefined
+        ? undefined
+        : (typeof findNum === 'number' ? findNum : String(findNum))
+      const refdesValue = refdes === null || refdes === undefined
+        ? undefined
+        : (Array.isArray(refdes) ? refdes.filter(Boolean).join(',') : String(refdes))
+
       items.push({
         id: String(relationship.id ?? `${rootId}:${child.id}`),
         product_id: rootId,
@@ -1899,8 +1904,8 @@ export class PLMAdapter extends HTTPAdapter {
         component_code: componentCode,
         quantity,
         unit,
-        find_num: findNum ?? undefined,
-        refdes: refdes ?? undefined,
+        find_num: findNumValue,
+        refdes: refdesValue,
         level,
         sequence,
         created_at: createdAt,
