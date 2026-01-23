@@ -1207,6 +1207,391 @@
 
     <section class="panel">
       <div class="panel-header">
+        <h2>ECO 影响分析</h2>
+        <div class="panel-actions">
+          <button class="btn ghost" @click="copyDeepLink('eco-impact')">复制深链接</button>
+          <button class="btn" :disabled="!ecoImpactId || ecoImpactLoading" @click="loadEcoImpact">
+            {{ ecoImpactLoading ? '加载中...' : '分析' }}
+          </button>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label for="plm-eco-impact-id">
+          ECO ID
+          <input
+            id="plm-eco-impact-id"
+            v-model.trim="ecoImpactId"
+            name="plmEcoImpactId"
+            placeholder="输入 ECO ID"
+          />
+        </label>
+        <label for="plm-eco-impact-max-levels">
+          最大层级
+          <input
+            id="plm-eco-impact-max-levels"
+            v-model.number="ecoImpactMaxLevels"
+            name="plmEcoImpactMaxLevels"
+            type="number"
+            min="-1"
+            max="20"
+          />
+        </label>
+        <label for="plm-eco-impact-effective-at">
+          生效时间
+          <input
+            id="plm-eco-impact-effective-at"
+            v-model="ecoImpactEffectiveAt"
+            name="plmEcoImpactEffectiveAt"
+            type="datetime-local"
+          />
+        </label>
+        <label for="plm-eco-impact-compare-mode">
+          Compare Mode
+          <input
+            id="plm-eco-impact-compare-mode"
+            v-model.trim="ecoImpactCompareMode"
+            name="plmEcoImpactCompareMode"
+            placeholder="only_product / summarized / num_qty"
+          />
+        </label>
+        <label for="plm-eco-impact-rel-props">
+          关系字段
+          <input
+            id="plm-eco-impact-rel-props"
+            v-model.trim="ecoImpactRelationshipProps"
+            name="plmEcoImpactRelProps"
+            placeholder="quantity,uom,find_num,refdes"
+          />
+        </label>
+        <label class="checkbox-field" for="plm-eco-impact-child">
+          <span>包含父/子字段</span>
+          <input
+            id="plm-eco-impact-child"
+            name="plmEcoImpactChildFields"
+            v-model="ecoImpactIncludeChildFields"
+            type="checkbox"
+          />
+        </label>
+        <label class="checkbox-field" for="plm-eco-impact-bom">
+          <span>包含 BOM 差异</span>
+          <input
+            id="plm-eco-impact-bom"
+            name="plmEcoImpactBomDiff"
+            v-model="ecoImpactIncludeBomDiff"
+            type="checkbox"
+          />
+        </label>
+        <label class="checkbox-field" for="plm-eco-impact-version">
+          <span>包含版本差异</span>
+          <input
+            id="plm-eco-impact-version"
+            name="plmEcoImpactVersionDiff"
+            v-model="ecoImpactIncludeVersionDiff"
+            type="checkbox"
+          />
+        </label>
+        <label class="checkbox-field" for="plm-eco-impact-files">
+          <span>包含文件</span>
+          <input
+            id="plm-eco-impact-files"
+            name="plmEcoImpactFiles"
+            v-model="ecoImpactIncludeFiles"
+            type="checkbox"
+          />
+        </label>
+      </div>
+      <p v-if="ecoImpactError" class="status error">{{ ecoImpactError }}</p>
+      <div v-if="!ecoImpact" class="empty">
+        暂无影响分析数据
+        <span class="empty-hint">（输入 ECO ID 后分析）</span>
+      </div>
+      <div v-else>
+        <div class="summary-row">
+          <span>影响项: {{ ecoImpact.impact_count ?? 0 }}</span>
+          <span>等级: {{ ecoImpact.impact_level || '-' }}</span>
+          <span>得分: {{ ecoImpact.impact_score ?? '-' }}</span>
+          <span>范围: {{ ecoImpact.impact_scope || '-' }}</span>
+          <span>新增: {{ ecoImpactSummary.added ?? 0 }}</span>
+          <span>删除: {{ ecoImpactSummary.removed ?? 0 }}</span>
+          <span>变更: {{ ecoImpactSummary.changed ?? 0 }}</span>
+        </div>
+        <div v-if="ecoImpactAssemblies.length">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>层级</th>
+                <th>父件编号</th>
+                <th>父件名称</th>
+                <th>数量</th>
+                <th>单位</th>
+                <th>Find #</th>
+                <th>Refdes</th>
+                <th>关系 ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(entry, idx) in ecoImpactAssemblies" :key="entry?.relationship?.id || entry?.parent?.id || idx">
+                <td>{{ entry.level ?? '-' }}</td>
+                <td>{{ getItemNumber(entry.parent) }}</td>
+                <td>{{ getItemName(entry.parent) }}</td>
+                <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
+                <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
+                <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
+                <td>{{ getWhereUsedRefdes(entry) }}</td>
+                <td>{{ entry.relationship?.id || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <details class="json-block">
+          <summary>原始数据</summary>
+          <pre>{{ formatJson(ecoImpact) }}</pre>
+        </details>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>ECO BOM Redline</h2>
+        <div class="panel-actions">
+          <button class="btn ghost" @click="copyDeepLink('eco-bom')">复制深链接</button>
+          <button class="btn" :disabled="!ecoBomDiffId || ecoBomDiffLoading" @click="loadEcoBomDiff">
+            {{ ecoBomDiffLoading ? '加载中...' : '加载 Redline' }}
+          </button>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label for="plm-eco-bom-id">
+          ECO ID
+          <input
+            id="plm-eco-bom-id"
+            v-model.trim="ecoBomDiffId"
+            name="plmEcoBomDiffId"
+            placeholder="输入 ECO ID"
+          />
+        </label>
+        <label for="plm-eco-bom-max-levels">
+          最大层级
+          <input
+            id="plm-eco-bom-max-levels"
+            v-model.number="ecoBomDiffMaxLevels"
+            name="plmEcoBomDiffMaxLevels"
+            type="number"
+            min="-1"
+            max="20"
+          />
+        </label>
+        <label for="plm-eco-bom-effective-at">
+          生效时间
+          <input
+            id="plm-eco-bom-effective-at"
+            v-model="ecoBomDiffEffectiveAt"
+            name="plmEcoBomDiffEffectiveAt"
+            type="datetime-local"
+          />
+        </label>
+        <label for="plm-eco-bom-compare-mode">
+          Compare Mode
+          <input
+            id="plm-eco-bom-compare-mode"
+            v-model.trim="ecoBomDiffCompareMode"
+            name="plmEcoBomDiffCompareMode"
+            placeholder="only_product / summarized / num_qty"
+          />
+        </label>
+        <label for="plm-eco-bom-rel-props">
+          关系字段
+          <input
+            id="plm-eco-bom-rel-props"
+            v-model.trim="ecoBomDiffRelationshipProps"
+            name="plmEcoBomDiffRelProps"
+            placeholder="quantity,uom,find_num,refdes"
+          />
+        </label>
+        <label for="plm-eco-bom-filter">
+          过滤
+          <input
+            id="plm-eco-bom-filter"
+            v-model.trim="ecoBomDiffFilter"
+            name="plmEcoBomDiffFilter"
+            placeholder="编号/名称/Line ID"
+          />
+        </label>
+        <label class="checkbox-field" for="plm-eco-bom-child">
+          <span>包含父/子字段</span>
+          <input
+            id="plm-eco-bom-child"
+            name="plmEcoBomDiffChildFields"
+            v-model="ecoBomDiffIncludeChildFields"
+            type="checkbox"
+          />
+        </label>
+      </div>
+      <p v-if="ecoBomDiffError" class="status error">{{ ecoBomDiffError }}</p>
+      <div v-if="!ecoBomDiff" class="empty">
+        暂无 Redline 数据
+        <span class="empty-hint">（输入 ECO ID 后加载）</span>
+      </div>
+      <div v-else>
+        <div class="summary-row">
+          <span>新增: {{ ecoBomDiffSummary.added ?? 0 }}</span>
+          <span>删除: {{ ecoBomDiffSummary.removed ?? 0 }}</span>
+          <span>变更: {{ ecoBomDiffSummary.changed ?? 0 }}</span>
+          <span>重大: {{ ecoBomDiffSummary.changed_major ?? 0 }}</span>
+          <span>轻微: {{ ecoBomDiffSummary.changed_minor ?? 0 }}</span>
+          <span>提示: {{ ecoBomDiffSummary.changed_info ?? 0 }}</span>
+          <span class="muted">展示: {{ ecoBomDiffTotalFiltered }}</span>
+        </div>
+        <div class="compare-section">
+          <h3>新增 ({{ ecoBomDiffAddedFiltered.length }}/{{ ecoBomDiffAdded.length }})</h3>
+          <div v-if="!ecoBomDiffAddedFiltered.length" class="empty">无新增</div>
+          <table v-else class="data-table">
+            <thead>
+              <tr>
+                <th>层级</th>
+                <th>父件</th>
+                <th>子件</th>
+                <th>数量</th>
+                <th>单位</th>
+                <th>Find #</th>
+                <th>Refdes</th>
+                <th>生效</th>
+                <th>替代件</th>
+                <th>Line</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="entry in ecoBomDiffAddedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+                <td>{{ entry.level ?? '-' }}</td>
+                <td>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                </td>
+                <td>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
+                </td>
+                <td>{{ getCompareProp(entry, 'quantity') }}</td>
+                <td>{{ getCompareProp(entry, 'uom') }}</td>
+                <td>{{ getCompareProp(entry, 'find_num') }}</td>
+                <td>{{ getCompareProp(entry, 'refdes') }}</td>
+                <td>{{ formatEffectivity(entry) }}</td>
+                <td>{{ formatSubstituteCount(entry) }}</td>
+                <td>
+                  <div class="mono">{{ entry.line_key || '-' }}</div>
+                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="compare-section">
+          <h3>删除 ({{ ecoBomDiffRemovedFiltered.length }}/{{ ecoBomDiffRemoved.length }})</h3>
+          <div v-if="!ecoBomDiffRemovedFiltered.length" class="empty">无删除</div>
+          <table v-else class="data-table">
+            <thead>
+              <tr>
+                <th>层级</th>
+                <th>父件</th>
+                <th>子件</th>
+                <th>数量</th>
+                <th>单位</th>
+                <th>Find #</th>
+                <th>Refdes</th>
+                <th>生效</th>
+                <th>替代件</th>
+                <th>Line</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="entry in ecoBomDiffRemovedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+                <td>{{ entry.level ?? '-' }}</td>
+                <td>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                </td>
+                <td>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
+                </td>
+                <td>{{ getCompareProp(entry, 'quantity') }}</td>
+                <td>{{ getCompareProp(entry, 'uom') }}</td>
+                <td>{{ getCompareProp(entry, 'find_num') }}</td>
+                <td>{{ getCompareProp(entry, 'refdes') }}</td>
+                <td>{{ formatEffectivity(entry) }}</td>
+                <td>{{ formatSubstituteCount(entry) }}</td>
+                <td>
+                  <div class="mono">{{ entry.line_key || '-' }}</div>
+                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="compare-section">
+          <h3>变更 ({{ ecoBomDiffChangedFiltered.length }}/{{ ecoBomDiffChanged.length }})</h3>
+          <div v-if="!ecoBomDiffChangedFiltered.length" class="empty">无变更</div>
+          <table v-else class="data-table">
+            <thead>
+              <tr>
+                <th>层级</th>
+                <th>父件</th>
+                <th>子件</th>
+                <th>严重度</th>
+                <th>变更项</th>
+                <th>生效</th>
+                <th>替代件</th>
+                <th>Line</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="entry in ecoBomDiffChangedFiltered" :key="entry.relationship_id || entry.line_key || entry.child_id">
+                <td>{{ entry.level ?? '-' }}</td>
+                <td>
+                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
+                </td>
+                <td>
+                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
+                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
+                </td>
+                <td>
+                  <span class="tag" :class="severityClass(entry.severity)">{{ entry.severity || 'info' }}</span>
+                </td>
+                <td>
+                  <div v-if="entry.changes?.length" class="diff-list">
+                    <div v-for="change in entry.changes" :key="change.field" class="diff-row">
+                      <span class="tag" :class="severityClass(change.severity)">{{ change.severity || 'info' }}</span>
+                      <span class="diff-field">
+                        {{ getCompareFieldLabel(change.field) }}
+                        <span v-if="compareFieldLabelMap.has(change.field)" class="diff-field-code">
+                          ({{ change.field }})
+                        </span>
+                      </span>
+                      <span class="diff-value">{{ formatDiffValue(change.left) }} → {{ formatDiffValue(change.right) }}</span>
+                    </div>
+                  </div>
+                  <span v-else class="muted">-</span>
+                </td>
+                <td>{{ formatEffectivity(entry) }}</td>
+                <td>{{ formatSubstituteCount(entry) }}</td>
+                <td>
+                  <div class="mono">{{ entry.line_key || '-' }}</div>
+                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <details class="json-block">
+          <summary>详细结果</summary>
+          <pre>{{ formatJson(ecoBomDiff) }}</pre>
+        </details>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
         <h2>替代件</h2>
         <div class="panel-actions">
           <button class="btn ghost" @click="copyDeepLink('substitutes')">复制深链接</button>
@@ -1342,6 +1727,7 @@ const DEFAULT_WHERE_USED_MAX_LEVELS = 5
 const DEFAULT_COMPARE_MAX_LEVELS = 10
 const DEFAULT_COMPARE_LINE_KEY = 'child_config'
 const DEFAULT_COMPARE_REL_PROPS = 'quantity,uom,find_num,refdes'
+const DEFAULT_ECO_MAX_LEVELS = 10
 const DEFAULT_APPROVAL_STATUS = 'pending'
 
 const searchQuery = ref('')
@@ -1446,6 +1832,11 @@ const approvalsError = ref('')
 const approvalsFilter = ref('')
 const approvalSortKey = ref<'created' | 'title' | 'status' | 'requester' | 'product'>('created')
 const approvalSortDir = ref<'asc' | 'desc'>('desc')
+const approvalsSelected = ref<Record<string, boolean>>({})
+const approvalsBatchComment = ref('')
+const approvalsBatchStatus = ref('')
+const approvalsBatchError = ref('')
+const approvalsBatchLoading = ref(false)
 const defaultApprovalColumns = {
   status: true,
   type: true,
@@ -1462,6 +1853,30 @@ const approvalColumnOptions: Array<{ key: ApprovalColumnKey; label: string }> = 
   { key: 'created', label: '创建时间' },
   { key: 'product', label: '产品' },
 ]
+
+const ecoImpactId = ref('')
+const ecoImpact = ref<any | null>(null)
+const ecoImpactLoading = ref(false)
+const ecoImpactError = ref('')
+const ecoImpactMaxLevels = ref(DEFAULT_ECO_MAX_LEVELS)
+const ecoImpactEffectiveAt = ref('')
+const ecoImpactCompareMode = ref('')
+const ecoImpactRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
+const ecoImpactIncludeChildFields = ref(true)
+const ecoImpactIncludeFiles = ref(false)
+const ecoImpactIncludeBomDiff = ref(true)
+const ecoImpactIncludeVersionDiff = ref(true)
+
+const ecoBomDiffId = ref('')
+const ecoBomDiff = ref<any | null>(null)
+const ecoBomDiffLoading = ref(false)
+const ecoBomDiffError = ref('')
+const ecoBomDiffMaxLevels = ref(DEFAULT_ECO_MAX_LEVELS)
+const ecoBomDiffEffectiveAt = ref('')
+const ecoBomDiffCompareMode = ref('')
+const ecoBomDiffRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
+const ecoBomDiffIncludeChildFields = ref(true)
+const ecoBomDiffFilter = ref('')
 
 const whereUsedItemId = ref('')
 const whereUsedRecursive = ref(true)
@@ -1838,6 +2253,31 @@ const approvalSortConfig: SortConfig = {
 
 const approvalsSorted = computed(() =>
   sortRows(approvalsFiltered.value, approvalSortKey.value, approvalSortDir.value, approvalSortConfig)
+)
+
+const approvalsSelectedIds = computed(() =>
+  Object.entries(approvalsSelected.value)
+    .filter(([, enabled]) => enabled)
+    .map(([id]) => id)
+)
+
+const approvalsAllSelected = computed(() => {
+  if (!approvalsSorted.value.length) return false
+  return approvalsSorted.value.every((entry: any) => approvalsSelected.value[entry.id])
+})
+
+const ecoImpactSummary = computed(() => ecoImpact.value?.impact_summary || {})
+const ecoImpactAssemblies = computed(() => ecoImpact.value?.impacted_assemblies || [])
+
+const ecoBomDiffSummary = computed(() => ecoBomDiff.value?.summary || {})
+const ecoBomDiffAdded = computed(() => ecoBomDiff.value?.added || [])
+const ecoBomDiffRemoved = computed(() => ecoBomDiff.value?.removed || [])
+const ecoBomDiffChanged = computed(() => ecoBomDiff.value?.changed || [])
+const ecoBomDiffAddedFiltered = computed(() => filterEcoDiffEntries(ecoBomDiffAdded.value))
+const ecoBomDiffRemovedFiltered = computed(() => filterEcoDiffEntries(ecoBomDiffRemoved.value))
+const ecoBomDiffChangedFiltered = computed(() => filterEcoDiffEntries(ecoBomDiffChanged.value))
+const ecoBomDiffTotalFiltered = computed(
+  () => ecoBomDiffAddedFiltered.value.length + ecoBomDiffRemovedFiltered.value.length + ecoBomDiffChangedFiltered.value.length
 )
 
 const compareSummary = computed(() => bomCompare.value?.summary || {})
@@ -3581,6 +4021,22 @@ function formatSubstituteCount(entry: Record<string, any>): string {
 
 function filterCompareEntries(entries: any[]): any[] {
   const needle = compareFilter.value.trim().toLowerCase()
+  if (!needle) return entries
+  return entries.filter((entry) => {
+    const tokens = [
+      getItemNumber(entry.parent),
+      getItemName(entry.parent),
+      getItemNumber(entry.child),
+      getItemName(entry.child),
+      entry.relationship_id,
+      entry.line_key,
+    ]
+    return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
+  })
+}
+
+function filterEcoDiffEntries(entries: any[]): any[] {
+  const needle = ecoBomDiffFilter.value.trim().toLowerCase()
   if (!needle) return entries
   return entries.filter((entry) => {
     const tokens = [
