@@ -884,9 +884,9 @@
                 </details>
                 <span v-else>-</span>
               </td>
-              <td>{{ entry.relationship?.quantity ?? '-' }}</td>
-              <td>{{ entry.relationship?.uom ?? '-' }}</td>
-              <td>{{ entry.relationship?.find_num ?? '-' }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
+              <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
               <td>{{ getWhereUsedRefdes(entry) }}</td>
               <td>{{ entry.relationship?.id || '-' }}</td>
             </tr>
@@ -2783,11 +2783,34 @@ function getCompareProp(entry: Record<string, any>, key: string): string {
   return String(value)
 }
 
-function getWhereUsedRefdes(entry: Record<string, any>): string {
+function getWhereUsedLineValue(
+  entry: Record<string, any>,
+  key: string,
+  fallbackKeys: string[] = [],
+  emptyValue = '-'
+): string {
+  const line = entry?.line || {}
   const rel = entry?.relationship || {}
-  const value = rel.refdes ?? rel.properties?.refdes ?? rel.properties?.ref_des
-  if (value === undefined || value === null || value === '') return '-'
+  const relProps = rel?.properties || {}
+  const candidates = [
+    line?.[key],
+    rel?.[key],
+    relProps?.[key],
+    ...fallbackKeys.map((alt) => line?.[alt] ?? rel?.[alt] ?? relProps?.[alt]),
+  ]
+  const value = candidates.find((item) => item !== undefined && item !== null && item !== '')
+  if (Array.isArray(value)) {
+    const joined = value
+      .filter((item) => item !== null && item !== undefined && item !== '')
+      .join(',')
+    return joined === '' ? emptyValue : joined
+  }
+  if (value === undefined || value === null || value === '') return emptyValue
   return String(value)
+}
+
+function getWhereUsedRefdes(entry: Record<string, any>): string {
+  return getWhereUsedLineValue(entry, 'refdes', ['ref_des'])
 }
 
 function normalizeEffectiveAt(value: string): string | undefined {
@@ -3561,9 +3584,9 @@ function exportWhereUsedCsv() {
     getItemNumber(entry.parent),
     getItemName(entry.parent),
     entry.pathLabel || '',
-    String(entry.relationship?.quantity ?? ''),
-    String(entry.relationship?.uom ?? ''),
-    String(entry.relationship?.find_num ?? ''),
+    getWhereUsedLineValue(entry, 'quantity', [], ''),
+    getWhereUsedLineValue(entry, 'uom', [], ''),
+    getWhereUsedLineValue(entry, 'find_num', [], ''),
     (() => {
       const refdes = getWhereUsedRefdes(entry)
       return refdes === '-' ? '' : refdes
