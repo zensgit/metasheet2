@@ -3591,6 +3591,8 @@ const deepLinkPanelLabels: Record<string, string> = {
   cad: 'CAD 元数据',
   'where-used': 'Where-Used',
   compare: 'BOM 对比',
+  'eco-impact': 'ECO 影响',
+  'eco-bom': 'ECO Redline',
   substitutes: '替代件',
 }
 
@@ -3838,6 +3840,8 @@ function formatDeepLinkTargets(panel?: string): string {
   if (cadFileId.value) targets.push(deepLinkPanelLabels.cad)
   if (whereUsedItemId.value) targets.push(deepLinkPanelLabels['where-used'])
   if (compareLeftId.value && compareRightId.value) targets.push(deepLinkPanelLabels.compare)
+  if (ecoImpactId.value) targets.push(deepLinkPanelLabels['eco-impact'])
+  if (ecoBomDiffId.value) targets.push(deepLinkPanelLabels['eco-bom'])
   if (bomLineId.value) targets.push(deepLinkPanelLabels.substitutes)
   return targets.length ? targets.join(' / ') : deepLinkPanelLabels.all
 }
@@ -3861,6 +3865,22 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('documentFilter', documentFilter.value)
   append('approvalsStatus', approvalsStatus.value !== DEFAULT_APPROVAL_STATUS ? approvalsStatus.value : undefined)
   append('approvalsFilter', approvalsFilter.value)
+  append('ecoImpactId', ecoImpactId.value)
+  append('ecoImpactMaxLevels', ecoImpactMaxLevels.value !== DEFAULT_ECO_MAX_LEVELS ? ecoImpactMaxLevels.value : undefined)
+  append('ecoImpactCompareMode', ecoImpactCompareMode.value)
+  append('ecoImpactIncludeChildFields', ecoImpactIncludeChildFields.value !== true ? ecoImpactIncludeChildFields.value : undefined)
+  append('ecoImpactIncludeFiles', ecoImpactIncludeFiles.value !== false ? ecoImpactIncludeFiles.value : undefined)
+  append('ecoImpactIncludeBomDiff', ecoImpactIncludeBomDiff.value !== true ? ecoImpactIncludeBomDiff.value : undefined)
+  append('ecoImpactIncludeVersionDiff', ecoImpactIncludeVersionDiff.value !== true ? ecoImpactIncludeVersionDiff.value : undefined)
+  append('ecoImpactEffectiveAt', ecoImpactEffectiveAt.value)
+  append('ecoImpactRelationshipProps', ecoImpactRelationshipProps.value !== DEFAULT_COMPARE_REL_PROPS ? ecoImpactRelationshipProps.value : undefined)
+  append('ecoBomDiffId', ecoBomDiffId.value)
+  append('ecoBomDiffMaxLevels', ecoBomDiffMaxLevels.value !== DEFAULT_ECO_MAX_LEVELS ? ecoBomDiffMaxLevels.value : undefined)
+  append('ecoBomDiffCompareMode', ecoBomDiffCompareMode.value)
+  append('ecoBomDiffIncludeChildFields', ecoBomDiffIncludeChildFields.value !== true ? ecoBomDiffIncludeChildFields.value : undefined)
+  append('ecoBomDiffEffectiveAt', ecoBomDiffEffectiveAt.value)
+  append('ecoBomDiffRelationshipProps', ecoBomDiffRelationshipProps.value !== DEFAULT_COMPARE_REL_PROPS ? ecoBomDiffRelationshipProps.value : undefined)
+  append('ecoBomDiffFilter', ecoBomDiffFilter.value)
   append('whereUsedItemId', whereUsedItemId.value)
   append('whereUsedRecursive', whereUsedRecursive.value !== true ? whereUsedRecursive.value : undefined)
   append('whereUsedMaxLevels', whereUsedMaxLevels.value !== DEFAULT_WHERE_USED_MAX_LEVELS ? whereUsedMaxLevels.value : undefined)
@@ -3888,6 +3908,8 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
       Boolean(cadFileId.value) ||
       Boolean(whereUsedItemId.value) ||
       Boolean(compareLeftId.value && compareRightId.value) ||
+      Boolean(ecoImpactId.value) ||
+      Boolean(ecoBomDiffId.value) ||
       Boolean(bomLineId.value) ||
       Boolean(searchQuery.value)
     if (shouldAutoload) {
