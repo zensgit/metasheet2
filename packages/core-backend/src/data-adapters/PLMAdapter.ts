@@ -168,6 +168,54 @@ export interface BOMCompareResponse {
   changed: BOMCompareChangedEntry[]
 }
 
+export interface EcoImpactOptions {
+  maxLevels?: number
+  includeChildFields?: boolean
+  includeFiles?: boolean
+  includeBomDiff?: boolean
+  includeVersionDiff?: boolean
+  includeRelationshipProps?: string[]
+  effectiveAt?: string
+  compareMode?: string
+}
+
+export interface EcoImpactResponse {
+  eco_id: string
+  changed_product_id?: string
+  impact_count?: number
+  impacted_assemblies?: WhereUsedEntry[]
+  impact_level?: string
+  impact_score?: number
+  impact_scope?: string
+  impact_summary?: BOMCompareSummary
+  bom_diff?: BOMCompareResponse
+  version_diff?: Record<string, unknown>
+  version_files_diff?: Record<string, unknown>
+  files?: Record<string, unknown>
+}
+
+export interface EcoBomDiffOptions {
+  maxLevels?: number
+  includeChildFields?: boolean
+  includeRelationshipProps?: string[]
+  effectiveAt?: string
+  compareMode?: string
+}
+
+export interface EcoBomDiffResponse {
+  summary: BOMCompareSummary
+  added: BOMCompareEntry[]
+  removed: BOMCompareEntry[]
+  changed: BOMCompareChangedEntry[]
+}
+
+export interface EcoBatchApprovalResponse {
+  mode: string
+  count: number
+  summary: { ok: number; failed: number }
+  results: Array<Record<string, unknown>>
+}
+
 export interface WhereUsedEntry {
   relationship: Record<string, unknown>
   parent: Record<string, unknown>
@@ -1126,6 +1174,42 @@ export class PLMAdapter extends HTTPAdapter {
     return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
   }
 
+  async batchEcoApprovals(
+    params: { ecoIds: string[]; mode: 'approve' | 'reject'; comment?: string }
+  ): Promise<QueryResult<EcoBatchApprovalResponse>> {
+    if (this.mockMode) {
+      const results = params.ecoIds.map((id) => ({ eco_id: id, ok: true, status: params.mode }))
+      return {
+        data: [{
+          mode: params.mode,
+          count: params.ecoIds.length,
+          summary: { ok: params.ecoIds.length, failed: 0 },
+          results,
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Batch approvals are not supported for this PLM API mode') }
+    }
+    if (!params.ecoIds || params.ecoIds.length === 0) {
+      return { data: [], error: new Error('ecoIds is required for batch approvals') }
+    }
+
+    const payload: Record<string, unknown> = {
+      eco_ids: params.ecoIds,
+      mode: params.mode,
+    }
+    if (params.comment) {
+      payload.comment = params.comment
+    }
+
+    return this.select<EcoBatchApprovalResponse>('/api/v1/eco/approvals/batch', {
+      method: 'POST',
+      data: payload,
+    })
+  }
+
   async getWhereUsed(
     itemId: string,
     options?: { recursive?: boolean; maxLevels?: number }
@@ -1199,6 +1283,74 @@ export class PLMAdapter extends HTTPAdapter {
     if (params.effectiveAt) queryParams.effective_at = params.effectiveAt
 
     return this.query<BOMCompareResponse>('/api/v1/bom/compare', [queryParams])
+  }
+
+  async getEcoImpact(ecoId: string, options?: EcoImpactOptions): Promise<QueryResult<EcoImpactResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          eco_id: ecoId,
+          impact_count: 0,
+          impacted_assemblies: [],
+          impact_level: 'none',
+          impact_score: 0,
+          impact_scope: 'none',
+          impact_summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('ECO impact is not supported for this PLM API mode') }
+    }
+    if (!ecoId) {
+      return { data: [], error: new Error('ecoId is required for ECO impact') }
+    }
+
+    const queryParams: Record<string, unknown> = {}
+    if (typeof options?.maxLevels === 'number') queryParams.max_levels = options.maxLevels
+    if (typeof options?.includeChildFields === 'boolean') queryParams.include_child_fields = options.includeChildFields
+    if (typeof options?.includeFiles === 'boolean') queryParams.include_files = options.includeFiles
+    if (typeof options?.includeBomDiff === 'boolean') queryParams.include_bom_diff = options.includeBomDiff
+    if (typeof options?.includeVersionDiff === 'boolean') queryParams.include_version_diff = options.includeVersionDiff
+    if (options?.includeRelationshipProps && options.includeRelationshipProps.length > 0) {
+      queryParams.include_relationship_props = options.includeRelationshipProps.join(',')
+    }
+    if (options?.effectiveAt) queryParams.effective_at = options.effectiveAt
+    if (options?.compareMode) queryParams.compare_mode = options.compareMode
+
+    return this.query<EcoImpactResponse>(`/api/v1/eco/${ecoId}/impact`, [queryParams])
+  }
+
+  async getEcoBomDiff(ecoId: string, options?: EcoBomDiffOptions): Promise<QueryResult<EcoBomDiffResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+          added: [],
+          removed: [],
+          changed: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('ECO BOM diff is not supported for this PLM API mode') }
+    }
+    if (!ecoId) {
+      return { data: [], error: new Error('ecoId is required for ECO BOM diff') }
+    }
+
+    const queryParams: Record<string, unknown> = {}
+    if (typeof options?.maxLevels === 'number') queryParams.max_levels = options.maxLevels
+    if (typeof options?.includeChildFields === 'boolean') queryParams.include_child_fields = options.includeChildFields
+    if (options?.includeRelationshipProps && options.includeRelationshipProps.length > 0) {
+      queryParams.include_relationship_props = options.includeRelationshipProps.join(',')
+    }
+    if (options?.effectiveAt) queryParams.effective_at = options.effectiveAt
+    if (options?.compareMode) queryParams.compare_mode = options.compareMode
+
+    return this.query<EcoBomDiffResponse>(`/api/v1/eco/${ecoId}/bom-diff`, [queryParams])
   }
 
   async getBomSubstitutes(bomLineId: string): Promise<QueryResult<BOMSubstitutesResponse>> {

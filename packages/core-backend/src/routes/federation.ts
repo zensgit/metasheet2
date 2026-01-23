@@ -131,6 +131,8 @@ const PLMQuerySchema = z.object({
     'bom',
     'documents',
     'approvals',
+    'eco_impact',
+    'eco_bom_diff',
     'bom_compare',
     'substitutes',
     'where_used',
@@ -142,6 +144,7 @@ const PLMQuerySchema = z.object({
     'cad_mesh_stats',
   ]),
   productId: z.string().optional(),
+  ecoId: z.string().optional(),
   itemId: z.string().optional(),
   bomLineId: z.string().optional(),
   fileId: z.string().optional(),
@@ -153,8 +156,12 @@ const PLMQuerySchema = z.object({
   lineKey: z.string().optional(),
   compareMode: z.string().optional(),
   maxLevels: z.number().min(-1).max(100).optional(),
+  includeChildFields: z.boolean().optional(),
   includeSubstitutes: z.boolean().optional(),
   includeEffectivity: z.boolean().optional(),
+  includeFiles: z.boolean().optional(),
+  includeBomDiff: z.boolean().optional(),
+  includeVersionDiff: z.boolean().optional(),
   includeRelationshipProps: z.union([z.array(z.string()), z.string()]).optional(),
   effectiveAt: z.string().optional(),
   recursive: z.boolean().optional(),
@@ -169,6 +176,7 @@ const PLMMutationSchema = z.object({
   operation: z.enum([
     'substitutes_add',
     'substitutes_remove',
+    'approvals_batch',
     'cad_properties_update',
     'cad_view_state_update',
     'cad_review_update',
@@ -177,6 +185,9 @@ const PLMMutationSchema = z.object({
   substituteItemId: z.string().optional(),
   substituteId: z.string().optional(),
   fileId: z.string().optional(),
+  ecoIds: z.array(z.string()).optional(),
+  mode: z.enum(['approve', 'reject']).optional(),
+  comment: z.string().optional(),
   payload: z.record(z.unknown()).optional(),
   properties: z.record(z.unknown()).optional(),
   filters: z.record(z.unknown()).optional(),
@@ -925,6 +936,7 @@ export function federationRouter(injector?: Injector): Router {
         const {
           operation,
           productId,
+          ecoId,
           itemId,
           bomLineId,
           fileId,
@@ -936,8 +948,12 @@ export function federationRouter(injector?: Injector): Router {
           lineKey,
           compareMode,
           maxLevels,
+          includeChildFields,
           includeSubstitutes,
           includeEffectivity,
+          includeFiles,
+          includeBomDiff,
+          includeVersionDiff,
           includeRelationshipProps,
           effectiveAt,
           recursive,
@@ -1002,6 +1018,40 @@ export function federationRouter(injector?: Injector): Router {
                 productId,
                 items: result.data,
                 total: result.metadata?.totalCount ?? result.data.length,
+              },
+            })
+          }
+
+          if (operation === 'approvals') {
+            const resolvedStatus = typeof filters?.status === 'string'
+              ? filters.status
+              : toStringParam(filterParams.status)
+            const resolvedProductId = productId
+              || toStringParam(filterParams.product_id ?? filterParams.productId)
+            const resolvedRequesterId = toStringParam(
+              filterParams.requester_id ?? filterParams.requesterId ?? filterParams.user_id ?? filterParams.userId
+            )
+
+            const result = await adapter.getApprovals({
+              status: resolvedStatus,
+              productId: resolvedProductId,
+              requesterId: resolvedRequesterId,
+              limit: pagination?.limit,
+              offset: pagination?.offset,
+            })
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: {
+                items: result.data,
+                total: result.metadata?.totalCount ?? result.data.length,
+                limit: pagination?.limit ?? 100,
+                offset: pagination?.offset ?? 0,
               },
             })
           }
@@ -1317,6 +1367,119 @@ export function federationRouter(injector?: Injector): Router {
               },
             })
           }
+
+          if (operation === 'eco_impact') {
+            const resolvedEcoId = ecoId
+              || toStringParam(filterParams.eco_id ?? filterParams.ecoId ?? filterParams.id ?? filterParams.eco)
+            if (!resolvedEcoId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'ecoId is required for eco_impact',
+                },
+              })
+            }
+
+            const resolvedMaxLevels = typeof maxLevels === 'number'
+              ? maxLevels
+              : toNumberParam(filterParams.max_levels ?? filterParams.maxLevels)
+            const resolvedIncludeChildFields = typeof includeChildFields === 'boolean'
+              ? includeChildFields
+              : toBoolParam(filterParams.include_child_fields ?? filterParams.includeChildFields)
+            const resolvedIncludeFiles = typeof includeFiles === 'boolean'
+              ? includeFiles
+              : toBoolParam(filterParams.include_files ?? filterParams.includeFiles)
+            const resolvedIncludeBomDiff = typeof includeBomDiff === 'boolean'
+              ? includeBomDiff
+              : toBoolParam(filterParams.include_bom_diff ?? filterParams.includeBomDiff)
+            const resolvedIncludeVersionDiff = typeof includeVersionDiff === 'boolean'
+              ? includeVersionDiff
+              : toBoolParam(filterParams.include_version_diff ?? filterParams.includeVersionDiff)
+            const resolvedRelProps = toStringArrayParam(
+              includeRelationshipProps ?? filterParams.include_relationship_props ?? filterParams.includeRelationshipProps
+            )
+            const resolvedEffectiveAt = effectiveAt || toStringParam(filterParams.effective_at ?? filterParams.effectiveAt)
+            const resolvedCompareMode = compareMode || toStringParam(filterParams.compare_mode ?? filterParams.compareMode)
+
+            const result = await adapter.getEcoImpact(resolvedEcoId, {
+              maxLevels: resolvedMaxLevels,
+              includeChildFields: resolvedIncludeChildFields,
+              includeFiles: resolvedIncludeFiles,
+              includeBomDiff: resolvedIncludeBomDiff,
+              includeVersionDiff: resolvedIncludeVersionDiff,
+              includeRelationshipProps: resolvedRelProps,
+              effectiveAt: resolvedEffectiveAt,
+              compareMode: resolvedCompareMode,
+            })
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                eco_id: resolvedEcoId,
+                impact_count: 0,
+                impacted_assemblies: [],
+                impact_level: 'none',
+                impact_score: 0,
+                impact_scope: 'none',
+                impact_summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+              },
+            })
+          }
+
+          if (operation === 'eco_bom_diff') {
+            const resolvedEcoId = ecoId
+              || toStringParam(filterParams.eco_id ?? filterParams.ecoId ?? filterParams.id ?? filterParams.eco)
+            if (!resolvedEcoId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'ecoId is required for eco_bom_diff',
+                },
+              })
+            }
+
+            const resolvedMaxLevels = typeof maxLevels === 'number'
+              ? maxLevels
+              : toNumberParam(filterParams.max_levels ?? filterParams.maxLevels)
+            const resolvedIncludeChildFields = typeof includeChildFields === 'boolean'
+              ? includeChildFields
+              : toBoolParam(filterParams.include_child_fields ?? filterParams.includeChildFields)
+            const resolvedRelProps = toStringArrayParam(
+              includeRelationshipProps ?? filterParams.include_relationship_props ?? filterParams.includeRelationshipProps
+            )
+            const resolvedEffectiveAt = effectiveAt || toStringParam(filterParams.effective_at ?? filterParams.effectiveAt)
+            const resolvedCompareMode = compareMode || toStringParam(filterParams.compare_mode ?? filterParams.compareMode)
+
+            const result = await adapter.getEcoBomDiff(resolvedEcoId, {
+              maxLevels: resolvedMaxLevels,
+              includeChildFields: resolvedIncludeChildFields,
+              includeRelationshipProps: resolvedRelProps,
+              effectiveAt: resolvedEffectiveAt,
+              compareMode: resolvedCompareMode,
+            })
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: result.data[0] ?? {
+                summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+                added: [],
+                removed: [],
+                changed: [],
+              },
+            })
+          }
         }
 
         metrics.recordRequest(
@@ -1384,6 +1547,9 @@ export function federationRouter(injector?: Injector): Router {
           substituteItemId,
           substituteId,
           fileId,
+          ecoIds,
+          mode,
+          comment,
           payload,
           properties,
           filters,
@@ -1397,6 +1563,54 @@ export function federationRouter(injector?: Injector): Router {
             error: {
               code: 'PLM_UNAVAILABLE',
               message: 'PLM adapter not configured',
+            },
+          })
+        }
+
+        if (operation === 'approvals_batch') {
+          const resolvedEcoIds = Array.isArray(ecoIds) ? ecoIds : toStringArrayParam(
+            filterParams.eco_ids ?? filterParams.ecoIds ?? filterParams.ids
+          )
+          const resolvedMode = (mode || toStringParam(filterParams.mode) || '').toLowerCase()
+          const resolvedComment = comment ?? toStringParam(filterParams.comment)
+
+          if (!resolvedEcoIds || resolvedEcoIds.length === 0) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'ecoIds is required for approvals_batch',
+              },
+            })
+          }
+          if (!['approve', 'reject'].includes(resolvedMode)) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'mode must be approve|reject',
+              },
+            })
+          }
+
+          const result = await adapter.batchEcoApprovals({
+            ecoIds: resolvedEcoIds,
+            mode: resolvedMode as 'approve' | 'reject',
+            comment: resolvedComment || undefined,
+          })
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? {
+              mode: resolvedMode,
+              count: resolvedEcoIds.length,
+              summary: { ok: 0, failed: resolvedEcoIds.length },
+              results: [],
             },
           })
         }
@@ -2221,9 +2435,12 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'drawings',
       'where_used',
       'bom_compare',
+      'eco_impact',
+      'eco_bom_diff',
       'substitutes',
       'substitutes_add',
       'substitutes_remove',
+      'approvals_batch',
       'cad_properties',
       'cad_view_state',
       'cad_review',
@@ -2425,6 +2642,26 @@ function getMockPLMData(
           left_id: left,
           right_id: right,
         }
+      }
+    case 'eco_impact':
+      {
+        const ecoId = options?.itemId || productId || 'eco-1'
+        return {
+          eco_id: ecoId,
+          impact_count: 0,
+          impacted_assemblies: [],
+          impact_level: 'none',
+          impact_score: 0,
+          impact_scope: 'none',
+          impact_summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+        }
+      }
+    case 'eco_bom_diff':
+      return {
+        summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+        added: [],
+        removed: [],
+        changed: [],
       }
     case 'documents':
       return {
