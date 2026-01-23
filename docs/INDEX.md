@@ -45,7 +45,9 @@
 | 文档 | 用途 |
 |------|------|
 | [verification-test-report.md](./verification-test-report.md) | 测试报告 |
+| [verification-attendance-20260123.md](./verification-attendance-20260123.md) | Attendance 插件验证报告 (2026-01-23) |
 | [verification-index.md](./verification-index.md) | 验证索引（常用命令/产物） |
+| [development/attendance-development-report-20260123.md](./development/attendance-development-report-20260123.md) | Attendance 执行报告 (2026-01-23) |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |
