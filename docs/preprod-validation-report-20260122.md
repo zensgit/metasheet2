@@ -92,6 +92,15 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - Direct backend call on `127.0.0.1:8900` also returns `404 {"ok":false,"error":"Not enabled"}`, so this is not a proxy-only issue.
 - Role display mismatch observed: admin at DB, token shows user; may need app-level refresh.
 
+## Update (2026-01-23)
+- Root cause confirmed: fallback-test routes were mounted at root, intercepting `/api/attendance/*` and returning `"Not enabled"`.
+- GHCR `metasheet2-backend:latest` (digest `sha256:fdc16b93f6985c01b787d761aa862db1a2093a59df18b6be5372b010675b0ace`) still contains the old mount (no `/internal/test` prefix).
+- Applied **temporary hotfix** inside running backend container to scope fallback-test to `/internal/test`, then restarted backend.
+- After hotfix, both endpoints now return `200`:
+  - `GET /api/attendance/settings` → ok + default settings
+  - `GET /api/attendance/summary` → ok + empty summary
+- Action pending: redeploy backend once GHCR latest includes commit `85e4a5fa`; this will replace the hotfix with a permanent fix.
+
 ## Artifacts
 - Logs: N/A
 - Screenshots: `/tmp/attendance-page.png`
