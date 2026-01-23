@@ -48,7 +48,12 @@ export function authHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   }
-  const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null
+  const storedToken =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('auth_token') ||
+        localStorage.getItem('jwt') ||
+        localStorage.getItem('devToken')
+      : null
   const resolvedToken = typeof token === 'string' ? token : storedToken ?? ''
   if (resolvedToken.trim().length > 0) {
     headers.Authorization = `Bearer ${resolvedToken}`
