@@ -12,16 +12,17 @@
   - Result: ✅ Success
 - Remote API smoke check (142.171.239.56:8081)
   - `GET /api/plugins`: ✅ 200, `enabled` flag present; attendance/calendar/gallery/kanban contributions present
-  - `GET /api/admin/plugins/config`: ⚠️ 401 Unauthorized (admin token not available; login token role = user)
+  - `GET /api/admin/plugins/config`: ✅ 200 with admin token
+  - `PUT /api/admin/plugins/config`: ✅ toggled `plugin-attendance` off/on and verified status change in `/api/plugins`
 
 ## Deployment Notes
 - Backend image rebuilt on server from `feat/plm-updates`.
 - `metasheet-backend` restarted with `node --import tsx` override in `/home/mainuser/metasheet2/docker-compose.app.yml` to avoid ESM specifier resolution failures in `dist`.
+- Created `plugin_kv` table manually (migration runner failed due to a missing historical migration).
 
 ## Manual Checks Not Run
 - Admin UI toggle at `/admin/plugins`
-- Backend runtime verification for plugin enable/disable using an admin token
+- UI verification that disabled plugins are hidden from navigation
 
 ## Follow-ups
-- Obtain an admin-role token and confirm `PUT /api/admin/plugins/config` toggles `enabled` state.
 - Confirm disabled plugin views are removed from navigation and routes via UI.

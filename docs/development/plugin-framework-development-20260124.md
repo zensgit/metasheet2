@@ -12,6 +12,7 @@
 - Added runtime enable/disable hooks so toggles take effect without restart.
 - Updated frontend routing and navigation to use plugin view contributions and hide disabled view IDs.
 - Restored `@metasheet/core-backend` build by fixing type errors, adapter typing, and missing deps for import/export.
+- Normalized JWT payloads to map `userId` to `id` for RBAC/SafetyGuard checks.
 
 ## Files Touched
 - `apps/web/src/App.vue`
@@ -24,6 +25,7 @@
 - `packages/core-backend/src/guards/types.ts`
 - `packages/core-backend/src/index.ts`
 - `packages/core-backend/src/routes/admin-routes.ts`
+- `packages/core-backend/src/auth/jwt-middleware.ts`
 - `packages/core-backend/src/audit/AuditService.ts`
 - `packages/core-backend/src/core/plugin-loader.ts`
 - `packages/core-backend/src/data-adapters/HTTPAdapter.ts`
