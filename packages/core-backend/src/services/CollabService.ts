@@ -18,13 +18,15 @@ export class CollabService implements ICollabService {
   }
 
   private setupEventListeners() {
-    this.eventBus.subscribe('spreadsheet.cell.updated', (payload) => {
+    this.eventBus.subscribe('spreadsheet.cell.updated', (payload: unknown) => {
       if (!this.io) return;
-      const { spreadsheetId } = payload;
+      const data = payload as { spreadsheetId?: string } & Record<string, unknown>
+      const spreadsheetId = data.spreadsheetId
+      if (!spreadsheetId) return
       // Broadcast to room 'sheet:{spreadsheetId}'
       this.io.to(`sheet:${spreadsheetId}`).emit('sheet:op', {
         type: 'cell-update',
-        data: payload
+        data
       });
       this.logger.debug(`Broadcasting update for sheet ${spreadsheetId}`);
     });
@@ -91,11 +93,6 @@ export class CollabService implements ICollabService {
   sendTo(userId: string, event: string, data: unknown): void {
     if (!this.io) return;
     this.io.to(userId).emit(event, data);
-  }
-
-  broadcastTo(room: string, event: string, data: unknown): void {
-    if (!this.io) return
-    this.io.to(room).emit(event, data)
   }
 
   joinRoom(room: string, userId: string): void

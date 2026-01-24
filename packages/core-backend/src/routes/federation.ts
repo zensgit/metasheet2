@@ -1909,7 +1909,7 @@ export function federationRouter(injector?: Injector): Router {
               })
             }
 
-            const results = items.map((doc, index) => ({
+            const results = items.map((doc: { id: string; name: string }, index: number) => ({
               id: doc.id,
               name: doc.name,
               score: 1 - index * 0.01,

@@ -47,11 +47,11 @@ export class ImportEngine {
 
     const results: ImportResult[] = [];
 
-    workbook.eachSheet((worksheet) => {
+    workbook.eachSheet((worksheet: ExcelJS.Worksheet) => {
       const rows: Array<Record<string, any>> = [];
       let headers: string[] = [];
 
-      worksheet.eachRow((row, rowNumber) => {
+      worksheet.eachRow((row: ExcelJS.Row, rowNumber: number) => {
         const rowValues = row.values as any[]; // ExcelJS values start at index 1
         // Shift to index 0
         const values = rowValues.slice(1);

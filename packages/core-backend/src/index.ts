@@ -17,6 +17,7 @@ import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData, PluginContext, PluginApiMethod, PluginCommunication, PluginStorage } from './types/plugin'
 import type { User } from './auth/AuthService'
+import type { CollectionDefinition } from './types/collection'
 import { poolManager } from './integration/db/connection-pool'
 import { getPluginEnabledMap } from './core/plugin-settings-store'
 import { eventBus } from './integration/events/event-bus'
@@ -27,7 +28,6 @@ import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
-import { poolManager } from './integration/db/connection-pool'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -42,7 +42,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter } from './routes/data-sources'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -121,15 +121,15 @@ export class MetaSheetServer {
     return {
       injector: this.injector,
       formula: {
-        calculate: (name, ...args) => this.injector.get(IFormulaService).calculate(name, ...args),
-        calculateFormula: (exp, resolver) => this.injector.get(IFormulaService).calculateFormula(exp, resolver),
+        calculate: (name: string, ...args: unknown[]) => this.injector.get(IFormulaService).calculate(name, ...args),
+        calculateFormula: (exp: string, resolver?: (name: string) => unknown) => this.injector.get(IFormulaService).calculateFormula(exp, resolver),
         getAvailableFunctions: () => this.injector.get(IFormulaService).getAvailableFunctions()
       },
       collection: {
-        register: (definition) => {
+        register: (definition: CollectionDefinition) => {
           this.injector.get(ICollectionManager).register(definition)
         },
-        getRepository: (name) => {
+        getRepository: (name: string) => {
           return this.injector.get(ICollectionManager).getRepository(name)
         },
         sync: async () => {
@@ -177,30 +177,30 @@ export class MetaSheetServer {
       },
 
       plm: {
-        getProducts: (options) => this.injector.get(IPLMAdapter).getProducts(options),
-        getProductBOM: (id) => this.injector.get(IPLMAdapter).getProductBOM(id)
+        getProducts: (options?: Record<string, unknown>) => this.injector.get(IPLMAdapter).getProducts(options),
+        getProductBOM: (id: string) => this.injector.get(IPLMAdapter).getProductBOM(id)
       },
 
       athena: {
-        listFolders: (parentId) => this.injector.get(IAthenaAdapter).listFolders(parentId),
-        searchDocuments: (params) => this.injector.get(IAthenaAdapter).searchDocuments(params),
-        getDocument: (id) => this.injector.get(IAthenaAdapter).getDocument(id),
-        uploadDocument: (params) => this.injector.get(IAthenaAdapter).uploadDocument(params)
+        listFolders: (parentId?: string) => this.injector.get(IAthenaAdapter).listFolders(parentId),
+        searchDocuments: (params: Record<string, unknown>) => this.injector.get(IAthenaAdapter).searchDocuments(params),
+        getDocument: (id: string) => this.injector.get(IAthenaAdapter).getDocument(id),
+        uploadDocument: (params: Record<string, unknown>) => this.injector.get(IAthenaAdapter).uploadDocument(params)
       },
 
       dedup: {
-        search: (fileId, threshold) => this.injector.get(IDedupCADAdapter).search(fileId, threshold),
-        compare: (sourceId, targetId) => this.injector.get(IDedupCADAdapter).compare(sourceId, targetId)
+        search: (fileId: string, threshold?: number) => this.injector.get(IDedupCADAdapter).search(fileId, threshold),
+        compare: (sourceId: string, targetId: string) => this.injector.get(IDedupCADAdapter).compare(sourceId, targetId)
       },
 
       ai: {
-        analyze: (fileId) => this.injector.get(ICADMLAdapter).analyze(fileId),
-        extractText: (fileId) => this.injector.get(ICADMLAdapter).extractText(fileId),
-        predictCost: (fileId, params) => this.injector.get(ICADMLAdapter).predictCost(fileId, params)
+        analyze: (fileId: string) => this.injector.get(ICADMLAdapter).analyze(fileId),
+        extractText: (fileId: string) => this.injector.get(ICADMLAdapter).extractText(fileId),
+        predictCost: (fileId: string, params: Record<string, unknown>) => this.injector.get(ICADMLAdapter).predictCost(fileId, params)
       },
 
       vision: {
-        generateDiff: (sourceId, targetId) => this.injector.get(IVisionAdapter).generateDiff(sourceId, targetId)
+        generateDiff: (sourceId: string, targetId: string) => this.injector.get(IVisionAdapter).generateDiff(sourceId, targetId)
       },
 
       database: {
@@ -398,8 +398,8 @@ export class MetaSheetServer {
   private createPluginContext(loaded: LoadedPlugin, coreAPI: CoreAPI): PluginContext {
     const storageMap = new Map<string, unknown>()
     const storage: PluginStorage = {
-      get: async (key: string) => storageMap.has(key) ? (storageMap.get(key) as unknown) : null,
-      set: async (key: string, value: unknown) => {
+      get: async <T = unknown>(key: string): Promise<T | null> => storageMap.has(key) ? (storageMap.get(key) as T) : null,
+      set: async <T = unknown>(key: string, value: T) => {
         storageMap.set(key, value)
       },
       delete: async (key: string) => {
@@ -409,12 +409,12 @@ export class MetaSheetServer {
     }
 
     const communication: PluginCommunication = {
-      call: async (plugin: string, method: string, ...args: unknown[]) => {
+      call: async <R = unknown>(plugin: string, method: string, ...args: unknown[]): Promise<R> => {
         const api = this.pluginApis.get(plugin)
         if (!api || typeof api[method] !== 'function') {
           throw new Error(`Plugin API not found: ${plugin}.${method}`)
         }
-        return api[method](...args)
+        return api[method](...args) as Promise<R>
       },
       register: (name: string, api: Record<string, PluginApiMethod>) => {
         this.pluginApis.set(name, api)
@@ -534,7 +534,7 @@ export class MetaSheetServer {
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
     this.app.use(filesRouter())
-    this.app.use(spreadsheetsRouter(this.injector))
+    this.app.use(spreadsheetsRouter())
     this.app.use(spreadsheetPermissionsRouter())
     this.app.use(commentsRouter(this.injector))
     // 路由：看板（Kanban MVP API）
@@ -621,8 +621,7 @@ export class MetaSheetServer {
         enablePlugin: this.enablePluginRuntime.bind(this),
         disablePlugin: this.disablePluginRuntime.bind(this)
       },
-      snapshotService: this.snapshotService,
-      dataSourceManager: getDataSourceManager()
+      snapshotService: this.snapshotService
     }))
 
     // V2 测试端点

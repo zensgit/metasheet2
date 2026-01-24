@@ -399,7 +399,7 @@ export class PluginLoader {
   private validatePermissions(manifest: PluginManifest): void {
     const permissions = normalizePermissionList(manifest.permissions)
     if (permissions.length === 0) return
-    const whitelist = new Set(PERMISSION_WHITELIST)
+    const whitelist = new Set<string>(PERMISSION_WHITELIST)
     const invalid = permissions.filter(permission => !whitelist.has(permission))
     if (invalid.length > 0) {
       throw new Error(`Permission not in whitelist: ${invalid.join(', ')}`)

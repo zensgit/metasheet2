@@ -8,6 +8,7 @@ interface AxiosRequestConfig {
   params?: Record<string, unknown>;
   data?: unknown;
   auth?: { username: string; password: string };
+  responseType?: string;
 }
 
 interface AxiosResponse<T = unknown> {
@@ -28,13 +29,13 @@ interface AxiosInstance {
   interceptors: {
     request: {
       use(
-        onFulfilled: (config: AxiosRequestConfig) => AxiosRequestConfig,
+        onFulfilled: (config: AxiosRequestConfig) => AxiosRequestConfig | Promise<AxiosRequestConfig>,
         onRejected: (error: unknown) => Promise<never>
       ): void;
     };
     response: {
       use(
-        onFulfilled: (response: AxiosResponse) => AxiosResponse,
+        onFulfilled: (response: AxiosResponse) => AxiosResponse | Promise<AxiosResponse>,
         onRejected: (error: unknown) => Promise<never>
       ): void;
     };
@@ -102,7 +103,7 @@ interface TokenProvider {
 }
 
 export class HTTPAdapter extends BaseDataAdapter {
-  private client: AxiosInstance | null = null
+  protected client: AxiosInstance | null = null
   private endpoints: Map<string, EndpointConfig> = new Map()
   private tokenProvider: TokenProvider | null = null
 
@@ -241,6 +242,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const endpointConfig = this.endpoints.get(endpoint)
     const executeRequest = async (): Promise<QueryResult<T>> => {
       if (endpointConfig) {
@@ -261,7 +263,7 @@ export class HTTPAdapter extends BaseDataAdapter {
           }
         }
 
-        const response = await this.client.request<T>(requestConfig)
+        const response = await client.request<T>(requestConfig)
 
         // Apply response transformation if provided
         const data = endpointConfig.transformResponse
@@ -277,7 +279,7 @@ export class HTTPAdapter extends BaseDataAdapter {
         }
       }
 
-      const response = await this.client.get<T>(endpoint, { params: params?.[0] as Record<string, unknown> })
+      const response = await client.get<T>(endpoint, { params: params?.[0] as Record<string, unknown> })
       const data = response.data
 
       return {
@@ -315,6 +317,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const executeRequest = async (): Promise<QueryResult<T>> => {
       const method = options?.method || 'GET'
       const url = options?.endpoint || endpoint
@@ -345,7 +348,7 @@ export class HTTPAdapter extends BaseDataAdapter {
         }
       }
 
-      const response = await this.client.request<T | { data?: T[]; items?: T[]; results?: T[]; total?: number; count?: number; totalCount?: number }>(requestConfig)
+      const response = await client.request<T | { data?: T[]; items?: T[]; results?: T[]; total?: number; count?: number; totalCount?: number }>(requestConfig)
       const data = response.data
 
       // Handle paginated responses
@@ -407,8 +410,9 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const executeRequest = async (): Promise<QueryResult<T>> => {
-      const response = await this.client.post<T>(endpoint, data)
+      const response = await client.post<T>(endpoint, data)
       const responseData = response.data
 
       return {
@@ -449,12 +453,13 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const executeRequest = async (): Promise<QueryResult<T>> => {
       // For REST APIs, typically update by ID
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
 
-      const response = await this.client.put<T>(url, data, {
+      const response = await client.put<T>(url, data, {
         params: id ? undefined : where
       })
 
@@ -494,12 +499,13 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const executeRequest = async (): Promise<QueryResult<T>> => {
       // For REST APIs, typically delete by ID
       const id = where.id || where._id
       const url = id ? `${endpoint}/${id}` : endpoint
 
-      const response = await this.client.delete<T>(url, {
+      const response = await client.delete<T>(url, {
         params: id ? undefined : where
       })
 
@@ -594,12 +600,13 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     // Implement pagination-based streaming
     let page = 0
     const pageSize = options?.highWaterMark || 100
 
     while (true) {
-      const response = await this.client.get<unknown>(endpoint, {
+      const response = await client.get<unknown>(endpoint, {
         params: {
           ...(params?.[0] as Record<string, unknown>),
           page,
@@ -636,6 +643,21 @@ export class HTTPAdapter extends BaseDataAdapter {
     }
   }
 
+  protected async download(endpoint: string): Promise<Buffer> {
+    if (!this.client) {
+      throw new Error('HTTP client not initialized')
+    }
+
+    const client = this.client
+    const response = await client.request<ArrayBuffer>({
+      url: endpoint,
+      method: 'GET',
+      responseType: 'arraybuffer'
+    })
+
+    return Buffer.from(response.data as ArrayBuffer)
+  }
+
   // Helper methods
   private extractColumns(data: unknown): Array<{ name: string; type: string; nullable?: boolean }> {
     if (!data) return []
@@ -658,6 +680,7 @@ export class HTTPAdapter extends BaseDataAdapter {
       throw new Error('HTTP client not initialized')
     }
 
+    const client = this.client
     const results: QueryResult<T>[] = []
 
     // Execute requests in parallel with concurrency control
@@ -672,7 +695,7 @@ export class HTTPAdapter extends BaseDataAdapter {
     for (const chunk of chunks) {
       const promises = chunk.map(async (req) => {
         try {
-          const response = await this.client!.request<T>({
+          const response = await client.request<T>({
             method: req.method,
             url: req.endpoint,
             data: req.data,

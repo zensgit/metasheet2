@@ -4,6 +4,8 @@
  */
 
 import type { RequestHandler } from 'express'
+import type { CollectionDefinition } from './collection'
+import type { Repository } from '../core/database/Repository'
 
 /**
  * 插件生命周期接口
@@ -311,7 +313,54 @@ export interface PluginManifest {
 /**
  * 核心API接口
  */
+export interface FormulaAPI {
+  calculate(name: string, ...args: unknown[]): unknown
+  calculateFormula(exp: string, resolver?: (name: string) => unknown): unknown
+  getAvailableFunctions(): string[]
+}
+
+export interface CollectionAPI {
+  register(definition: CollectionDefinition): void
+  getRepository(name: string): Repository
+  sync(): Promise<void>
+}
+
+export interface PLMAPI {
+  getProducts(options?: Record<string, unknown>): Promise<unknown>
+  getProductBOM(id: string): Promise<unknown>
+}
+
+export interface AthenaAPI {
+  listFolders(parentId?: string): Promise<unknown>
+  searchDocuments(params: Record<string, unknown>): Promise<unknown>
+  getDocument(id: string): Promise<unknown>
+  uploadDocument(params: Record<string, unknown>): Promise<unknown>
+}
+
+export interface DedupAPI {
+  search(fileId: string, threshold?: number): Promise<unknown>
+  compare(sourceId: string, targetId: string): Promise<unknown>
+}
+
+export interface AIAPI {
+  analyze(fileId: string): Promise<unknown>
+  extractText(fileId: string): Promise<unknown>
+  predictCost(fileId: string, params: Record<string, unknown>): Promise<unknown>
+}
+
+export interface VisionAPI {
+  generateDiff(sourceId: string, targetId: string): Promise<unknown>
+}
+
 export interface CoreAPI {
+  injector?: unknown
+  formula: FormulaAPI
+  collection: CollectionAPI
+  plm: PLMAPI
+  athena: AthenaAPI
+  dedup: DedupAPI
+  ai: AIAPI
+  vision: VisionAPI
   http: HttpAPI
   database: DatabaseAPI
   auth: AuthAPI

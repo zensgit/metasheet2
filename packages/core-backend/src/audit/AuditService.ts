@@ -101,7 +101,7 @@ export interface AuditMessageEvent {
   id: string
   /** Who performed the action (user ID, system, plugin name) */
   who: {
-    userId?: number
+    userId?: number | string
     userName?: string
     userEmail?: string
     sessionId?: string

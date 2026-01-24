@@ -222,8 +222,9 @@ export class BPMNWorkflowEngine extends EventEmitter {
       if (!process) {
         throw new Error('No process definition found in BPMN XML')
       }
-      const processKey = process.$.id || definition.key
-      const processName = process.$.name || definition.name
+      const processMeta = (process as { $?: { id?: string; name?: string } }).$
+      const processKey = processMeta?.id || definition.key
+      const processName = processMeta?.name || definition.name
 
       // Get next version number
       const latestVersion = await this.getLatestVersion(processKey, definition.tenantId)
@@ -433,24 +434,25 @@ export class BPMNWorkflowEngine extends EventEmitter {
     const candidateUsers = this.resolveExpression(props.candidateUsers, instance?.variables)
     const candidateGroups = this.resolveExpression(props.candidateGroups, instance?.variables)
 
-    await db
-      .insertInto('bpmn_user_tasks')
-      .values({
-        id: taskId,
-        process_instance_id: instanceId,
-        activity_instance_id: activityInstanceId,
-        task_definition_key: activityDef.id,
-        name: activityDef.name || 'User Task',
-        assignee: (assignee as string | null) || null,
-        candidate_users: Array.isArray(candidateUsers) ? candidateUsers : candidateUsers ? [candidateUsers as string] : null,
-        candidate_groups: Array.isArray(candidateGroups) ? candidateGroups : candidateGroups ? [candidateGroups as string] : null,
-        priority: (props.priority as number | undefined) || 50,
-        due_date: props.dueDate ? new Date(props.dueDate as string | number | Date).toISOString() : null,
-        follow_up_date: null,
-        state: assignee ? 'RESERVED' : 'READY',
-        completed_at: null
-      })
-      .execute()
+      await db
+        .insertInto('bpmn_user_tasks')
+        .values({
+          id: taskId,
+          process_instance_id: instanceId,
+          activity_instance_id: activityInstanceId,
+          task_definition_key: activityDef.id,
+          name: activityDef.name || 'User Task',
+          assignee: (assignee as string | null) || null,
+          candidate_users: Array.isArray(candidateUsers) ? candidateUsers : candidateUsers ? [candidateUsers as string] : null,
+          candidate_groups: Array.isArray(candidateGroups) ? candidateGroups : candidateGroups ? [candidateGroups as string] : null,
+          priority: (props.priority as number | undefined) || 50,
+          due_date: props.dueDate ? new Date(props.dueDate as string | number | Date).toISOString() : null,
+          follow_up_date: null,
+          state: assignee ? 'RESERVED' : 'READY',
+          variables: JSON.stringify(instance?.variables ?? {}),
+          completed_at: null
+        })
+        .execute()
 
     this.emit('task:created', { taskId, instanceId, assignee })
     this.logger.info(`Created user task: ${taskId}`)
@@ -1783,7 +1785,8 @@ export class BPMNWorkflowEngine extends EventEmitter {
     const startEvents = this.findElementsByType(process, 'bpmn:startEvent')
 
     for (const startEvent of startEvents) {
-      const activityId = startEvent.$.id
+      const startEventMeta = (startEvent as { $?: { id?: string } }).$
+      const activityId = startEventMeta?.id ?? uuidv4()
       const outgoing = startEvent['bpmn:outgoing']
 
       // Record start event execution
