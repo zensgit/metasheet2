@@ -15,6 +15,8 @@
 - Normalized JWT payloads to map `userId` to `id` for RBAC/SafetyGuard checks.
 - Added an ESM import fixer for backend builds so Node can run `dist` without `tsx`.
 - Set `@metasheet/core-backend` package `type: "module"` and run the fixer across the full `dist` tree.
+- Hardened ESM runtime compatibility (lodash imports, plugin loader dynamic imports, `require` shims, and ESM-safe paths).
+- Marked legacy CommonJS plugins with local `package.json` to load cleanly under ESM.
 - Added a placeholder migration for a missing historical spreadsheet migration.
 
 ## Files Touched
@@ -29,24 +31,35 @@
 - `packages/core-backend/src/index.ts`
 - `packages/core-backend/src/routes/admin-routes.ts`
 - `packages/core-backend/src/auth/jwt-middleware.ts`
+- `packages/core-backend/src/core/PluginIsolationManager.ts`
 - `packages/core-backend/scripts/fix-esm-imports.mjs`
 - `packages/core-backend/migrations/zzzz20260113_create_spreadsheets_table.sql`
 - `packages/core-backend/src/audit/AuditService.ts`
 - `packages/core-backend/src/core/plugin-loader.ts`
+- `packages/core-backend/src/core/logger.ts`
+- `packages/core-backend/src/core/plugin-service-factory.ts`
 - `packages/core-backend/src/data-adapters/HTTPAdapter.ts`
 - `packages/core-backend/src/libs/import-export/import.ts`
 - `packages/core-backend/src/libs/plugins/PluginManager.ts`
+- `packages/core-backend/src/libs/fields/field.ts`
+- `packages/core-backend/src/libs/fields/number_base_field.ts`
+- `packages/core-backend/src/libs/fields/text_base_field.ts`
+- `packages/core-backend/src/libs/parser/lexer.ts`
 - `packages/core-backend/src/routes/federation.ts`
 - `packages/core-backend/src/services/CollabService.ts`
 - `packages/core-backend/src/types/plugin.ts`
 - `packages/core-backend/src/workflow/BPMNWorkflowEngine.ts`
+- `packages/core-backend/src/db/migrate.ts`
 - `plugins/plugin-attendance/plugin.json`
 - `plugins/plugin-view-kanban/plugin.json`
 - `plugins/plugin-view-gantt/plugin.json`
 - `plugins/plugin-view-calendar/plugin.json`
 - `plugins/plugin-view-calendar/index.js`
+- `plugins/plugin-view-calendar/package.json`
 - `plugins/plugin-view-gallery/plugin.json`
 - `plugins/plugin-view-gallery/index.js`
+- `plugins/plugin-view-gallery/package.json`
+- `plugins/sample-basic/package.json`
 
 ## Notes
 - Disabled plugins now render as `inactive` in `/api/plugins` and are removed from navigation.
