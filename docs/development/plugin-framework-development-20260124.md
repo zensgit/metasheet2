@@ -11,6 +11,7 @@
 - Added SafetyGuard + admin-role protection for plugin enable/disable updates.
 - Added runtime enable/disable hooks so toggles take effect without restart.
 - Updated frontend routing and navigation to use plugin view contributions and hide disabled view IDs.
+- Restored `@metasheet/core-backend` build by fixing type errors, adapter typing, and missing deps for import/export.
 
 ## Files Touched
 - `apps/web/src/App.vue`
@@ -23,6 +24,15 @@
 - `packages/core-backend/src/guards/types.ts`
 - `packages/core-backend/src/index.ts`
 - `packages/core-backend/src/routes/admin-routes.ts`
+- `packages/core-backend/src/audit/AuditService.ts`
+- `packages/core-backend/src/core/plugin-loader.ts`
+- `packages/core-backend/src/data-adapters/HTTPAdapter.ts`
+- `packages/core-backend/src/libs/import-export/import.ts`
+- `packages/core-backend/src/libs/plugins/PluginManager.ts`
+- `packages/core-backend/src/routes/federation.ts`
+- `packages/core-backend/src/services/CollabService.ts`
+- `packages/core-backend/src/types/plugin.ts`
+- `packages/core-backend/src/workflow/BPMNWorkflowEngine.ts`
 - `plugins/plugin-attendance/plugin.json`
 - `plugins/plugin-view-kanban/plugin.json`
 - `plugins/plugin-view-gantt/plugin.json`
@@ -34,3 +44,4 @@
 ## Notes
 - Disabled plugins now render as `inactive` in `/api/plugins` and are removed from navigation.
 - Calendar/Gallery view plugins use lightweight stubs for backend activation and rely on existing frontend views.
+- Backend build now installs `exceljs`, `csv-parse`, and `@types/lodash` to satisfy runtime and type requirements.
