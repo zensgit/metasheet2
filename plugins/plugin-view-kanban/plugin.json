@@ -10,7 +10,14 @@
   "capabilities": { "views": ["kanban"], "workflows": [], "functions": [] },
   "contributes": {
     "views": [
-      { "id": "kanban", "name": "看板", "component": "KanbanView" }
+      {
+        "id": "kanban",
+        "name": "看板",
+        "component": "KanbanView",
+        "icon": "mdi-view-dashboard",
+        "order": 20,
+        "location": "main"
+      }
     ]
   },
   "permissions": [

@@ -68,7 +68,8 @@ const RISK_MAP: Record<OperationType, RiskLevel> = {
   [OperationType.CLEAR_CACHE]: RiskLevel.MEDIUM,
 
   // Low risk operations
-  [OperationType.RESET_METRICS]: RiskLevel.LOW
+  [OperationType.RESET_METRICS]: RiskLevel.LOW,
+  [OperationType.UPDATE_PLUGIN_CONFIG]: RiskLevel.LOW
 };
 
 export class SafetyGuard {
@@ -456,7 +457,9 @@ export class SafetyGuard {
       [OperationType.ALTER_SCHEMA]:
         'This will modify the database schema structure',
       [OperationType.DROP_COLUMN]:
-        'This will permanently remove a column and its data'
+        'This will permanently remove a column and its data',
+      [OperationType.UPDATE_PLUGIN_CONFIG]:
+        'This will enable or disable a plugin'
     };
 
     return (

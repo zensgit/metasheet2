@@ -14,9 +14,23 @@
   },
   "main": "dist/index.js",
   "capabilities": {
-    "views": [],
+    "views": [
+      "gantt"
+    ],
     "workflows": [],
     "functions": []
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "gantt",
+        "name": "Gantt",
+        "component": "GanttView",
+        "icon": "mdi-chart-gantt",
+        "order": 80,
+        "location": "hidden"
+      }
+    ]
   },
   "permissions": {
     "database": {

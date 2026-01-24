@@ -18,6 +18,7 @@ import { Logger, setLogContext } from './core/logger'
 import type { CoreAPI, UserInfo, TokenOptions, UploadOptions, MessageHandler, RpcHandler, QueueJobData, PluginContext, PluginApiMethod, PluginCommunication, PluginStorage } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
+import { getPluginEnabledMap } from './core/plugin-settings-store'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -616,6 +617,10 @@ export class MetaSheetServer {
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
       pluginLoader: this.pluginLoader,
+      pluginRuntime: {
+        enablePlugin: this.enablePluginRuntime.bind(this),
+        disablePlugin: this.disablePluginRuntime.bind(this)
+      },
       snapshotService: this.snapshotService,
       dataSourceManager: getDataSourceManager()
     }))
@@ -655,16 +660,20 @@ export class MetaSheetServer {
     })
 
     // 插件信息
-    this.app.get('/api/plugins', (req, res) => {
+    this.app.get('/api/plugins', async (req, res) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
-        const list = Array.from(this.pluginLoader.getPlugins().values()).map((loaded) => {
+        const loadedPlugins = Array.from(this.pluginLoader.getPlugins().values())
+        const enabledMap = await getPluginEnabledMap(loadedPlugins.map((loaded) => loaded.manifest.name))
+        const list = loadedPlugins.map((loaded) => {
           const state = this.pluginStatus.get(loaded.manifest.name)
+          const enabled = enabledMap.get(loaded.manifest.name) !== false
           return {
             name: loaded.manifest.name,
             version: loaded.manifest.version,
             displayName: loaded.manifest.displayName,
-            status: state?.status ?? 'inactive',
+            status: enabled ? (state?.status ?? 'inactive') : 'inactive',
+            enabled,
             error: state?.error,
             lastAttempt: state?.lastAttempt,
             contributes: loaded.manifest.contributes ? { views: loaded.manifest.contributes.views } : undefined,
@@ -710,9 +719,16 @@ export class MetaSheetServer {
 
   private async activateLoadedPlugins(): Promise<void> {
     const plugins = this.pluginLoader.getPlugins()
+    const enabledMap = await getPluginEnabledMap(Array.from(plugins.keys()))
     const coreAPI = this.injector.get(ICoreAPI)
     for (const [name, loaded] of plugins) {
       const lastAttempt = new Date().toISOString()
+      const enabled = enabledMap.get(name) !== false
+      if (!enabled) {
+        this.pluginStatus.set(name, { status: 'inactive', lastAttempt })
+        this.logger.info(`Plugin disabled via config: ${name}`)
+        continue
+      }
       if (!loaded.plugin || typeof loaded.plugin.activate !== 'function') {
         this.pluginStatus.set(name, { status: 'inactive', lastAttempt })
         continue
@@ -728,6 +744,52 @@ export class MetaSheetServer {
         this.pluginStatus.set(name, { status: 'failed', error: message, lastAttempt })
         this.logger.error(`Plugin activation failed: ${name}`, error as Error)
       }
+    }
+  }
+
+  private async enablePluginRuntime(pluginName: string): Promise<void> {
+    const loaded = this.pluginLoader.getPlugins().get(pluginName)
+    if (!loaded) {
+      throw new Error(`Plugin not loaded: ${pluginName}`)
+    }
+
+    const lastAttempt = new Date().toISOString()
+    if (!loaded.plugin || typeof loaded.plugin.activate !== 'function') {
+      this.pluginStatus.set(pluginName, { status: 'inactive', lastAttempt })
+      return
+    }
+
+    const current = this.pluginStatus.get(pluginName)
+    if (current?.status === 'active') return
+
+    const context = this.createPluginContext(loaded, this.injector.get(ICoreAPI))
+    try {
+      await loaded.plugin.activate(context)
+      this.pluginContexts.set(pluginName, context)
+      this.pluginStatus.set(pluginName, { status: 'active', lastAttempt })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.pluginStatus.set(pluginName, { status: 'failed', error: message, lastAttempt })
+      throw error
+    }
+  }
+
+  private async disablePluginRuntime(pluginName: string): Promise<void> {
+    const loaded = this.pluginLoader.getPlugins().get(pluginName)
+    if (!loaded) {
+      throw new Error(`Plugin not loaded: ${pluginName}`)
+    }
+
+    const lastAttempt = new Date().toISOString()
+    try {
+      if (loaded.plugin?.deactivate) {
+        await loaded.plugin.deactivate()
+      }
+    } catch (error) {
+      this.logger.warn(`Plugin deactivation failed: ${pluginName}`, error as Error)
+    } finally {
+      this.pluginContexts.delete(pluginName)
+      this.pluginStatus.set(pluginName, { status: 'inactive', lastAttempt })
     }
   }
 

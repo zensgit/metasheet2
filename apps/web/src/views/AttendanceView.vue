@@ -875,7 +875,6 @@ const requests = ref<AttendanceRequest[]>([])
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const calendarMonth = ref(new Date())
-const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
 const ruleLoading = ref(false)
@@ -899,7 +898,7 @@ const holidayEditingId = ref<string | null>(null)
 const orgId = ref('')
 const targetUserId = ref('')
 
-const { plugins, fetchPlugins, loading: pluginsLoading, error: pluginsError } = usePlugins()
+const { plugins, fetchPlugins, loading: pluginsLoading, loaded: pluginsLoaded, error: pluginsError } = usePlugins()
 const attendancePluginNames = new Set(['plugin-attendance', '@metasheet/plugin-attendance'])
 const attendancePluginEntry = computed(() => {
   return plugins.value.find(plugin => attendancePluginNames.has(plugin.name)) ?? null
@@ -1774,15 +1773,12 @@ async function loadAdminData() {
 onMounted(() => {
   fetchPlugins()
     .then(() => {
-      pluginsLoaded.value = true
       if (attendancePluginActive.value) {
         refreshAll()
         loadAdminData()
       }
     })
-    .catch(() => {
-      pluginsLoaded.value = true
-    })
+    .catch(() => null)
 })
 
 watch(orgId, () => {

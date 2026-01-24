@@ -5,13 +5,14 @@
         <span class="brand-text">MetaSheet</span>
       </div>
       <div class="nav-links">
-        <router-link :to="{ path: '/grid', query: { source: 'meta' } }" class="nav-link">Grid</router-link>
-        <router-link :to="{ path: '/kanban', query: { source: 'meta' } }" class="nav-link">Kanban</router-link>
-        <router-link to="/calendar" class="nav-link">Calendar</router-link>
-        <router-link to="/gallery" class="nav-link">Gallery</router-link>
-        <router-link to="/form" class="nav-link">Form</router-link>
-        <router-link v-if="showAttendance" to="/attendance" class="nav-link">Attendance</router-link>
-        <router-link to="/plm" class="nav-link">PLM</router-link>
+        <router-link
+          v-for="view in navViews"
+          :key="view.id"
+          :to="view.query ? { path: view.path, query: view.query } : view.path"
+          class="nav-link"
+        >
+          {{ view.name }}
+        </router-link>
       </div>
     </nav>
     <main class="app-main">
@@ -21,27 +22,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { usePlugins } from './composables/usePlugins'
+import { buildNavViews, resolveAppViews } from './router/viewRegistry'
 
 const route = useRoute()
-const { plugins, fetchPlugins } = usePlugins()
-const pluginsLoaded = ref(false)
+const { views, disabledViewIds, loaded, fetchPlugins } = usePlugins()
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
-const attendancePluginNames = new Set(['plugin-attendance', '@metasheet/plugin-attendance'])
-const showAttendance = computed(() => {
-  if (!pluginsLoaded.value) return false
-  return plugins.value.some(plugin => attendancePluginNames.has(plugin.name) && plugin.status === 'active')
-})
+const navViews = computed(() => buildNavViews(resolveAppViews(views.value, disabledViewIds.value)))
 
 onMounted(async () => {
-  await fetchPlugins()
-  pluginsLoaded.value = true
+  if (!loaded.value) {
+    await fetchPlugins()
+  }
 })
 </script>
 

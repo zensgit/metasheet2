@@ -1,0 +1,29 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-gallery",
+  "version": "0.1.0",
+  "displayName": "Gallery View",
+  "description": "Gallery view contribution for card layouts.",
+  "author": { "name": "MetaSheet" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.js",
+  "capabilities": { "views": ["gallery"], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": [
+      {
+        "id": "gallery",
+        "name": "Gallery",
+        "component": "GalleryView",
+        "icon": "mdi-view-grid",
+        "order": 40,
+        "location": "main"
+      }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "events.emit"
+  ]
+}

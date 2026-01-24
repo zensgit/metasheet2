@@ -7,7 +7,19 @@
   "author": { "name": "MetaSheet" },
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "index.cjs",
-  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "capabilities": { "views": ["attendance"], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": [
+      {
+        "id": "attendance",
+        "name": "Attendance",
+        "component": "AttendanceView",
+        "icon": "mdi-calendar-check",
+        "order": 60,
+        "location": "main"
+      }
+    ]
+  },
   "permissions": [
     "database.read",
     "database.write",

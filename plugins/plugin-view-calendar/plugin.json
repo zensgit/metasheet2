@@ -1,0 +1,29 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-calendar",
+  "version": "0.1.0",
+  "displayName": "Calendar View",
+  "description": "Calendar view contribution for date-based records.",
+  "author": { "name": "MetaSheet" },
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.js",
+  "capabilities": { "views": ["calendar"], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": [
+      {
+        "id": "calendar",
+        "name": "Calendar",
+        "component": "CalendarView",
+        "icon": "mdi-calendar",
+        "order": 30,
+        "location": "main"
+      }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "events.emit"
+  ]
+}

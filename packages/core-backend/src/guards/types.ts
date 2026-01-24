@@ -22,6 +22,7 @@ export enum OperationType {
   UNLOAD_PLUGIN = 'unload_plugin',
   RELOAD_ALL_PLUGINS = 'reload_all_plugins',
   FORCE_RELOAD = 'force_reload',
+  UPDATE_PLUGIN_CONFIG = 'update_plugin_config',
 
   // Snapshot operations
   DELETE_SNAPSHOT = 'delete_snapshot',

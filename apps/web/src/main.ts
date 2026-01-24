@@ -5,106 +5,64 @@ import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 import App from './App.vue'
-import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
+import { usePlugins } from './composables/usePlugins'
+import { buildViewRoutes, resolveAppViews } from './router/viewRegistry'
 
-// Import views
+// Legacy views remain available for compatibility
 import GridView from './views/GridView.vue'
 import KanbanView from './views/KanbanView.vue'
-import CalendarView from './views/CalendarView.vue'
-import GalleryView from './views/GalleryView.vue'
-import FormView from './views/FormView.vue'
-import PlmProductView from './views/PlmProductView.vue'
-import AttendanceView from './views/AttendanceView.vue'
-import UniverGridPOC from './views/UniverGridPOC.vue'
-import UniverKanbanPOC from './views/UniverKanbanPOC.vue'
 
-const routes: RouteRecordRaw[] = [
-  {
-    path: '/',
-    name: 'home',
-    redirect: { path: '/grid', query: { source: 'meta' } }
-  },
-  {
-    path: '/grid',
-    name: 'grid',
-    component: UniverGridPOC,
-    meta: { title: 'Grid View' }
-  },
-  {
-    path: '/grid-legacy',
-    name: 'grid-legacy',
-    component: GridView,
-    meta: { title: 'Grid (Legacy)' }
-  },
-  {
-    path: '/kanban',
-    name: 'kanban',
-    component: UniverKanbanPOC,
-    meta: { title: 'Kanban View' }
-  },
-  {
-    path: '/kanban-legacy',
-    name: 'kanban-legacy',
-    component: KanbanView,
-    meta: { title: 'Kanban (Legacy)' }
-  },
-  {
-    path: '/calendar',
-    name: 'calendar',
-    component: CalendarView,
-    meta: { title: 'Calendar View' }
-  },
-  {
-    path: '/gallery',
-    name: 'gallery',
-    component: GalleryView,
-    meta: { title: 'Gallery View' }
-  },
-  {
-    path: '/form',
-    name: 'form',
-    component: FormView,
-    meta: { title: 'Form View' }
-  },
-  {
-    path: '/attendance',
-    name: 'attendance',
-    component: AttendanceView,
-    meta: { title: 'Attendance' }
-  },
-  {
-    path: '/plm',
-    name: 'plm',
-    component: PlmProductView,
-    meta: { title: 'PLM View' }
-  },
-  {
-    path: '/:pathMatch(.*)*',
-    name: 'not-found',
-    redirect: '/'
-  }
-]
+async function bootstrap() {
+  const { views, disabledViewIds, fetchPlugins } = usePlugins()
+  await fetchPlugins()
 
-// Create router
-const router = createRouter({
-  history: createWebHistory(),
-  routes
-})
+  const appViews = resolveAppViews(views.value, disabledViewIds.value)
+  const viewRoutes = buildViewRoutes(appViews)
 
-// Navigation guard for page title
-router.beforeEach((to, from, next) => {
-  const title = to.meta?.title
-  if (title) {
-    document.title = `${title} - MetaSheet`
-  } else {
-    document.title = 'MetaSheet'
-  }
-  next()
-})
+  const routes: RouteRecordRaw[] = [
+    {
+      path: '/',
+      name: 'home',
+      redirect: { path: '/grid', query: { source: 'meta' } }
+    },
+    ...viewRoutes,
+    {
+      path: '/grid-legacy',
+      name: 'grid-legacy',
+      component: GridView,
+      meta: { title: 'Grid (Legacy)' }
+    },
+    {
+      path: '/kanban-legacy',
+      name: 'kanban-legacy',
+      component: KanbanView,
+      meta: { title: 'Kanban (Legacy)' }
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'not-found',
+      redirect: '/'
+    }
+  ]
 
-// Create and mount app
-const app = createApp(App)
+  const router = createRouter({
+    history: createWebHistory(),
+    routes
+  })
 
-app.use(router)
+  router.beforeEach((to, from, next) => {
+    const title = to.meta?.title
+    if (title) {
+      document.title = `${title} - MetaSheet`
+    } else {
+      document.title = 'MetaSheet'
+    }
+    next()
+  })
 
-app.mount('#app')
+  const app = createApp(App)
+  app.use(router)
+  app.mount('#app')
+}
+
+void bootstrap()

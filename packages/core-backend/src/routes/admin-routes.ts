@@ -13,6 +13,7 @@ import {
   OperationType,
   getSafetyGuard,
   initSafetyGuard,
+  requireAdminRole,
   protectAdminOperation,
   logSafetyOperation,
   protectConfirmationEndpoint,
@@ -33,6 +34,7 @@ import type { Database } from '../db/types';
 import { poolManager } from '../integration/db/connection-pool';
 import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
+import { ENABLED_KEY, getPluginEnabledMap, setPluginSetting } from '../core/plugin-settings-store';
 
 const logger = new Logger('AdminRoutes');
 
@@ -40,6 +42,10 @@ const logger = new Logger('AdminRoutes');
 interface AdminRouteServices {
   pluginLoader?: PluginLoader;
   snapshotService?: SnapshotService;
+  pluginRuntime?: {
+    enablePlugin: (pluginId: string) => Promise<void>;
+    disablePlugin: (pluginId: string) => Promise<void>;
+  };
 }
 
 // Use the global Express.Request type which already includes user property
@@ -157,6 +163,105 @@ router.get('/plugins/health', (req: Request, res: Response) => {
     count: health.length,
     health
   });
+});
+
+/**
+ * GET /api/admin/plugins/config
+ * Get plugin enablement flags
+ */
+router.get('/plugins/config', requireAdminRole(), async (_req: Request, res: Response) => {
+  if (!services.pluginLoader) {
+    res.status(503).json({
+      success: false,
+      error: 'PluginLoader service not available'
+    });
+    return;
+  }
+
+  try {
+    const loaded = Array.from(services.pluginLoader.getPlugins().values()).map((plugin) => ({
+      name: plugin.manifest.name,
+      displayName: plugin.manifest.displayName
+    }));
+    const enabledMap = await getPluginEnabledMap(loaded.map((item) => item.name));
+    const data = loaded.map((item) => ({
+      ...item,
+      enabled: enabledMap.get(item.name) !== false
+    }));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Failed to load plugin config'
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/plugins/config
+ * Update plugin enablement flag
+ */
+router.put(
+  '/plugins/config',
+  ...protectAdminOperation(OperationType.UPDATE_PLUGIN_CONFIG),
+  requireSafetyCheck({
+    operation: OperationType.UPDATE_PLUGIN_CONFIG,
+    getDetails: (req) => ({ pluginId: (req.body as { plugin?: string }).plugin })
+  }),
+  async (req: Request, res: Response) => {
+  if (!services.pluginLoader) {
+    res.status(503).json({
+      success: false,
+      error: 'PluginLoader service not available'
+    });
+    return;
+  }
+
+  const { plugin, enabled } = req.body as { plugin?: string; enabled?: unknown };
+  if (!plugin || typeof plugin !== 'string') {
+    res.status(400).json({
+      success: false,
+      error: 'plugin is required'
+    });
+    return;
+  }
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({
+      success: false,
+      error: 'enabled must be boolean'
+    });
+    return;
+  }
+
+  const hasPlugin = services.pluginLoader.getPlugins().has(plugin);
+  if (!hasPlugin) {
+    res.status(404).json({
+      success: false,
+      error: 'Plugin not found'
+    });
+    return;
+  }
+
+  try {
+    if (services.pluginRuntime) {
+      if (enabled) {
+        await services.pluginRuntime.enablePlugin(plugin);
+      } else {
+        await services.pluginRuntime.disablePlugin(plugin);
+      }
+    }
+    await setPluginSetting(plugin, ENABLED_KEY, enabled);
+    res.json({
+      success: true,
+      data: { plugin, enabled }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update plugin config'
+    });
+  }
 });
 
 /**
