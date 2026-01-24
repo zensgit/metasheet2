@@ -1,5 +1,7 @@
 import { Token, TokenType } from './token';
-import { isNumber } from 'lodash';
+import lodash from 'lodash';
+
+const { isNumber } = lodash;
 
 export const EXPR_GRAMMAR: { key: TokenType; exp: RegExp }[] = [
   // The value in the record obtained by the field name constant

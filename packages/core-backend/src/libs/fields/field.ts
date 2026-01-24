@@ -1,6 +1,6 @@
 
 import Joi from 'joi';
-import { isEqual } from 'lodash';
+import lodash from 'lodash';
 import { 
   FieldType, 
   BasicValueType, 
@@ -13,6 +13,8 @@ import {
   IJsonSchema,
   IFilterCondition
 } from './types';
+
+const { isEqual } = lodash;
 
 export interface IBindFieldContext {
   (field: IField, context: any): Field;

@@ -11,7 +11,6 @@ import {
   SegmentType,
   FieldType
 } from './types';
-import { isNumber, isString } from 'lodash';
 
 export abstract class TextBaseField extends Field {
   static _acceptFilterOperators = [

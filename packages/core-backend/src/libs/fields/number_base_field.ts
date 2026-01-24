@@ -9,8 +9,10 @@ import {
   FieldType,
   SymbolAlign
 } from './types';
-import { isNumber } from 'lodash';
+import lodash from 'lodash';
 import { str2number, str2NumericStr, numberToShow, str2Currency } from './number_utils';
+
+const { isNumber } = lodash;
 
 export abstract class NumberBaseField extends Field {
   static _statTypeList = [
