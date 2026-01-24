@@ -14,6 +14,7 @@
 - Restored `@metasheet/core-backend` build by fixing type errors, adapter typing, and missing deps for import/export.
 - Normalized JWT payloads to map `userId` to `id` for RBAC/SafetyGuard checks.
 - Added an ESM import fixer for backend builds so Node can run `dist` without `tsx`.
+- Set `@metasheet/core-backend` package `type: "module"` and run the fixer across the full `dist` tree.
 - Added a placeholder migration for a missing historical spreadsheet migration.
 
 ## Files Touched

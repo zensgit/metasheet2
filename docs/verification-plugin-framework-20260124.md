@@ -10,7 +10,7 @@
   - Note: Vite chunk size warning (unchanged warning category)
 - Backend build: `pnpm --filter @metasheet/core-backend build`
   - Result: ✅ Success
-- Backend dist runtime: ✅ ESM import fixer applied (Node can resolve `.js` extensions)
+- Backend dist runtime: ✅ ESM import fixer applied (full `dist` tree) and package set to ESM
 - Remote API smoke check (142.171.239.56:8081)
   - `GET /api/plugins`: ✅ 200, `enabled` flag present; attendance/calendar/gallery/kanban contributions present
   - `GET /api/admin/plugins/config`: ✅ 200 with admin token
