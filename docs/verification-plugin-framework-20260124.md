@@ -14,19 +14,19 @@
 - Remote API smoke check (142.171.239.56:8081)
   - `GET /health`: ✅ 200, `pluginsSummary.active` reports 13
   - `GET /api/plugins`: ✅ 200, `enabled` flag present; calendar/gallery/sample plugins loaded after CommonJS fixes
+  - `GET /api/admin/plugins/config`: ✅ 200 with admin token
+  - `PUT /api/admin/plugins/config`: ✅ toggled `sample-basic` off/on with SafetyGuard confirmation
 
 ## Deployment Notes
 - Backend image rebuilt on server from `feat/plm-updates`.
 - Created `plugin_kv` table manually (migration runner failed due to a missing historical migration).
 - Added placeholder migration so `migrate` can run again.
 - Added CommonJS plugin package markers for calendar/gallery/sample-basic to load under ESM.
+- BPMN workflow engine initialized without missing-dependency errors.
 
 ## Manual Checks Not Run
 - Admin UI toggle at `/admin/plugins`
-- `GET /api/admin/plugins/config` admin endpoint toggle (requires token)
 - UI verification that disabled plugins are hidden from navigation
 
 ## Follow-ups
 - Confirm disabled plugin views are removed from navigation and routes via UI.
-- Add `type: "module"` to `plugins/plugin-intelligent-restore/package.json` to remove Node ESM warning.
-- Install `xml2js` (or disable workflow engine) if BPMN API endpoints are needed.
