@@ -16,6 +16,9 @@
   - `GET /api/plugins`: ✅ 200, `enabled` flag present; calendar/gallery/sample plugins loaded after CommonJS fixes
   - `GET /api/admin/plugins/config`: ✅ 200 with admin token
   - `PUT /api/admin/plugins/config`: ✅ toggled `sample-basic` off/on with SafetyGuard confirmation
+  - `POST /api/auth/login`: ✅ admin login successful after ESM jsonwebtoken fix
+  - `PUT /api/admin/plugins/config`: ✅ toggled `plugin-attendance` off/on with SafetyGuard confirmation
+  - UI navigation: ✅ Attendance menu hides after disable and reappears after enable
 
 ## Deployment Notes
 - Backend image rebuilt on server from `feat/plm-updates`.
@@ -23,10 +26,10 @@
 - Added placeholder migration so `migrate` can run again.
 - Added CommonJS plugin package markers for calendar/gallery/sample-basic to load under ESM.
 - BPMN workflow engine initialized without missing-dependency errors.
+- Updated runtime env for production hardening (`JWT_SECRET` rotated, `BCRYPT_SALT_ROUNDS=12`).
 
 ## Manual Checks Not Run
-- Admin UI toggle at `/admin/plugins`
-- UI verification that disabled plugins are hidden from navigation
+- None
 
 ## Follow-ups
-- Confirm disabled plugin views are removed from navigation and routes via UI.
+- None

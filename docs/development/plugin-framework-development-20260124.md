@@ -18,6 +18,7 @@
 - Hardened ESM runtime compatibility (lodash imports, plugin loader dynamic imports, `require` shims, and ESM-safe paths).
 - Marked legacy CommonJS plugins with local `package.json` to load cleanly under ESM.
 - Added ESM-safe optional dependency loading for BPMN workflows and marked plugin-intelligent-restore as ESM.
+- Fixed AuthService JWT signing under ESM by switching to default jsonwebtoken import.
 - Added a placeholder migration for a missing historical spreadsheet migration.
 
 ## Files Touched
@@ -39,6 +40,7 @@
 - `packages/core-backend/src/core/plugin-loader.ts`
 - `packages/core-backend/src/core/logger.ts`
 - `packages/core-backend/src/core/plugin-service-factory.ts`
+- `packages/core-backend/src/auth/AuthService.ts`
 - `packages/core-backend/src/data-adapters/HTTPAdapter.ts`
 - `packages/core-backend/src/libs/import-export/import.ts`
 - `packages/core-backend/src/libs/plugins/PluginManager.ts`
