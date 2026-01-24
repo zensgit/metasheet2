@@ -10,6 +10,7 @@
 
 import * as path from 'path'
 import * as fs from 'fs'
+import { pathToFileURL } from 'node:url'
 import semver from 'semver'
 import { z } from 'zod'
 import { PERMISSION_WHITELIST } from '../types/plugin'
@@ -314,9 +315,7 @@ export class PluginLoader {
         throw new Error(`Plugin entry point not found: ${entryPath}. Check 'main' field in ${path.basename(manifestPath)}`)
       }
 
-      // Dynamic import
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pluginModule = require(entryPath)
+      const pluginModule = await import(pathToFileURL(entryPath).href)
       const pluginExport = pluginModule.default || pluginModule
 
       const loadedPlugin: LoadedPlugin = {

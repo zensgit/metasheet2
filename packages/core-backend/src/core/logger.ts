@@ -3,6 +3,7 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks'
+import { createRequire } from 'node:module'
 import winston from 'winston'
 
 type LogContext = {
@@ -12,6 +13,8 @@ type LogContext = {
 }
 
 const contextStore = new AsyncLocalStorage<LogContext>()
+
+const require = createRequire(import.meta.url)
 
 // Optional OpenTelemetry API (loaded lazily to avoid hard dependency)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic import of optional dependency

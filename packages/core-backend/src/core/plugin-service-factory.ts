@@ -3,6 +3,7 @@
  * 负责创建和管理所有插件相关服务的实例
  */
 
+import { createRequire } from 'node:module'
 import type { PluginServices } from '../types/plugin'
 import { Logger } from './logger'
 
@@ -15,6 +16,8 @@ import { NotificationServiceImpl } from '../services/NotificationService'
 import { WebSocketServiceImpl } from '../services/WebSocketService'
 import { SecurityServiceImpl } from '../services/SecurityService'
 import { ValidationServiceImpl } from '../services/ValidationService'
+
+const require = createRequire(import.meta.url)
 
 /**
  * Email configuration for notification service

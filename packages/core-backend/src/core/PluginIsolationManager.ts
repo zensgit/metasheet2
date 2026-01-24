@@ -6,6 +6,7 @@
 import { Worker } from 'worker_threads'
 import * as path from 'path'
 import * as fs from 'fs'
+import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'eventemitter3'
 import { Logger } from './logger'
 import type { PluginCapabilities } from './PluginContext'
@@ -112,6 +113,9 @@ const DEFAULT_ISOLATION_CONFIG: IsolationConfig = {
   enableFileSystemIsolation: true
 }
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
 export class PluginIsolationManager extends EventEmitter {
   private logger: Logger
   private config: IsolationConfig
@@ -152,7 +156,7 @@ export class PluginIsolationManager extends EventEmitter {
    */
   private async createWorker(): Promise<Worker> {
     // Create worker script file
-    const workerScriptPath = path.join(__dirname, 'plugin-worker.js')
+    const workerScriptPath = path.join(__dirname, 'plugin-worker.cjs')
     await fs.promises.writeFile(workerScriptPath, this.workerCode, 'utf-8')
 
     const worker = new Worker(workerScriptPath, {
