@@ -13,6 +13,8 @@
 - Updated frontend routing and navigation to use plugin view contributions and hide disabled view IDs.
 - Restored `@metasheet/core-backend` build by fixing type errors, adapter typing, and missing deps for import/export.
 - Normalized JWT payloads to map `userId` to `id` for RBAC/SafetyGuard checks.
+- Added an ESM import fixer for backend builds so Node can run `dist` without `tsx`.
+- Added a placeholder migration for a missing historical spreadsheet migration.
 
 ## Files Touched
 - `apps/web/src/App.vue`
@@ -26,6 +28,8 @@
 - `packages/core-backend/src/index.ts`
 - `packages/core-backend/src/routes/admin-routes.ts`
 - `packages/core-backend/src/auth/jwt-middleware.ts`
+- `packages/core-backend/scripts/fix-esm-imports.mjs`
+- `packages/core-backend/migrations/zzzz20260113_create_spreadsheets_table.sql`
 - `packages/core-backend/src/audit/AuditService.ts`
 - `packages/core-backend/src/core/plugin-loader.ts`
 - `packages/core-backend/src/data-adapters/HTTPAdapter.ts`

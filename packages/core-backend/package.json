@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/fix-esm-imports.mjs dist/src",
     "build:cache": "tsc -p tsconfig.cache.tests.json",
     "dev": "tsx watch src/index.ts",
     "dev:core": "tsx src/index.ts",
