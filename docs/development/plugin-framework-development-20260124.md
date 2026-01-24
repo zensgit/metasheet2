@@ -17,6 +17,7 @@
 - Set `@metasheet/core-backend` package `type: "module"` and run the fixer across the full `dist` tree.
 - Hardened ESM runtime compatibility (lodash imports, plugin loader dynamic imports, `require` shims, and ESM-safe paths).
 - Marked legacy CommonJS plugins with local `package.json` to load cleanly under ESM.
+- Added ESM-safe optional dependency loading for BPMN workflows and marked plugin-intelligent-restore as ESM.
 - Added a placeholder migration for a missing historical spreadsheet migration.
 
 ## Files Touched
@@ -49,6 +50,7 @@
 - `packages/core-backend/src/services/CollabService.ts`
 - `packages/core-backend/src/types/plugin.ts`
 - `packages/core-backend/src/workflow/BPMNWorkflowEngine.ts`
+- `plugins/plugin-intelligent-restore/package.json`
 - `packages/core-backend/src/db/migrate.ts`
 - `plugins/plugin-attendance/plugin.json`
 - `plugins/plugin-view-kanban/plugin.json`

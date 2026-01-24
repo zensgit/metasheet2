@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from 'events'
+import { createRequire } from 'node:module'
 import { db } from '../db/db'
 import { sql } from 'kysely'
 import { Logger } from '../core/logger'
@@ -63,6 +64,8 @@ interface BPMNTimerJob {
 }
 
 // Dynamic imports for optional dependencies
+const require = createRequire(import.meta.url)
+
 let xml2js: Xml2JsModule | null = null
 let cron: CronModule | null = null
 
