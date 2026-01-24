@@ -3,7 +3,7 @@
  * 替换之前的mock实现
  */
 
-import * as jwt from 'jsonwebtoken'
+import jwt from 'jsonwebtoken'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
