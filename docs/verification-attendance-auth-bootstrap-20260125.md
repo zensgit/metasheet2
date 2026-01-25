@@ -3,16 +3,16 @@
 ## Environment
 - Branch: `feat/plm-updates`
 - Workspace: `/Users/huazhou/Downloads/Github/metasheet2`
+- Preprod: `http://142.171.239.56:8081`
 
 ## Automated Tests
 - Command: `pnpm --filter @metasheet/web exec vitest run --watch=false`
 - Result: PASS
 
-## Manual Verification (Not Run)
-- Clear localStorage keys `auth_token`, `jwt`, `devToken`.
-- Set `VITE_AUTO_DEV_TOKEN=true` on the frontend.
-- Set `ALLOW_DEV_TOKEN=true` on the backend if `NODE_ENV=production`.
-- Open `/attendance` and confirm the summary loads without manual token entry.
+## Manual Verification (Preprod)
+- Backend dev-token endpoint: `GET /api/auth/dev-token` returned `200`.
+- Frontend: `VITE_AUTO_DEV_TOKEN=true` baked into web build.
+- `/attendance` renders without token errors; summary/records load with empty state (no data).
 
 ## Notes
 - `/api/auth/dev-token` remains disabled by default in production unless explicitly enabled.
