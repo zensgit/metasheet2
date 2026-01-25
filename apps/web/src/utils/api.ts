@@ -120,6 +120,24 @@ async function maybeBootstrapDevToken(): Promise<string | null> {
 /**
  * Make an authenticated fetch request
  */
+function normalizeHeaders(input?: HeadersInit): Record<string, string> {
+  if (!input) return {}
+  if (input instanceof Headers) {
+    const normalized: Record<string, string> = {}
+    input.forEach((value, key) => {
+      normalized[key] = value
+    })
+    return normalized
+  }
+  if (Array.isArray(input)) {
+    return input.reduce<Record<string, string>>((acc, [key, value]) => {
+      acc[key] = value
+      return acc
+    }, {})
+  }
+  return input
+}
+
 export async function apiFetch(
   path: string,
   options: RequestInit = {}
@@ -128,7 +146,7 @@ export async function apiFetch(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
-    ...(options.headers || {})
+    ...normalizeHeaders(options.headers)
   }
   if (!headers.Authorization) {
     const token = await maybeBootstrapDevToken()
