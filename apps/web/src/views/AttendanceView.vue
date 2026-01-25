@@ -55,6 +55,14 @@
         </span>
       </section>
 
+      <div v-if="authRequired" class="attendance__card attendance__card--empty attendance__card--auth">
+        <h3>Authentication required</h3>
+        <p class="attendance__empty">{{ authMessage }}</p>
+        <div class="attendance__auth-actions">
+          <button class="attendance__btn" :disabled="loading" @click="refreshAll">Retry</button>
+        </div>
+      </div>
+
       <section class="attendance__grid">
         <div class="attendance__card">
           <h3>Summary</h3>
@@ -755,7 +763,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { usePlugins } from '../composables/usePlugins'
-import { apiFetch } from '../utils/api'
+import { apiFetch as rawApiFetch } from '../utils/api'
 
 interface AttendanceSummary {
   total_days: number
@@ -874,6 +882,10 @@ const records = ref<AttendanceRecord[]>([])
 const requests = ref<AttendanceRequest[]>([])
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
+const AUTH_REQUIRED_MESSAGE =
+  'Authentication required. Please login and refresh. If you already have a token, set localStorage auth_token and reload.'
+const authRequired = ref(false)
+const authMessage = ref(AUTH_REQUIRED_MESSAGE)
 const calendarMonth = ref(new Date())
 const exporting = ref(false)
 const settingsLoading = ref(false)
@@ -1111,6 +1123,31 @@ function setStatus(message: string, kind: 'info' | 'error' = 'info') {
   }, 4000)
 }
 
+function setAuthRequired(message = AUTH_REQUIRED_MESSAGE) {
+  authRequired.value = true
+  authMessage.value = message
+  summary.value = null
+  records.value = []
+  requests.value = []
+  recordsTotal.value = 0
+}
+
+function clearAuthRequired() {
+  authRequired.value = false
+}
+
+async function attendanceFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const response = await rawApiFetch(path, options)
+  if (response.status === 401) {
+    setAuthRequired()
+    throw new Error(AUTH_REQUIRED_MESSAGE)
+  }
+  if (response.ok) {
+    clearAuthRequired()
+  }
+  return response
+}
+
 async function punch(eventType: 'check_in' | 'check_out') {
   punching.value = true
   try {
@@ -1118,7 +1155,7 @@ async function punch(eventType: 'check_in' | 'check_out') {
     const payload: Record<string, string> = { eventType, timezone }
     const orgValue = normalizedOrgId()
     if (orgValue) payload.orgId = orgValue
-    const response = await apiFetch('/api/attendance/punch', {
+    const response = await attendanceFetch('/api/attendance/punch', {
       method: 'POST',
       body: JSON.stringify(payload)
     })
@@ -1142,7 +1179,7 @@ async function loadSummary() {
     orgId: normalizedOrgId(),
     userId: normalizedUserId(),
   })
-  const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
+  const response = await attendanceFetch(`/api/attendance/summary?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw new Error(data?.error?.message || 'Failed to load summary')
@@ -1159,7 +1196,7 @@ async function loadRecords() {
     orgId: normalizedOrgId(),
     userId: normalizedUserId(),
   })
-  const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
+  const response = await attendanceFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw new Error(data?.error?.message || 'Failed to load records')
@@ -1177,7 +1214,7 @@ async function loadRequests() {
     orgId: normalizedOrgId(),
     userId: normalizedUserId(),
   })
-  const response = await apiFetch(`/api/attendance/requests?${query.toString()}`)
+  const response = await attendanceFetch(`/api/attendance/requests?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw new Error(data?.error?.message || 'Failed to load requests')
@@ -1187,6 +1224,7 @@ async function loadRequests() {
 
 async function refreshAll() {
   if (!attendancePluginActive.value) return
+  clearAuthRequired()
   loading.value = true
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
@@ -1221,7 +1259,7 @@ async function submitRequest() {
       reason: requestForm.reason || undefined,
       orgId: orgValue,
     }
-    const response = await apiFetch('/api/attendance/requests', {
+    const response = await attendanceFetch('/api/attendance/requests', {
       method: 'POST',
       body: JSON.stringify(payload)
     })
@@ -1240,7 +1278,7 @@ async function submitRequest() {
 
 async function resolveRequest(id: string, action: 'approve' | 'reject') {
   try {
-    const response = await apiFetch(`/api/attendance/requests/${id}/${action}`, {
+    const response = await attendanceFetch(`/api/attendance/requests/${id}/${action}`, {
       method: 'POST',
       body: JSON.stringify({})
     })
@@ -1273,7 +1311,7 @@ async function exportCsv() {
       orgId: normalizedOrgId(),
       userId: normalizedUserId(),
     })
-    const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
+    const response = await attendanceFetch(`/api/attendance/export?${query.toString()}`)
     const text = await response.text()
     if (!response.ok) {
       let message = 'Export failed'
@@ -1319,7 +1357,7 @@ function applySettingsToForm(settings: AttendanceSettings) {
 async function loadSettings() {
   settingsLoading.value = true
   try {
-    const response = await apiFetch('/api/attendance/settings')
+    const response = await attendanceFetch('/api/attendance/settings')
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -1366,7 +1404,7 @@ async function saveSettings() {
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
     }
 
-    const response = await apiFetch('/api/attendance/settings', {
+    const response = await attendanceFetch('/api/attendance/settings', {
       method: 'PUT',
       body: JSON.stringify(payload),
     })
@@ -1392,7 +1430,7 @@ async function loadRule() {
   ruleLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/rules/default?${query.toString()}`)
+    const response = await attendanceFetch(`/api/attendance/rules/default?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load rule')
@@ -1427,7 +1465,7 @@ async function saveRule() {
       workingDays: parseWorkingDaysInput(ruleForm.workingDays),
       orgId: normalizedOrgId(),
     }
-    const response = await apiFetch('/api/attendance/rules/default', {
+    const response = await attendanceFetch('/api/attendance/rules/default', {
       method: 'PUT',
       body: JSON.stringify(payload),
     })
@@ -1484,7 +1522,7 @@ async function loadShifts() {
   shiftLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/shifts?${query.toString()}`)
+    const response = await attendanceFetch(`/api/attendance/shifts?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -1523,7 +1561,7 @@ async function saveShift() {
     const endpoint = isEditing
       ? `/api/attendance/shifts/${shiftEditingId.value}`
       : '/api/attendance/shifts'
-    const response = await apiFetch(endpoint, {
+    const response = await attendanceFetch(endpoint, {
       method: isEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
@@ -1549,7 +1587,7 @@ async function saveShift() {
 async function deleteShift(id: string) {
   if (!window.confirm('Delete this shift? Assignments will be removed.')) return
   try {
-    const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
+    const response = await attendanceFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
       throw new Error('Admin permissions required')
@@ -1589,7 +1627,7 @@ async function loadAssignments() {
   assignmentLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
+    const response = await attendanceFetch(`/api/attendance/assignments?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -1629,7 +1667,7 @@ async function saveAssignment() {
     const endpoint = isEditing
       ? `/api/attendance/assignments/${assignmentEditingId.value}`
       : '/api/attendance/assignments'
-    const response = await apiFetch(endpoint, {
+    const response = await attendanceFetch(endpoint, {
       method: isEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
@@ -1655,7 +1693,7 @@ async function saveAssignment() {
 async function deleteAssignment(id: string) {
   if (!window.confirm('Delete this assignment?')) return
   try {
-    const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
+    const response = await attendanceFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
       throw new Error('Admin permissions required')
@@ -1694,7 +1732,7 @@ async function loadHolidays() {
       to: toDate.value,
       orgId: normalizedOrgId(),
     })
-    const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
+    const response = await attendanceFetch(`/api/attendance/holidays?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load holidays')
@@ -1723,7 +1761,7 @@ async function saveHoliday() {
     const endpoint = isEditing
       ? `/api/attendance/holidays/${holidayEditingId.value}`
       : '/api/attendance/holidays'
-    const response = await apiFetch(endpoint, {
+    const response = await attendanceFetch(endpoint, {
       method: isEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
@@ -1749,7 +1787,7 @@ async function saveHoliday() {
 async function deleteHoliday(id: string) {
   if (!window.confirm('Delete this holiday?')) return
   try {
-    const response = await apiFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
+    const response = await attendanceFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
       throw new Error('Admin permissions required')
@@ -1908,6 +1946,16 @@ watch(orgId, () => {
 .attendance__card--empty {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__card--auth {
+  border-color: #f2b8b5;
+  background: #fff5f5;
+}
+
+.attendance__auth-actions {
+  display: flex;
   gap: 8px;
 }
 
