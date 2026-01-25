@@ -74,10 +74,11 @@
               Save token
             </button>
             <button class="attendance__btn" :disabled="loading" @click="clearAuthToken">Clear token</button>
+            <button class="attendance__btn" :disabled="loading" @click="goToLogin">Go to login</button>
             <button class="attendance__btn" :disabled="loading" @click="refreshAll">Retry</button>
           </div>
           <p class="attendance__auth-hint">
-            No login UI yet. Use the auth API to obtain a token, then save it here.
+            Use the login page or paste a JWT token here if you already have one.
           </p>
         </div>
       </div>
@@ -781,6 +782,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch as rawApiFetch, clearStoredAuthToken, setStoredAuthToken } from '../utils/api'
 
@@ -901,6 +903,8 @@ const records = ref<AttendanceRecord[]>([])
 const requests = ref<AttendanceRequest[]>([])
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
+const router = useRouter()
+const route = useRoute()
 const AUTH_REQUIRED_MESSAGE =
   'Authentication required. Please login and refresh. If you already have a token, paste it below.'
 const authRequired = ref(false)
@@ -1185,6 +1189,11 @@ function clearAuthToken() {
   clearStoredAuthToken()
   setAuthRequired()
   setStatus('Token cleared.')
+}
+
+function goToLogin() {
+  const redirect = typeof route.fullPath === 'string' && route.fullPath.length > 0 ? route.fullPath : '/attendance'
+  router.push({ path: '/login', query: { redirect } })
 }
 
 async function punch(eventType: 'check_in' | 'check_out') {

@@ -11,6 +11,7 @@ import { buildViewRoutes, resolveAppViews } from './router/viewRegistry'
 // Legacy views remain available for compatibility
 import GridView from './views/GridView.vue'
 import KanbanView from './views/KanbanView.vue'
+import LoginView from './views/LoginView.vue'
 
 async function bootstrap() {
   const { views, disabledViewIds, fetchPlugins } = usePlugins()
@@ -24,6 +25,12 @@ async function bootstrap() {
       path: '/',
       name: 'home',
       redirect: { path: '/grid', query: { source: 'meta' } }
+    },
+    {
+      path: '/login',
+      name: 'login',
+      component: LoginView,
+      meta: { title: 'Login' }
     },
     ...viewRoutes,
     {
