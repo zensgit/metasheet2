@@ -13,6 +13,20 @@
         >
           {{ view.name }}
         </router-link>
+        <router-link
+          v-if="!hasToken"
+          :to="{ path: '/login', query: loginRedirect }"
+          class="nav-link nav-link--auth"
+        >
+          Login
+        </router-link>
+        <button
+          v-else
+          class="nav-link nav-link--button nav-link--auth"
+          @click="logout"
+        >
+          Logout
+        </button>
       </div>
     </nav>
     <main class="app-main">
@@ -23,11 +37,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { usePlugins } from './composables/usePlugins'
 import { buildNavViews, resolveAppViews } from './router/viewRegistry'
+import { clearStoredAuthToken, getStoredAuthToken } from './utils/api'
 
 const route = useRoute()
+const router = useRouter()
 const { views, disabledViewIds, loaded, fetchPlugins } = usePlugins()
 
 const showNav = computed(() => {
@@ -35,6 +51,13 @@ const showNav = computed(() => {
 })
 
 const navViews = computed(() => buildNavViews(resolveAppViews(views.value, disabledViewIds.value)))
+const hasToken = computed(() => Boolean(getStoredAuthToken()))
+const loginRedirect = computed(() => ({ redirect: route.fullPath || '/attendance' }))
+
+function logout() {
+  clearStoredAuthToken()
+  router.push({ path: '/login', query: loginRedirect.value })
+}
 
 onMounted(async () => {
   if (!loaded.value) {
@@ -100,6 +123,10 @@ html, body {
   color: #666;
   border-radius: 4px;
   transition: all 0.2s;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
 }
 
 .nav-link:hover {
@@ -110,6 +137,17 @@ html, body {
 .nav-link.router-link-active {
   background-color: #e3f2fd;
   color: #1976d2;
+}
+
+.nav-link--button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-link--auth {
+  color: #1976d2;
+  font-weight: 600;
 }
 
 .app-main {
