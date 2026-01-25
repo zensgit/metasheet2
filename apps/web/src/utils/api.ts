@@ -7,6 +7,7 @@ declare global {
   interface ImportMetaEnv {
     VITE_API_URL?: string
     VITE_API_BASE?: string
+    VITE_AUTO_DEV_TOKEN?: string
     MODE: string
     DEV: boolean
     PROD: boolean
@@ -48,17 +49,72 @@ export function authHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   }
-  const storedToken =
-    typeof localStorage !== 'undefined'
-      ? localStorage.getItem('auth_token') ||
-        localStorage.getItem('jwt') ||
-        localStorage.getItem('devToken')
-      : null
-  const resolvedToken = typeof token === 'string' ? token : storedToken ?? ''
-  if (resolvedToken.trim().length > 0) {
-    headers.Authorization = `Bearer ${resolvedToken}`
-  }
+  const resolvedToken = typeof token === 'string' ? token : getStoredAuthToken() ?? ''
+  if (resolvedToken.trim().length > 0) headers.Authorization = `Bearer ${resolvedToken}`
   return headers
+}
+
+const storedTokenKeys = ['auth_token', 'jwt', 'devToken'] as const
+let devTokenPromise: Promise<string | null> | null = null
+let devTokenFailed = false
+
+export function getStoredAuthToken(): string | null {
+  if (typeof localStorage === 'undefined') return null
+  for (const key of storedTokenKeys) {
+    const value = localStorage.getItem(key)
+    if (value && value.trim().length > 0) return value
+  }
+  return null
+}
+
+export function setStoredAuthToken(token: string) {
+  if (typeof localStorage === 'undefined') return
+  const value = token.trim()
+  if (!value) return
+  localStorage.setItem('auth_token', value)
+  localStorage.setItem('jwt', value)
+}
+
+export function clearStoredAuthToken() {
+  if (typeof localStorage === 'undefined') return
+  localStorage.removeItem('auth_token')
+  localStorage.removeItem('jwt')
+  localStorage.removeItem('devToken')
+}
+
+function shouldAutoDevToken(): boolean {
+  const setting = import.meta.env.VITE_AUTO_DEV_TOKEN
+  if (setting === 'true') return true
+  if (setting === 'false') return false
+  return Boolean(import.meta.env.DEV)
+}
+
+async function maybeBootstrapDevToken(): Promise<string | null> {
+  if (devTokenFailed || !shouldAutoDevToken()) return null
+  const existing = getStoredAuthToken()
+  if (existing) return existing
+  if (!devTokenPromise) {
+    devTokenPromise = (async () => {
+      try {
+        const response = await fetch(`${getApiBase()}/api/auth/dev-token`)
+        if (!response.ok) {
+          devTokenFailed = true
+          return null
+        }
+        const data = await response.json()
+        if (typeof data?.token === 'string' && data.token.trim().length > 0) {
+          setStoredAuthToken(data.token)
+          return data.token
+        }
+      } catch {
+        devTokenFailed = true
+      }
+      return null
+    })()
+  }
+  const token = await devTokenPromise
+  devTokenPromise = null
+  return token
 }
 
 /**
@@ -69,10 +125,14 @@ export async function apiFetch(
   options: RequestInit = {}
 ): Promise<Response> {
   const base = getApiBase()
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
     ...(options.headers || {})
+  }
+  if (!headers.Authorization) {
+    const token = await maybeBootstrapDevToken()
+    if (token) headers.Authorization = `Bearer ${token}`
   }
 
   return fetch(`${base}${path}`, {

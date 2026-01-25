@@ -1,11 +1,9 @@
+import { clearStoredAuthToken, getStoredAuthToken, setStoredAuthToken } from '../utils/api'
+
 export function useAuth() {
   function getToken(): string | null {
     try {
-      return (
-        (typeof localStorage !== 'undefined' &&
-          (localStorage.getItem('jwt') || localStorage.getItem('devToken'))) ||
-        null
-      )
+      return getStoredAuthToken()
     } catch {
       return null
     }
@@ -13,13 +11,13 @@ export function useAuth() {
 
   function setToken(token: string) {
     try {
-      if (typeof localStorage !== 'undefined') localStorage.setItem('jwt', token)
+      setStoredAuthToken(token)
     } catch {}
   }
 
   function clearToken() {
     try {
-      if (typeof localStorage !== 'undefined') localStorage.removeItem('jwt')
+      clearStoredAuthToken()
     } catch {}
   }
 

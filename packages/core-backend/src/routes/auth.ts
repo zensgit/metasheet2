@@ -18,9 +18,11 @@ export const authRouter = Router()
 // ============================================
 
 const DEV_FALLBACK_JWT_SECRET = 'fallback-development-secret-change-in-production'
+const allowDevToken =
+  process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_TOKEN === 'true'
 
 authRouter.get('/dev-token', (req: Request, res: Response) => {
-  if (process.env.NODE_ENV === 'production') {
+  if (!allowDevToken) {
     return res.status(404).json({ success: false, error: 'Not found' })
   }
 
