@@ -58,8 +58,27 @@
       <div v-if="authRequired" class="attendance__card attendance__card--empty attendance__card--auth">
         <h3>Authentication required</h3>
         <p class="attendance__empty">{{ authMessage }}</p>
-        <div class="attendance__auth-actions">
-          <button class="attendance__btn" :disabled="loading" @click="refreshAll">Retry</button>
+        <div class="attendance__auth-form">
+          <label class="attendance__field attendance__field--full" for="attendance-auth-token">
+            <span>Auth token</span>
+            <input
+              id="attendance-auth-token"
+              v-model="authTokenInput"
+              type="password"
+              placeholder="Paste JWT token"
+              autocomplete="off"
+            />
+          </label>
+          <div class="attendance__auth-actions">
+            <button class="attendance__btn attendance__btn--primary" :disabled="loading" @click="saveAuthToken">
+              Save token
+            </button>
+            <button class="attendance__btn" :disabled="loading" @click="clearAuthToken">Clear token</button>
+            <button class="attendance__btn" :disabled="loading" @click="refreshAll">Retry</button>
+          </div>
+          <p class="attendance__auth-hint">
+            No login UI yet. Use the auth API to obtain a token, then save it here.
+          </p>
         </div>
       </div>
 
@@ -763,7 +782,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { usePlugins } from '../composables/usePlugins'
-import { apiFetch as rawApiFetch } from '../utils/api'
+import { apiFetch as rawApiFetch, clearStoredAuthToken, setStoredAuthToken } from '../utils/api'
 
 interface AttendanceSummary {
   total_days: number
@@ -883,9 +902,10 @@ const requests = ref<AttendanceRequest[]>([])
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const AUTH_REQUIRED_MESSAGE =
-  'Authentication required. Please login and refresh. If you already have a token, set localStorage auth_token and reload.'
+  'Authentication required. Please login and refresh. If you already have a token, paste it below.'
 const authRequired = ref(false)
 const authMessage = ref(AUTH_REQUIRED_MESSAGE)
+const authTokenInput = ref('')
 const calendarMonth = ref(new Date())
 const exporting = ref(false)
 const settingsLoading = ref(false)
@@ -1146,6 +1166,25 @@ async function attendanceFetch(path: string, options: RequestInit = {}): Promise
     clearAuthRequired()
   }
   return response
+}
+
+function saveAuthToken() {
+  const token = authTokenInput.value.trim()
+  if (!token) {
+    setStatus('Token is required.', 'error')
+    return
+  }
+  setStoredAuthToken(token)
+  authTokenInput.value = ''
+  clearAuthRequired()
+  setStatus('Token saved.')
+  refreshAll()
+}
+
+function clearAuthToken() {
+  clearStoredAuthToken()
+  setAuthRequired()
+  setStatus('Token cleared.')
 }
 
 async function punch(eventType: 'check_in' | 'check_out') {
@@ -1954,9 +1993,22 @@ watch(orgId, () => {
   background: #fff5f5;
 }
 
+.attendance__auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .attendance__auth-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__auth-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #666;
 }
 
 .attendance__summary {

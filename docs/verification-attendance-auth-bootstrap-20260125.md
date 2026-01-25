@@ -12,7 +12,7 @@
 ## Manual Verification (Preprod - Production Lock)
 - Backend dev-token endpoint: `GET /api/auth/dev-token` returned `404` after `ALLOW_DEV_TOKEN=false`.
 - Frontend: `VITE_AUTO_DEV_TOKEN=false` baked into web build.
-- `/attendance` shows an "Authentication required" banner with retry action when no token is present.
+- `/attendance` shows an "Authentication required" banner with token input, save/clear, and retry actions when no token is present.
 
 ## Notes
 - `/api/auth/dev-token` remains disabled by default in production unless explicitly enabled.
