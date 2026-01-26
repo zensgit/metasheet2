@@ -1,0 +1,115 @@
+paths:
+  /api/permissions:
+    get:
+      summary: List all permissions
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Permission' }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/permissions/me:
+    get:
+      summary: Get current user permissions
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string }
+                  permissions:
+                    type: array
+                    items: { type: string }
+                  isAdmin: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/permissions/check:
+    post:
+      summary: Check permission for a user
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                permission: { type: string }
+                userId: { type: string }
+              required: [permission]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string }
+                  permission: { type: string }
+                  allowed: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/permissions/grant:
+    post:
+      summary: Grant permission (admin only)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                permission: { type: string }
+              required: [userId, permission]
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/permissions/revoke:
+    post:
+      summary: Revoke permission (admin only)
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                permission: { type: string }
+              required: [userId, permission]
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/permissions/health:
+    get:
+      summary: Permissions health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  degraded: { type: boolean }
+                  timestamp: { type: string }

@@ -31,6 +31,153 @@ components:
               type: string
             message:
               type: string
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        perms:
+          type: array
+          items:
+            type: string
+    Permission:
+      type: object
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Comment:
+      type: object
+      properties:
+        id:
+          type: string
+        spreadsheetId:
+          type: string
+        rowId:
+          type: string
+        fieldId:
+          type: string
+          nullable: true
+        content:
+          type: string
+        authorId:
+          type: string
+        parentId:
+          type: string
+          nullable: true
+        resolved:
+          type: boolean
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+        mentions:
+          type: array
+          items:
+            type: string
+    CommentsListResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Comment'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
+            offset:
+              type: integer
+              example: 0
+    PluginAdminEntry:
+      type: object
+      properties:
+        name:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        version:
+          type: string
+          nullable: true
+        author:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, inactive, failed]
+        error:
+          type: string
+          nullable: true
+        lastAttempt:
+          type: string
+          nullable: true
+        registryStatus:
+          type: string
+          nullable: true
+        lastActivated:
+          type: string
+          nullable: true
+    PluginConfigEntry:
+      type: object
+      properties:
+        config:
+          type: object
+        schema:
+          type: object
+          nullable: true
+        version:
+          type: string
+          nullable: true
+        last_modified:
+          type: string
+          nullable: true
+        modified_by:
+          type: string
+          nullable: true
     AttendanceEvent:
       type: object
       properties:

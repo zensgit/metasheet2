@@ -1,0 +1,231 @@
+paths:
+  /api/workflow/deploy:
+    post:
+      summary: Deploy workflow definition
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                bpmnFile:
+                  type: string
+                  format: binary
+                key: { type: string }
+                name: { type: string }
+                category: { type: string }
+                description: { type: string }
+          application/json:
+            schema:
+              type: object
+              properties:
+                bpmnXml: { type: string }
+                key: { type: string }
+                name: { type: string }
+                category: { type: string }
+                description: { type: string }
+              required: [name, bpmnXml]
+      responses:
+        '201': { description: Created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/workflow/definitions:
+    get:
+      summary: List workflow definitions
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: latest
+          schema: { type: boolean }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/workflow/start/{key}:
+    post:
+      summary: Start workflow instance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                businessKey: { type: string }
+                variables: { type: object }
+      responses:
+        '201': { description: Created }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/workflow/instances:
+    get:
+      summary: List workflow instances
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: state
+          schema: { type: string }
+        - in: query
+          name: processKey
+          schema: { type: string }
+        - in: query
+          name: businessKey
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/workflow/instances/{instanceId}:
+    get:
+      summary: Get workflow instance detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workflow/tasks:
+    get:
+      summary: List workflow tasks
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: assignee
+          schema: { type: string }
+        - in: query
+          name: candidateUser
+          schema: { type: string }
+        - in: query
+          name: candidateGroup
+          schema: { type: string }
+        - in: query
+          name: processInstanceId
+          schema: { type: string }
+        - in: query
+          name: state
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /api/workflow/tasks/{taskId}/claim:
+    post:
+      summary: Claim workflow task
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Conflict }
+  /api/workflow/tasks/{taskId}/complete:
+    post:
+      summary: Complete workflow task
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                variables: { type: object }
+                formData: { type: object }
+      responses:
+        '200': { description: OK }
+  /api/workflow/message:
+    post:
+      summary: Send workflow message event
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                messageName: { type: string }
+                correlationKey: { type: string }
+                variables: { type: object }
+              required: [messageName]
+      responses:
+        '200': { description: OK }
+  /api/workflow/signal:
+    post:
+      summary: Broadcast workflow signal event
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signalName: { type: string }
+                variables: { type: object }
+              required: [signalName]
+      responses:
+        '200': { description: OK }
+  /api/workflow/incidents:
+    get:
+      summary: List workflow incidents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: state
+          schema: { type: string }
+        - in: query
+          name: processInstanceId
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /api/workflow/incidents/{incidentId}/resolve:
+    post:
+      summary: Resolve workflow incident
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: incidentId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+  /api/workflow/audit:
+    get:
+      summary: Get workflow audit log
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: processInstanceId
+          schema: { type: string }
+        - in: query
+          name: taskId
+          schema: { type: string }
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200': { description: OK }
