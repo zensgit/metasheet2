@@ -14,6 +14,9 @@
    - Result: success (updated lockfile resolutions)
 6. `pnpm exec tsx packages/openapi/tools/build.ts`
    - Result: success
+7. Preprod UI smoke (`/admin/plugins`):
+   - Example Plugin toggled Disable → Enable (status updated, registry enabled).
+   - Config loaded (`{}`) and saved; UI shows “Saved to database”.
 
 ## Notes
 - Runtime verification blocked until DB credentials are updated.
