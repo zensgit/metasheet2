@@ -12,6 +12,7 @@
         <router-link to="/gallery" class="nav-link">Gallery</router-link>
         <router-link to="/form" class="nav-link">Form</router-link>
         <router-link v-if="showAttendance" to="/attendance" class="nav-link">Attendance</router-link>
+        <router-link to="/admin/plugins" class="nav-link">Plugins</router-link>
         <router-link to="/plm" class="nav-link">PLM</router-link>
       </div>
     </nav>

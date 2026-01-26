@@ -40,6 +40,7 @@ import { authService } from './auth/AuthService'
 import { cache } from './cache-init'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
+import { isDatabaseSchemaError } from './utils/database-errors'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -69,12 +70,19 @@ import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
 
+type PluginRuntimeState = {
+  status: 'active' | 'inactive' | 'failed'
+  error?: string
+  lastAttempt?: string
+}
+
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
   private logger: Logger
   private eventBus: EventEmitter
-  private pluginStatus = new Map<string, { status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>()
+  private pluginStatus = new Map<string, PluginRuntimeState>()
+  private disabledPlugins = new Set<string>()
   private pluginApis = new Map<string, Record<string, PluginApiMethod>>()
   private port: number
   private host?: string
@@ -558,6 +566,9 @@ export class MetaSheetServer {
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
       pluginLoader: this.pluginLoader,
+      pluginStatus: this.pluginStatus,
+      activatePlugin: this.activatePluginByName.bind(this),
+      deactivatePlugin: this.deactivatePluginByName.bind(this),
       snapshotService: this.snapshotService,
     }))
 
@@ -709,33 +720,99 @@ export class MetaSheetServer {
     }
   }
 
+  private setPluginRuntimeState(name: string, status: PluginRuntimeState['status'], error?: string): PluginRuntimeState {
+    const lastAttempt = new Date().toISOString()
+    const state: PluginRuntimeState = { status, lastAttempt }
+    if (error) state.error = error
+    this.pluginStatus.set(name, state)
+    return state
+  }
+
+  private ensurePluginInstance(loaded: LoadedPlugin): PluginLifecycle | null {
+    let pluginInstance: PluginLifecycle | null = loaded.plugin
+    if (typeof pluginInstance === 'function') {
+      const proto = (pluginInstance as { prototype?: { activate?: unknown; deactivate?: unknown } }).prototype
+      if (proto && (typeof proto.activate === 'function' || typeof proto.deactivate === 'function')) {
+        pluginInstance = new (pluginInstance as new () => PluginLifecycle)()
+        loaded.plugin = pluginInstance
+      }
+    }
+    return pluginInstance
+  }
+
+  private async activatePluginInstance(name: string, loaded: LoadedPlugin): Promise<PluginRuntimeState> {
+    const pluginInstance = this.ensurePluginInstance(loaded)
+    if (!pluginInstance || typeof pluginInstance.activate !== 'function') {
+      return this.setPluginRuntimeState(name, 'inactive')
+    }
+
+    const context = this.createPluginContext(loaded)
+    try {
+      await pluginInstance.activate(context)
+      return this.setPluginRuntimeState(name, 'active')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.logger.error(`Plugin activation failed: ${name}`, error as Error)
+      return this.setPluginRuntimeState(name, 'failed', message)
+    }
+  }
+
+  private async activatePluginByName(name: string): Promise<PluginRuntimeState> {
+    this.disabledPlugins.delete(name)
+    const loaded = this.pluginLoader.get(name)
+    if (!loaded) {
+      return this.setPluginRuntimeState(name, 'failed', 'Plugin not loaded')
+    }
+    return this.activatePluginInstance(name, loaded)
+  }
+
+  private async deactivatePluginByName(name: string): Promise<PluginRuntimeState> {
+    const loaded = this.pluginLoader.get(name)
+    if (!loaded) {
+      this.disabledPlugins.add(name)
+      return this.setPluginRuntimeState(name, 'inactive')
+    }
+
+    const pluginInstance = this.ensurePluginInstance(loaded)
+    if (pluginInstance && typeof pluginInstance.deactivate === 'function') {
+      try {
+        await pluginInstance.deactivate()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.logger.error(`Plugin deactivation failed: ${name}`, error as Error)
+        this.disabledPlugins.add(name)
+        return this.setPluginRuntimeState(name, 'failed', message)
+      }
+    }
+
+    this.disabledPlugins.add(name)
+    return this.setPluginRuntimeState(name, 'inactive')
+  }
+
+  private async refreshDisabledPluginsFromRegistry(): Promise<void> {
+    try {
+      const pool = poolManager.get()
+      const result = await pool.query<{ name: string }>(
+        `SELECT name FROM plugin_registry WHERE status = $1`,
+        ['disabled']
+      )
+      this.disabledPlugins = new Set(result.rows.map(row => row.name))
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return
+      }
+      this.logger.warn('Failed to load plugin registry status; continuing without registry overrides', error as Error)
+    }
+  }
+
   private async activateLoadedPlugins(): Promise<void> {
     const plugins = this.pluginLoader.getPlugins()
     for (const [name, loaded] of plugins) {
-      const lastAttempt = new Date().toISOString()
-      let pluginInstance: PluginLifecycle | null = loaded.plugin
-      if (typeof pluginInstance === 'function') {
-        const proto = (pluginInstance as { prototype?: { activate?: unknown; deactivate?: unknown } }).prototype
-        if (proto && (typeof proto.activate === 'function' || typeof proto.deactivate === 'function')) {
-          pluginInstance = new (pluginInstance as new () => PluginLifecycle)()
-          loaded.plugin = pluginInstance
-        }
-      }
-
-      if (!pluginInstance || typeof pluginInstance.activate !== 'function') {
-        this.pluginStatus.set(name, { status: 'inactive', lastAttempt })
+      if (this.disabledPlugins.has(name)) {
+        this.setPluginRuntimeState(name, 'inactive')
         continue
       }
-
-      const context = this.createPluginContext(loaded)
-      try {
-        await pluginInstance.activate(context)
-        this.pluginStatus.set(name, { status: 'active', lastAttempt })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.pluginStatus.set(name, { status: 'failed', error: message, lastAttempt })
-        this.logger.error(`Plugin activation failed: ${name}`, error as Error)
-      }
+      await this.activatePluginInstance(name, loaded)
     }
   }
 
@@ -886,6 +963,7 @@ export class MetaSheetServer {
       this.logger.info('Loading plugins...')
       try {
         await this.pluginLoader.loadPlugins()
+        await this.refreshDisabledPluginsFromRegistry()
         await this.activateLoadedPlugins()
         this.logger.info('Plugins loaded successfully')
       } catch (e) {

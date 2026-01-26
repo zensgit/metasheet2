@@ -17,6 +17,7 @@ import PlmProductView from './views/PlmProductView.vue'
 import AttendanceView from './views/AttendanceView.vue'
 import SpreadsheetsView from './views/SpreadsheetsView.vue'
 import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
+import PluginManagerView from './views/PluginManagerView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -77,6 +78,12 @@ const routes: RouteRecordRaw[] = [
     name: 'plm',
     component: PlmProductView,
     meta: { title: 'PLM' }
+  },
+  {
+    path: '/admin/plugins',
+    name: 'plugin-manager',
+    component: PluginManagerView,
+    meta: { title: 'Plugins' }
   },
   {
     path: '/:pathMatch(.*)*',
