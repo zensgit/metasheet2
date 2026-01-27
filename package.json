@@ -72,18 +72,6 @@
   "pnpm": {
     "overrides": {
       "vite": "^5.4.0"
-    },
-    "packageExtensions": {
-      "@univerjs/presets@*": {
-        "dependencies": {
-          "@univerjs/themes": "^0.15.0"
-        }
-      },
-      "htm@*": {
-        "dependencies": {
-          "preact": "^10.0.0"
-        }
-      }
     }
   },
   "dependencies": {

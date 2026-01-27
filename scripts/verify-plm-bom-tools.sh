@@ -493,11 +493,11 @@ if not subs:
 print("PLM BOM tools verification: OK")
 PY
 
-python3 - <<'PY' "$report_json" "$report_md" "$API_BASE" "$PLM_BASE_URL" "$PARENT_A" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A_NUMBER"
+python3 - <<'PY' "$report_json" "$report_md" "$API_BASE" "$PLM_BASE_URL" "$PARENT_A" "$PARENT_B" "$CHILD_X" "$CHILD_Y" "$CHILD_Z" "$SUB_PART" "$BOM_LINE_X" "$DOC_FILE_ID" "$DOC_FILENAME" "$DOC_ROLE" "$DOC_VERSION" "$DOC_ATTACHMENT_ID" "$ECO_ID" "$ECO_NAME" "$ECO_STATE" "$PARENT_A_NUMBER" "$CHILD_X_FIND_NUM_A" "$CHILD_X_REFDES_A"
 import json,sys
 report_json, report_md, api_base, plm_base = sys.argv[1:5]
 parent_a, parent_b, child_x, child_y, child_z, sub_part, bom_line = sys.argv[5:12]
-doc_file_id, doc_filename, doc_role, doc_version, doc_attachment_id, eco_id, eco_name, eco_state, parent_a_number = sys.argv[12:21]
+doc_file_id, doc_filename, doc_role, doc_version, doc_attachment_id, eco_id, eco_name, eco_state, parent_a_number, bom_find_num, bom_refdes = sys.argv[12:23]
 
 data=json.load(open(report_json, encoding="utf-8"))
 where_data = (data.get("where_used") or {}).get("data") or {}
@@ -524,6 +524,8 @@ lines = [
     f"- Child Y: {child_y}",
     f"- Child Z: {child_z}",
     f"- BOM Child ID: {child_x}",
+    f"- BOM Find #: {bom_find_num}",
+    f"- BOM Refdes: {bom_refdes}",
     f"- Substitute Part: {sub_part}",
     f"- BOM Line ID (Child X): {bom_line}",
     f"- Parent A Number: {parent_a_number}",

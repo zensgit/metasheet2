@@ -131,6 +131,7 @@ const PLMQuerySchema = z.object({
     'bom',
     'documents',
     'approvals',
+    'approval_history',
     'bom_compare',
     'bom_compare_schema',
     'substitutes',
@@ -143,6 +144,7 @@ const PLMQuerySchema = z.object({
     'cad_mesh_stats',
   ]),
   productId: z.string().optional(),
+  approvalId: z.string().optional(),
   itemId: z.string().optional(),
   bomLineId: z.string().optional(),
   fileId: z.string().optional(),
@@ -170,6 +172,8 @@ const PLMMutationSchema = z.object({
   operation: z.enum([
     'substitutes_add',
     'substitutes_remove',
+    'approval_approve',
+    'approval_reject',
     'cad_properties_update',
     'cad_view_state_update',
     'cad_review_update',
@@ -177,6 +181,8 @@ const PLMMutationSchema = z.object({
   bomLineId: z.string().optional(),
   substituteItemId: z.string().optional(),
   substituteId: z.string().optional(),
+  approvalId: z.string().optional(),
+  comment: z.string().optional(),
   fileId: z.string().optional(),
   payload: z.record(z.unknown()).optional(),
   properties: z.record(z.unknown()).optional(),
@@ -563,11 +569,11 @@ export function federationRouter(injector?: Injector): Router {
 
     try {
       const productId = req.params.id
-      const depthValue = toNumberParam(req.query.depth)
-      const depth = typeof depthValue === 'number' ? Math.max(1, Math.floor(depthValue)) : undefined
-      const effectiveAt = toStringParam(req.query.effective_at ?? req.query.effectiveAt)
       const adapter = await ensurePlmAdapter()
       const fallbackItems = getMockPlmBomItems(productId)
+      const rawDepth = toNumberParam(req.query.depth ?? req.query.max_levels ?? req.query.maxLevels)
+      const depth = typeof rawDepth === 'number' ? Math.max(1, Math.floor(rawDepth)) : undefined
+      const effectiveAt = toStringParam(req.query.effective_at ?? req.query.effectiveAt)
 
       metrics.recordRequest(
         { adapter: 'plm', method: 'GET', endpoint: '/products/:id/bom', status: '200' },
@@ -986,6 +992,7 @@ export function federationRouter(injector?: Injector): Router {
         const {
           operation,
           productId,
+          approvalId,
           itemId,
           bomLineId,
           fileId,
@@ -1152,6 +1159,44 @@ export function federationRouter(injector?: Injector): Router {
                 total: result.metadata?.totalCount ?? result.data.length,
                 limit: pagination?.limit ?? 100,
                 offset: pagination?.offset ?? 0,
+              },
+            })
+          }
+
+          if (operation === 'approval_history') {
+            const resolvedApprovalId = approvalId
+              || toStringParam(
+                filterParams.approval_id ??
+                  filterParams.approvalId ??
+                  filterParams.eco_id ??
+                  filterParams.ecoId ??
+                  filterParams.request_id ??
+                  filterParams.requestId ??
+                  filterParams.id
+              )
+            if (!resolvedApprovalId) {
+              return res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: 'approvalId is required for approval_history',
+                },
+              })
+            }
+
+            const result = await adapter.getApprovalHistory(resolvedApprovalId)
+
+            metrics.recordRequest(
+              { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+              Date.now() - startTime
+            )
+
+            return res.json({
+              ok: true,
+              data: {
+                approvalId: resolvedApprovalId,
+                items: result.data,
+                total: result.metadata?.totalCount ?? result.data.length,
               },
             })
           }
@@ -1525,6 +1570,7 @@ export function federationRouter(injector?: Injector): Router {
 
         const mockData = getMockPLMData(operation, productId, { limit: pagination?.limit ?? 10, offset: pagination?.offset ?? 0 }, {
           itemId,
+          approvalId,
           bomLineId,
           fileId,
           otherFileId,
@@ -1585,6 +1631,8 @@ export function federationRouter(injector?: Injector): Router {
           bomLineId,
           substituteItemId,
           substituteId,
+          approvalId,
+          comment,
           fileId,
           payload,
           properties,
@@ -1724,6 +1772,57 @@ export function federationRouter(injector?: Injector): Router {
           return res.json({
             ok: true,
             data: result.data[0] ?? { file_id: resolvedFileId },
+          })
+        }
+
+        if (operation === 'approval_approve' || operation === 'approval_reject') {
+          const resolvedApprovalId = approvalId
+            || toStringParam(
+              filterParams.approval_id ??
+                filterParams.approvalId ??
+                filterParams.eco_id ??
+                filterParams.ecoId ??
+                filterParams.request_id ??
+                filterParams.requestId ??
+                filterParams.id
+            )
+          if (!resolvedApprovalId) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'approvalId is required',
+              },
+            })
+          }
+          const resolvedComment = toStringParam(
+            comment ??
+              filterParams.comment ??
+              filterParams.reason ??
+              (payload && typeof payload === 'object' ? (payload as Record<string, unknown>).comment : undefined)
+          )
+          if (operation === 'approval_reject' && !resolvedComment) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'comment is required for approval_reject',
+              },
+            })
+          }
+
+          const result = operation === 'approval_approve'
+            ? await adapter.approveApproval(resolvedApprovalId, resolvedComment || undefined)
+            : await adapter.rejectApproval(resolvedApprovalId, resolvedComment || '')
+
+          metrics.recordRequest(
+            { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },
+            Date.now() - startTime
+          )
+
+          return res.json({
+            ok: true,
+            data: result.data[0] ?? { id: resolvedApprovalId },
           })
         }
 
@@ -2439,6 +2538,7 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'bom',
       'documents',
       'approvals',
+      'approval_history',
       'drawings',
       'where_used',
       'bom_compare',
@@ -2446,6 +2546,8 @@ function getDefaultCapabilities(type: 'plm' | 'athena'): string[] {
       'substitutes',
       'substitutes_add',
       'substitutes_remove',
+      'approval_approve',
+      'approval_reject',
       'cad_properties',
       'cad_view_state',
       'cad_review',
@@ -2589,7 +2691,15 @@ function getMockPLMData(
   operation: string,
   productId?: string,
   pagination?: { limit: number; offset: number },
-  options?: { itemId?: string; bomLineId?: string; fileId?: string; otherFileId?: string; leftId?: string; rightId?: string }
+  options?: {
+    itemId?: string;
+    approvalId?: string;
+    bomLineId?: string;
+    fileId?: string;
+    otherFileId?: string;
+    leftId?: string;
+    rightId?: string;
+  }
 ): unknown {
   const limit = pagination?.limit || 10
   const offset = pagination?.offset || 0
@@ -2701,6 +2811,25 @@ function getMockPLMData(
       return {
         items: [
           { id: 'apr-1', productId: 'prod-1', status: 'pending', requester: 'user1' },
+        ],
+        total: 1,
+      }
+    case 'approval_history':
+      return {
+        approvalId: options?.approvalId || 'apr-1',
+        items: [
+          {
+            id: 'apr-rec-1',
+            eco_id: options?.approvalId || 'apr-1',
+            stage_id: 'stage-1',
+            approval_type: 'mandatory',
+            required_role: 'admin',
+            user_id: '1',
+            status: 'approved',
+            comment: 'mock approved',
+            approved_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          },
         ],
         total: 1,
       }

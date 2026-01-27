@@ -37,6 +37,7 @@ bash scripts/deploy-ghcr-gh.sh
 ## Notes
 
 - `docker/app.env` and `docker-compose.override.yml` are gitignored.
+- For preprod/production, keep Postgres and Redis internal (avoid exposing `5432`/`6379`); use SSH tunneling if remote access is required.
 - To change the web port or image tag, edit `WEB_PORT` or `IMAGE_TAG` near the top of the script.
 - If you want to avoid `sudo`, re-login after running `usermod -aG docker $USER`.
 

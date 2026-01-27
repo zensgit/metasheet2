@@ -14,6 +14,7 @@ import {
   getSafetyGuard,
   initSafetyGuard,
   protectAdminOperation,
+  requireAdminRole,
   logSafetyOperation,
   protectConfirmationEndpoint,
   initIdempotency,
@@ -21,7 +22,7 @@ import {
   getIdempotencyStats
 } from '../guards';
 import { Logger } from '../core/logger';
-import type { PluginLoader } from '../core/plugin-loader';
+import type { PluginLoader, LoadedPlugin } from '../core/plugin-loader';
 import type { SnapshotService } from '../services/SnapshotService';
 
 import { pluginHealthService } from '../services/PluginHealthService';
@@ -33,12 +34,18 @@ import type { Database } from '../db/types';
 import { poolManager } from '../integration/db/connection-pool';
 import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
+import { pluginConfigManager } from '../core/plugin-config-manager';
+import { isDatabaseSchemaError } from '../utils/database-errors';
+import type { PluginManifest } from '../types/plugin';
 
 const logger = new Logger('AdminRoutes');
 
 // Service dependencies
 interface AdminRouteServices {
   pluginLoader?: PluginLoader;
+  pluginStatus?: Map<string, { status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>;
+  activatePlugin?: (pluginId: string) => Promise<{ status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>;
+  deactivatePlugin?: (pluginId: string) => Promise<{ status: 'active' | 'inactive' | 'failed'; error?: string; lastAttempt?: string }>;
   snapshotService?: SnapshotService;
 }
 
@@ -146,11 +153,210 @@ router.post(
 // Plugin Management (Protected)
 // ═══════════════════════════════════════════════════════════════════
 
+type PluginRuntimeState = {
+  status: 'active' | 'inactive' | 'failed';
+  error?: string;
+  lastAttempt?: string;
+};
+
+type PluginRegistryEntry = {
+  name: string;
+  status: string | null;
+  error_message?: string | null;
+  last_activated?: string | null;
+  display_name?: string | null;
+  description?: string | null;
+  version?: string | null;
+  author?: string | null;
+  manifest?: Record<string, unknown> | string | null;
+};
+
+type PluginConfigEntry = {
+  config?: Record<string, unknown> | null;
+  schema?: Record<string, unknown> | null;
+  version?: string | null;
+  last_modified?: string | null;
+  modified_by?: string | null;
+};
+
+const isMissingColumnError = (error: unknown): boolean => {
+  const code = (error as { code?: string }).code;
+  if (code === '42703') return true;
+  const message = (error as Error)?.message;
+  if (typeof message === 'string') {
+    return message.toLowerCase().includes('column') && message.toLowerCase().includes('does not exist');
+  }
+  return false;
+};
+
+const parseJsonField = <T>(value: T | string | null | undefined): T | null => {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return null;
+    }
+  }
+  return value as T;
+};
+
+const getPluginRuntimeState = (pluginId: string): PluginRuntimeState => {
+  const runtime = services.pluginStatus?.get(pluginId);
+  return runtime ?? { status: 'inactive' };
+};
+
+const loadPluginRegistry = async (): Promise<Map<string, PluginRegistryEntry>> => {
+  const registry = new Map<string, PluginRegistryEntry>();
+  try {
+    const pool = poolManager.get();
+    const result = await pool.query<PluginRegistryEntry>(
+      `SELECT name, status, error_message, last_activated, display_name, description, version, author, manifest
+       FROM plugin_registry`
+    );
+    for (const row of result.rows) {
+      registry.set(row.name, {
+        ...row,
+        manifest: parseJsonField<Record<string, unknown>>(row.manifest)
+      });
+    }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return registry;
+    }
+    throw error;
+  }
+  return registry;
+};
+
+const upsertPluginRegistryStatus = async (
+  pluginId: string,
+  status: string,
+  manifest?: PluginManifest | null,
+  errorMessage?: string | null
+): Promise<{ persisted: boolean; reason?: string }> => {
+  try {
+    const pool = poolManager.get();
+    const lastActivated = status === 'enabled' ? new Date() : null;
+    if (manifest) {
+      const version = typeof manifest.version === 'string' ? manifest.version : 'unknown';
+      await pool.query(
+        `INSERT INTO plugin_registry (name, version, manifest, status, last_activated, error_message)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (name)
+         DO UPDATE SET
+           version = EXCLUDED.version,
+           manifest = EXCLUDED.manifest,
+           status = EXCLUDED.status,
+           last_activated = EXCLUDED.last_activated,
+           error_message = EXCLUDED.error_message,
+           updated_at = NOW()`,
+        [pluginId, version, manifest, status, lastActivated, errorMessage ?? null]
+      );
+      return { persisted: true };
+    }
+
+    const result = await pool.query(
+      `UPDATE plugin_registry
+       SET status = $1, last_activated = $2, error_message = $3, updated_at = NOW()
+       WHERE name = $4`,
+      [status, lastActivated, errorMessage ?? null, pluginId]
+    );
+    if (result.rowCount === 0) {
+      return { persisted: false, reason: 'missing_registry_row' };
+    }
+    return { persisted: true };
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return { persisted: false, reason: 'missing_registry_table' };
+    }
+    throw error;
+  }
+};
+
+const loadPluginConfig = async (pluginId: string): Promise<PluginConfigEntry> => {
+  try {
+    const pool = poolManager.get();
+    const result = await pool.query<PluginConfigEntry>(
+      `SELECT config, schema, version, last_modified, modified_by
+       FROM plugin_configs
+       WHERE plugin_name = $1`,
+      [pluginId]
+    );
+    const row = result.rows[0];
+    if (row) {
+      const config = parseJsonField<Record<string, unknown>>(row.config) || {};
+      const schema = parseJsonField<Record<string, unknown>>(row.schema);
+      try {
+        pluginConfigManager.set(pluginId, config);
+      } catch (configError) {
+        logger.warn(`Config cache update failed for plugin ${pluginId}`, configError as Error);
+      }
+      return {
+        config,
+        schema,
+        version: row.version ?? null,
+        last_modified: row.last_modified ?? null,
+        modified_by: row.modified_by ?? null
+      };
+    }
+  } catch (error) {
+    if (isDatabaseSchemaError(error) || isMissingColumnError(error)) {
+      const fallback = pluginConfigManager.get<Record<string, unknown>>(pluginId) || {};
+      return { config: fallback, schema: null, version: null, last_modified: null, modified_by: null };
+    }
+    throw error;
+  }
+
+  const fallback = pluginConfigManager.get<Record<string, unknown>>(pluginId) || {};
+  return { config: fallback, schema: null, version: null, last_modified: null, modified_by: null };
+};
+
+const upsertPluginConfig = async (
+  pluginId: string,
+  config: Record<string, unknown>,
+  schema: Record<string, unknown> | null,
+  version: string,
+  modifiedBy?: string
+): Promise<{ persisted: boolean; reason?: string }> => {
+  try {
+    const pool = poolManager.get();
+    await pool.query(
+      `INSERT INTO plugin_configs (plugin_name, config, schema, version, last_modified, modified_by)
+       VALUES ($1, $2, $3, $4, NOW(), $5)
+       ON CONFLICT (plugin_name)
+       DO UPDATE SET
+         config = EXCLUDED.config,
+         schema = EXCLUDED.schema,
+         version = EXCLUDED.version,
+         last_modified = NOW(),
+         modified_by = EXCLUDED.modified_by`,
+      [pluginId, config, schema, version, modifiedBy ?? null]
+    );
+      try {
+        pluginConfigManager.set(pluginId, config);
+      } catch (configError) {
+        logger.warn(`Config cache update failed for plugin ${pluginId}`, configError as Error);
+      }
+      return { persisted: true };
+  } catch (error) {
+    if (isDatabaseSchemaError(error) || isMissingColumnError(error)) {
+      try {
+        pluginConfigManager.set(pluginId, config);
+      } catch (configError) {
+        logger.warn(`Config cache update failed for plugin ${pluginId}`, configError as Error);
+      }
+      return { persisted: false, reason: 'missing_plugin_configs_table' };
+    }
+    throw error;
+  }
+};
+
 /**
  * GET /api/admin/plugins/health
  * Get health status of all plugins
  */
-router.get('/plugins/health', (req: Request, res: Response) => {
+router.get('/plugins/health', requireAdminRole(), (req: Request, res: Response) => {
   const health = pluginHealthService.getAllPluginHealth();
   res.json({
     success: true,
@@ -160,11 +366,267 @@ router.get('/plugins/health', (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/admin/plugins
+ * List plugins with runtime status + registry status
+ */
+router.get('/plugins', requireAdminRole(), async (_req: Request, res: Response) => {
+  try {
+    const registry = await loadPluginRegistry();
+    const loaded = services.pluginLoader?.getPlugins() ?? new Map<string, LoadedPlugin>();
+    const failed = services.pluginLoader?.getFailedPlugins() ?? new Map<string, string>();
+
+    const list = Array.from(loaded.values()).map((item) => {
+      const runtime = getPluginRuntimeState(item.manifest.name);
+      const registryEntry = registry.get(item.manifest.name);
+      return {
+        name: item.manifest.name,
+        displayName: item.manifest.displayName ?? item.manifest.name,
+        description: item.manifest.description,
+        version: item.manifest.version,
+        author: item.manifest.author,
+        status: runtime.status,
+        error: runtime.error,
+        lastAttempt: runtime.lastAttempt,
+        registryStatus: registryEntry?.status ?? null,
+        lastActivated: registryEntry?.last_activated ?? null
+      };
+    });
+
+    for (const [name, error] of failed.entries()) {
+      if (list.some(entry => entry.name === name)) continue;
+      const registryEntry = registry.get(name);
+      list.push({
+        name,
+        displayName: registryEntry?.display_name ?? name,
+        description: registryEntry?.description ?? null,
+        version: registryEntry?.version ?? null,
+        author: registryEntry?.author ?? null,
+        status: 'failed',
+        error,
+        lastAttempt: null,
+        registryStatus: registryEntry?.status ?? null,
+        lastActivated: registryEntry?.last_activated ?? null
+      });
+    }
+
+    for (const entry of registry.values()) {
+      if (list.some(item => item.name === entry.name)) continue;
+      list.push({
+        name: entry.name,
+        displayName: entry.display_name ?? entry.name,
+        description: entry.description ?? null,
+        version: entry.version ?? null,
+        author: entry.author ?? null,
+        status: 'inactive',
+        error: entry.error_message ?? null,
+        lastAttempt: null,
+        registryStatus: entry.status ?? null,
+        lastActivated: entry.last_activated ?? null
+      });
+    }
+
+    res.json({
+      success: true,
+      count: list.length,
+      list
+    });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/plugins/:id
+ * Get plugin detail + config
+ */
+router.get('/plugins/:id', requireAdminRole(), async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const registry = await loadPluginRegistry();
+    const loaded = services.pluginLoader?.get(id);
+    const runtime = getPluginRuntimeState(id);
+    const registryEntry = registry.get(id);
+    const configEntry = await loadPluginConfig(id);
+
+    if (!loaded && !registryEntry) {
+      res.status(404).json({
+        success: false,
+        error: 'Plugin not found',
+        pluginId: id
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      plugin: {
+        name: id,
+        displayName: loaded?.manifest.displayName ?? registryEntry?.display_name ?? id,
+        description: loaded?.manifest.description ?? registryEntry?.description ?? null,
+        version: loaded?.manifest.version ?? registryEntry?.version ?? null,
+        author: loaded?.manifest.author ?? registryEntry?.author ?? null,
+        status: runtime.status,
+        error: runtime.error,
+        lastAttempt: runtime.lastAttempt,
+        registryStatus: registryEntry?.status ?? null,
+        lastActivated: registryEntry?.last_activated ?? null
+      },
+      config: configEntry
+    });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      pluginId: id
+    });
+  }
+});
+
+/**
+ * POST /api/admin/plugins/:id/enable
+ * Enable a plugin (activate)
+ */
+router.post('/plugins/:id/enable', requireAdminRole(), async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  if (!services.activatePlugin || !services.pluginLoader) {
+    res.status(503).json({
+      success: false,
+      error: 'Plugin services not available'
+    });
+    return;
+  }
+  try {
+    const runtime = await services.activatePlugin(id);
+    const loaded = services.pluginLoader.get(id);
+    const manifest = loaded?.manifest ?? null;
+    const persisted = await upsertPluginRegistryStatus(id, 'enabled', manifest ?? undefined, runtime.error ?? null);
+    res.json({
+      success: true,
+      pluginId: id,
+      runtime,
+      registry: persisted
+    });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      pluginId: id
+    });
+  }
+});
+
+/**
+ * POST /api/admin/plugins/:id/disable
+ * Disable a plugin (deactivate)
+ */
+router.post('/plugins/:id/disable', requireAdminRole(), async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  if (!services.deactivatePlugin || !services.pluginLoader) {
+    res.status(503).json({
+      success: false,
+      error: 'Plugin services not available'
+    });
+    return;
+  }
+  try {
+    const runtime = await services.deactivatePlugin(id);
+    const loaded = services.pluginLoader.get(id);
+    const manifest = loaded?.manifest ?? null;
+    const persisted = await upsertPluginRegistryStatus(id, 'disabled', manifest ?? undefined, runtime.error ?? null);
+    res.json({
+      success: true,
+      pluginId: id,
+      runtime,
+      registry: persisted
+    });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      pluginId: id
+    });
+  }
+});
+
+/**
+ * GET /api/admin/plugins/:id/config
+ * Get plugin config (best-effort)
+ */
+router.get('/plugins/:id/config', requireAdminRole(), async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const configEntry = await loadPluginConfig(id);
+    res.json({ success: true, pluginId: id, config: configEntry });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      pluginId: id
+    });
+  }
+});
+
+/**
+ * PUT /api/admin/plugins/:id/config
+ * Update plugin config (best-effort)
+ */
+router.put('/plugins/:id/config', requireAdminRole(), async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const { config, schema, version } = req.body || {};
+
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid config payload',
+      pluginId: id
+    });
+    return;
+  }
+
+  try {
+    const modifiedBy =
+      typeof req.user?.email === 'string'
+        ? req.user.email
+        : req.user?.id != null
+          ? String(req.user.id)
+          : undefined;
+    const persisted = await upsertPluginConfig(
+      id,
+      config,
+      schema && typeof schema === 'object' ? schema : null,
+      typeof version === 'string' && version.trim().length > 0 ? version : '1.0.0',
+      modifiedBy
+    );
+    res.json({
+      success: true,
+      pluginId: id,
+      persisted
+    });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      pluginId: id
+    });
+  }
+});
+
+/**
  * POST /api/admin/plugins/:id/reload
  * Reload a single plugin
  */
 router.post(
   '/plugins/:id/reload',
+  ...protectAdminOperation(OperationType.FORCE_RELOAD),
   requireSafetyCheck({
     operation: OperationType.FORCE_RELOAD,
     getDetails: (req) => ({ pluginId: req.params.id })
@@ -187,10 +649,12 @@ router.post(
 
     try {
       await services.pluginLoader.reloadPlugin(id);
+      const runtime = services.activatePlugin ? await services.activatePlugin(id) : undefined;
       res.json({
         success: true,
         message: `Plugin ${id} reloaded successfully`,
-        pluginId: id
+        pluginId: id,
+        runtime
       });
     } catch (error) {
       const err = error as Error;
@@ -231,10 +695,22 @@ router.post(
 
     try {
       // Reload all plugins by re-running loadPlugins
-      await services.pluginLoader.loadPlugins();
+      const loaded = await services.pluginLoader.loadPlugins();
+      const activated: Array<{ name: string; status: string; error?: string }> = [];
+      if (services.activatePlugin) {
+        for (const plugin of loaded) {
+          const runtime = await services.activatePlugin(plugin.manifest.name);
+          activated.push({
+            name: plugin.manifest.name,
+            status: runtime.status,
+            error: runtime.error
+          });
+        }
+      }
       res.json({
         success: true,
         message: 'All plugins reloaded successfully',
+        activated,
         warning: 'Service may have experienced brief unavailability'
       });
     } catch (error) {
@@ -278,8 +754,19 @@ router.post('/plugins/reload-all-unsafe', async (req: AuthenticatedRequest, res:
     if (!services.pluginLoader) {
       return res.status(503).json({ success: false, error: 'PluginLoader service not available' })
     }
-    await services.pluginLoader.loadPlugins()
-    return res.json({ success: true, message: 'All plugins reloaded (unsafe local bypass)' })
+    const loaded = await services.pluginLoader.loadPlugins()
+    const activated: Array<{ name: string; status: string; error?: string }> = []
+    if (services.activatePlugin) {
+      for (const plugin of loaded) {
+        const runtime = await services.activatePlugin(plugin.manifest.name)
+        activated.push({
+          name: plugin.manifest.name,
+          status: runtime.status,
+          error: runtime.error
+        })
+      }
+    }
+    return res.json({ success: true, message: 'All plugins reloaded (unsafe local bypass)', activated })
   } catch (error) {
     const err = error as Error
     logger.error('Unsafe reload-all failed', err)
@@ -320,7 +807,8 @@ router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res:
     }
     const { id } = req.params
     await services.pluginLoader.reloadPlugin(id)
-    return res.json({ success: true, message: `Plugin ${id} reloaded (unsafe local bypass)`, pluginId: id })
+    const runtime = services.activatePlugin ? await services.activatePlugin(id) : undefined
+    return res.json({ success: true, message: `Plugin ${id} reloaded (unsafe local bypass)`, pluginId: id, runtime })
   } catch (error) {
     const err = error as Error
     logger.error('Unsafe single plugin reload failed', err)
@@ -334,6 +822,7 @@ router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res:
  */
 router.delete(
   '/plugins/:id',
+  ...protectAdminOperation(OperationType.UNLOAD_PLUGIN),
   requireSafetyCheck({
     operation: OperationType.UNLOAD_PLUGIN,
     getDetails: (req) => ({ pluginId: req.params.id })
@@ -1530,6 +2019,8 @@ export function initAdminRoutes(
     safetyGuardEnabled: getSafetyGuard().isEnabled(),
     idempotencyStats: getIdempotencyStats().config,
     pluginLoaderAvailable: !!services.pluginLoader,
+    pluginStatusAvailable: !!services.pluginStatus,
+    pluginActivationAvailable: !!services.activatePlugin,
     snapshotServiceAvailable: !!services.snapshotService
   });
 

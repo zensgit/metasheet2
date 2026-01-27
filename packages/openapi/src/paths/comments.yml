@@ -1,0 +1,77 @@
+paths:
+  /api/comments:
+    get:
+      summary: List comments
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: spreadsheetId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: rowId
+          schema: { type: string }
+        - in: query
+          name: resolved
+          schema: { type: boolean }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentsListResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create comment
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                spreadsheetId: { type: string }
+                rowId: { type: string }
+                fieldId: { type: string }
+                content: { type: string }
+                parentId: { type: string }
+              required: [spreadsheetId, rowId, content]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      comment: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/comments/{commentId}/resolve:
+    post:
+      summary: Resolve a comment
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: commentId
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: No Content }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }

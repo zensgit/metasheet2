@@ -129,6 +129,8 @@ ERROR_SCREENSHOT_PATH="$OUTPUT_DIR/plm-ui-regression-${STAMP}-error.png"
 ERROR_RESPONSE_PATH="$OUTPUT_DIR/plm-ui-regression-last-response-${STAMP}.json"
 REPORT_PATH="$REPORT_DIR/verification-plm-ui-regression-${STAMP}.md"
 ITEM_NUMBER_JSON="$OUTPUT_DIR/plm-ui-regression-item-number-${STAMP}.json"
+APPROVAL_ACTION_JSON="$OUTPUT_DIR/plm-ui-regression-approval-actions-${STAMP}.json"
+APPROVAL_HISTORY_JSON="$OUTPUT_DIR/plm-ui-regression-approval-history-${STAMP}.json"
 
 if [[ -z "$PLM_BOM_TOOLS_JSON" ]]; then
   PLM_BOM_TOOLS_JSON=$(ls -t artifacts/plm-bom-tools-*.json 2>/dev/null | head -n1 || true)
@@ -1568,6 +1570,62 @@ function firstLineText(value) {
     await approvalsSection.locator('th', { hasText: '产品 ID' }).first().waitFor({ timeout: 60000 });
   }
 
+  const approvalCommentInput = approvalsSection.locator('#plm-approvals-comment');
+  const approvalCommentPresent = (await approvalCommentInput.count()) > 0;
+  if (approvalCommentPresent) {
+    await approvalCommentInput.fill('回归验证');
+  }
+  const approveButtons = await approvalsSection.locator('button:has-text("通过")').count();
+  const rejectButtons = await approvalsSection.locator('button:has-text("拒绝")').count();
+  const approvalActionPath = process.env.APPROVAL_ACTION_PATH;
+  if (approvalActionPath) {
+    const fs = require('fs');
+    fs.writeFileSync(
+      approvalActionPath,
+      JSON.stringify(
+        {
+          comment_input: approvalCommentPresent,
+          approve_buttons: approveButtons,
+          reject_buttons: rejectButtons,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  const approvalHistoryPath = process.env.APPROVAL_HISTORY_PATH;
+  if (approvalHistoryPath) {
+    const historyButton = approvalsSection.locator('button:has-text("记录")').first();
+    const historyAvailable = (await historyButton.count()) > 0;
+    let historyRows = 0;
+    let historyEmpty = false;
+    if (historyAvailable) {
+      await historyButton.click();
+      const historyPanel = approvalsSection.locator('[data-approval-history="true"]');
+      await historyPanel.waitFor({ timeout: 60000 });
+      const historyTable = historyPanel.locator('table');
+      if ((await historyTable.count()) > 0) {
+        historyRows = await historyTable.locator('tbody tr').count();
+      } else {
+        historyEmpty = (await historyPanel.locator('.empty').count()) > 0;
+      }
+    }
+    const fs = require('fs');
+    fs.writeFileSync(
+      approvalHistoryPath,
+      JSON.stringify(
+        {
+          history_available: historyAvailable,
+          history_rows: historyRows,
+          history_empty: historyEmpty,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
   if (itemNumberPath) {
     const fs = require('fs');
     fs.writeFileSync(itemNumberPath, JSON.stringify({ item_number: itemNumberValue }, null, 2));
@@ -1622,6 +1680,8 @@ PLM_DOCUMENT_ROLE="$PLM_DOCUMENT_ROLE" \
 PLM_DOCUMENT_REVISION="$PLM_DOCUMENT_REVISION" \
 PLM_APPROVAL_TITLE="$PLM_APPROVAL_TITLE" \
 PLM_APPROVAL_PRODUCT_NUMBER="$PLM_APPROVAL_PRODUCT_NUMBER" \
+APPROVAL_ACTION_PATH="$APPROVAL_ACTION_JSON" \
+APPROVAL_HISTORY_PATH="$APPROVAL_HISTORY_JSON" \
 UI_BASE="$UI_BASE" \
 SCREENSHOT_PATH="$SCREENSHOT_PATH" \
 ERROR_SCREENSHOT_PATH="$ERROR_SCREENSHOT_PATH" \
@@ -1648,6 +1708,47 @@ if [[ -s "$ITEM_NUMBER_JSON" ]]; then
 import json,sys
 with open(sys.argv[1], encoding="utf-8") as f:
     print(json.load(f).get("item_number",""))
+PY
+  )
+fi
+
+APPROVAL_ACTION_RESULT="Approval action controls not verified."
+if [[ -s "$APPROVAL_ACTION_JSON" ]]; then
+  APPROVAL_ACTION_RESULT=$(python3 - <<'PY' "$APPROVAL_ACTION_JSON"
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+comment = data.get("comment_input")
+approve = int(data.get("approve_buttons") or 0)
+reject = int(data.get("reject_buttons") or 0)
+if comment:
+    if approve or reject:
+        print(f"Approval action controls visible (approve {approve}, reject {reject}).")
+    else:
+        print("Approval comment input visible; no pending approvals to action.")
+else:
+    print("Approval action controls missing.")
+PY
+  )
+fi
+
+APPROVAL_HISTORY_RESULT="Approval history not verified."
+if [[ -s "$APPROVAL_HISTORY_JSON" ]]; then
+  APPROVAL_HISTORY_RESULT=$(python3 - <<'PY' "$APPROVAL_HISTORY_JSON"
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+available = data.get("history_available")
+rows = int(data.get("history_rows") or 0)
+empty = bool(data.get("history_empty"))
+if not available:
+    print("Approval history action missing.")
+elif rows:
+    print(f"Approval history loaded ({rows} rows).")
+elif empty:
+    print("Approval history panel shows empty state.")
+else:
+    print("Approval history panel loaded with no table.")
 PY
   )
 fi
@@ -1708,6 +1809,8 @@ Verify the end-to-end PLM UI flow: search -> select -> load product -> where-use
 - Substitutes query completes.
 - Documents table loads with expected document metadata and extended columns.
 - Approvals table loads with expected approval metadata and extended columns.
+- ${APPROVAL_ACTION_RESULT}
+- ${APPROVAL_HISTORY_RESULT}
 - Screenshot: ${SCREENSHOT_PATH}
 - Item number artifact: ${ITEM_NUMBER_JSON}
 REPORT_EOF
