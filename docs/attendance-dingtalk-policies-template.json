@@ -36,6 +36,16 @@
         "sourceField": "making_up_lack_times",
         "targetField": "making_up_lack_times",
         "dataType": "number"
+      },
+      {
+        "sourceField": "attendance_group",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "考勤组",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
       }
     ]
   },
@@ -85,6 +95,30 @@
         }
       },
       {
+        "name": "missing-punch-warning",
+        "when": {
+          "fieldContains": {
+            "attend_result": "缺卡"
+          }
+        },
+        "then": {
+          "addWarning": "Missing punch detected"
+        }
+      },
+      {
+        "name": "supplement-punch-warning",
+        "when": {
+          "fieldContains": {
+            "approvalSummary": "补卡"
+          }
+        },
+        "then": {
+          "addWarning": "Supplement punch approval detected"
+        }
+      }
+    ],
+    "disabledRules": [
+      {
         "name": "driver-rest-day-overtime-check-in",
         "when": {
           "userGroup": "driver",
@@ -128,28 +162,6 @@
         "then": {
           "setOvertimeMinutes": 480,
           "addWarning": "Rest + Travel => overtime 8h"
-        }
-      },
-      {
-        "name": "missing-punch-warning",
-        "when": {
-          "fieldContains": {
-            "attend_result": "缺卡"
-          }
-        },
-        "then": {
-          "addWarning": "Missing punch detected"
-        }
-      },
-      {
-        "name": "supplement-punch-warning",
-        "when": {
-          "fieldContains": {
-            "approvalSummary": "补卡"
-          }
-        },
-        "then": {
-          "addWarning": "Supplement punch approval detected"
         }
       },
       {

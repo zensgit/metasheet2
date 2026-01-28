@@ -131,6 +131,11 @@ We provide a starter policy config you can copy and customize:
 - `docs/attendance-dingtalk-policies-template.json`
 - `docs/attendance-dingtalk-rule-set-config.json` (full rule-set config with mappings + policies)
 
+Notes:
+- `attendance_group` is expected from your CSV (you said the CSV contains it), so it is mapped but **rules using it are disabled by default**.
+- Optional rules are kept under `policies.disabledRules`. To enable, move them into `policies.rules` and fill in userIds.
+- From your CSV headers, the actual column name is **`考勤组`** (daily summary CSV line 3). The template now maps both `attendance_group` and `考勤组` to `attendanceGroup`.
+
 ## Implementation Steps
 1. **Normalize DingTalk mapping** to canonical fields (we already have mappings table).
 2. **Store rule set policies** in `attendance_rule_sets.config`.
