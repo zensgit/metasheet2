@@ -97,6 +97,40 @@ Keep warnings **separate** from “auto correction.”
   - endMonthOffset = 1
 - Manual cycles should remain supported with overrides.
 
+## Rule Inventory From `新建 文本文档 (2)(1).txt` (Extracted)
+This list highlights concrete rules found in the file and shows **where they belong**.
+
+| Rule (Summary) | Where It Belongs | Notes |
+| --- | --- | --- |
+| Backup existing month data, then re-run clean | System | Data hygiene / batch pipeline behavior. |
+| Build overtime map from DingTalk approvals | System + Config | System capability; process codes and field IDs are config. |
+| Holiday list sourced from DingTalk YiDa form | System + Config | System capability; data source/app/form IDs are config. |
+| Security staff daily attendance = 8 hours | Config | Role-based override. |
+| Driver rest day + any punch = 8 hours overtime | Config | Role-based override. |
+| 单休车间 + 休息 + 出差审批 → default 8 hours overtime | Config | Group/shift specific. |
+| Holiday day: entry after holiday → set hours 0 | Config | HR policy. |
+| Holiday day: resigned before workdate → set hours 0 | Config | HR policy. |
+| Holiday day: active employee → required/actual = 8 hours | Config | HR policy. |
+| Holiday day + security staff punching → overtime +8 | Config | Role-based policy. |
+| Special userId (16256197521696414) 10/10.5-hour rule | Config | User override. |
+| Overtime approval vs punch reconciliation | System + Config | Engine is system; rounding thresholds and penalties are config. |
+| Multi-approval merge + overlap detection | System + Config | Engine is system; handling strategy is config. |
+| Approval exists but no punches → overtime = 0 | Config | Company policy. |
+| Overtime > 15 hours special handling | Config | Thresholds are company policy. |
+| Night overtime (“通宵单”) → set attendance hours to 0 | Config | Policy decision. |
+| Warnings for mismatched approvals vs punches | System + Config | Warning engine is system; rules are config. |
+| Leave + overtime + travel conflict warnings | Config | Policy decision. |
+| Dept exceptions (国内销售 / 服务测试部-调试) | Config | Department policy. |
+
+## Decision Summary
+**System built-in** should provide: data ingestion, mapping, approvals ingestion, holiday/calendar support, payroll cycle engine, rule evaluation engine, and warning collection.  
+**User-configurable** should cover: roles/departments, shift-specific overrides, thresholds, special user rules, approval labels, and warning policy choices.
+
+## Policy Template
+We provide a starter policy config you can copy and customize:
+- `docs/attendance-dingtalk-policies-template.json`
+- `docs/attendance-dingtalk-rule-set-config.json` (full rule-set config with mappings + policies)
+
 ## Implementation Steps
 1. **Normalize DingTalk mapping** to canonical fields (we already have mappings table).
 2. **Store rule set policies** in `attendance_rule_sets.config`.

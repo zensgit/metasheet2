@@ -202,6 +202,140 @@ function parseDateInput(value) {
   return date
 }
 
+function normalizeStatusLabel(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  if (!text) return null
+  const normalized = text.toLowerCase()
+  const map = {
+    normal: 'normal',
+    ok: 'normal',
+    '正常': 'normal',
+    late: 'late',
+    '迟到': 'late',
+    '早退': 'early_leave',
+    early: 'early_leave',
+    '迟到早退': 'late_early',
+    'late+early': 'late_early',
+    partial: 'partial',
+    '缺卡': 'partial',
+    '补卡': 'adjusted',
+    adjusted: 'adjusted',
+    absent: 'absent',
+    '旷工': 'absent',
+    off: 'off',
+    '休息': 'off',
+  }
+  return map[text] ?? map[normalized] ?? normalized.replace(/\s+/g, '_')
+}
+
+function parseMinutesValue(value, dataType) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = parseNumber(value, null)
+  if (!Number.isFinite(numeric)) return null
+  const type = typeof dataType === 'string' ? dataType.toLowerCase() : ''
+  if (type.includes('hour')) return Math.round(numeric * 60)
+  if (type.includes('minute')) return Math.round(numeric)
+  return Math.round(numeric)
+}
+
+function buildZonedDate(dateString, timeString, timeZone) {
+  const dateParts = String(dateString).split('-').map(item => Number(item))
+  if (dateParts.length !== 3 || dateParts.some(item => !Number.isFinite(item))) return null
+  const [year, month, day] = dateParts
+  const timeParts = String(timeString).split(':').map(item => Number(item))
+  if (timeParts.length < 2 || timeParts.some(item => !Number.isFinite(item))) return null
+  const [hour, minute, second] = [timeParts[0], timeParts[1], timeParts[2] ?? 0]
+  const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
+  if (!timeZone) return utcDate
+  try {
+    const tzDate = new Date(utcDate.toLocaleString('en-US', { timeZone }))
+    const offsetMs = utcDate.getTime() - tzDate.getTime()
+    return new Date(utcDate.getTime() + offsetMs)
+  } catch {
+    return utcDate
+  }
+}
+
+function parseImportedDateTime(value, workDate, timeZone) {
+  if (!value) return null
+  if (value instanceof Date) return value
+  const text = String(value).trim()
+  if (!text) return null
+  const dateMatch = text.match(/\d{4}-\d{2}-\d{2}/)
+  const timeMatch = text.match(/\d{2}:\d{2}(:\d{2})?/)
+  if (dateMatch && timeMatch) {
+    return buildZonedDate(dateMatch[0], timeMatch[0], timeZone)
+  }
+  if (timeMatch && workDate) {
+    return buildZonedDate(workDate, timeMatch[0], timeZone)
+  }
+  return parseDateInput(text)
+}
+
+function buildDingTalkFieldMap(columns) {
+  const map = new Map()
+  if (!Array.isArray(columns)) return map
+  for (const column of columns) {
+    const id = column?.id ?? column?.column_id ?? column?.columnId
+    if (id === undefined || id === null) continue
+    const key = String(id)
+    const alias = typeof column.alias === 'string' && column.alias.trim().length > 0 ? column.alias.trim() : null
+    const name = typeof column.name === 'string' && column.name.trim().length > 0 ? column.name.trim() : null
+    map.set(key, { id: key, alias, name })
+  }
+  return map
+}
+
+function buildRowsFromDingTalk({ columns, data }) {
+  const map = buildDingTalkFieldMap(columns)
+  const rowsByDate = new Map()
+  const columnVals = data?.column_vals
+  if (!Array.isArray(columnVals)) return []
+  for (const columnEntry of columnVals) {
+    const colId = columnEntry?.column_vo?.id ?? columnEntry?.column_vo?.column_id ?? columnEntry?.columnId
+    if (colId === undefined || colId === null) continue
+    const columnInfo = map.get(String(colId)) ?? { id: String(colId) }
+    const keys = []
+    if (columnInfo.alias) keys.push(columnInfo.alias)
+    if (columnInfo.name) keys.push(columnInfo.name)
+    keys.push(`col_${columnInfo.id}`)
+    const values = Array.isArray(columnEntry?.column_vals) ? columnEntry.column_vals : []
+    for (const entry of values) {
+      const dateRaw = entry?.date
+      if (!dateRaw) continue
+      const dateKey = String(dateRaw).slice(0, 10)
+      if (!rowsByDate.has(dateKey)) {
+        rowsByDate.set(dateKey, { workDate: dateKey, fields: {} })
+      }
+      const row = rowsByDate.get(dateKey)
+      const rawValue = entry?.value ?? entry?.date ?? ''
+      for (const key of keys) {
+        if (key && row.fields[key] === undefined) {
+          row.fields[key] = rawValue
+        }
+      }
+    }
+  }
+  return Array.from(rowsByDate.values())
+}
+
+function applyFieldMappings(fields, mappings) {
+  const normalized = {}
+  if (!Array.isArray(mappings)) return normalized
+  for (const mapping of mappings) {
+    const sourceField = mapping?.sourceField
+    const targetField = mapping?.targetField
+    if (!sourceField || !targetField) continue
+    if (fields[sourceField] === undefined) continue
+    normalized[targetField] = {
+      value: fields[sourceField],
+      dataType: mapping?.dataType,
+    }
+  }
+  return normalized
+}
+
 function getUtcParts(date) {
   return {
     year: date.getUTCFullYear(),
@@ -627,6 +761,188 @@ function computeMetrics(options) {
   return { workMinutes, lateMinutes, earlyLeaveMinutes, status }
 }
 
+function normalizeComparableValue(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'boolean') return value
+  const text = String(value).trim()
+  if (!text) return ''
+  const lower = text.toLowerCase()
+  if (lower === 'true') return true
+  if (lower === 'false') return false
+  if (/^-?\d+(\.\d+)?$/.test(text)) {
+    const num = Number(text)
+    if (Number.isFinite(num)) return num
+  }
+  return text
+}
+
+function valuesEqual(left, right) {
+  const lhs = normalizeComparableValue(left)
+  const rhs = normalizeComparableValue(right)
+  if (lhs === null || rhs === null) return false
+  if (typeof lhs === 'number' && typeof rhs === 'number') return lhs === rhs
+  if (typeof lhs === 'boolean' && typeof rhs === 'boolean') return lhs === rhs
+  return String(lhs).toLowerCase() === String(rhs).toLowerCase()
+}
+
+function fieldHasValue(value) {
+  if (value === null || value === undefined) return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'string') return value.trim().length > 0
+  return true
+}
+
+function matchFieldEquals(actual, expected) {
+  if (Array.isArray(expected)) {
+    return expected.some(item => valuesEqual(actual, item))
+  }
+  if (Array.isArray(actual)) {
+    return actual.some(item => valuesEqual(item, expected))
+  }
+  return valuesEqual(actual, expected)
+}
+
+function matchFieldIn(actual, expectedList) {
+  if (!Array.isArray(expectedList)) return false
+  if (Array.isArray(actual)) {
+    return actual.some(item => expectedList.some(expected => valuesEqual(item, expected)))
+  }
+  return expectedList.some(expected => valuesEqual(actual, expected))
+}
+
+function matchFieldContains(actual, expectedText) {
+  if (actual === null || actual === undefined || expectedText === null || expectedText === undefined) return false
+  const source = String(actual).toLowerCase()
+  const target = String(expectedText).toLowerCase()
+  return source.includes(target)
+}
+
+function buildFieldValueMap(rawFields, mappedFields) {
+  const values = { ...(rawFields || {}) }
+  if (mappedFields && typeof mappedFields === 'object') {
+    for (const [key, detail] of Object.entries(mappedFields)) {
+      if (detail && Object.prototype.hasOwnProperty.call(detail, 'value')) {
+        values[key] = detail.value
+      }
+    }
+  }
+  return values
+}
+
+function resolveUserGroups(userGroups, facts, fieldValues) {
+  const groups = new Set()
+  if (!Array.isArray(userGroups)) return groups
+  for (const group of userGroups) {
+    if (!group || typeof group !== 'object') continue
+    const name = String(group.name ?? '').trim()
+    if (!name) continue
+    const conditions = []
+    if (Array.isArray(group.userIds) && group.userIds.length > 0) {
+      conditions.push(group.userIds.includes(facts.userId))
+    }
+    if (Array.isArray(group.shiftNames) && group.shiftNames.length > 0) {
+      conditions.push(group.shiftNames.includes(facts.shiftName))
+    }
+    if (typeof group.isHoliday === 'boolean') {
+      conditions.push(group.isHoliday === facts.isHoliday)
+    }
+    if (typeof group.isWorkingDay === 'boolean') {
+      conditions.push(group.isWorkingDay === facts.isWorkingDay)
+    }
+    if (group.fieldEquals && typeof group.fieldEquals === 'object') {
+      for (const [key, expected] of Object.entries(group.fieldEquals)) {
+        conditions.push(matchFieldEquals(fieldValues[key], expected))
+      }
+    }
+    if (group.fieldIn && typeof group.fieldIn === 'object') {
+      for (const [key, expected] of Object.entries(group.fieldIn)) {
+        conditions.push(matchFieldIn(fieldValues[key], expected))
+      }
+    }
+    if (group.fieldContains && typeof group.fieldContains === 'object') {
+      for (const [key, expected] of Object.entries(group.fieldContains)) {
+        conditions.push(matchFieldContains(fieldValues[key], expected))
+      }
+    }
+    const matched = conditions.length === 0 ? false : conditions.every(Boolean)
+    if (matched) groups.add(name)
+  }
+  return groups
+}
+
+function matchPolicyRule(ruleWhen, facts, fieldValues, userGroups, metrics) {
+  if (!ruleWhen) return true
+  if (Array.isArray(ruleWhen.userIds) && ruleWhen.userIds.length > 0) {
+    if (!ruleWhen.userIds.includes(facts.userId)) return false
+  }
+  if (ruleWhen.userGroup) {
+    if (!userGroups.has(ruleWhen.userGroup)) return false
+  }
+  if (Array.isArray(ruleWhen.shiftNames) && ruleWhen.shiftNames.length > 0) {
+    if (!ruleWhen.shiftNames.includes(facts.shiftName)) return false
+  }
+  if (typeof ruleWhen.isHoliday === 'boolean' && ruleWhen.isHoliday !== facts.isHoliday) return false
+  if (typeof ruleWhen.isWorkingDay === 'boolean' && ruleWhen.isWorkingDay !== facts.isWorkingDay) return false
+  if (Array.isArray(ruleWhen.statusIn) && ruleWhen.statusIn.length > 0) {
+    if (!ruleWhen.statusIn.includes(metrics.status)) return false
+  }
+  if (Array.isArray(ruleWhen.fieldExists)) {
+    for (const key of ruleWhen.fieldExists) {
+      if (!fieldHasValue(fieldValues[key])) return false
+    }
+  }
+  if (ruleWhen.fieldEquals && typeof ruleWhen.fieldEquals === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldEquals)) {
+      if (!matchFieldEquals(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldIn && typeof ruleWhen.fieldIn === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldIn)) {
+      if (!matchFieldIn(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldContains && typeof ruleWhen.fieldContains === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldContains)) {
+      if (!matchFieldContains(fieldValues[key], expected)) return false
+    }
+  }
+  return true
+}
+
+function applyAttendancePolicies({ policies, facts, fieldValues, metrics }) {
+  const nextMetrics = { ...metrics }
+  const warnings = []
+  const appliedRules = []
+  if (!policies || typeof policies !== 'object') {
+    return { metrics: nextMetrics, warnings, appliedRules, userGroups: [] }
+  }
+  const userGroups = resolveUserGroups(policies.userGroups, facts, fieldValues)
+  const rules = Array.isArray(policies.rules) ? policies.rules : []
+  rules.forEach((rule, index) => {
+    if (!rule || typeof rule !== 'object') return
+    if (!matchPolicyRule(rule.when, facts, fieldValues, userGroups, nextMetrics)) return
+    const ruleName = (typeof rule.name === 'string' && rule.name.trim()) ? rule.name.trim() : `rule-${index + 1}`
+    appliedRules.push(ruleName)
+    const actions = rule.then ?? {}
+    if (Number.isFinite(actions.setWorkMinutes)) nextMetrics.workMinutes = actions.setWorkMinutes
+    if (Number.isFinite(actions.setLateMinutes)) nextMetrics.lateMinutes = actions.setLateMinutes
+    if (Number.isFinite(actions.setEarlyLeaveMinutes)) nextMetrics.earlyLeaveMinutes = actions.setEarlyLeaveMinutes
+    if (Number.isFinite(actions.setLeaveMinutes)) nextMetrics.leaveMinutes = actions.setLeaveMinutes
+    if (Number.isFinite(actions.setOvertimeMinutes)) nextMetrics.overtimeMinutes = actions.setOvertimeMinutes
+    if (typeof actions.setStatus === 'string' && actions.setStatus.trim()) {
+      nextMetrics.status = actions.setStatus.trim()
+    }
+    if (typeof actions.addWarning === 'string' && actions.addWarning.trim()) {
+      warnings.push(actions.addWarning.trim())
+    }
+    if (Array.isArray(actions.addWarnings)) {
+      warnings.push(...actions.addWarnings.map(item => String(item).trim()).filter(Boolean))
+    }
+  })
+  return { metrics: nextMetrics, warnings, appliedRules, userGroups: Array.from(userGroups) }
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const rows = await db.query(
     `SELECT
@@ -1032,9 +1348,11 @@ async function upsertAttendanceRecord(options) {
     updateLastOutAt,
     mode,
     statusOverride,
+    overrideMetrics,
     isWorkday,
     leaveMinutes,
     overtimeMinutes,
+    meta,
     client,
   } = options
 
@@ -1045,6 +1363,10 @@ async function upsertAttendanceRecord(options) {
 
   let firstInAt = existing[0]?.first_in_at ?? null
   let lastOutAt = existing[0]?.last_out_at ?? null
+  const existingMeta = normalizeMetadata(existing[0]?.meta)
+  const finalMeta = meta && typeof meta === 'object'
+    ? { ...existingMeta, ...meta }
+    : existingMeta
 
   if (mode === 'override') {
     if (updateFirstInAt) firstInAt = updateFirstInAt
@@ -1066,12 +1388,26 @@ async function upsertAttendanceRecord(options) {
     leaveMinutes,
     overtimeMinutes,
   })
-  const status = statusOverride ?? metrics.status
+  const finalMetrics = {
+    workMinutes: metrics.workMinutes,
+    lateMinutes: metrics.lateMinutes,
+    earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+    status: metrics.status,
+  }
+  if (overrideMetrics) {
+    if (Number.isFinite(overrideMetrics.workMinutes)) finalMetrics.workMinutes = overrideMetrics.workMinutes
+    if (Number.isFinite(overrideMetrics.lateMinutes)) finalMetrics.lateMinutes = overrideMetrics.lateMinutes
+    if (Number.isFinite(overrideMetrics.earlyLeaveMinutes)) finalMetrics.earlyLeaveMinutes = overrideMetrics.earlyLeaveMinutes
+    if (typeof overrideMetrics.status === 'string' && overrideMetrics.status.trim()) {
+      finalMetrics.status = overrideMetrics.status.trim()
+    }
+  }
+  const status = statusOverride ?? finalMetrics.status
 
   const updated = await client.query(
     `INSERT INTO attendance_records
-      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
      ON CONFLICT (user_id, work_date, org_id)
      DO UPDATE SET
        org_id = EXCLUDED.org_id,
@@ -1083,6 +1419,7 @@ async function upsertAttendanceRecord(options) {
        early_leave_minutes = EXCLUDED.early_leave_minutes,
        status = EXCLUDED.status,
        is_workday = EXCLUDED.is_workday,
+       meta = EXCLUDED.meta,
        updated_at = now()
      RETURNING *`,
     [
@@ -1092,11 +1429,12 @@ async function upsertAttendanceRecord(options) {
       timezone,
       firstInAt,
       lastOutAt,
-      metrics.workMinutes,
-      metrics.lateMinutes,
-      metrics.earlyLeaveMinutes,
+      finalMetrics.workMinutes,
+      finalMetrics.lateMinutes,
+      finalMetrics.earlyLeaveMinutes,
       status,
       isWorkday !== false,
+      JSON.stringify(finalMeta ?? {}),
     ]
   )
 
@@ -1572,7 +1910,92 @@ module.exports = {
         cycleMode: z.enum(['template', 'manual']).optional(),
         templateId: z.string().optional(),
       }).optional(),
+      policies: z.object({
+        userGroups: z.array(
+          z.object({
+            name: z.string().min(1),
+            userIds: z.array(z.string().min(1)).optional(),
+            fieldEquals: z.record(z.unknown()).optional(),
+            fieldIn: z.record(z.array(z.unknown())).optional(),
+            fieldContains: z.record(z.string()).optional(),
+            shiftNames: z.array(z.string()).optional(),
+            isHoliday: z.boolean().optional(),
+            isWorkingDay: z.boolean().optional(),
+          }).catchall(z.unknown())
+        ).optional(),
+        rules: z.array(
+          z.object({
+            name: z.string().optional(),
+            when: z.object({
+              userIds: z.array(z.string().min(1)).optional(),
+              userGroup: z.string().optional(),
+              shiftNames: z.array(z.string()).optional(),
+              isHoliday: z.boolean().optional(),
+              isWorkingDay: z.boolean().optional(),
+              statusIn: z.array(z.string()).optional(),
+              fieldEquals: z.record(z.unknown()).optional(),
+              fieldIn: z.record(z.array(z.unknown())).optional(),
+              fieldContains: z.record(z.string()).optional(),
+              fieldExists: z.array(z.string()).optional(),
+            }).optional(),
+            then: z.object({
+              setWorkMinutes: z.number().int().min(0).optional(),
+              setLateMinutes: z.number().int().min(0).optional(),
+              setEarlyLeaveMinutes: z.number().int().min(0).optional(),
+              setLeaveMinutes: z.number().int().min(0).optional(),
+              setOvertimeMinutes: z.number().int().min(0).optional(),
+              setStatus: z.string().optional(),
+              addWarning: z.string().optional(),
+              addWarnings: z.array(z.string()).optional(),
+            }).optional(),
+          }).catchall(z.unknown())
+        ).optional(),
+      }).optional(),
     }).catchall(z.unknown())
+
+    const importColumnSchema = z.object({
+      id: z.union([z.string(), z.number()]),
+      name: z.string().optional(),
+      alias: z.string().optional(),
+    })
+
+    const importRowSchema = z.object({
+      workDate: z.string().min(1),
+      fields: z.record(z.unknown()),
+    })
+
+    const importPayloadSchema = z.object({
+      source: z.enum(['dingtalk', 'manual']).optional(),
+      orgId: z.string().optional(),
+      userId: z.string().optional(),
+      timezone: z.string().optional(),
+      ruleSetId: z.string().uuid().optional(),
+      mapping: z.object({
+        columns: z.array(z.object({
+          sourceField: z.string().min(1),
+          targetField: z.string().min(1),
+          dataType: z.string().optional(),
+        })).optional(),
+        fields: z.array(z.object({
+          sourceField: z.string().min(1),
+          targetField: z.string().min(1),
+          dataType: z.string().optional(),
+        })).optional(),
+      }).optional(),
+      columns: z.array(importColumnSchema).optional(),
+      data: z.object({
+        column_vals: z.array(z.object({
+          column_vo: z.object({ id: z.union([z.string(), z.number()]) }).optional(),
+          column_vals: z.array(z.object({
+            date: z.string(),
+            value: z.unknown().optional(),
+          })).optional(),
+        })).optional(),
+      }).optional(),
+      rows: z.array(importRowSchema).optional(),
+      statusMap: z.record(z.string()).optional(),
+      mode: z.enum(['merge', 'override']).optional(),
+    })
 
     const payrollTemplateCreateSchema = z.object({
       name: z.string().min(1),
@@ -3889,6 +4312,10 @@ module.exports = {
                 { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'datetime' },
                 { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'datetime' },
                 { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+                { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
+                { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
+                { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
+                { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
               ],
             },
             approvals: {
@@ -3898,6 +4325,21 @@ module.exports = {
             payroll: {
               cycleMode: 'template',
               templateId: '',
+            },
+            policies: {
+              userGroups: [
+                {
+                  name: 'security',
+                  userIds: [],
+                },
+              ],
+              rules: [
+                {
+                  name: 'holiday-default-8h',
+                  when: { isHoliday: true, isWorkingDay: false },
+                  then: { setWorkMinutes: 480, setStatus: 'adjusted', addWarning: 'Holiday default applied' },
+                },
+              ],
             },
           },
         })
@@ -4197,6 +4639,371 @@ module.exports = {
           }
           logger.error('Attendance rule set preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/import/template',
+      withPermission('attendance:admin', async (_req, res) => {
+        res.json({
+          ok: true,
+          data: {
+            source: 'dingtalk',
+            mapping: {
+              columns: [
+                { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
+                { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
+                { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+                { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
+                { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
+                { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+                { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
+                { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
+                { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
+                { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
+                { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
+                { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+              ],
+            },
+            payloadExample: {
+              source: 'dingtalk',
+              userId: '16890353051678207',
+              ruleSetId: '<ruleSetId>',
+              columns: [
+                { id: 14888299, name: '上班1打卡时间', alias: '1_on_duty_user_check_time' },
+                { id: 14888301, name: '下班1打卡时间', alias: '1_off_duty_user_check_time' },
+                { id: 14888297, name: '考勤结果', alias: 'attend_result' },
+              ],
+              data: {
+                column_vals: [
+                  {
+                    column_vo: { id: 14888299 },
+                    column_vals: [{ date: '2025-12-31 00:00:00', value: '07:55' }],
+                  },
+                ],
+              },
+            },
+          },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/import/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const userId = parsed.data.userId ?? getUserId(req)
+        if (!userId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+          return
+        }
+
+        try {
+          let ruleSetConfig = null
+          if (parsed.data.ruleSetId) {
+            const rows = await db.query(
+              'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+              [parsed.data.ruleSetId, orgId]
+            )
+            if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
+          }
+
+          const mapping = parsed.data.mapping?.columns
+            ?? parsed.data.mapping?.fields
+            ?? ruleSetConfig?.mappings?.columns
+            ?? ruleSetConfig?.mappings?.fields
+            ?? []
+
+          const rows = Array.isArray(parsed.data.rows)
+            ? parsed.data.rows
+            : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+
+          if (rows.length === 0) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
+            return
+          }
+
+          const baseRule = await loadDefaultRule(db, orgId)
+          const override = normalizeRuleOverride(ruleSetConfig?.rule)
+          const ruleOverride = override
+            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+            : baseRule
+
+          const statusMap = parsed.data.statusMap ?? {}
+          const preview = []
+          for (const row of rows) {
+            const workDate = row.workDate
+            const context = await resolveWorkContext({
+              db,
+              orgId,
+              userId,
+              workDate,
+              defaultRule: ruleOverride,
+            })
+            const mapped = applyFieldMappings(row.fields ?? {}, mapping)
+            const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+            const dataTypeFor = (key) => mapped[key]?.dataType
+
+            const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
+            const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+            const statusRaw = valueFor('status')
+            const statusOverride = statusRaw != null
+              ? statusMap[String(statusRaw)] ?? statusMap[String(statusRaw).toLowerCase()] ?? normalizeStatusLabel(statusRaw)
+              : null
+
+            const workMinutes = parseMinutesValue(
+              valueFor('workMinutes') ?? valueFor('workHours'),
+              dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
+            )
+            const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
+            const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+            const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
+            const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+            const computed = computeMetrics({
+              rule: context.rule,
+              firstInAt,
+              lastOutAt,
+              isWorkingDay: context.isWorkingDay,
+              leaveMinutes,
+              overtimeMinutes,
+            })
+            const finalMetrics = {
+              workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
+              lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
+              earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
+              status: statusOverride ?? computed.status,
+            }
+
+            const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+            const policyResult = applyAttendancePolicies({
+              policies: ruleSetConfig?.policies,
+              facts: {
+                userId,
+                orgId,
+                workDate,
+                shiftName: context.rule?.name ?? null,
+                isHoliday: Boolean(context.holiday),
+                isWorkingDay: context.isWorkingDay,
+              },
+              fieldValues,
+              metrics: {
+                ...finalMetrics,
+                leaveMinutes: leaveMinutes ?? 0,
+                overtimeMinutes: overtimeMinutes ?? 0,
+              },
+            })
+            const effective = policyResult.metrics
+
+            preview.push({
+              userId,
+              workDate,
+              firstInAt: firstInAt ? firstInAt.toISOString() : null,
+              lastOutAt: lastOutAt ? lastOutAt.toISOString() : null,
+              workMinutes: effective.workMinutes,
+              lateMinutes: effective.lateMinutes,
+              earlyLeaveMinutes: effective.earlyLeaveMinutes,
+              leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : (leaveMinutes ?? 0),
+              overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : (overtimeMinutes ?? 0),
+              status: effective.status,
+              isWorkday: context.isWorkingDay,
+              warnings: policyResult.warnings,
+              appliedPolicies: policyResult.appliedRules,
+              userGroups: policyResult.userGroups,
+            })
+          }
+
+          res.json({
+            ok: true,
+            data: {
+              items: preview,
+              total: preview.length,
+              mappingUsed: mapping,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview import' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/import',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const userId = parsed.data.userId ?? getUserId(req)
+        if (!userId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+          return
+        }
+
+        try {
+          let ruleSetConfig = null
+          if (parsed.data.ruleSetId) {
+            const rows = await db.query(
+              'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+              [parsed.data.ruleSetId, orgId]
+            )
+            if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
+          }
+
+          const mapping = parsed.data.mapping?.columns
+            ?? parsed.data.mapping?.fields
+            ?? ruleSetConfig?.mappings?.columns
+            ?? ruleSetConfig?.mappings?.fields
+            ?? []
+
+          const rows = Array.isArray(parsed.data.rows)
+            ? parsed.data.rows
+            : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+
+          if (rows.length === 0) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+            return
+          }
+
+          const baseRule = await loadDefaultRule(db, orgId)
+          const override = normalizeRuleOverride(ruleSetConfig?.rule)
+          const ruleOverride = override
+            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+            : baseRule
+
+          const statusMap = parsed.data.statusMap ?? {}
+          const results = []
+          await db.transaction(async (trx) => {
+            for (const row of rows) {
+              const workDate = row.workDate
+              const context = await resolveWorkContext({
+                db: trx,
+                orgId,
+                userId,
+                workDate,
+                defaultRule: ruleOverride,
+              })
+              const mapped = applyFieldMappings(row.fields ?? {}, mapping)
+              const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+              const dataTypeFor = (key) => mapped[key]?.dataType
+
+              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
+              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+              const statusRaw = valueFor('status')
+              const statusOverride = statusRaw != null
+                ? statusMap[String(statusRaw)] ?? statusMap[String(statusRaw).toLowerCase()] ?? normalizeStatusLabel(statusRaw)
+                : null
+
+              const workMinutes = parseMinutesValue(
+                valueFor('workMinutes') ?? valueFor('workHours'),
+                dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
+              )
+              const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
+              const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+              const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
+              const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+              const computed = computeMetrics({
+                rule: context.rule,
+                firstInAt,
+                lastOutAt,
+                isWorkingDay: context.isWorkingDay,
+                leaveMinutes,
+                overtimeMinutes,
+              })
+              const finalMetrics = {
+                workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
+                lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
+                earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
+                status: statusOverride ?? computed.status,
+              }
+
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+              const policyResult = applyAttendancePolicies({
+                policies: ruleSetConfig?.policies,
+                facts: {
+                  userId,
+                  orgId,
+                  workDate,
+                  shiftName: context.rule?.name ?? null,
+                  isHoliday: Boolean(context.holiday),
+                  isWorkingDay: context.isWorkingDay,
+                },
+                fieldValues,
+                metrics: {
+                  ...finalMetrics,
+                  leaveMinutes: leaveMinutes ?? 0,
+                  overtimeMinutes: overtimeMinutes ?? 0,
+                },
+              })
+              const effective = policyResult.metrics
+              const effectiveLeaveMinutes = Number.isFinite(effective.leaveMinutes)
+                ? effective.leaveMinutes
+                : leaveMinutes
+              const effectiveOvertimeMinutes = Number.isFinite(effective.overtimeMinutes)
+                ? effective.overtimeMinutes
+                : overtimeMinutes
+
+              const record = await upsertAttendanceRecord({
+                userId,
+                orgId,
+                workDate,
+                timezone: context.rule.timezone,
+                rule: context.rule,
+                updateFirstInAt: firstInAt,
+                updateLastOutAt: lastOutAt,
+                mode: parsed.data.mode ?? 'override',
+                statusOverride,
+                overrideMetrics: {
+                  workMinutes: effective.workMinutes,
+                  lateMinutes: effective.lateMinutes,
+                  earlyLeaveMinutes: effective.earlyLeaveMinutes,
+                  status: effective.status,
+                },
+                isWorkday: context.isWorkingDay,
+                leaveMinutes: effectiveLeaveMinutes,
+                overtimeMinutes: effectiveOvertimeMinutes,
+                meta: (policyResult.warnings.length || policyResult.appliedRules.length)
+                  ? { policy: { warnings: policyResult.warnings, appliedRules: policyResult.appliedRules, userGroups: policyResult.userGroups } }
+                  : undefined,
+                client: trx,
+              })
+              results.push({ id: record.id, workDate })
+            }
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              imported: results.length,
+              items: results,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
         }
       })
     )

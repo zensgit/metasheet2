@@ -423,6 +423,48 @@ describe('Attendance Plugin Integration', () => {
       expect([201, 409]).toContain(payrollCycleRes.status)
     }
 
+    const importTemplateRes = await requestJson(`${baseUrl}/api/attendance/import/template`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateRes.status).toBe(200)
+
+    const importPayload = {
+      userId: 'attendance-test',
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+    }
+
+    const importPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(importPayload),
+    })
+    expect(importPreviewRes.status).toBe(200)
+
+    const importRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(importPayload),
+    })
+    expect(importRes.status).toBe(200)
+
     const reportRes = await requestJson(`${baseUrl}/api/attendance/reports/requests?from=${workDate}&to=${workDate}`, {
       headers: {
         Authorization: `Bearer ${token}`,

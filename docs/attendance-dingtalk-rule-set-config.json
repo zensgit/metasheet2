@@ -1,0 +1,231 @@
+{
+  "source": "dingtalk",
+  "rule": {
+    "timezone": "Asia/Shanghai",
+    "workStartTime": "08:00",
+    "workEndTime": "17:00",
+    "lateGraceMinutes": 5,
+    "earlyGraceMinutes": 5,
+    "roundingMinutes": 1,
+    "workingDays": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  "mappings": {
+    "columns": [
+      {
+        "sourceField": "1_on_duty_user_check_time",
+        "targetField": "firstInAt",
+        "dataType": "datetime"
+      },
+      {
+        "sourceField": "1_off_duty_user_check_time",
+        "targetField": "lastOutAt",
+        "dataType": "datetime"
+      },
+      {
+        "sourceField": "attend_result",
+        "targetField": "status",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_work_time",
+        "targetField": "workMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "late_minute",
+        "targetField": "lateMinutes",
+        "dataType": "minutes"
+      },
+      {
+        "sourceField": "leave_early_minute",
+        "targetField": "earlyLeaveMinutes",
+        "dataType": "minutes"
+      },
+      {
+        "sourceField": "leave_hours",
+        "targetField": "leaveMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "overtime_duration",
+        "targetField": "overtimeMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "plan_detail",
+        "targetField": "shiftName",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_class",
+        "targetField": "attendanceClass",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_approve",
+        "targetField": "approvalSummary",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_group",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      }
+    ]
+  },
+  "approvals": {
+    "processCodes": [],
+    "roleMappings": []
+  },
+  "payroll": {
+    "cycleMode": "template",
+    "templateId": ""
+  },
+  "policies": {
+    "userGroups": [
+      {
+        "name": "security",
+        "userIds": [
+          "<security-user-id>"
+        ]
+      },
+      {
+        "name": "driver",
+        "userIds": [
+          "<driver-user-id>"
+        ]
+      },
+      {
+        "name": "special_user_10h",
+        "userIds": [
+          "16256197521696414"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "name": "holiday-default-8h",
+        "when": {
+          "isHoliday": true,
+          "isWorkingDay": false
+        },
+        "then": {
+          "setWorkMinutes": 480,
+          "setStatus": "adjusted",
+          "addWarning": "Holiday default 8h applied"
+        }
+      },
+      {
+        "name": "security-daily-8h",
+        "when": {
+          "userGroup": "security"
+        },
+        "then": {
+          "setWorkMinutes": 480,
+          "setStatus": "adjusted",
+          "addWarning": "Security daily attendance = 8h"
+        }
+      },
+      {
+        "name": "security-holiday-overtime",
+        "when": {
+          "isHoliday": true,
+          "userGroup": "security"
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Security holiday overtime = 8h"
+        }
+      },
+      {
+        "name": "driver-rest-day-overtime-check-in",
+        "when": {
+          "userGroup": "driver",
+          "fieldContains": {
+            "shiftName": "休息"
+          },
+          "fieldExists": [
+            "1_on_duty_user_check_time"
+          ]
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Driver rest day punch => overtime 8h"
+        }
+      },
+      {
+        "name": "driver-rest-day-overtime-check-out",
+        "when": {
+          "userGroup": "driver",
+          "fieldContains": {
+            "shiftName": "休息"
+          },
+          "fieldExists": [
+            "1_off_duty_user_check_time"
+          ]
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Driver rest day punch => overtime 8h"
+        }
+      },
+      {
+        "name": "single-rest-travel-overtime",
+        "when": {
+          "fieldContains": {
+            "shiftName": "休息",
+            "approvalSummary": "出差",
+            "attendanceGroup": "单休车间"
+          }
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Rest + Travel => overtime 8h"
+        }
+      },
+      {
+        "name": "missing-punch-warning",
+        "when": {
+          "fieldContains": {
+            "attend_result": "缺卡"
+          }
+        },
+        "then": {
+          "addWarning": "Missing punch detected"
+        }
+      },
+      {
+        "name": "supplement-punch-warning",
+        "when": {
+          "fieldContains": {
+            "approvalSummary": "补卡"
+          }
+        },
+        "then": {
+          "addWarning": "Supplement punch approval detected"
+        }
+      },
+      {
+        "name": "special-user-manual-review",
+        "when": {
+          "userGroup": "special_user_10h"
+        },
+        "then": {
+          "addWarning": "Special user 10h/10.5h rule requires manual policy logic"
+        }
+      }
+    ]
+  },
+  "notes": [
+    "Replace <security-user-id> and <driver-user-id> with real DingTalk userIds.",
+    "If your data uses different field names or aliases, update mappings accordingly.",
+    "For OR logic, split into multiple rules; all conditions are AND.",
+    "Complex time math should be handled in pre-processing or a dedicated rule module."
+  ]
+}

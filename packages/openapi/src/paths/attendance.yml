@@ -1697,6 +1697,105 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /api/attendance/import/template:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance import template
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/preview:
+    x-plugin: plugin-attendance
+    post:
+      summary: Preview attendance import
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source: { type: string }
+                orgId: { type: string }
+                userId: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                mapping: { type: object }
+                columns: { type: array, items: { type: object } }
+                data: { type: object }
+                rows: { type: array, items: { type: object } }
+                statusMap: { type: object }
+                mode: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
+                      total: { type: integer }
+                      mappingUsed: { type: array, items: { type: object } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import:
+    x-plugin: plugin-attendance
+    post:
+      summary: Import attendance data
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source: { type: string }
+                orgId: { type: string }
+                userId: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                mapping: { type: object }
+                columns: { type: array, items: { type: object } }
+                data: { type: object }
+                rows: { type: array, items: { type: object } }
+                statusMap: { type: object }
+                mode: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /api/attendance/payroll-templates:
     x-plugin: plugin-attendance
     get:

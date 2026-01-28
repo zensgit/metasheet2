@@ -607,6 +607,95 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Import (DingTalk / Manual)</h4>
+                <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+                  {{ importLoading ? 'Loading...' : 'Load template' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-import-rule-set">
+                  <span>Rule set</span>
+                  <select
+                    id="attendance-import-rule-set"
+                    name="importRuleSetId"
+                    v-model="importForm.ruleSetId"
+                    :disabled="ruleSets.length === 0"
+                  >
+                    <option value="">(Optional) Use default rule</option>
+                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-import-user">
+                  <span>User ID</span>
+                  <input
+                    id="attendance-import-user"
+                    name="importUserId"
+                    v-model="importForm.userId"
+                    type="text"
+                    placeholder="Required if not in payload"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-import-timezone">
+                  <span>Timezone</span>
+                  <input
+                    id="attendance-import-timezone"
+                    name="importTimezone"
+                    v-model="importForm.timezone"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-import-payload">
+                  <span>Payload (JSON)</span>
+                  <textarea
+                    id="attendance-import-payload"
+                    name="importPayload"
+                    v-model="importForm.payload"
+                    rows="6"
+                    placeholder='{\"source\":\"dingtalk\",\"userId\":\"...\",\"columns\":[],\"data\":{}}'
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="importLoading" @click="previewImport">
+                  {{ importLoading ? 'Working...' : 'Preview' }}
+                </button>
+                <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
+                  {{ importLoading ? 'Importing...' : 'Import' }}
+                </button>
+              </div>
+              <div v-if="importPreview.length === 0" class="attendance__empty">No preview data.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Work date</th>
+                      <th>Work minutes</th>
+                      <th>Late</th>
+                      <th>Early leave</th>
+                      <th>Status</th>
+                      <th>Warnings</th>
+                      <th>Policies</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in importPreview" :key="item.workDate">
+                      <td>{{ item.workDate }}</td>
+                      <td>{{ item.workMinutes }}</td>
+                      <td>{{ item.lateMinutes }}</td>
+                      <td>{{ item.earlyLeaveMinutes }}</td>
+                      <td>{{ formatStatus(item.status) }}</td>
+                      <td>{{ formatList(item.warnings) }}</td>
+                      <td>{{ formatPolicyList(item) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Payroll Templates</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
                   {{ payrollTemplateLoading ? 'Loading...' : 'Reload templates' }}
@@ -1881,6 +1970,21 @@ interface AttendancePayrollCycle {
   metadata?: Record<string, any>
 }
 
+interface AttendanceImportPreviewItem {
+  userId: string
+  workDate: string
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  status: string
+  leaveMinutes?: number
+  overtimeMinutes?: number
+  isWorkday?: boolean
+  warnings?: string[]
+  appliedPolicies?: string[]
+  userGroups?: string[]
+}
+
 interface AttendanceShift {
   id: string
   orgId?: string
@@ -2024,6 +2128,7 @@ const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
+const importLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
@@ -2039,6 +2144,7 @@ const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
+const importPreview = ref<AttendanceImportPreviewItem[]>([])
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
@@ -2268,6 +2374,13 @@ const payrollCycleForm = reactive({
   status: 'open',
 })
 
+const importForm = reactive({
+  ruleSetId: '',
+  userId: '',
+  timezone: defaultTimezone,
+  payload: '{}',
+})
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
@@ -2298,6 +2411,18 @@ function formatStatus(value: string): string {
     off: 'Off',
   }
   return map[value] ?? value
+}
+
+function formatList(items?: Array<string> | null): string {
+  if (!items || items.length === 0) return '--'
+  return items.map(item => String(item)).filter(Boolean).join(', ')
+}
+
+function formatPolicyList(item: AttendanceImportPreviewItem): string {
+  const applied = Array.isArray(item.appliedPolicies) ? item.appliedPolicies : []
+  const groups = Array.isArray(item.userGroups) ? item.userGroups : []
+  const combined = Array.from(new Set([...applied, ...groups])).filter(Boolean)
+  return formatList(combined)
 }
 
 function formatRequestType(value: string): string {
@@ -2379,10 +2504,91 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   }
 }
 
+function buildImportPayload(): Record<string, any> | null {
+  const parsed = parseJsonConfig(importForm.payload)
+  if (!parsed) return null
+  const payload = { ...parsed }
+  const resolvedOrgId = normalizedOrgId()
+  const resolvedUserId = importForm.userId.trim() || normalizedUserId()
+  if (resolvedOrgId && !payload.orgId) payload.orgId = resolvedOrgId
+  if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
+  if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
+  if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
+  return payload
+}
+
 function payrollTemplateName(templateId?: string | null): string {
   if (!templateId) return 'Manual'
   const found = payrollTemplates.value.find(item => item.id === templateId)
   return found?.name ?? templateId
+}
+
+async function loadImportTemplate() {
+  importLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/import/template')
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import template')
+    }
+    importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    setStatus('Import template loaded.')
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to load import template', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
+async function previewImport() {
+  const payload = buildImportPayload()
+  if (!payload) {
+    setStatus('Invalid JSON payload for import.', 'error')
+    return
+  }
+  importLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to preview import')
+    }
+    importPreview.value = data.data?.items ?? []
+    setStatus(`Preview loaded (${importPreview.value.length} rows).`)
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to preview import', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
+async function runImport() {
+  const payload = buildImportPayload()
+  if (!payload) {
+    setStatus('Invalid JSON payload for import.', 'error')
+    return
+  }
+  importLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to import attendance')
+    }
+    const count = data.data?.imported ?? 0
+    setStatus(`Imported ${count} rows.`)
+    await loadRecords()
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to import attendance', 'error')
+  } finally {
+    importLoading.value = false
+  }
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {

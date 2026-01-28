@@ -3,6 +3,7 @@
 ## Commands Run (Local)
 - `pnpm --filter @metasheet/core-backend build`
 - `pnpm --filter @metasheet/web build`
+- `pnpm --filter @metasheet/core-backend test:integration:attendance`
 
 ## Commands Run (Server: 142.171.239.56)
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend migrate"`
@@ -27,14 +28,18 @@
 - ✅ Web build succeeded
 - ✅ DB migration executed: `zzzz20260128120000_create_attendance_rule_sets_and_payroll`
 - ✅ Attendance integration test passed (1 test)
+- ⚠️ Test run logged DB auth errors from Workflow engine init (password auth failed for user `metasheet`), but test still passed.
+- ⚠️ Policy engine behavior validated by code review; no dedicated policy preview/import test run yet.
 - ✅ Backend container rebuilt and restarted
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
 - ✅ UI smoke: `/attendance` loaded; Rule Sets / Payroll Templates / Payroll Cycles sections visible; no auth error banner.
 - ✅ API E2E: rule set, payroll template, payroll cycle created; summary + CSV export succeeded.
+ - ⚠️ Policy rules preview/import validation not executed after latest changes (see Not Run).
 
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
+- Policy engine preview/import UI smoke not re-run after latest policy changes.
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.

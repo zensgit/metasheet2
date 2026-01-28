@@ -394,6 +394,72 @@ components:
           type: string
         metadata:
           type: object
+    AttendanceImportTemplate:
+      type: object
+      properties:
+        source:
+          type: string
+        mapping:
+          type: object
+        payloadExample:
+          type: object
+    AttendanceImportPreviewItem:
+      type: object
+      properties:
+        userId:
+          type: string
+        workDate:
+          type: string
+          format: date
+        firstInAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastOutAt:
+          type: string
+          format: date-time
+          nullable: true
+        workMinutes:
+          type: integer
+        lateMinutes:
+          type: integer
+        earlyLeaveMinutes:
+          type: integer
+        leaveMinutes:
+          type: integer
+        overtimeMinutes:
+          type: integer
+        status:
+          type: string
+        isWorkday:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+        appliedPolicies:
+          type: array
+          items:
+            type: string
+        userGroups:
+          type: array
+          items:
+            type: string
+    AttendanceImportResult:
+      type: object
+      properties:
+        imported:
+          type: integer
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              workDate:
+                type: string
+                format: date
     AttendanceShift:
       type: object
       properties:
