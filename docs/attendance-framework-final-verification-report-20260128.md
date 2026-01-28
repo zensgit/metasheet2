@@ -14,6 +14,13 @@
 - `docker cp ~/web-dist/dist/. metasheet-web:/usr/share/nginx/html/`
 - `docker restart metasheet-web`
 - `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8081/`
+- `docker exec metasheet-backend sh -lc "node -e '...jwt.sign(...)'"` (generate short-lived admin token)
+- `python3` script to call:
+  - `POST /api/attendance/rule-sets`
+  - `POST /api/attendance/payroll-templates`
+  - `POST /api/attendance/payroll-cycles`
+  - `GET /api/attendance/payroll-cycles/:id/summary`
+  - `GET /api/attendance/payroll-cycles/:id/summary/export`
 
 ## Results
 - ✅ Backend build succeeded
@@ -24,9 +31,11 @@
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
 - ✅ UI smoke: `/attendance` loaded; Rule Sets / Payroll Templates / Payroll Cycles sections visible; no auth error banner.
+- ✅ API E2E: rule set, payroll template, payroll cycle created; summary + CSV export succeeded.
 
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.
+- E2E API run created objects: Rule Set `d019f58c-2697-43f6-b9c7-bb6c483ad28e`, Template `b3379adb-9b5f-4d36-818e-47ec088b5fd1`, Cycle `b051e6bf-0fd7-461f-9771-5c7f0b8ac4a9`.
