@@ -39,6 +39,8 @@
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
 - ✅ UI smoke: `/attendance` loaded; Rule Sets / Payroll Templates / Payroll Cycles sections visible; no auth error banner.
+- ✅ UI records (MCP): date range `2025-12-01` → `2025-12-05`, user `09141829115765` shows 5 records; Summary totals 5 days / 2400 minutes / Early leave 222; status `Early leave`.
+- ✅ UI records (MCP): same range, user `0613271732687725` shows 5 records; Summary totals 5 days / 0 minutes / Absent 5; status `Absent`.
 - ✅ API E2E: rule set, payroll template, payroll cycle created; summary + CSV export succeeded.
  - ⚠️ Policy rules preview/import validation not executed after latest changes (see Not Run).
 
@@ -49,3 +51,4 @@
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.
 - E2E API run created objects: Rule Set `d019f58c-2697-43f6-b9c7-bb6c483ad28e`, Template `b3379adb-9b5f-4d36-818e-47ec088b5fd1`, Cycle `b051e6bf-0fd7-461f-9771-5c7f0b8ac4a9`.
+- UI records validation required manually setting date range and User ID to align with imported data.
