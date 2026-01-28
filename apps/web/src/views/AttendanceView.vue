@@ -68,6 +68,22 @@
               <strong>{{ summary.total_minutes }}</strong>
             </div>
             <div class="attendance__summary-item">
+              <span>Late minutes</span>
+              <strong>{{ summary.total_late_minutes ?? 0 }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>Early leave minutes</span>
+              <strong>{{ summary.total_early_leave_minutes ?? 0 }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>Leave minutes</span>
+              <strong>{{ summary.leave_minutes ?? 0 }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>Overtime minutes</span>
+              <strong>{{ summary.overtime_minutes ?? 0 }}</strong>
+            </div>
+            <div class="attendance__summary-item">
               <span>Normal</span>
               <strong>{{ summary.normal_days }}</strong>
             </div>
@@ -479,6 +495,402 @@
               <button class="attendance__btn attendance__btn--primary" :disabled="ruleLoading" @click="saveRule">
                 {{ ruleLoading ? 'Saving...' : 'Save rule' }}
               </button>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Rule Sets</h4>
+                <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
+                  {{ ruleSetLoading ? 'Loading...' : 'Reload rule sets' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-rule-set-name">
+                  <span>Name</span>
+                  <input id="attendance-rule-set-name" name="ruleSetName" v-model="ruleSetForm.name" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-rule-set-scope">
+                  <span>Scope</span>
+                  <select id="attendance-rule-set-scope" name="ruleSetScope" v-model="ruleSetForm.scope">
+                    <option value="org">Org</option>
+                    <option value="department">Department</option>
+                    <option value="project">Project</option>
+                    <option value="user">User</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-rule-set-version">
+                  <span>Version</span>
+                  <input
+                    id="attendance-rule-set-version"
+                    name="ruleSetVersion"
+                    v-model.number="ruleSetForm.version"
+                    type="number"
+                    min="1"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-rule-set-default">
+                  <span>Default</span>
+                  <input
+                    id="attendance-rule-set-default"
+                    name="ruleSetDefault"
+                    v-model="ruleSetForm.isDefault"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
+                  <span>Description</span>
+                  <input
+                    id="attendance-rule-set-description"
+                    name="ruleSetDescription"
+                    v-model="ruleSetForm.description"
+                    type="text"
+                    placeholder="Optional"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
+                  <span>Config (JSON)</span>
+                  <textarea
+                    id="attendance-rule-set-config"
+                    name="ruleSetConfig"
+                    v-model="ruleSetForm.config"
+                    rows="4"
+                    placeholder='{"source":"dingtalk","mappings":{"columns":[{"sourceField":"1_on_duty_user_check_time","targetField":"firstInAt"}]}}'
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
+                  {{ ruleSetSaving ? 'Saving...' : ruleSetEditingId ? 'Update rule set' : 'Create rule set' }}
+                </button>
+                <button class="attendance__btn" :disabled="ruleSetSaving" @click="loadRuleSetTemplate">
+                  Load template
+                </button>
+                <button
+                  v-if="ruleSetEditingId"
+                  class="attendance__btn"
+                  :disabled="ruleSetSaving"
+                  @click="resetRuleSetForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="ruleSets.length === 0" class="attendance__empty">No rule sets yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Scope</th>
+                      <th>Version</th>
+                      <th>Default</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in ruleSets" :key="item.id">
+                      <td>{{ item.name }}</td>
+                      <td>{{ item.scope }}</td>
+                      <td>{{ item.version }}</td>
+                      <td>{{ item.isDefault ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editRuleSet(item)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteRuleSet(item.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Payroll Templates</h4>
+                <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
+                  {{ payrollTemplateLoading ? 'Loading...' : 'Reload templates' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-payroll-template-name">
+                  <span>Name</span>
+                  <input
+                    id="attendance-payroll-template-name"
+                    name="payrollTemplateName"
+                    v-model="payrollTemplateForm.name"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-template-timezone">
+                  <span>Timezone</span>
+                  <input
+                    id="attendance-payroll-template-timezone"
+                    name="payrollTemplateTimezone"
+                    v-model="payrollTemplateForm.timezone"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-template-start">
+                  <span>Start day</span>
+                  <input
+                    id="attendance-payroll-template-start"
+                    name="payrollTemplateStartDay"
+                    v-model.number="payrollTemplateForm.startDay"
+                    type="number"
+                    min="1"
+                    max="31"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-template-end">
+                  <span>End day</span>
+                  <input
+                    id="attendance-payroll-template-end"
+                    name="payrollTemplateEndDay"
+                    v-model.number="payrollTemplateForm.endDay"
+                    type="number"
+                    min="1"
+                    max="31"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-template-offset">
+                  <span>End month offset</span>
+                  <select
+                    id="attendance-payroll-template-offset"
+                    name="payrollTemplateOffset"
+                    v-model.number="payrollTemplateForm.endMonthOffset"
+                  >
+                    <option :value="0">Same month</option>
+                    <option :value="1">Next month</option>
+                  </select>
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-auto">
+                  <span>Auto generate</span>
+                  <input
+                    id="attendance-payroll-template-auto"
+                    name="payrollTemplateAuto"
+                    v-model="payrollTemplateForm.autoGenerate"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-default">
+                  <span>Default</span>
+                  <input
+                    id="attendance-payroll-template-default"
+                    name="payrollTemplateDefault"
+                    v-model="payrollTemplateForm.isDefault"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-payroll-template-config">
+                  <span>Config (JSON)</span>
+                  <textarea
+                    id="attendance-payroll-template-config"
+                    name="payrollTemplateConfig"
+                    v-model="payrollTemplateForm.config"
+                    rows="3"
+                    placeholder="{}"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="payrollTemplateSaving"
+                  @click="savePayrollTemplate"
+                >
+                  {{ payrollTemplateSaving ? 'Saving...' : payrollTemplateEditingId ? 'Update template' : 'Create template' }}
+                </button>
+                <button
+                  v-if="payrollTemplateEditingId"
+                  class="attendance__btn"
+                  :disabled="payrollTemplateSaving"
+                  @click="resetPayrollTemplateForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="payrollTemplates.length === 0" class="attendance__empty">No payroll templates yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Timezone</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Offset</th>
+                      <th>Default</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in payrollTemplates" :key="item.id">
+                      <td>{{ item.name }}</td>
+                      <td>{{ item.timezone }}</td>
+                      <td>{{ item.startDay }}</td>
+                      <td>{{ item.endDay }}</td>
+                      <td>{{ item.endMonthOffset }}</td>
+                      <td>{{ item.isDefault ? 'Yes' : 'No' }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editPayrollTemplate(item)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deletePayrollTemplate(item.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Payroll Cycles</h4>
+                <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
+                  {{ payrollCycleLoading ? 'Loading...' : 'Reload cycles' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-payroll-cycle-template">
+                  <span>Template</span>
+                  <select
+                    id="attendance-payroll-cycle-template"
+                    name="payrollCycleTemplate"
+                    v-model="payrollCycleForm.templateId"
+                    :disabled="payrollTemplates.length === 0"
+                  >
+                    <option value="">Manual</option>
+                    <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-payroll-cycle-name">
+                  <span>Name</span>
+                  <input
+                    id="attendance-payroll-cycle-name"
+                    name="payrollCycleName"
+                    v-model="payrollCycleForm.name"
+                    type="text"
+                    placeholder="Optional"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-cycle-anchor">
+                  <span>Anchor date</span>
+                  <input
+                    id="attendance-payroll-cycle-anchor"
+                    name="payrollCycleAnchor"
+                    v-model="payrollCycleForm.anchorDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-cycle-start">
+                  <span>Start date</span>
+                  <input
+                    id="attendance-payroll-cycle-start"
+                    name="payrollCycleStartDate"
+                    v-model="payrollCycleForm.startDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-cycle-end">
+                  <span>End date</span>
+                  <input
+                    id="attendance-payroll-cycle-end"
+                    name="payrollCycleEndDate"
+                    v-model="payrollCycleForm.endDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-cycle-status">
+                  <span>Status</span>
+                  <select
+                    id="attendance-payroll-cycle-status"
+                    name="payrollCycleStatus"
+                    v-model="payrollCycleForm.status"
+                  >
+                    <option value="open">Open</option>
+                    <option value="closed">Closed</option>
+                    <option value="archived">Archived</option>
+                  </select>
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="payrollCycleSaving"
+                  @click="savePayrollCycle"
+                >
+                  {{ payrollCycleSaving ? 'Saving...' : payrollCycleEditingId ? 'Update cycle' : 'Create cycle' }}
+                </button>
+                <button class="attendance__btn" :disabled="payrollCycleSaving" @click="loadPayrollCycleSummary">
+                  Load summary
+                </button>
+                <button class="attendance__btn" :disabled="payrollCycleSaving" @click="exportPayrollCycleSummary">
+                  Export CSV
+                </button>
+                <button
+                  v-if="payrollCycleEditingId"
+                  class="attendance__btn"
+                  :disabled="payrollCycleSaving"
+                  @click="resetPayrollCycleForm"
+                >
+                  Cancel edit
+                </button>
+              </div>
+              <div v-if="payrollCycleSummary" class="attendance__summary">
+                <div class="attendance__summary-item">
+                  <span>Cycle total minutes</span>
+                  <strong>{{ payrollCycleSummary.total_minutes }}</strong>
+                </div>
+                <div class="attendance__summary-item">
+                  <span>Leave minutes</span>
+                  <strong>{{ payrollCycleSummary.leave_minutes ?? 0 }}</strong>
+                </div>
+                <div class="attendance__summary-item">
+                  <span>Overtime minutes</span>
+                  <strong>{{ payrollCycleSummary.overtime_minutes ?? 0 }}</strong>
+                </div>
+                <div class="attendance__summary-item">
+                  <span>Late minutes</span>
+                  <strong>{{ payrollCycleSummary.total_late_minutes ?? 0 }}</strong>
+                </div>
+                <div class="attendance__summary-item">
+                  <span>Early leave minutes</span>
+                  <strong>{{ payrollCycleSummary.total_early_leave_minutes ?? 0 }}</strong>
+                </div>
+              </div>
+              <div v-if="payrollCycles.length === 0" class="attendance__empty">No payroll cycles yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Template</th>
+                      <th>Start</th>
+                      <th>End</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in payrollCycles" :key="item.id">
+                      <td>{{ item.name || '--' }}</td>
+                      <td>{{ payrollTemplateName(item.templateId) }}</td>
+                      <td>{{ item.startDate }}</td>
+                      <td>{{ item.endDate }}</td>
+                      <td>{{ item.status }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editPayrollCycle(item)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deletePayrollCycle(item.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             <div class="attendance__admin-section">
@@ -1320,6 +1732,8 @@
               <th>Work (min)</th>
               <th>Late</th>
               <th>Early leave</th>
+              <th>Leave</th>
+              <th>Overtime</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -1331,6 +1745,8 @@
               <td>{{ record.work_minutes }}</td>
               <td>{{ record.late_minutes }}</td>
               <td>{{ record.early_leave_minutes }}</td>
+              <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
+              <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
               <td>{{ formatStatus(record.status) }}</td>
             </tr>
           </tbody>
@@ -1357,6 +1773,8 @@ import { apiFetch } from '../utils/api'
 interface AttendanceSummary {
   total_days: number
   total_minutes: number
+  total_late_minutes?: number
+  total_early_leave_minutes?: number
   normal_days: number
   late_days: number
   early_leave_days: number
@@ -1365,6 +1783,8 @@ interface AttendanceSummary {
   absent_days: number
   adjusted_days: number
   off_days: number
+  leave_minutes?: number
+  overtime_minutes?: number
 }
 
 interface AttendanceRecord {
@@ -1377,6 +1797,7 @@ interface AttendanceRecord {
   early_leave_minutes: number
   status: string
   is_workday?: boolean
+  meta?: Record<string, any>
 }
 
 interface AttendanceRequest {
@@ -1423,6 +1844,41 @@ interface AttendanceRule {
   roundingMinutes: number
   workingDays: number[]
   isDefault?: boolean
+}
+
+interface AttendanceRuleSet {
+  id: string
+  orgId?: string
+  name: string
+  description?: string | null
+  version: number
+  scope: string
+  config?: Record<string, any>
+  isDefault: boolean
+}
+
+interface AttendancePayrollTemplate {
+  id: string
+  orgId?: string
+  name: string
+  timezone: string
+  startDay: number
+  endDay: number
+  endMonthOffset: number
+  autoGenerate: boolean
+  config?: Record<string, any>
+  isDefault: boolean
+}
+
+interface AttendancePayrollCycle {
+  id: string
+  orgId?: string
+  templateId?: string | null
+  name?: string | null
+  startDate: string
+  endDate: string
+  status: string
+  metadata?: Record<string, any>
 }
 
 interface AttendanceShift {
@@ -1562,6 +2018,12 @@ const rotationRuleLoading = ref(false)
 const rotationRuleSaving = ref(false)
 const rotationAssignmentLoading = ref(false)
 const rotationAssignmentSaving = ref(false)
+const ruleSetLoading = ref(false)
+const ruleSetSaving = ref(false)
+const payrollTemplateLoading = ref(false)
+const payrollTemplateSaving = ref(false)
+const payrollCycleLoading = ref(false)
+const payrollCycleSaving = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
@@ -1574,6 +2036,9 @@ const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
+const ruleSets = ref<AttendanceRuleSet[]>([])
+const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
+const payrollCycles = ref<AttendancePayrollCycle[]>([])
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
@@ -1583,6 +2048,10 @@ const overtimeRuleEditingId = ref<string | null>(null)
 const approvalFlowEditingId = ref<string | null>(null)
 const rotationRuleEditingId = ref<string | null>(null)
 const rotationAssignmentEditingId = ref<string | null>(null)
+const ruleSetEditingId = ref<string | null>(null)
+const payrollTemplateEditingId = ref<string | null>(null)
+const payrollCycleEditingId = ref<string | null>(null)
+const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -1770,6 +2239,35 @@ const rotationAssignmentForm = reactive({
   isActive: true,
 })
 
+const ruleSetForm = reactive({
+  name: '',
+  description: '',
+  version: 1,
+  scope: 'org',
+  isDefault: false,
+  config: '{}',
+})
+
+const payrollTemplateForm = reactive({
+  name: '',
+  timezone: defaultTimezone,
+  startDay: 1,
+  endDay: 30,
+  endMonthOffset: 0,
+  autoGenerate: true,
+  isDefault: false,
+  config: '{}',
+})
+
+const payrollCycleForm = reactive({
+  templateId: '',
+  name: '',
+  anchorDate: '',
+  startDate: '',
+  endDate: '',
+  status: 'open',
+})
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
@@ -1859,6 +2357,32 @@ function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null
 
 function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
   return JSON.stringify(steps ?? [], null, 2)
+}
+
+function formatMetaMinutes(meta: Record<string, any> | undefined, key: 'leave' | 'overtime'): string {
+  if (!meta) return '--'
+  const leaveMinutes = Number(meta.leave_minutes ?? meta.leaveMinutes ?? 0)
+  const overtimeMinutes = Number(meta.overtime_minutes ?? meta.overtimeMinutes ?? 0)
+  const value = key === 'leave' ? leaveMinutes : overtimeMinutes
+  return Number.isFinite(value) && value > 0 ? String(value) : '--'
+}
+
+function parseJsonConfig(value: string): Record<string, any> | null {
+  const trimmed = value.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, any>
+    return null
+  } catch {
+    return null
+  }
+}
+
+function payrollTemplateName(templateId?: string | null): string {
+  if (!templateId) return 'Manual'
+  const found = payrollTemplates.value.find(item => item.id === templateId)
+  return found?.name ?? templateId
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {
@@ -3158,10 +3682,409 @@ async function deleteHoliday(id: string) {
   }
 }
 
+function resetRuleSetForm() {
+  ruleSetEditingId.value = null
+  ruleSetForm.name = ''
+  ruleSetForm.description = ''
+  ruleSetForm.version = 1
+  ruleSetForm.scope = 'org'
+  ruleSetForm.isDefault = false
+  ruleSetForm.config = '{}'
+}
+
+function editRuleSet(item: AttendanceRuleSet) {
+  ruleSetEditingId.value = item.id
+  ruleSetForm.name = item.name
+  ruleSetForm.description = item.description ?? ''
+  ruleSetForm.version = item.version ?? 1
+  ruleSetForm.scope = item.scope ?? 'org'
+  ruleSetForm.isDefault = item.isDefault ?? false
+  ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
+}
+
+async function loadRuleSets() {
+  ruleSetLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/rule-sets?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load rule sets')
+    }
+    adminForbidden.value = false
+    ruleSets.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load rule sets', 'error')
+  } finally {
+    ruleSetLoading.value = false
+  }
+}
+
+async function saveRuleSet() {
+  ruleSetSaving.value = true
+  try {
+    const config = parseJsonConfig(ruleSetForm.config)
+    if (!config) {
+      throw new Error('Rule set config must be valid JSON')
+    }
+
+    const payload = {
+      name: ruleSetForm.name.trim(),
+      description: ruleSetForm.description.trim() || null,
+      version: Number(ruleSetForm.version) || 1,
+      scope: ruleSetForm.scope,
+      isDefault: ruleSetForm.isDefault,
+      config,
+      orgId: normalizedOrgId(),
+    }
+
+    const response = await apiFetch(
+      ruleSetEditingId.value ? `/api/attendance/rule-sets/${ruleSetEditingId.value}` : '/api/attendance/rule-sets',
+      {
+        method: ruleSetEditingId.value ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      }
+    )
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save rule set')
+    }
+    adminForbidden.value = false
+    resetRuleSetForm()
+    await loadRuleSets()
+    setStatus('Rule set saved.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save rule set', 'error')
+  } finally {
+    ruleSetSaving.value = false
+  }
+}
+
+async function deleteRuleSet(id: string) {
+  if (!window.confirm('Delete this rule set?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/rule-sets/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete rule set')
+    }
+    adminForbidden.value = false
+    await loadRuleSets()
+    setStatus('Rule set deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete rule set', 'error')
+  }
+}
+
+async function loadRuleSetTemplate() {
+  try {
+    const response = await apiFetch('/api/attendance/rule-sets/template')
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load rule set template')
+    }
+    ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
+    setStatus('Rule set template loaded.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load rule set template', 'error')
+  }
+}
+
+function resetPayrollTemplateForm() {
+  payrollTemplateEditingId.value = null
+  payrollTemplateForm.name = ''
+  payrollTemplateForm.timezone = defaultTimezone
+  payrollTemplateForm.startDay = 1
+  payrollTemplateForm.endDay = 30
+  payrollTemplateForm.endMonthOffset = 0
+  payrollTemplateForm.autoGenerate = true
+  payrollTemplateForm.isDefault = false
+  payrollTemplateForm.config = '{}'
+}
+
+function editPayrollTemplate(item: AttendancePayrollTemplate) {
+  payrollTemplateEditingId.value = item.id
+  payrollTemplateForm.name = item.name
+  payrollTemplateForm.timezone = item.timezone
+  payrollTemplateForm.startDay = item.startDay
+  payrollTemplateForm.endDay = item.endDay
+  payrollTemplateForm.endMonthOffset = item.endMonthOffset
+  payrollTemplateForm.autoGenerate = item.autoGenerate
+  payrollTemplateForm.isDefault = item.isDefault
+  payrollTemplateForm.config = JSON.stringify(item.config ?? {}, null, 2)
+}
+
+async function loadPayrollTemplates() {
+  payrollTemplateLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/payroll-templates?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load payroll templates')
+    }
+    adminForbidden.value = false
+    payrollTemplates.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load payroll templates', 'error')
+  } finally {
+    payrollTemplateLoading.value = false
+  }
+}
+
+async function savePayrollTemplate() {
+  payrollTemplateSaving.value = true
+  try {
+    const config = parseJsonConfig(payrollTemplateForm.config)
+    if (!config) {
+      throw new Error('Payroll template config must be valid JSON')
+    }
+
+    const payload = {
+      name: payrollTemplateForm.name.trim(),
+      timezone: payrollTemplateForm.timezone.trim() || defaultTimezone,
+      startDay: Number(payrollTemplateForm.startDay) || 1,
+      endDay: Number(payrollTemplateForm.endDay) || 30,
+      endMonthOffset: Number(payrollTemplateForm.endMonthOffset) || 0,
+      autoGenerate: payrollTemplateForm.autoGenerate,
+      isDefault: payrollTemplateForm.isDefault,
+      config,
+      orgId: normalizedOrgId(),
+    }
+
+    const response = await apiFetch(
+      payrollTemplateEditingId.value
+        ? `/api/attendance/payroll-templates/${payrollTemplateEditingId.value}`
+        : '/api/attendance/payroll-templates',
+      {
+        method: payrollTemplateEditingId.value ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      }
+    )
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save payroll template')
+    }
+    adminForbidden.value = false
+    resetPayrollTemplateForm()
+    await loadPayrollTemplates()
+    setStatus('Payroll template saved.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save payroll template', 'error')
+  } finally {
+    payrollTemplateSaving.value = false
+  }
+}
+
+async function deletePayrollTemplate(id: string) {
+  if (!window.confirm('Delete this payroll template?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/payroll-templates/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete payroll template')
+    }
+    adminForbidden.value = false
+    await loadPayrollTemplates()
+    setStatus('Payroll template deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete payroll template', 'error')
+  }
+}
+
+function resetPayrollCycleForm() {
+  payrollCycleEditingId.value = null
+  payrollCycleForm.templateId = ''
+  payrollCycleForm.name = ''
+  payrollCycleForm.anchorDate = ''
+  payrollCycleForm.startDate = ''
+  payrollCycleForm.endDate = ''
+  payrollCycleForm.status = 'open'
+  payrollCycleSummary.value = null
+}
+
+function editPayrollCycle(item: AttendancePayrollCycle) {
+  payrollCycleEditingId.value = item.id
+  payrollCycleForm.templateId = item.templateId ?? ''
+  payrollCycleForm.name = item.name ?? ''
+  payrollCycleForm.anchorDate = ''
+  payrollCycleForm.startDate = item.startDate
+  payrollCycleForm.endDate = item.endDate
+  payrollCycleForm.status = item.status ?? 'open'
+  payrollCycleSummary.value = null
+}
+
+async function loadPayrollCycles() {
+  payrollCycleLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/payroll-cycles?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load payroll cycles')
+    }
+    adminForbidden.value = false
+    payrollCycles.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load payroll cycles', 'error')
+  } finally {
+    payrollCycleLoading.value = false
+  }
+}
+
+async function savePayrollCycle() {
+  payrollCycleSaving.value = true
+  try {
+    const payload: Record<string, any> = {
+      templateId: payrollCycleForm.templateId || undefined,
+      name: payrollCycleForm.name.trim() || undefined,
+      anchorDate: payrollCycleForm.anchorDate || undefined,
+      startDate: payrollCycleForm.startDate || undefined,
+      endDate: payrollCycleForm.endDate || undefined,
+      status: payrollCycleForm.status,
+      orgId: normalizedOrgId(),
+    }
+
+    const response = await apiFetch(
+      payrollCycleEditingId.value
+        ? `/api/attendance/payroll-cycles/${payrollCycleEditingId.value}`
+        : '/api/attendance/payroll-cycles',
+      {
+        method: payrollCycleEditingId.value ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      }
+    )
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save payroll cycle')
+    }
+    adminForbidden.value = false
+    resetPayrollCycleForm()
+    await loadPayrollCycles()
+    setStatus('Payroll cycle saved.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save payroll cycle', 'error')
+  } finally {
+    payrollCycleSaving.value = false
+  }
+}
+
+async function deletePayrollCycle(id: string) {
+  if (!window.confirm('Delete this payroll cycle?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/payroll-cycles/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete payroll cycle')
+    }
+    adminForbidden.value = false
+    await loadPayrollCycles()
+    payrollCycleSummary.value = null
+    setStatus('Payroll cycle deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete payroll cycle', 'error')
+  }
+}
+
+async function loadPayrollCycleSummary() {
+  const cycleId = payrollCycleEditingId.value
+  if (!cycleId) {
+    setStatus('Select or create a payroll cycle first.', 'error')
+    return
+  }
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), userId: normalizedUserId() })
+    const response = await apiFetch(`/api/attendance/payroll-cycles/${cycleId}/summary?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load payroll summary')
+    }
+    payrollCycleSummary.value = data.data?.summary ?? null
+    setStatus('Payroll summary loaded.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load payroll summary', 'error')
+  }
+}
+
+async function exportPayrollCycleSummary() {
+  const cycleId = payrollCycleEditingId.value
+  if (!cycleId) {
+    setStatus('Select or create a payroll cycle first.', 'error')
+    return
+  }
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId(), userId: normalizedUserId() })
+    const response = await apiFetch(`/api/attendance/payroll-cycles/${cycleId}/summary/export?${query.toString()}`)
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(text || 'Failed to export payroll summary')
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `payroll-cycle-${cycleId}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus('Payroll summary exported.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to export payroll summary', 'error')
+  }
+}
+
 async function loadAdminData() {
   await Promise.all([
     loadSettings(),
     loadRule(),
+    loadRuleSets(),
+    loadPayrollTemplates(),
+    loadPayrollCycles(),
     loadLeaveTypes(),
     loadOvertimeRules(),
     loadApprovalFlows(),

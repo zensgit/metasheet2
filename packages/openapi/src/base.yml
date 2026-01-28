@@ -277,6 +277,14 @@ components:
           type: integer
         total_minutes:
           type: integer
+        total_late_minutes:
+          type: integer
+        total_early_leave_minutes:
+          type: integer
+        leave_minutes:
+          type: integer
+        overtime_minutes:
+          type: integer
         normal_days:
           type: integer
         late_days:
@@ -320,6 +328,72 @@ components:
             type: integer
         isDefault:
           type: boolean
+    AttendanceRuleSet:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        version:
+          type: integer
+        scope:
+          type: string
+        config:
+          type: object
+        isDefault:
+          type: boolean
+    AttendancePayrollTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        startDay:
+          type: integer
+        endDay:
+          type: integer
+        endMonthOffset:
+          type: integer
+        autoGenerate:
+          type: boolean
+        config:
+          type: object
+        isDefault:
+          type: boolean
+    AttendancePayrollCycle:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        templateId:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        status:
+          type: string
+        metadata:
+          type: object
     AttendanceShift:
       type: object
       properties:

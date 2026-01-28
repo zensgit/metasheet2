@@ -202,6 +202,82 @@ function parseDateInput(value) {
   return date
 }
 
+function getUtcParts(date) {
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth(),
+    day: date.getUTCDate(),
+  }
+}
+
+function addMonthsUtc(year, month, delta) {
+  const date = new Date(Date.UTC(year, month, 1))
+  date.setUTCMonth(date.getUTCMonth() + delta)
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() }
+}
+
+function daysInMonthUtc(year, month) {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+}
+
+function buildUtcDate(year, month, day) {
+  const safeDay = Math.min(Math.max(day, 1), daysInMonthUtc(year, month))
+  return new Date(Date.UTC(year, month, safeDay))
+}
+
+function formatDateOnly(date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function resolvePayrollWindow(template, anchorDate) {
+  const anchor = anchorDate ?? new Date()
+  const { year, month, day } = getUtcParts(anchor)
+  const startDay = Number(template.startDay ?? template.start_day ?? 1)
+  const endDay = Number(template.endDay ?? template.end_day ?? 30)
+  const offset = Number(template.endMonthOffset ?? template.end_month_offset ?? 0)
+
+  const startMonthOffset = day >= startDay ? 0 : -1
+  const startAnchor = addMonthsUtc(year, month, startMonthOffset)
+  const startDate = buildUtcDate(startAnchor.year, startAnchor.month, startDay)
+
+  const endAnchor = addMonthsUtc(startAnchor.year, startAnchor.month, offset)
+  const endDate = buildUtcDate(endAnchor.year, endAnchor.month, endDay)
+
+  return {
+    startDate: formatDateOnly(startDate),
+    endDate: formatDateOnly(endDate),
+  }
+}
+
+function normalizeRuleOverride(value) {
+  if (!value || typeof value !== 'object') return null
+  const override = value
+  const workingDays = Array.isArray(override.workingDays)
+    ? override.workingDays.map(day => Number(day)).filter(day => Number.isFinite(day) && day >= 0 && day <= 6)
+    : undefined
+  return {
+    timezone: typeof override.timezone === 'string' && override.timezone.trim().length > 0
+      ? override.timezone.trim()
+      : undefined,
+    workStartTime: typeof override.workStartTime === 'string' && override.workStartTime.trim().length > 0
+      ? override.workStartTime.trim()
+      : undefined,
+    workEndTime: typeof override.workEndTime === 'string' && override.workEndTime.trim().length > 0
+      ? override.workEndTime.trim()
+      : undefined,
+    lateGraceMinutes: Number.isFinite(Number(override.lateGraceMinutes))
+      ? Math.max(0, Number(override.lateGraceMinutes))
+      : undefined,
+    earlyGraceMinutes: Number.isFinite(Number(override.earlyGraceMinutes))
+      ? Math.max(0, Number(override.earlyGraceMinutes))
+      : undefined,
+    roundingMinutes: Number.isFinite(Number(override.roundingMinutes))
+      ? Math.max(0, Number(override.roundingMinutes))
+      : undefined,
+    workingDays: workingDays && workingDays.length > 0 ? workingDays : undefined,
+  }
+}
+
 function normalizeWorkingDays(value) {
   if (Array.isArray(value)) {
     return value.map(v => Number(v)).filter(v => Number.isFinite(v))
@@ -282,6 +358,47 @@ function mapHolidayRow(row) {
     date: row.holiday_date,
     name: row.name ?? null,
     isWorkingDay: row.is_working_day ?? false,
+  }
+}
+
+function mapRuleSetRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    description: row.description ?? null,
+    version: Number(row.version ?? 1),
+    scope: row.scope ?? 'org',
+    config: normalizeMetadata(row.config),
+    isDefault: row.is_default ?? false,
+  }
+}
+
+function mapPayrollTemplateRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    timezone: row.timezone ?? 'UTC',
+    startDay: Number(row.start_day ?? 1),
+    endDay: Number(row.end_day ?? 30),
+    endMonthOffset: Number(row.end_month_offset ?? 0),
+    autoGenerate: row.auto_generate ?? true,
+    config: normalizeMetadata(row.config),
+    isDefault: row.is_default ?? false,
+  }
+}
+
+function mapPayrollCycleRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    templateId: row.template_id ?? null,
+    name: row.name ?? null,
+    startDate: row.start_date,
+    endDate: row.end_date,
+    status: row.status ?? 'open',
+    metadata: normalizeMetadata(row.metadata),
   }
 }
 
@@ -462,7 +579,7 @@ function diffDays(fromDate, toDate) {
 }
 
 function computeMetrics(options) {
-  const { rule, firstInAt, lastOutAt, isWorkingDay } = options
+  const { rule, firstInAt, lastOutAt, isWorkingDay, leaveMinutes, overtimeMinutes } = options
 
   if (!isWorkingDay) {
     if (!firstInAt && !lastOutAt) {
@@ -477,6 +594,9 @@ function computeMetrics(options) {
   }
 
   if (!firstInAt && !lastOutAt) {
+    if (Number(leaveMinutes ?? 0) > 0) {
+      return { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'adjusted' }
+    }
     return { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'absent' }
   }
 
@@ -502,8 +622,64 @@ function computeMetrics(options) {
   if (lateMinutes > 0 && earlyLeaveMinutes > 0) status = 'late_early'
   else if (lateMinutes > 0) status = 'late'
   else if (earlyLeaveMinutes > 0) status = 'early_leave'
+  else if (Number(leaveMinutes ?? 0) > 0 || Number(overtimeMinutes ?? 0) > 0) status = 'adjusted'
 
   return { workMinutes, lateMinutes, earlyLeaveMinutes, status }
+}
+
+async function loadAttendanceSummary(db, orgId, userId, from, to) {
+  const rows = await db.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN is_workday THEN 1 ELSE 0 END), 0)::int AS total_days,
+       COALESCE(SUM(CASE WHEN is_workday THEN work_minutes ELSE 0 END), 0)::int AS total_minutes,
+       COALESCE(SUM(CASE WHEN is_workday THEN late_minutes ELSE 0 END), 0)::int AS total_late_minutes,
+       COALESCE(SUM(CASE WHEN is_workday THEN early_leave_minutes ELSE 0 END), 0)::int AS total_early_leave_minutes,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
+       COALESCE(SUM(CASE WHEN is_workday AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
+       COALESCE(SUM(CASE WHEN NOT is_workday THEN 1 ELSE 0 END), 0)::int AS off_days
+     FROM attendance_records
+     WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
+    [userId, orgId, from, to]
+  )
+
+  const requestRows = await db.query(
+    `SELECT request_type,
+            COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+     FROM attendance_requests
+     WHERE user_id = $1
+       AND org_id = $2
+       AND work_date BETWEEN $3 AND $4
+       AND status = 'approved'
+       AND request_type IN ('leave', 'overtime')
+     GROUP BY request_type`,
+    [userId, orgId, from, to]
+  )
+
+  const leaveMinutes = Number(requestRows.find(row => row.request_type === 'leave')?.total_minutes ?? 0)
+  const overtimeMinutes = Number(requestRows.find(row => row.request_type === 'overtime')?.total_minutes ?? 0)
+
+  const row = rows[0] ?? {}
+  return {
+    total_days: Number(row.total_days ?? 0),
+    total_minutes: Number(row.total_minutes ?? 0),
+    total_late_minutes: Number(row.total_late_minutes ?? 0),
+    total_early_leave_minutes: Number(row.total_early_leave_minutes ?? 0),
+    normal_days: Number(row.normal_days ?? 0),
+    late_days: Number(row.late_days ?? 0),
+    early_leave_days: Number(row.early_leave_days ?? 0),
+    late_early_days: Number(row.late_early_days ?? 0),
+    partial_days: Number(row.partial_days ?? 0),
+    absent_days: Number(row.absent_days ?? 0),
+    adjusted_days: Number(row.adjusted_days ?? 0),
+    off_days: Number(row.off_days ?? 0),
+    leave_minutes: leaveMinutes,
+    overtime_minutes: overtimeMinutes,
+  }
 }
 
 function normalizeSettings(raw) {
@@ -795,6 +971,56 @@ async function resolveWorkContext(options) {
   }
 }
 
+async function loadApprovedMinutes(db, orgId, userId, workDate) {
+  const rows = await db.query(
+    `SELECT request_type,
+            COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+     FROM attendance_requests
+     WHERE user_id = $1
+       AND org_id = $2
+       AND work_date = $3
+       AND status = 'approved'
+       AND request_type IN ('leave', 'overtime')
+     GROUP BY request_type`,
+    [userId, orgId, workDate]
+  )
+  const leaveMinutes = Number(rows.find(row => row.request_type === 'leave')?.total_minutes ?? 0)
+  const overtimeMinutes = Number(rows.find(row => row.request_type === 'overtime')?.total_minutes ?? 0)
+  return { leaveMinutes, overtimeMinutes }
+}
+
+async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
+  const rows = await db.query(
+    `SELECT work_date,
+            request_type,
+            COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+     FROM attendance_requests
+     WHERE user_id = $1
+       AND org_id = $2
+       AND work_date BETWEEN $3 AND $4
+       AND status = 'approved'
+       AND request_type IN ('leave', 'overtime')
+     GROUP BY work_date, request_type
+     ORDER BY work_date`,
+    [userId, orgId, fromDate, toDate]
+  )
+
+  const map = new Map()
+  for (const row of rows) {
+    const workDate = row.work_date
+    if (!map.has(workDate)) {
+      map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0 })
+    }
+    const entry = map.get(workDate)
+    if (row.request_type === 'leave') {
+      entry.leaveMinutes = Number(row.total_minutes ?? 0)
+    } else if (row.request_type === 'overtime') {
+      entry.overtimeMinutes = Number(row.total_minutes ?? 0)
+    }
+  }
+  return map
+}
+
 async function upsertAttendanceRecord(options) {
   const {
     userId,
@@ -807,6 +1033,8 @@ async function upsertAttendanceRecord(options) {
     mode,
     statusOverride,
     isWorkday,
+    leaveMinutes,
+    overtimeMinutes,
     client,
   } = options
 
@@ -835,6 +1063,8 @@ async function upsertAttendanceRecord(options) {
     firstInAt,
     lastOutAt,
     isWorkingDay: isWorkday !== false,
+    leaveMinutes,
+    overtimeMinutes,
   })
   const status = statusOverride ?? metrics.status
 
@@ -894,6 +1124,35 @@ function buildCsv(rows, headers) {
     lines.push(line)
   }
   return lines.join('\n')
+}
+
+function buildPayrollSummaryCsv(summary, cycle) {
+  const headers = ['cycle_id', 'cycle_name', 'start_date', 'end_date', 'metric', 'value']
+  const rows = [
+    ['total_minutes', summary.total_minutes ?? 0],
+    ['leave_minutes', summary.leave_minutes ?? 0],
+    ['overtime_minutes', summary.overtime_minutes ?? 0],
+    ['total_late_minutes', summary.total_late_minutes ?? 0],
+    ['total_early_leave_minutes', summary.total_early_leave_minutes ?? 0],
+    ['total_days', summary.total_days ?? 0],
+    ['normal_days', summary.normal_days ?? 0],
+    ['late_days', summary.late_days ?? 0],
+    ['early_leave_days', summary.early_leave_days ?? 0],
+    ['late_early_days', summary.late_early_days ?? 0],
+    ['partial_days', summary.partial_days ?? 0],
+    ['absent_days', summary.absent_days ?? 0],
+    ['adjusted_days', summary.adjusted_days ?? 0],
+    ['off_days', summary.off_days ?? 0],
+  ]
+  const csvRows = rows.map(([metric, value]) => ({
+    cycle_id: cycle.id,
+    cycle_name: cycle.name ?? '',
+    start_date: cycle.startDate,
+    end_date: cycle.endDate,
+    metric,
+    value,
+  }))
+  return buildCsv(csvRows, headers)
 }
 
 async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req }) {
@@ -1266,6 +1525,80 @@ module.exports = {
     })
     const overtimeRuleUpdateSchema = overtimeRuleCreateSchema.partial()
 
+    const ruleSetCreateSchema = z.object({
+      name: z.string().min(1),
+      description: z.string().nullable().optional(),
+      version: z.number().int().min(1).optional(),
+      scope: z.enum(['org', 'department', 'project', 'user', 'custom']).optional(),
+      config: z.record(z.unknown()).optional(),
+      isDefault: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const ruleSetUpdateSchema = ruleSetCreateSchema.partial()
+
+    const ruleSetConfigSchema = z.object({
+      source: z.string().optional(),
+      rule: z.object({
+        timezone: z.string().optional(),
+        workStartTime: z.string().optional(),
+        workEndTime: z.string().optional(),
+        lateGraceMinutes: z.number().int().min(0).optional(),
+        earlyGraceMinutes: z.number().int().min(0).optional(),
+        roundingMinutes: z.number().int().min(0).optional(),
+        workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+      }).optional(),
+      mappings: z.object({
+        columns: z.array(z.object({
+          sourceField: z.string().min(1),
+          targetField: z.string().min(1),
+          dataType: z.string().optional(),
+          transform: z.string().optional(),
+        })).optional(),
+        fields: z.array(z.object({
+          sourceField: z.string().min(1),
+          targetField: z.string().min(1),
+          dataType: z.string().optional(),
+          transform: z.string().optional(),
+        })).optional(),
+      }).optional(),
+      approvals: z.object({
+        processCodes: z.array(z.string()).optional(),
+        roleMappings: z.array(z.object({
+          roleId: z.string().min(1),
+          roleName: z.string().optional(),
+        })).optional(),
+      }).optional(),
+      payroll: z.object({
+        cycleMode: z.enum(['template', 'manual']).optional(),
+        templateId: z.string().optional(),
+      }).optional(),
+    }).catchall(z.unknown())
+
+    const payrollTemplateCreateSchema = z.object({
+      name: z.string().min(1),
+      timezone: z.string().optional(),
+      startDay: z.number().int().min(1).max(31).optional(),
+      endDay: z.number().int().min(1).max(31).optional(),
+      endMonthOffset: z.number().int().min(0).max(1).optional(),
+      autoGenerate: z.boolean().optional(),
+      config: z.record(z.unknown()).optional(),
+      isDefault: z.boolean().optional(),
+      orgId: z.string().optional(),
+    })
+    const payrollTemplateUpdateSchema = payrollTemplateCreateSchema.partial()
+
+    const payrollCycleCreateSchema = z.object({
+      templateId: z.string().uuid().optional(),
+      name: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      anchorDate: z.string().optional(),
+      status: z.enum(['open', 'closed', 'archived']).optional(),
+      metadata: z.record(z.unknown()).optional(),
+      orgId: z.string().optional(),
+    })
+    const payrollCycleUpdateSchema = payrollCycleCreateSchema.partial()
+
     const approvalStepSchema = z.object({
       name: z.string().optional(),
       approverUserIds: z.array(z.string()).optional(),
@@ -1377,6 +1710,8 @@ module.exports = {
               updateLastOutAt: parsed.data.eventType === 'check_out' ? occurredAt : null,
               mode: 'append',
               isWorkday: context.isWorkingDay,
+              leaveMinutes: 0,
+              overtimeMinutes: 0,
               client: trx,
             })
 
@@ -1467,10 +1802,24 @@ module.exports = {
             [targetUserId, orgId, from, to, pageSize, offset]
           )
 
+          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
+          const records = rows.map((row) => {
+            const meta = normalizeMetadata(row.meta)
+            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            return {
+              ...row,
+              meta: {
+                ...meta,
+                leave_minutes: approved.leaveMinutes,
+                overtime_minutes: approved.overtimeMinutes,
+              },
+            }
+          })
+
           res.json({
             ok: true,
             data: {
-              items: rows,
+              items: records,
               total,
               page,
               pageSize,
@@ -1530,37 +1879,7 @@ module.exports = {
         const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
 
         try {
-          const rows = await db.query(
-            `SELECT
-               COALESCE(SUM(CASE WHEN is_workday THEN 1 ELSE 0 END), 0)::int AS total_days,
-               COALESCE(SUM(CASE WHEN is_workday THEN work_minutes ELSE 0 END), 0)::int AS total_minutes,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'normal' THEN 1 ELSE 0 END), 0)::int AS normal_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'late' THEN 1 ELSE 0 END), 0)::int AS late_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'early_leave' THEN 1 ELSE 0 END), 0)::int AS early_leave_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'late_early' THEN 1 ELSE 0 END), 0)::int AS late_early_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'partial' THEN 1 ELSE 0 END), 0)::int AS partial_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'absent' THEN 1 ELSE 0 END), 0)::int AS absent_days,
-               COALESCE(SUM(CASE WHEN is_workday AND status = 'adjusted' THEN 1 ELSE 0 END), 0)::int AS adjusted_days,
-               COALESCE(SUM(CASE WHEN NOT is_workday THEN 1 ELSE 0 END), 0)::int AS off_days
-             FROM attendance_records
-             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4`,
-            [targetUserId, orgId, from, to]
-          )
-
-          const row = rows[0] ?? {}
-          const summary = {
-            total_days: Number(row.total_days ?? 0),
-            total_minutes: Number(row.total_minutes ?? 0),
-            normal_days: Number(row.normal_days ?? 0),
-            late_days: Number(row.late_days ?? 0),
-            early_leave_days: Number(row.early_leave_days ?? 0),
-            late_early_days: Number(row.late_early_days ?? 0),
-            partial_days: Number(row.partial_days ?? 0),
-            absent_days: Number(row.absent_days ?? 0),
-            adjusted_days: Number(row.adjusted_days ?? 0),
-            off_days: Number(row.off_days ?? 0),
-          }
-
+          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
           res.json({ ok: true, data: summary })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -2067,6 +2386,7 @@ module.exports = {
             })
             const timezone = context.rule.timezone
             if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
+              const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
               const updateFirstInAt = requestRow.requested_in_at ? new Date(requestRow.requested_in_at) : null
               const updateLastOutAt = requestRow.requested_out_at ? new Date(requestRow.requested_out_at) : null
               record = await upsertAttendanceRecord({
@@ -2080,6 +2400,25 @@ module.exports = {
                 mode: 'override',
                 statusOverride: 'adjusted',
                 isWorkday: context.isWorkingDay,
+                leaveMinutes: approvedMinutes.leaveMinutes,
+                overtimeMinutes: approvedMinutes.overtimeMinutes,
+                client: trx,
+              })
+            } else if (requestType === 'leave' || requestType === 'overtime') {
+              const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
+              record = await upsertAttendanceRecord({
+                userId: requestRow.user_id,
+                orgId,
+                workDate: requestRow.work_date,
+                timezone,
+                rule: context.rule,
+                updateFirstInAt: null,
+                updateLastOutAt: null,
+                mode: 'merge',
+                statusOverride: context.isWorkingDay ? 'adjusted' : 'off',
+                isWorkday: context.isWorkingDay,
+                leaveMinutes: approvedMinutes.leaveMinutes,
+                overtimeMinutes: approvedMinutes.overtimeMinutes,
                 client: trx,
               })
             }
@@ -3493,6 +3832,992 @@ module.exports = {
           }
           logger.error('Attendance rule update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-sets',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_rule_sets WHERE org_id = $1',
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_rule_sets
+             WHERE org_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapRuleSetRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule sets query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule sets' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-sets/template',
+      withPermission('attendance:admin', async (_req, res) => {
+        res.json({
+          ok: true,
+          data: {
+            source: 'dingtalk',
+            mappings: {
+              columns: [
+                { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'datetime' },
+                { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'datetime' },
+                { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+              ],
+            },
+            approvals: {
+              processCodes: [],
+              roleMappings: [],
+            },
+            payroll: {
+              cycleMode: 'template',
+              templateId: '',
+            },
+          },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/rule-sets',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = ruleSetCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          name: parsed.data.name,
+          description: parsed.data.description ?? null,
+          version: parsed.data.version ?? 1,
+          scope: parsed.data.scope ?? 'org',
+          config: parsed.data.config ?? {},
+          isDefault: parsed.data.isDefault ?? false,
+        }
+
+        const configValidation = ruleSetConfigSchema.safeParse(payload.config)
+        if (!configValidation.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: configValidation.error.message } })
+          return
+        }
+        payload.config = configValidation.data
+
+        try {
+          const ruleSet = await db.transaction(async (trx) => {
+            if (payload.isDefault) {
+              await trx.query('UPDATE attendance_rule_sets SET is_default = false WHERE org_id = $1', [orgId])
+            }
+            const rows = await trx.query(
+              `INSERT INTO attendance_rule_sets
+               (id, org_id, name, description, version, scope, config, is_default)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.name,
+                payload.description,
+                payload.version,
+                payload.scope,
+                JSON.stringify(payload.config),
+                payload.isDefault,
+              ]
+            )
+            return rows[0]
+          })
+
+          const mapped = mapRuleSetRow(ruleSet)
+          emitEvent('attendance.ruleSet.created', { orgId, ruleSetId: mapped.id })
+          res.status(201).json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/rule-sets/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = ruleSetUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const ruleSetId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+            [ruleSetId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+            return
+          }
+          const existing = existingRows[0]
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            description: parsed.data.description ?? existing.description,
+            version: parsed.data.version ?? existing.version ?? 1,
+            scope: parsed.data.scope ?? existing.scope ?? 'org',
+            config: parsed.data.config ?? normalizeMetadata(existing.config),
+            isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+          }
+
+          const configValidation = ruleSetConfigSchema.safeParse(payload.config)
+          if (!configValidation.success) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: configValidation.error.message } })
+            return
+          }
+          payload.config = configValidation.data
+
+          const updated = await db.transaction(async (trx) => {
+            if (payload.isDefault) {
+              await trx.query('UPDATE attendance_rule_sets SET is_default = false WHERE org_id = $1', [orgId])
+            }
+            const rows = await trx.query(
+              `UPDATE attendance_rule_sets
+               SET name = $3,
+                   description = $4,
+                   version = $5,
+                   scope = $6,
+                   config = $7::jsonb,
+                   is_default = $8,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                ruleSetId,
+                orgId,
+                payload.name,
+                payload.description,
+                payload.version,
+                payload.scope,
+                JSON.stringify(payload.config),
+                payload.isDefault,
+              ]
+            )
+            return rows[0]
+          })
+
+          const mapped = mapRuleSetRow(updated)
+          emitEvent('attendance.ruleSet.updated', { orgId, ruleSetId: mapped.id })
+          res.json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/rule-sets/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleSetId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_rule_sets WHERE id = $1 AND org_id = $2 RETURNING id',
+            [ruleSetId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+            return
+          }
+          emitEvent('attendance.ruleSet.deleted', { orgId, ruleSetId })
+          res.json({ ok: true, data: { id: ruleSetId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/rule-sets/preview',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          ruleSetId: z.string().uuid().optional(),
+          config: z.record(z.unknown()).optional(),
+          events: z.array(z.object({
+            eventType: z.enum(['check_in', 'check_out']),
+            occurredAt: z.string(),
+            workDate: z.string().optional(),
+            userId: z.string().optional(),
+          })).optional(),
+        })
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        let config = parsed.data.config ?? {}
+        let ruleSetId = parsed.data.ruleSetId
+
+        try {
+          if (ruleSetId) {
+            const rows = await db.query(
+              'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+              [ruleSetId, orgId]
+            )
+            if (!rows.length) {
+              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+              return
+            }
+            config = normalizeMetadata(rows[0].config)
+          }
+
+          const baseRule = await loadDefaultRule(db, orgId)
+          const override = normalizeRuleOverride(config.rule)
+          const ruleOverride = override
+            ? {
+              ...baseRule,
+              ...override,
+              workingDays: override.workingDays ?? baseRule.workingDays,
+            }
+            : baseRule
+
+          const events = Array.isArray(parsed.data.events) ? parsed.data.events : []
+          const buckets = new Map()
+          for (const event of events) {
+            const occurred = parseDateInput(event.occurredAt)
+            if (!occurred) continue
+            const userId = event.userId ?? 'unknown'
+            const workDate = event.workDate ?? toWorkDate(occurred, ruleOverride.timezone)
+            const key = `${userId}::${workDate}`
+            const entry = buckets.get(key) ?? {
+              userId,
+              workDate,
+              firstInAt: null,
+              lastOutAt: null,
+            }
+            if (event.eventType === 'check_in') {
+              if (!entry.firstInAt || occurred < entry.firstInAt) entry.firstInAt = occurred
+            }
+            if (event.eventType === 'check_out') {
+              if (!entry.lastOutAt || occurred > entry.lastOutAt) entry.lastOutAt = occurred
+            }
+            buckets.set(key, entry)
+          }
+
+          const preview = []
+          for (const entry of buckets.values()) {
+            const context = await resolveWorkContext({
+              db,
+              orgId,
+              userId: entry.userId,
+              workDate: entry.workDate,
+              defaultRule: ruleOverride,
+            })
+            const metrics = computeMetrics({
+              rule: context.rule,
+              firstInAt: entry.firstInAt,
+              lastOutAt: entry.lastOutAt,
+              isWorkingDay: context.isWorkingDay,
+            })
+            preview.push({
+              userId: entry.userId,
+              workDate: entry.workDate,
+              firstInAt: entry.firstInAt ? entry.firstInAt.toISOString() : null,
+              lastOutAt: entry.lastOutAt ? entry.lastOutAt.toISOString() : null,
+              workMinutes: metrics.workMinutes,
+              lateMinutes: metrics.lateMinutes,
+              earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+              status: metrics.status,
+              isWorkingDay: context.isWorkingDay,
+              source: context.source,
+            })
+          }
+
+          res.json({
+            ok: true,
+            data: {
+              ruleSetId: ruleSetId ?? null,
+              totalEvents: events.length,
+              preview,
+              config,
+              notes: ['Preview uses rule/shift/holiday context with basic in/out pairing.'],
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-templates',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_payroll_templates WHERE org_id = $1',
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_payroll_templates
+             WHERE org_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapPayrollTemplateRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll templates query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll templates' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/payroll-templates',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = payrollTemplateCreateSchema.safeParse(req.body)
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payload = {
+          name: parsed.data.name,
+          timezone: parsed.data.timezone ?? 'UTC',
+          startDay: parsed.data.startDay ?? 1,
+          endDay: parsed.data.endDay ?? 30,
+          endMonthOffset: parsed.data.endMonthOffset ?? 0,
+          autoGenerate: parsed.data.autoGenerate ?? true,
+          config: parsed.data.config ?? {},
+          isDefault: parsed.data.isDefault ?? false,
+        }
+
+        try {
+          const template = await db.transaction(async (trx) => {
+            if (payload.isDefault) {
+              await trx.query('UPDATE attendance_payroll_templates SET is_default = false WHERE org_id = $1', [orgId])
+            }
+            const rows = await trx.query(
+              `INSERT INTO attendance_payroll_templates
+               (id, org_id, name, timezone, start_day, end_day, end_month_offset, auto_generate, config, is_default)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.name,
+                payload.timezone,
+                payload.startDay,
+                payload.endDay,
+                payload.endMonthOffset,
+                payload.autoGenerate,
+                JSON.stringify(payload.config),
+                payload.isDefault,
+              ]
+            )
+            return rows[0]
+          })
+
+          const mapped = mapPayrollTemplateRow(template)
+          emitEvent('attendance.payrollTemplate.created', { orgId, templateId: mapped.id })
+          res.status(201).json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll template creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create payroll template' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/payroll-templates/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = payrollTemplateUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const templateId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+            [templateId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          const existing = existingRows[0]
+          const payload = {
+            name: parsed.data.name ?? existing.name,
+            timezone: parsed.data.timezone ?? existing.timezone ?? 'UTC',
+            startDay: parsed.data.startDay ?? existing.start_day ?? 1,
+            endDay: parsed.data.endDay ?? existing.end_day ?? 30,
+            endMonthOffset: parsed.data.endMonthOffset ?? existing.end_month_offset ?? 0,
+            autoGenerate: parsed.data.autoGenerate ?? existing.auto_generate ?? true,
+            config: parsed.data.config ?? normalizeMetadata(existing.config),
+            isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+          }
+
+          const updated = await db.transaction(async (trx) => {
+            if (payload.isDefault) {
+              await trx.query('UPDATE attendance_payroll_templates SET is_default = false WHERE org_id = $1', [orgId])
+            }
+            const rows = await trx.query(
+              `UPDATE attendance_payroll_templates
+               SET name = $3,
+                   timezone = $4,
+                   start_day = $5,
+                   end_day = $6,
+                   end_month_offset = $7,
+                   auto_generate = $8,
+                   config = $9::jsonb,
+                   is_default = $10,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                templateId,
+                orgId,
+                payload.name,
+                payload.timezone,
+                payload.startDay,
+                payload.endDay,
+                payload.endMonthOffset,
+                payload.autoGenerate,
+                JSON.stringify(payload.config),
+                payload.isDefault,
+              ]
+            )
+            return rows[0]
+          })
+
+          const mapped = mapPayrollTemplateRow(updated)
+          emitEvent('attendance.payrollTemplate.updated', { orgId, templateId: mapped.id })
+          res.json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll template update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update payroll template' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/payroll-templates/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const templateId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2 RETURNING id',
+            [templateId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          emitEvent('attendance.payrollTemplate.deleted', { orgId, templateId })
+          res.json({ ok: true, data: { id: templateId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll template delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete payroll template' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const status = typeof req.query.status === 'string' ? req.query.status : null
+        const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : null
+        const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : null
+
+        const conditions = ['org_id = $1']
+        const params = [orgId]
+
+        if (status) {
+          params.push(status)
+          conditions.push(`status = $${params.length}`)
+        }
+        if (startDate) {
+          params.push(startDate)
+          conditions.push(`start_date >= $${params.length}`)
+        }
+        if (endDate) {
+          params.push(endDate)
+          conditions.push(`end_date <= $${params.length}`)
+        }
+
+        const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total FROM attendance_payroll_cycles ${whereClause}`,
+            params
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_payroll_cycles
+             ${whereClause}
+             ORDER BY start_date DESC
+             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+            [...params, pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapPayrollCycleRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycles query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll cycles' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/payroll-cycles',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = payrollCycleCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        let template = null
+        if (parsed.data.templateId) {
+          const templateRows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+            [parsed.data.templateId, orgId]
+          )
+          if (!templateRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          template = templateRows[0]
+        }
+
+        let startDate = parsed.data.startDate
+        let endDate = parsed.data.endDate
+        if ((!startDate || !endDate) && template) {
+          const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
+          const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+          startDate = startDate ?? resolved.startDate
+          endDate = endDate ?? resolved.endDate
+        }
+
+        if (!startDate || !endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'startDate and endDate are required' } })
+          return
+        }
+
+        const startParsed = parseDateInput(startDate)
+        const endParsed = parseDateInput(endDate)
+        if (!startParsed || !endParsed || startParsed > endParsed) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date range' } })
+          return
+        }
+
+        const payload = {
+          templateId: parsed.data.templateId ?? null,
+          name: parsed.data.name ?? null,
+          startDate,
+          endDate,
+          status: parsed.data.status ?? 'open',
+          metadata: parsed.data.metadata ?? {},
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_payroll_cycles
+             (id, org_id, template_id, name, start_date, end_date, status, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+             RETURNING *`,
+            [
+              randomUUID(),
+              orgId,
+              payload.templateId,
+              payload.name,
+              payload.startDate,
+              payload.endDate,
+              payload.status,
+              JSON.stringify(payload.metadata),
+            ]
+          )
+
+          const mapped = mapPayrollCycleRow(rows[0])
+          emitEvent('attendance.payrollCycle.created', { orgId, payrollCycleId: mapped.id })
+          res.status(201).json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/payroll-cycles/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = payrollCycleUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const payrollCycleId = req.params.id
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [payrollCycleId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+          const existing = existingRows[0]
+
+          let template = null
+          if (parsed.data.templateId) {
+            const templateRows = await db.query(
+              'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+              [parsed.data.templateId, orgId]
+            )
+            if (!templateRows.length) {
+              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+              return
+            }
+            template = templateRows[0]
+          }
+
+          let startDate = parsed.data.startDate ?? existing.start_date
+          let endDate = parsed.data.endDate ?? existing.end_date
+          if (parsed.data.anchorDate && template) {
+            const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
+            const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+            startDate = resolved.startDate
+            endDate = resolved.endDate
+          }
+
+          const startParsed = parseDateInput(startDate)
+          const endParsed = parseDateInput(endDate)
+          if (!startParsed || !endParsed || startParsed > endParsed) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid date range' } })
+            return
+          }
+
+          const payload = {
+            templateId: parsed.data.templateId ?? existing.template_id ?? null,
+            name: parsed.data.name ?? existing.name,
+            startDate,
+            endDate,
+            status: parsed.data.status ?? existing.status ?? 'open',
+            metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_payroll_cycles
+             SET template_id = $3,
+                 name = $4,
+                 start_date = $5,
+                 end_date = $6,
+                 status = $7,
+                 metadata = $8::jsonb,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              payrollCycleId,
+              orgId,
+              payload.templateId,
+              payload.name,
+              payload.startDate,
+              payload.endDate,
+              payload.status,
+              JSON.stringify(payload.metadata),
+            ]
+          )
+
+          const mapped = mapPayrollCycleRow(rows[0])
+          emitEvent('attendance.payrollCycle.updated', { orgId, payrollCycleId: mapped.id })
+          res.json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/payroll-cycles/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const payrollCycleId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2 RETURNING id',
+            [payrollCycleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+          emitEvent('attendance.payrollCycle.deleted', { orgId, payrollCycleId })
+          res.json({ ok: true, data: { id: payrollCycleId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/summary',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          orgId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const targetUserId = parsed.data.userId ?? requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+
+        const orgId = getOrgId(req)
+        const cycleId = req.params.id
+
+        try {
+          const cycleRows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [cycleId, orgId]
+          )
+          if (!cycleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+          const cycle = mapPayrollCycleRow(cycleRows[0])
+          const summary = await loadAttendanceSummary(db, orgId, targetUserId, cycle.startDate, cycle.endDate)
+
+          res.json({
+            ok: true,
+            data: {
+              cycle,
+              summary,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle summary failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll summary' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/summary/export',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          orgId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const targetUserId = parsed.data.userId ?? requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+
+        const orgId = getOrgId(req)
+        const cycleId = req.params.id
+
+        try {
+          const cycleRows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [cycleId, orgId]
+          )
+          if (!cycleRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+          const cycle = mapPayrollCycleRow(cycleRows[0])
+          const summary = await loadAttendanceSummary(db, orgId, targetUserId, cycle.startDate, cycle.endDate)
+          const csv = buildPayrollSummaryCsv(summary, cycle)
+          const filename = `payroll-cycle-${cycle.id}.csv`
+
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+          res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+          res.status(200).send(csv)
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle summary export failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export payroll summary' } })
         }
       })
     )

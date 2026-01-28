@@ -79,6 +79,9 @@ export interface Database {
   attendance_approval_flows: AttendanceApprovalFlowsTable
   attendance_rotation_rules: AttendanceRotationRulesTable
   attendance_rotation_assignments: AttendanceRotationAssignmentsTable
+  attendance_rule_sets: AttendanceRuleSetsTable
+  attendance_payroll_templates: AttendancePayrollTemplatesTable
+  attendance_payroll_cycles: AttendancePayrollCyclesTable
   // Meta tables
   meta_sheets: MetaSheetsTable
   meta_fields: MetaFieldsTable
@@ -1002,6 +1005,47 @@ export interface AttendanceRotationAssignmentsTable {
   start_date: ColumnType<string, string | undefined, string>
   end_date: ColumnType<string | null, string | undefined, string | null>
   is_active: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRuleSetsTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  description: string | null
+  version: number
+  scope: string
+  config: JsonObjectColumn
+  is_default: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendancePayrollTemplatesTable {
+  id: Generated<string>
+  org_id: string
+  name: string
+  timezone: string
+  start_day: number
+  end_day: number
+  end_month_offset: number
+  auto_generate: boolean
+  config: JsonObjectColumn
+  is_default: boolean
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendancePayrollCyclesTable {
+  id: Generated<string>
+  org_id: string
+  template_id: string | null
+  name: string | null
+  start_date: ColumnType<string, string | undefined, string>
+  end_date: ColumnType<string, string | undefined, string>
+  status: 'open' | 'closed' | 'archived'
+  metadata: JsonObjectColumn
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
