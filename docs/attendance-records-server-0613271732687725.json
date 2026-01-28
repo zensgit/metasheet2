@@ -1,0 +1,110 @@
+{
+  "ok": true,
+  "data": {
+    "items": [
+      {
+        "id": "b19a29ae-8d76-4d70-83ae-a799d34aa204",
+        "user_id": "0613271732687725",
+        "work_date": "2025-12-05T00:00:00.000Z",
+        "timezone": "UTC",
+        "first_in_at": null,
+        "last_out_at": null,
+        "work_minutes": 0,
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "status": "absent",
+        "meta": {
+          "leave_minutes": 0,
+          "overtime_minutes": 0
+        },
+        "created_at": "2026-01-28T12:52:38.981Z",
+        "updated_at": "2026-01-28T12:52:38.981Z",
+        "org_id": "default",
+        "is_workday": true
+      },
+      {
+        "id": "ae3d1c50-03d5-4ccc-b1dd-af3d8da41ea9",
+        "user_id": "0613271732687725",
+        "work_date": "2025-12-04T00:00:00.000Z",
+        "timezone": "UTC",
+        "first_in_at": null,
+        "last_out_at": null,
+        "work_minutes": 0,
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "status": "absent",
+        "meta": {
+          "leave_minutes": 0,
+          "overtime_minutes": 0
+        },
+        "created_at": "2026-01-28T12:52:38.981Z",
+        "updated_at": "2026-01-28T12:52:38.981Z",
+        "org_id": "default",
+        "is_workday": true
+      },
+      {
+        "id": "f625f90a-9d09-41be-9405-c642bdb868c7",
+        "user_id": "0613271732687725",
+        "work_date": "2025-12-03T00:00:00.000Z",
+        "timezone": "UTC",
+        "first_in_at": null,
+        "last_out_at": null,
+        "work_minutes": 0,
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "status": "absent",
+        "meta": {
+          "leave_minutes": 0,
+          "overtime_minutes": 0
+        },
+        "created_at": "2026-01-28T12:52:38.981Z",
+        "updated_at": "2026-01-28T12:52:38.981Z",
+        "org_id": "default",
+        "is_workday": true
+      },
+      {
+        "id": "eea5853d-405f-420d-b8e4-380ef5cfea17",
+        "user_id": "0613271732687725",
+        "work_date": "2025-12-02T00:00:00.000Z",
+        "timezone": "UTC",
+        "first_in_at": null,
+        "last_out_at": null,
+        "work_minutes": 0,
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "status": "absent",
+        "meta": {
+          "leave_minutes": 0,
+          "overtime_minutes": 0
+        },
+        "created_at": "2026-01-28T12:52:38.981Z",
+        "updated_at": "2026-01-28T12:52:38.981Z",
+        "org_id": "default",
+        "is_workday": true
+      },
+      {
+        "id": "961d57f9-11f6-4bb3-89f0-bf0fe55b0907",
+        "user_id": "0613271732687725",
+        "work_date": "2025-12-01T00:00:00.000Z",
+        "timezone": "UTC",
+        "first_in_at": null,
+        "last_out_at": null,
+        "work_minutes": 0,
+        "late_minutes": 0,
+        "early_leave_minutes": 0,
+        "status": "absent",
+        "meta": {
+          "leave_minutes": 0,
+          "overtime_minutes": 0
+        },
+        "created_at": "2026-01-28T12:52:38.981Z",
+        "updated_at": "2026-01-28T12:52:38.981Z",
+        "org_id": "default",
+        "is_workday": true
+      }
+    ],
+    "total": 5,
+    "page": 1,
+    "pageSize": 50
+  }
+}
