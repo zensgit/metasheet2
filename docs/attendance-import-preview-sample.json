@@ -1,0 +1,110 @@
+{
+  "source": "manual",
+  "rows": [
+    {
+      "userId": "09141829115765",
+      "workDate": "2025-12-01",
+      "fields": {
+        "name": "刘树林",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00",
+        "1_on_duty_user_check_time": "07:45",
+        "1_off_duty_user_check_time": "17:04",
+        "attendance_work_time": "8"
+      }
+    },
+    {
+      "userId": "09141829115765",
+      "workDate": "2025-12-02",
+      "fields": {
+        "name": "刘树林",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00",
+        "1_on_duty_user_check_time": "07:47",
+        "1_off_duty_user_check_time": "17:04",
+        "attendance_work_time": "8"
+      }
+    },
+    {
+      "userId": "09141829115765",
+      "workDate": "2025-12-03",
+      "fields": {
+        "name": "刘树林",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00",
+        "1_on_duty_user_check_time": "07:43",
+        "1_off_duty_user_check_time": "17:04",
+        "attendance_work_time": "8"
+      }
+    },
+    {
+      "userId": "09141829115765",
+      "workDate": "2025-12-04",
+      "fields": {
+        "name": "刘树林",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00",
+        "1_on_duty_user_check_time": "07:48",
+        "1_off_duty_user_check_time": "17:04",
+        "attendance_work_time": "8"
+      }
+    },
+    {
+      "userId": "09141829115765",
+      "workDate": "2025-12-05",
+      "fields": {
+        "name": "刘树林",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00",
+        "1_on_duty_user_check_time": "07:43",
+        "1_off_duty_user_check_time": "17:12",
+        "attendance_work_time": "8"
+      }
+    },
+    {
+      "userId": "0613271732687725",
+      "workDate": "2025-12-01",
+      "fields": {
+        "name": "刘超",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00"
+      }
+    },
+    {
+      "userId": "0613271732687725",
+      "workDate": "2025-12-02",
+      "fields": {
+        "name": "刘超",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00"
+      }
+    },
+    {
+      "userId": "0613271732687725",
+      "workDate": "2025-12-03",
+      "fields": {
+        "name": "刘超",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00"
+      }
+    },
+    {
+      "userId": "0613271732687725",
+      "workDate": "2025-12-04",
+      "fields": {
+        "name": "刘超",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00"
+      }
+    },
+    {
+      "userId": "0613271732687725",
+      "workDate": "2025-12-05",
+      "fields": {
+        "name": "刘超",
+        "attendance_group": "单双休",
+        "plan_detail": "办公职员 08:00-17:00"
+      }
+    }
+  ]
+}

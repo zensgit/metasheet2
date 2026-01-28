@@ -32,6 +32,7 @@
 - ⚠️ Test run logged DB auth errors from Workflow engine init (password auth failed for user `metasheet`), but test still passed.
 - ⚠️ Policy engine behavior validated by code review; no dedicated policy preview/import test run yet.
 - ✅ Import preview API (server) succeeded for 2 users (payload saved in `docs/attendance-import-preview-payload.json`).
+- ✅ Import API (server) succeeded for 2 users (10 rows). Summary saved in `docs/attendance-import-server-summary.json`.
 - ⚠️ Re-run preview with timezone-corrected payload failed due to 401 (token expired); needs fresh admin token to re-validate.
 - ✅ Backend container rebuilt and restarted
 - ✅ Web static assets updated and container restarted
