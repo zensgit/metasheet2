@@ -23,6 +23,7 @@
 - ✅ Backend container rebuilt and restarted
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
+- ✅ UI smoke: `/attendance` loaded; Rule Sets / Payroll Templates / Payroll Cycles sections visible; no auth error banner.
 
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
