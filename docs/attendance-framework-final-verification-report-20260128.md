@@ -4,6 +4,7 @@
 - `pnpm --filter @metasheet/core-backend build`
 - `pnpm --filter @metasheet/web build`
 - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+- `python3 docs/attendance-import-preview-payload.json -> POST /api/attendance/import/preview`
 
 ## Commands Run (Server: 142.171.239.56)
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend migrate"`
@@ -30,6 +31,8 @@
 - ✅ Attendance integration test passed (1 test)
 - ⚠️ Test run logged DB auth errors from Workflow engine init (password auth failed for user `metasheet`), but test still passed.
 - ⚠️ Policy engine behavior validated by code review; no dedicated policy preview/import test run yet.
+- ✅ Import preview API (server) succeeded for 2 users (payload saved in `docs/attendance-import-preview-payload.json`).
+- ⚠️ Re-run preview with timezone-corrected payload failed due to 401 (token expired); needs fresh admin token to re-validate.
 - ✅ Backend container rebuilt and restarted
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
