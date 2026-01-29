@@ -6,9 +6,16 @@
 - Notes: Vite reported a chunk-size warning (existing build guidance). No build errors.
 
 ## Runtime Verification
-- UI/API execution: Not run in this workspace (requires running app + valid backend).
-- Recommended check:
-  1) Open Attendance → Admin → Rule Preview (Engine)
-  2) Fill work date + clock in/out + (optional) role tags/attendance group
-  3) Click **Run preview**
-  4) Confirm status + minutes + engine diagnostics populate
+- UI/API execution: ✅ Pass (2026-01-29)
+- Steps:
+  1) Opened Attendance → Admin → Rule Preview (Engine)
+  2) Filled: userId=attendance-test, workDate=today, clockIn=09:05, clockOut=18:02, actualHours=8
+  3) Clicked **Run preview**
+- Result:
+  - Status: Normal
+  - Work minutes: 480
+  - Late minutes: 0
+  - Early leave: 0
+  - Leave minutes: 0
+  - Overtime minutes: 0
+  - Engine diagnostics: empty (no engine overrides returned for this sample)
