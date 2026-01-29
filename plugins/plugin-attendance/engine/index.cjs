@@ -22,8 +22,17 @@ function buildFacts(input) {
   const profile = input?.profile ?? {}
   const calc = input?.calc ?? {}
   const approvals = input?.approvals ?? []
-  const leaveHours = calc.leaveHours ?? calc.leave_hours
-  const exceptionReason = calc.exceptionReason ?? calc.exception_reason
+  const leaveHours = calc.leaveHours ?? calc.leave_hours ?? record.leave_hours
+  const exceptionReason =
+    calc.exceptionReason ?? calc.exception_reason ?? record.exceptionReason ?? record.exception_reason
+
+  const approvalSummary =
+    record.approvalSummary ??
+    record.approval_summary ??
+    record.attendance_approve ??
+    record.attendanceApprove ??
+    record.approval
+  const approval = approvals.length ? approvals : approvalSummary ?? record.approval
 
   const clockIn1 = record.clockIn1 ?? record.clock_in_1 ?? record['1_on_duty_user_check_time']
   const clockOut1 = record.clockOut1 ?? record.clock_out_1 ?? record['1_off_duty_user_check_time']
@@ -36,10 +45,16 @@ function buildFacts(input) {
     ...record,
     ...calc,
     approvals,
-    approval: approvals,
-    attendance_group: record.attendance_group ?? profile.attendance_group ?? profile.attendanceGroup,
+    approval,
+    approvalSummary,
+    attendance_group:
+      record.attendance_group ??
+      record.attendanceGroup ??
+      profile.attendance_group ??
+      profile.attendanceGroup,
     role_tags: profile.role_tags ?? profile.roleTags ?? [],
-    department: profile.department,
+    role: profile.role ?? record.role,
+    department: profile.department ?? record.department,
     shift: record.shift ?? record.plan_detail,
     clockIn1,
     clockOut1,
@@ -78,7 +93,42 @@ function matchesWhen(when, facts) {
     if (key.endsWith('_exists')) {
       const field = key.replace(/_exists$/, '')
       const actual = facts[field]
-      return Boolean(actual)
+      const exists = Boolean(actual)
+      if (expected === false) return !exists
+      return exists
+    }
+    if (key.endsWith('_contains_any')) {
+      const field = key.replace(/_contains_any$/, '')
+      const actual = facts[field]
+      if (Array.isArray(expected)) {
+        if (Array.isArray(actual)) {
+          return expected.some((value) => actual.includes(value))
+        }
+        if (typeof actual === 'string') {
+          return expected.some((value) => actual.includes(String(value)))
+        }
+        return false
+      }
+      if (Array.isArray(actual)) return actual.includes(expected)
+      if (typeof actual === 'string') return actual.includes(String(expected))
+      return false
+    }
+    if (key.endsWith('_not_contains')) {
+      const field = key.replace(/_not_contains$/, '')
+      const actual = facts[field]
+      if (actual == null || actual === '') return true
+      if (Array.isArray(expected)) {
+        if (Array.isArray(actual)) {
+          return expected.every((value) => !actual.includes(value))
+        }
+        if (typeof actual === 'string') {
+          return expected.every((value) => !actual.includes(String(value)))
+        }
+        return false
+      }
+      if (Array.isArray(actual)) return !actual.includes(expected)
+      if (typeof actual === 'string') return !actual.includes(String(expected))
+      return false
     }
     if (key.endsWith('_contains')) {
       const field = key.replace(/_contains$/, '')
@@ -96,11 +146,29 @@ function matchesWhen(when, facts) {
       if (typeof actual === 'string') return actual.includes(String(expected))
       return false
     }
+    if (key.endsWith('_before')) {
+      const field = key.replace(/_before$/, '')
+      const actual = facts[field]
+      const diff = compareTime(actual, expected)
+      return diff != null && diff < 0
+    }
     if (key.endsWith('_after')) {
       const field = key.replace(/_after$/, '')
       const actual = facts[field]
       const diff = compareTime(actual, expected)
       return diff != null && diff > 0
+    }
+    if (key.endsWith('_gt')) {
+      const field = key.replace(/_gt$/, '')
+      const actual = Number(facts[field])
+      if (!Number.isFinite(actual)) return false
+      return actual > Number(expected)
+    }
+    if (key.endsWith('_lt')) {
+      const field = key.replace(/_lt$/, '')
+      const actual = Number(facts[field])
+      if (!Number.isFinite(actual)) return false
+      return actual < Number(expected)
     }
     if (key.endsWith('_gte')) {
       const field = key.replace(/_gte$/, '')
@@ -118,6 +186,10 @@ function matchesWhen(when, facts) {
       const field = key.replace(/_eq$/, '')
       return facts[field] === expected
     }
+    if (key.endsWith('_ne')) {
+      const field = key.replace(/_ne$/, '')
+      return facts[field] !== expected
+    }
     if (expected === true || expected === false) {
       return Boolean(facts[key]) === expected
     }
@@ -129,6 +201,10 @@ function matchesWhen(when, facts) {
 }
 
 function applyEffects(result, effects) {
+  const pushUnique = (list, value) => {
+    if (!value) return
+    if (!list.includes(value)) list.push(value)
+  }
   if (typeof effects.overtime_hours === 'number') {
     result.overtime_hours = effects.overtime_hours
   }
@@ -142,11 +218,17 @@ function applyEffects(result, effects) {
   if (typeof effects.actual_hours === 'number') {
     result.actual_hours = effects.actual_hours
   }
+  if (Array.isArray(effects.warnings)) {
+    effects.warnings.filter(Boolean).forEach((warning) => pushUnique(result.warnings, warning))
+  }
+  if (Array.isArray(effects.reasons)) {
+    effects.reasons.filter(Boolean).forEach((reason) => pushUnique(result.reasons, reason))
+  }
   if (effects.warning) {
-    result.warnings.push(effects.warning)
+    pushUnique(result.warnings, effects.warning)
   }
   if (effects.reason) {
-    result.reasons.push(effects.reason)
+    pushUnique(result.reasons, effects.reason)
   }
 }
 

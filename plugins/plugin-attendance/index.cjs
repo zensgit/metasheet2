@@ -4476,6 +4476,60 @@ module.exports = {
                       when: { exceptionReason_contains: '休息并打卡', overtime_hours_eq: 0 },
                       then: { warning: '休息日打卡但无加班单' },
                     },
+                    {
+                      id: 'rest_punch_missing_checkout_warning',
+                      when: {
+                        exceptionReason_contains: '休息并打卡',
+                        clockIn1_exists: true,
+                        clockOut1_exists: false,
+                      },
+                      then: { warning: '休息日打卡但缺少下班卡' },
+                    },
+                  ],
+                },
+                {
+                  name: '通用提醒',
+                  rules: [
+                    {
+                      id: 'overtime_approval_no_punch_warning',
+                      when: { approval_contains: '加班', has_punch: false },
+                      then: { warning: '有加班单但未打卡' },
+                    },
+                    {
+                      id: 'trip_and_overtime_warning',
+                      when: { exceptionReason_contains: '出差', overtime_hours_gt: 0 },
+                      then: { warning: '出差同时存在加班工时，请核对' },
+                    },
+                    {
+                      id: 'trip_low_hours_warning',
+                      when: {
+                        exceptionReason_contains: '出差',
+                        shift_not_contains: '休息',
+                        actual_hours_lt: 8,
+                        department_not_contains: ['国内销售', '服务测试部-调试'],
+                      },
+                      then: { warning: '出差当天实际工时不足8小时，请核对' },
+                    },
+                    {
+                      id: 'leave_makeup_missing_punch_warning',
+                      when: { exceptionReason_contains: ['缺卡', '补卡'], clockIn2_exists: false },
+                      then: { warning: '缺卡且补卡，但未找到上班2打卡，请核对' },
+                    },
+                    {
+                      id: 'trip_and_leave_conflict_warning',
+                      when: { exceptionReason_contains: ['出差', '事假'] },
+                      then: { warning: '出差+事假请核对' },
+                    },
+                    {
+                      id: 'trip_and_sick_conflict_warning',
+                      when: { exceptionReason_contains: ['出差', '病假'] },
+                      then: { warning: '出差+病假请核对' },
+                    },
+                    {
+                      id: 'trip_and_injury_conflict_warning',
+                      when: { exceptionReason_contains: ['出差', '工伤假'] },
+                      then: { warning: '出差+工伤假请核对' },
+                    },
                   ],
                 },
                 {
@@ -4987,7 +5041,7 @@ module.exports = {
               leaveMinutes,
               overtimeMinutes,
             })
-            const finalMetrics = {
+            const initialMetrics = {
               workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
               lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
               earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
@@ -5007,7 +5061,7 @@ module.exports = {
               },
               fieldValues,
               metrics: {
-                ...finalMetrics,
+                ...initialMetrics,
                 leaveMinutes: leaveMinutes ?? 0,
                 overtimeMinutes: overtimeMinutes ?? 0,
               },
@@ -5202,7 +5256,7 @@ module.exports = {
                 leaveMinutes,
                 overtimeMinutes,
               })
-              const finalMetrics = {
+              const initialMetrics = {
                 workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
                 lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
                 earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
@@ -5222,7 +5276,7 @@ module.exports = {
                 },
                 fieldValues,
                 metrics: {
-                  ...finalMetrics,
+                  ...initialMetrics,
                   leaveMinutes: leaveMinutes ?? 0,
                   overtimeMinutes: overtimeMinutes ?? 0,
                 },
@@ -5271,7 +5325,7 @@ module.exports = {
                 overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
               }
               const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
-              const finalMetrics = engineAdjustment.metrics
+            const finalMetrics = engineAdjustment.metrics
               const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
                 ? finalMetrics.leaveMinutes
                 : leaveMinutes

@@ -8,7 +8,9 @@ const RuleActionSchema = z
     required_hours: z.number().optional(),
     actual_hours: z.number().optional(),
     warning: z.string().optional(),
+    warnings: z.array(z.string()).optional(),
     reason: z.string().optional(),
+    reasons: z.array(z.string()).optional(),
   })
   .passthrough()
 
