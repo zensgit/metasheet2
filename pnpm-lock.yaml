@@ -7,8 +7,6 @@ settings:
 overrides:
   vite: ^5.4.0
 
-packageExtensionsChecksum: sha256-ZVrOAnBL1MHEIUP5gGvEOrOiHO65fddnw5DblUDTTI0=
-
 importers:
 
   .:
@@ -7515,9 +7513,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  htm@3.1.1:
-    dependencies:
-      preact: 10.28.2
+  htm@3.1.1: {}
 
   html-encoding-sniffer@4.0.0:
     dependencies:
