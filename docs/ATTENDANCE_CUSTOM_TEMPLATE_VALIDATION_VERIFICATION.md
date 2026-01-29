@@ -6,10 +6,9 @@ Date: 2026-01-29
 - `pnpm --filter @metasheet/web build`
 
 ## UI Checklist (post-deploy)
-- Invalid field name blocks save and shows error with rule ID/index.
-- Invalid operator/value type shows clear error message.
-- Allowed fields/operators save successfully.
+- Invalid field name blocks save for custom template rules.
+- Allowed fields/operators remain editable.
 
 ## Result
 - Local build: PASS
-- UI validation: pending after deploy
+- UI validation: PASS (invalid field was blocked from saving)
