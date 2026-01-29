@@ -44,9 +44,15 @@
 - ✅ API E2E: rule set, payroll template, payroll cycle created; summary + CSV export succeeded.
  - ⚠️ Policy rules preview/import validation not executed after latest changes (see Not Run).
 
+## Addendum (Local CSV Validation)
+- ✅ `node scripts/attendance/dingtalk-csv-to-import.mjs --input /Users/huazhou/Downloads/核对(2).csv --columns docs/dingtalk-columns-alias-20260128.json --user-map /Users/huazhou/Downloads/dingtalk-csv-userid-map-核对.json --out artifacts/attendance/import-核对-20260120-20260127.json --from 2026-01-20 --to 2026-01-27 --debug 1`
+- ✅ Output generated: `artifacts/attendance/import-核对-20260120-20260127.json` (3080 rows)
+- ⚠️ API preview/import not re-run in this pass (DB unavailable).
+
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
 - Policy engine preview/import UI smoke not re-run after latest policy changes.
+- Attendance API preview/import for CSV output not executed (DB offline).
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.

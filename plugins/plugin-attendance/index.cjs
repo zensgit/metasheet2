@@ -818,6 +818,34 @@ function matchFieldContains(actual, expectedText) {
   return source.includes(target)
 }
 
+function normalizeNumber(value) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const num = Number(trimmed)
+      return Number.isFinite(num) ? num : null
+    }
+  }
+  return null
+}
+
+function matchesNumberGte(actual, expected) {
+  const actualNum = normalizeNumber(actual)
+  const expectedNum = normalizeNumber(expected)
+  if (actualNum === null || expectedNum === null) return false
+  return actualNum >= expectedNum
+}
+
+function matchesNumberLte(actual, expected) {
+  const actualNum = normalizeNumber(actual)
+  const expectedNum = normalizeNumber(expected)
+  if (actualNum === null || expectedNum === null) return false
+  return actualNum <= expectedNum
+}
+
 function buildFieldValueMap(rawFields, mappedFields) {
   const values = { ...(rawFields || {}) }
   if (mappedFields && typeof mappedFields === 'object') {
@@ -892,6 +920,16 @@ function matchPolicyRule(ruleWhen, facts, fieldValues, userGroups, metrics) {
       if (!fieldHasValue(fieldValues[key])) return false
     }
   }
+  if (ruleWhen.metricGte && typeof ruleWhen.metricGte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.metricGte)) {
+      if (!matchesNumberGte(metrics[key], expected)) return false
+    }
+  }
+  if (ruleWhen.metricLte && typeof ruleWhen.metricLte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.metricLte)) {
+      if (!matchesNumberLte(metrics[key], expected)) return false
+    }
+  }
   if (ruleWhen.fieldEquals && typeof ruleWhen.fieldEquals === 'object') {
     for (const [key, expected] of Object.entries(ruleWhen.fieldEquals)) {
       if (!matchFieldEquals(fieldValues[key], expected)) return false
@@ -905,6 +943,16 @@ function matchPolicyRule(ruleWhen, facts, fieldValues, userGroups, metrics) {
   if (ruleWhen.fieldContains && typeof ruleWhen.fieldContains === 'object') {
     for (const [key, expected] of Object.entries(ruleWhen.fieldContains)) {
       if (!matchFieldContains(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldNumberGte && typeof ruleWhen.fieldNumberGte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldNumberGte)) {
+      if (!matchesNumberGte(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldNumberLte && typeof ruleWhen.fieldNumberLte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldNumberLte)) {
+      if (!matchesNumberLte(fieldValues[key], expected)) return false
     }
   }
   return true
@@ -930,6 +978,15 @@ function applyAttendancePolicies({ policies, facts, fieldValues, metrics }) {
     if (Number.isFinite(actions.setEarlyLeaveMinutes)) nextMetrics.earlyLeaveMinutes = actions.setEarlyLeaveMinutes
     if (Number.isFinite(actions.setLeaveMinutes)) nextMetrics.leaveMinutes = actions.setLeaveMinutes
     if (Number.isFinite(actions.setOvertimeMinutes)) nextMetrics.overtimeMinutes = actions.setOvertimeMinutes
+    if (Number.isFinite(actions.addWorkMinutes)) nextMetrics.workMinutes = (nextMetrics.workMinutes ?? 0) + actions.addWorkMinutes
+    if (Number.isFinite(actions.addLateMinutes)) nextMetrics.lateMinutes = (nextMetrics.lateMinutes ?? 0) + actions.addLateMinutes
+    if (Number.isFinite(actions.addEarlyLeaveMinutes)) {
+      nextMetrics.earlyLeaveMinutes = (nextMetrics.earlyLeaveMinutes ?? 0) + actions.addEarlyLeaveMinutes
+    }
+    if (Number.isFinite(actions.addLeaveMinutes)) nextMetrics.leaveMinutes = (nextMetrics.leaveMinutes ?? 0) + actions.addLeaveMinutes
+    if (Number.isFinite(actions.addOvertimeMinutes)) {
+      nextMetrics.overtimeMinutes = (nextMetrics.overtimeMinutes ?? 0) + actions.addOvertimeMinutes
+    }
     if (typeof actions.setStatus === 'string' && actions.setStatus.trim()) {
       nextMetrics.status = actions.setStatus.trim()
     }
@@ -1918,6 +1975,8 @@ module.exports = {
             fieldEquals: z.record(z.unknown()).optional(),
             fieldIn: z.record(z.array(z.unknown())).optional(),
             fieldContains: z.record(z.string()).optional(),
+            fieldNumberGte: z.record(z.number()).optional(),
+            fieldNumberLte: z.record(z.number()).optional(),
             shiftNames: z.array(z.string()).optional(),
             isHoliday: z.boolean().optional(),
             isWorkingDay: z.boolean().optional(),
@@ -1937,6 +1996,10 @@ module.exports = {
               fieldIn: z.record(z.array(z.unknown())).optional(),
               fieldContains: z.record(z.string()).optional(),
               fieldExists: z.array(z.string()).optional(),
+              metricGte: z.record(z.number()).optional(),
+              metricLte: z.record(z.number()).optional(),
+              fieldNumberGte: z.record(z.number()).optional(),
+              fieldNumberLte: z.record(z.number()).optional(),
             }).optional(),
             then: z.object({
               setWorkMinutes: z.number().int().min(0).optional(),
@@ -1944,6 +2007,11 @@ module.exports = {
               setEarlyLeaveMinutes: z.number().int().min(0).optional(),
               setLeaveMinutes: z.number().int().min(0).optional(),
               setOvertimeMinutes: z.number().int().min(0).optional(),
+              addWorkMinutes: z.number().int().optional(),
+              addLateMinutes: z.number().int().optional(),
+              addEarlyLeaveMinutes: z.number().int().optional(),
+              addLeaveMinutes: z.number().int().optional(),
+              addOvertimeMinutes: z.number().int().optional(),
               setStatus: z.string().optional(),
               addWarning: z.string().optional(),
               addWarnings: z.array(z.string()).optional(),

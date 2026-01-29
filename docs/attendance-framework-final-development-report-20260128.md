@@ -22,6 +22,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Import preview/import can now apply policies and surface warnings.
 - Policy template added: `docs/attendance-dingtalk-policies-template.json`.
 - Rule-set config sample added: `docs/attendance-dingtalk-rule-set-config.json`.
+- Policy DSL extended with numeric comparisons and additive actions (see `docs/attendance-rule-dsl-spec-20260128.md`).
 
 ### 4) Admin UI
 - Rule sets, payroll templates, payroll cycles management.
@@ -33,6 +34,9 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Import UI section with JSON payload editor and preview.
 - Supports rule-set mapping + basic status normalization.
 - Policy evaluation runs during preview/import (warnings + applied policies surfaced).
+- Added DingTalk CSV -> import payload script (`scripts/attendance/dingtalk-csv-to-import.mjs`) with BOM handling, date-range filters, and userId mapping.
+- Expanded DingTalk CSV column alias map to cover all exported columns: `docs/dingtalk-columns-alias-20260128.json`.
+- Merged DingTalk column-value samples into `docs/dingtalk-column-vals-merged-20260128.json` for reference.
 
 ### 6) OpenAPI + Tests
 - Schemas and endpoints updated for new attendance framework APIs.
@@ -61,6 +65,11 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - OpenAPI
   - `packages/openapi/src/base.yml`
   - `packages/openapi/src/paths/attendance.yml`
+- Docs
+  - `docs/attendance-rule-dsl-spec-20260128.md`
+  - `docs/attendance-rule-split-matrix-20260128.md`
+  - `docs/framework-business-carrier-20260128.md`
+  - `docs/dingtalk-column-vals-merged-20260128.json`
 
 ## Notes
 - Record-level leave/overtime minutes are computed on read via a batch query per date range.
