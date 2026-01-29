@@ -67,7 +67,9 @@
 
 ## Full Import (Single Request) Result
 - ✅ Full CSV import succeeded as a single request after nginx limit increase (no status mapping). Output saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-single.json`.
-- ❌ Full CSV import with `statusMap` still failed (`value too long for type character varying(20)`). Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap.json`. Backend image needs update or further status normalization.
+- ❌ Full CSV import with `statusMap` still failed (`value too long for type character varying(20)`), even after adding prefix matching in code. Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap.json`.
+- ❌ Full CSV import with pre-normalized `attend_result` and expanded `statusMap` still failed (same error). Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized.json`.
+- ⚠️ Recommendation: keep status mapping disabled (use computed status) for now, or instrument backend to log offending status values.
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.

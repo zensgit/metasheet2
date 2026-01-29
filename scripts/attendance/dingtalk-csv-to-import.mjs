@@ -11,6 +11,7 @@ Options:
   --user-map <user-map-json>   Map empNo -> userId/name (optional)
   --mapping <mapping-json>     Attach import mapping (optional)
   --status-map <json>          Attach statusMap to payload (optional)
+  --normalize-status <true|1>  Normalize long attendance status strings
   --source <source>            Source tag (default: dingtalk_csv)
   --from <YYYY-MM-DD>          Filter start date (inclusive)
   --to <YYYY-MM-DD>            Filter end date (inclusive)
@@ -113,6 +114,28 @@ function loadStatusMap(statusMapPath) {
   return data.statusMap ?? data
 }
 
+function normalizeStatusText(value, statusMap) {
+  if (value === null || value === undefined) return value
+  const text = String(value).trim()
+  if (!text) return text
+  if (text.length <= 20) return text
+  const defaultOrder = [
+    '补卡申请', '加班', '事假', '病假', '工伤假', '调休', '出差', '外出', '请假', '外勤', '缺卡', '迟到早退', '迟到', '早退', '旷工', '正常', '休息',
+  ]
+  const keys = statusMap ? Object.keys(statusMap) : []
+  const candidates = (keys.length ? keys : defaultOrder)
+    .filter((key) => key !== '休息')
+    .concat((keys.length ? keys.includes('休息') : defaultOrder.includes('休息')) ? ['休息'] : [])
+  const lowerText = text.toLowerCase()
+  const sorted = candidates.sort((a, b) => b.length - a.length)
+  for (const key of sorted) {
+    if (!key) continue
+    const lowerKey = String(key).toLowerCase()
+    if (lowerText.includes(lowerKey)) return key
+  }
+  return text.slice(0, 20)
+}
+
 function parseCsv(raw) {
   const rows = []
   let row = []
@@ -169,6 +192,7 @@ function main() {
   const timezone = args.timezone || 'Asia/Shanghai'
   const orgId = args['org-id'] || ''
   const debug = ['1', 'true', 'yes'].includes(String(args.debug || '').toLowerCase())
+  const normalizeStatus = ['1', 'true', 'yes'].includes(String(args['normalize-status'] || '').toLowerCase())
 
   const columnsData = loadJson(columnsPath)
   const columnMap = loadColumnMap(columnsData)
@@ -215,7 +239,11 @@ function main() {
       if (value === '' || value === null || typeof value === 'undefined') continue
       const trimmedKey = key.trim()
       const alias = columnMap.get(trimmedKey) || trimmedKey
-      fields[alias] = typeof value === 'string' ? value.trim() : value
+      let nextValue = typeof value === 'string' ? value.trim() : value
+      if (normalizeStatus && alias === 'attend_result' && typeof nextValue === 'string') {
+        nextValue = normalizeStatusText(nextValue, statusMap)
+      }
+      fields[alias] = nextValue
     }
     if (user.name) fields.name = user.name
     fields.attendance_group = fields.attendance_group || row['考勤组'] || row['attendance_group'] || ''

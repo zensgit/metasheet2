@@ -38,6 +38,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Added DingTalk CSV -> import payload script (`scripts/attendance/dingtalk-csv-to-import.mjs`) with BOM handling, date-range filters, and userId mapping.
 - Expanded DingTalk CSV column alias map to cover all exported columns: `docs/dingtalk-columns-alias-20260128.json`.
 - Added statusMap payload support in CSV import script (`--status-map`).
+- Added status normalization option for long `attend_result` strings (`--normalize-status`).
 - Merged DingTalk column-value samples into `docs/dingtalk-column-vals-merged-20260128.json` for reference.
 
 ### 6) OpenAPI + Tests

@@ -17,6 +17,7 @@
     "调休": "adjusted",
     "加班": "adjusted",
     "补卡申请": "adjusted",
-    "外勤": "adjusted"
+    "外勤": "adjusted",
+    "未打卡": "partial"
   }
 }
