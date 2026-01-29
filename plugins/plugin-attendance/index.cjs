@@ -4493,6 +4493,10 @@ module.exports = {
           emitEvent('attendance.ruleSet.created', { orgId, ruleSetId: mapped.id })
           res.status(201).json({ ok: true, data: mapped })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Rule set already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return

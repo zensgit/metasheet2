@@ -461,7 +461,7 @@ describe('Spreadsheet Integration Tests', () => {
       })
 
       const missingCellResult = await formulaEngine.calculate('=A1', context)
-      expect(missingCellResult).toBeNull()
+      expect(missingCellResult).toBe('#ERROR!')
     })
 
     test('should handle complex nested formulas', async () => {
@@ -1033,7 +1033,7 @@ describe('Spreadsheet Integration Tests', () => {
       })
 
       const result = await formulaEngine.calculate('=A1', context)
-      expect(result).toBeNull()
+      expect(result).toBe('#ERROR!')
 
       // SUM should treat null/empty cells as 0
       const sumResult = await formulaEngine.calculate('=SUM(A1, 5, A2)', context)
