@@ -578,7 +578,12 @@
                 <div class="attendance__template-group">
                   <div class="attendance__template-header">
                     <span>Custom templates</span>
-                    <span class="attendance__tag attendance__tag--editable">Editable</span>
+                    <div class="attendance__template-header-actions">
+                      <span class="attendance__tag attendance__tag--editable">Editable</span>
+                      <button class="attendance__btn attendance__btn--sm" type="button" @click="createCustomTemplate">
+                        New
+                      </button>
+                    </div>
                   </div>
                   <div v-if="ruleSetCustomTemplates.length === 0" class="attendance__empty">
                     No custom templates yet.
@@ -587,12 +592,81 @@
                     <li v-for="tpl in ruleSetCustomTemplates" :key="tpl.name" class="attendance__template-item">
                       <div class="attendance__template-name">{{ tpl.name }}</div>
                       <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                      <button class="attendance__btn attendance__btn--sm" type="button" @click="openCustomTemplateEditor(tpl)">
+                        Edit rules
+                      </button>
                     </li>
                   </ul>
                 </div>
               </div>
               <div class="attendance__template-hint">
                 System templates are locked. You can add or modify custom templates in <code>engine.templates</code>.
+              </div>
+              <div v-if="customTemplateEditingName" class="attendance__template-editor">
+                <div class="attendance__template-editor-header">
+                  <div>
+                    <div class="attendance__template-editor-title">Editing custom template</div>
+                    <div class="attendance__template-editor-name">{{ customTemplateEditingName }}</div>
+                  </div>
+                  <button class="attendance__btn attendance__btn--sm" type="button" @click="closeCustomTemplateEditor">
+                    Close
+                  </button>
+                </div>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field" for="attendance-custom-template-description">
+                    <span>Description</span>
+                    <input
+                      id="attendance-custom-template-description"
+                      v-model="customTemplateDraftDescription"
+                      type="text"
+                      placeholder="Optional description"
+                    />
+                  </label>
+                </div>
+                <div class="attendance__template-rules">
+                  <div v-if="customTemplateDraftRules.length === 0" class="attendance__empty">
+                    No rules yet. Add your first rule below.
+                  </div>
+                  <div v-for="(rule, index) in customTemplateDraftRules" :key="rule.key" class="attendance__template-rule">
+                    <label class="attendance__field" :for="`attendance-custom-rule-id-${rule.key}`">
+                      <span>Rule ID</span>
+                      <input :id="`attendance-custom-rule-id-${rule.key}`" v-model="rule.id" type="text" />
+                    </label>
+                    <label class="attendance__field attendance__field--full" :for="`attendance-custom-rule-when-${rule.key}`">
+                      <span>When (JSON)</span>
+                      <textarea
+                        :id="`attendance-custom-rule-when-${rule.key}`"
+                        v-model="rule.whenText"
+                        rows="4"
+                        placeholder='{\"clockIn1_exists\": true}'
+                      />
+                    </label>
+                    <label class="attendance__field attendance__field--full" :for="`attendance-custom-rule-then-${rule.key}`">
+                      <span>Then (JSON)</span>
+                      <textarea
+                        :id="`attendance-custom-rule-then-${rule.key}`"
+                        v-model="rule.thenText"
+                        rows="4"
+                        placeholder='{\"warning\": \"...\"}'
+                      />
+                    </label>
+                    <div class="attendance__template-rule-actions">
+                      <button
+                        class="attendance__btn attendance__btn--danger attendance__btn--sm"
+                        type="button"
+                        @click="removeCustomRule(index)"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" type="button" @click="addCustomRule">Add rule</button>
+                  <button class="attendance__btn attendance__btn--primary" type="button" @click="saveCustomTemplate">
+                    Save template
+                  </button>
+                </div>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
@@ -1990,6 +2064,13 @@ interface AttendanceEngineTemplate {
   rules?: Array<Record<string, any>>
 }
 
+interface AttendanceRuleDraft {
+  key: string
+  id: string
+  whenText: string
+  thenText: string
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -2409,6 +2490,9 @@ const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
 
 const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
 const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
+const customTemplateEditingName = ref<string | null>(null)
+const customTemplateDraftDescription = ref('')
+const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
 
 const payrollTemplateForm = reactive({
   name: '',
@@ -2605,6 +2689,138 @@ function applyTemplateLock(config: Record<string, any>) {
 
   engine.templates = Array.from(merged.values())
   return { ...config, engine }
+}
+
+function buildRuleDrafts(rules: Array<Record<string, any>> = []): AttendanceRuleDraft[] {
+  return rules.map((rule, index) => ({
+    key: `${rule.id ?? 'rule'}-${index}-${Date.now()}`,
+    id: String(rule.id ?? `rule_${index + 1}`),
+    whenText: JSON.stringify(rule.when ?? {}, null, 2),
+    thenText: JSON.stringify(rule.then ?? {}, null, 2),
+  }))
+}
+
+function openCustomTemplateEditor(template: AttendanceEngineTemplate) {
+  customTemplateEditingName.value = template.name
+  customTemplateDraftDescription.value = template.description ?? ''
+  customTemplateDraftRules.value = buildRuleDrafts(template.rules ?? [])
+}
+
+function closeCustomTemplateEditor() {
+  customTemplateEditingName.value = null
+  customTemplateDraftDescription.value = ''
+  customTemplateDraftRules.value = []
+}
+
+function addCustomRule() {
+  customTemplateDraftRules.value.push({
+    key: `rule-${Date.now()}`,
+    id: `rule_${customTemplateDraftRules.value.length + 1}`,
+    whenText: '{\n}',
+    thenText: '{\n}',
+  })
+}
+
+function removeCustomRule(index: number) {
+  customTemplateDraftRules.value.splice(index, 1)
+}
+
+function parseRuleJson(text: string, label: string) {
+  const trimmed = text.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (parsed && typeof parsed === 'object') return parsed
+    throw new Error('JSON must be an object')
+  } catch (error: any) {
+    throw new Error(`${label} must be valid JSON object`)
+  }
+}
+
+function saveCustomTemplate() {
+  const name = customTemplateEditingName.value?.trim()
+  if (!name) {
+    setStatus('Select a custom template to edit.', 'error')
+    return
+  }
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    setStatus('Rule set config must be valid JSON before editing templates.', 'error')
+    return
+  }
+  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
+  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
+  let rules: Array<Record<string, any>>
+  try {
+    rules = customTemplateDraftRules.value.map((draft, index) => ({
+      id: draft.id.trim() || `rule_${index + 1}`,
+      when: parseRuleJson(draft.whenText, `Rule ${index + 1} when`),
+      then: parseRuleJson(draft.thenText, `Rule ${index + 1} then`),
+    }))
+  } catch (error: any) {
+    setStatus(error?.message || 'Invalid rule JSON.', 'error')
+    return
+  }
+
+  const updatedTemplate: AttendanceEngineTemplate = {
+    name,
+    category: 'custom',
+    editable: true,
+    description: customTemplateDraftDescription.value.trim() || undefined,
+    rules,
+  }
+
+  const existingIndex = templates.findIndex((tpl) => tpl.name === name)
+  if (existingIndex >= 0) {
+    templates[existingIndex] = { ...templates[existingIndex], ...updatedTemplate }
+  } else {
+    templates.push(updatedTemplate)
+  }
+
+  engine.templates = templates
+  config.engine = engine
+  ruleSetForm.config = JSON.stringify(config, null, 2)
+  syncRuleSetTemplates(config)
+  setStatus('Custom template updated.')
+}
+
+function createCustomTemplate() {
+  const name = window.prompt('Custom template name')
+  const trimmed = name?.trim()
+  if (!trimmed) return
+  if (SYSTEM_TEMPLATE_NAMES.includes(trimmed)) {
+    setStatus('Template name conflicts with a system template.', 'error')
+    return
+  }
+
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    setStatus('Rule set config must be valid JSON before editing templates.', 'error')
+    return
+  }
+  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
+  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
+  const existing = templates.find((tpl) => tpl.name === trimmed)
+  if (existing) {
+    openCustomTemplateEditor(existing)
+    setStatus('Custom template already exists. Opened for editing.')
+    return
+  }
+
+  const newTemplate: AttendanceEngineTemplate = {
+    name: trimmed,
+    category: 'custom',
+    editable: true,
+    description: '',
+    rules: [],
+  }
+  templates.push(newTemplate)
+  engine.templates = templates
+  config.engine = engine
+  ruleSetForm.config = JSON.stringify(config, null, 2)
+  syncRuleSetTemplates(config)
+  openCustomTemplateEditor(newTemplate)
+  setStatus('Custom template created.')
 }
 
 function buildImportPayload(): Record<string, any> | null {
@@ -4001,6 +4217,7 @@ function resetRuleSetForm() {
   ruleSetForm.config = '{}'
   ruleSetSystemTemplates.value = []
   ruleSetCustomTemplates.value = []
+  closeCustomTemplateEditor()
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
@@ -4012,6 +4229,7 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
   syncRuleSetTemplates(item.config ?? {})
+  closeCustomTemplateEditor()
 }
 
 async function loadRuleSets() {
@@ -4114,6 +4332,7 @@ async function loadRuleSetTemplate() {
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
     syncRuleSetTemplates(data.data ?? {})
+    closeCustomTemplateEditor()
     setStatus('Rule set template loaded.')
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load rule set template', 'error')
@@ -4518,6 +4737,11 @@ watch(orgId, () => {
   cursor: pointer;
 }
 
+.attendance__btn--sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .attendance__btn--primary {
   background: #1976d2;
   border-color: #1976d2;
@@ -4888,6 +5112,12 @@ watch(orgId, () => {
   color: #333;
 }
 
+.attendance__template-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .attendance__template-list {
   list-style: none;
   padding: 0;
@@ -4905,6 +5135,53 @@ watch(orgId, () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.attendance__template-editor {
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.attendance__template-editor-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+}
+
+.attendance__template-editor-name {
+  font-size: 12px;
+  color: #666;
+}
+
+.attendance__template-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-rule {
+  border: 1px dashed #d6d6d6;
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.attendance__template-rule-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .attendance__template-name {
