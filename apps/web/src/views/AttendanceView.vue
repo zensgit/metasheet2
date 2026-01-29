@@ -559,6 +559,41 @@
                   />
                 </label>
               </div>
+              <div class="attendance__template-panel">
+                <div class="attendance__template-group">
+                  <div class="attendance__template-header">
+                    <span>System templates</span>
+                    <span class="attendance__tag attendance__tag--locked">Locked</span>
+                  </div>
+                  <div v-if="ruleSetSystemTemplates.length === 0" class="attendance__empty">
+                    No system templates detected.
+                  </div>
+                  <ul v-else class="attendance__template-list">
+                    <li v-for="tpl in ruleSetSystemTemplates" :key="tpl.name" class="attendance__template-item">
+                      <div class="attendance__template-name">{{ tpl.name }}</div>
+                      <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                    </li>
+                  </ul>
+                </div>
+                <div class="attendance__template-group">
+                  <div class="attendance__template-header">
+                    <span>Custom templates</span>
+                    <span class="attendance__tag attendance__tag--editable">Editable</span>
+                  </div>
+                  <div v-if="ruleSetCustomTemplates.length === 0" class="attendance__empty">
+                    No custom templates yet.
+                  </div>
+                  <ul v-else class="attendance__template-list">
+                    <li v-for="tpl in ruleSetCustomTemplates" :key="tpl.name" class="attendance__template-item">
+                      <div class="attendance__template-name">{{ tpl.name }}</div>
+                      <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+              <div class="attendance__template-hint">
+                System templates are locked. You can add or modify custom templates in <code>engine.templates</code>.
+              </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
                   {{ ruleSetSaving ? 'Saving...' : ruleSetEditingId ? 'Update rule set' : 'Create rule set' }}
@@ -1946,6 +1981,15 @@ interface AttendanceRuleSet {
   isDefault: boolean
 }
 
+interface AttendanceEngineTemplate {
+  name: string
+  category?: 'system' | 'custom'
+  editable?: boolean
+  description?: string
+  scope?: Record<string, any>
+  rules?: Array<Record<string, any>>
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -2354,6 +2398,18 @@ const ruleSetForm = reactive({
   config: '{}',
 })
 
+const SYSTEM_TEMPLATE_NAMES = ['单休车间规则', '通用提醒', '角色规则', '部门提醒']
+const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
+  name: '用户自定义',
+  category: 'custom',
+  editable: true,
+  description: '为考勤管理员预留的自定义规则模板',
+  rules: [],
+}
+
+const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
+const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
+
 const payrollTemplateForm = reactive({
   name: '',
   timezone: defaultTimezone,
@@ -2502,6 +2558,53 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+function normalizeTemplate(template: AttendanceEngineTemplate): AttendanceEngineTemplate {
+  const isSystem = template.category === 'system' || template.editable === false || SYSTEM_TEMPLATE_NAMES.includes(template.name)
+  return {
+    ...template,
+    category: isSystem ? 'system' : 'custom',
+    editable: isSystem ? false : true,
+  }
+}
+
+function splitTemplates(templates: AttendanceEngineTemplate[] = []) {
+  const normalized = templates.map((tpl) => normalizeTemplate(tpl))
+  const system = normalized.filter((tpl) => tpl.category === 'system')
+  const custom = normalized.filter((tpl) => tpl.category !== 'system')
+  return { system, custom, normalized }
+}
+
+function syncRuleSetTemplates(config?: Record<string, any> | null) {
+  const templates = Array.isArray(config?.engine?.templates)
+    ? (config?.engine?.templates as AttendanceEngineTemplate[])
+    : []
+  const { system, custom } = splitTemplates(templates)
+  ruleSetSystemTemplates.value = system
+  ruleSetCustomTemplates.value = custom
+}
+
+function applyTemplateLock(config: Record<string, any>) {
+  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
+  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
+  const { custom } = splitTemplates(templates)
+
+  const lockedSystem = ruleSetSystemTemplates.value.length
+    ? ruleSetSystemTemplates.value.map(normalizeTemplate)
+    : splitTemplates(templates).system
+
+  const customTemplates = custom.map(normalizeTemplate)
+  if (!customTemplates.some((tpl) => tpl.name === CUSTOM_TEMPLATE_FALLBACK.name)) {
+    customTemplates.push({ ...CUSTOM_TEMPLATE_FALLBACK })
+  }
+
+  const merged = new Map<string, AttendanceEngineTemplate>()
+  lockedSystem.forEach((tpl) => merged.set(tpl.name, tpl))
+  customTemplates.forEach((tpl) => merged.set(tpl.name, tpl))
+
+  engine.templates = Array.from(merged.values())
+  return { ...config, engine }
 }
 
 function buildImportPayload(): Record<string, any> | null {
@@ -3896,6 +3999,8 @@ function resetRuleSetForm() {
   ruleSetForm.scope = 'org'
   ruleSetForm.isDefault = false
   ruleSetForm.config = '{}'
+  ruleSetSystemTemplates.value = []
+  ruleSetCustomTemplates.value = []
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
@@ -3906,6 +4011,7 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.scope = item.scope ?? 'org'
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
+  syncRuleSetTemplates(item.config ?? {})
 }
 
 async function loadRuleSets() {
@@ -3933,10 +4039,11 @@ async function loadRuleSets() {
 async function saveRuleSet() {
   ruleSetSaving.value = true
   try {
-    const config = parseJsonConfig(ruleSetForm.config)
+    let config = parseJsonConfig(ruleSetForm.config)
     if (!config) {
       throw new Error('Rule set config must be valid JSON')
     }
+    config = applyTemplateLock(config)
 
     const payload = {
       name: ruleSetForm.name.trim(),
@@ -4006,6 +4113,7 @@ async function loadRuleSetTemplate() {
       throw new Error(data?.error?.message || 'Failed to load rule set template')
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
+    syncRuleSetTemplates(data.data ?? {})
     setStatus('Rule set template loaded.')
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load rule set template', 'error')
@@ -4315,6 +4423,15 @@ onMounted(() => {
       pluginsLoaded.value = true
     })
 })
+
+watch(
+  () => ruleSetForm.config,
+  (value) => {
+    const parsed = parseJsonConfig(value)
+    if (parsed) syncRuleSetTemplates(parsed)
+  },
+  { immediate: true }
+)
 
 watch(orgId, () => {
   if (attendancePluginActive.value) {
@@ -4746,6 +4863,82 @@ watch(orgId, () => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
+}
+
+.attendance__template-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.attendance__template-group {
+  border: 1px solid #e6e6e6;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.attendance__template-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #333;
+}
+
+.attendance__template-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__template-item {
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attendance__template-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #222;
+}
+
+.attendance__template-meta {
+  font-size: 12px;
+  color: #666;
+}
+
+.attendance__template-hint {
+  font-size: 12px;
+  color: #666;
+}
+
+.attendance__tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e9eef7;
+  color: #2f5ea5;
+}
+
+.attendance__tag--locked {
+  background: #f0f0f0;
+  color: #666;
+}
+
+.attendance__tag--editable {
+  background: #e6f4ea;
+  color: #2e7d32;
 }
 
 @media (max-width: 768px) {
