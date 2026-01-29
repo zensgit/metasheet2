@@ -37,7 +37,10 @@
 - ✅ Docker build workflow re-run on branch after lockfile checksum refresh (run `21463337505`) and pushed latest backend/frontend images.
 - ⚠️ Initial docker build failed due to `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`; resolved by updating `pnpm-lock.yaml` checksum and re-running workflow.
 - ✅ DB migration executed: `zzzz20260128120000_create_attendance_rule_sets_and_payroll`
-- ✅ Attendance integration test passed (1 test)
+- ❌ Integration test suite failed (3 tests). Failures:
+  - `tests/integration/attendance-plugin.test.ts`: duplicate key on `attendance_rule_sets` (`idx_attendance_rule_sets_org_name`), assertion expected 201/409 but got 500.
+  - `tests/integration/spreadsheet-integration.test.ts`: formula engine returned `#ERROR!` for null/empty cell reference cases (2 tests).
+  - Plugin loader warnings for `plugin-view-kanban` parsing error (test still continued).
 - ⚠️ Test run logged DB auth errors from Workflow engine init (password auth failed for user `metasheet`), but test still passed.
 - ⚠️ Policy engine behavior validated by code review; no dedicated policy preview/import test run yet.
 - ✅ Import preview API (server) succeeded for 2 users (payload saved in `docs/attendance-import-preview-payload.json`).
