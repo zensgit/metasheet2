@@ -8,9 +8,9 @@ Date: 2026-01-29
 ## UI Checklist (post-deploy)
 - Custom templates list shows **New** and **Edit rules**.
 - Editor panel opens for a custom template.
-- Rule add/remove controls visible.
+- Rule add/remove controls visible (Add rule reveals Rule ID/When/Then fields).
 - Saving writes updated rules back to rule set config.
 
 ## Result
 - Local build: PASS
-- UI validation: pending after deploy
+- UI validation: PASS
