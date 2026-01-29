@@ -4421,6 +4421,21 @@ module.exports = {
               cycleMode: 'template',
               templateId: '',
             },
+            engine: {
+              templates: [
+                {
+                  name: '单休车间规则',
+                  scope: { attendance_group: ['单休车间'] },
+                  rules: [
+                    {
+                      id: 'rest_trip_default_overtime',
+                      when: { shift: '休息', approval_contains: '出差' },
+                      then: { overtime_hours: 8, reason: '单休车间休息日出差默认8小时' },
+                    },
+                  ],
+                },
+              ],
+            },
             policies: {
               userGroups: [
                 {
