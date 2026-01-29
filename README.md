@@ -29,6 +29,7 @@ MetaSheet V2 is a collaborative spreadsheet platform built on a modern microkern
 - **👋 New to the Project?** → [Quick Start Guide](claudedocs/QUICK_START_GUIDE.md) (5-minute setup)
 - **📊 Project Status?** → [Development Status](claudedocs/DEVELOPMENT_STATUS.md) (comprehensive overview)
 - **🔌 Need API Reference?** → [API Documentation](claudedocs/API_DOCUMENTATION.md) (complete API guide)
+- **🧭 Attendance Rule Examples?** → [Custom Rule Templates](docs/ATTENDANCE_CUSTOM_RULE_TEMPLATES.md)
 
 ### Prerequisites
 

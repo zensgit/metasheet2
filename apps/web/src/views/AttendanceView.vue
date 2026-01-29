@@ -663,6 +663,9 @@
                 </div>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" type="button" @click="addCustomRule">Add rule</button>
+                  <button class="attendance__btn" type="button" @click="insertCustomRuleSamples">
+                    Insert examples
+                  </button>
                   <button class="attendance__btn attendance__btn--primary" type="button" @click="saveCustomTemplate">
                     Save template
                   </button>
@@ -2696,6 +2699,34 @@ const RULE_ACTION_FIELDS: Record<string, 'number' | 'string' | 'stringArray'> = 
   reasons: 'stringArray',
 }
 
+const CUSTOM_RULE_SAMPLES: Array<Record<string, any>> = [
+  {
+    id: 'role_short_hours',
+    when: { role_tags_contains: 'driver' },
+    then: { actual_hours: 6, warning: '司机短班', reason: 'Role-based adjustment' },
+  },
+  {
+    id: 'missing_checkout',
+    when: { clockIn1_exists: true, clockOut1_exists: false },
+    then: { warning: '缺少下班卡' },
+  },
+  {
+    id: 'trip_overtime_conflict',
+    when: { exceptionReason_contains: '出差', overtime_hours_gt: 0 },
+    then: { warning: '出差同时存在加班，请核对' },
+  },
+  {
+    id: 'rest_day_punch',
+    when: { shift_contains: '休息', has_punch: true },
+    then: { reason: '休息日打卡', overtime_hours: 8 },
+  },
+  {
+    id: 'leave_with_punch',
+    when: { leave_hours_gt: 0, has_punch: true },
+    then: { warning: '请假但仍有打卡记录' },
+  },
+]
+
 const payrollTemplateForm = reactive({
   name: '',
   timezone: defaultTimezone,
@@ -2953,6 +2984,41 @@ function addCustomRule() {
     whenText: '{\n}',
     thenText: '{\n}',
   })
+}
+
+function insertCustomRuleSamples() {
+  if (!customTemplateEditingName.value) {
+    setStatus('Open a custom template before inserting examples.', 'error')
+    return
+  }
+  const existingIds = new Set(customTemplateDraftRules.value.map(rule => rule.id.trim()))
+  let inserted = 0
+  let skipped = 0
+
+  CUSTOM_RULE_SAMPLES.forEach((sample, index) => {
+    const id = String(sample.id ?? `sample_${index + 1}`).trim()
+    if (!id || existingIds.has(id)) {
+      skipped += 1
+      return
+    }
+    existingIds.add(id)
+    customTemplateDraftRules.value.push({
+      key: `sample-${id}-${Date.now()}`,
+      id,
+      whenText: JSON.stringify(sample.when ?? {}, null, 2),
+      thenText: JSON.stringify(sample.then ?? {}, null, 2),
+    })
+    inserted += 1
+  })
+
+  if (inserted === 0) {
+    setStatus('All sample rules already exist.', 'error')
+    return
+  }
+  const message = skipped > 0
+    ? `Inserted ${inserted} sample rules (${skipped} skipped).`
+    : `Inserted ${inserted} sample rules.`
+  setStatus(message)
 }
 
 function removeCustomRule(index: number) {
