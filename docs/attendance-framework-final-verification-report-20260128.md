@@ -49,11 +49,15 @@
 - ✅ Output generated: `artifacts/attendance/import-核对-20260120-20260127.json` (3080 rows)
 - ✅ API preview (mapped sample) succeeded for 10 rows. Output saved in `docs/attendance-import-preview-核对-20260120-20260127.json`.
 - ❌ API import (same payload) failed with `INTERNAL_ERROR` (HTTP 500). Response saved in `docs/attendance-import-核对-20260120-20260127.json`. Needs backend logs for root cause.
+- ✅ API preview re-run after removing status mapping succeeded. Output saved in `docs/attendance-import-preview-核对-20260120-20260127-nostatus.json`.
+- ✅ API import succeeded for 10 rows after removing status mapping. Output saved in `docs/attendance-import-核对-20260120-20260127-nostatus.json`.
+- ✅ Records API verified for sample user: `docs/attendance-records-核对-20260120-20260124.json`.
 
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
 - Policy engine preview/import UI smoke not re-run after latest policy changes.
 - Attendance API import for full 3080-row CSV output not executed (only 10-row sample attempted).
+- Import preview/import with `statusMap` normalization not executed (we removed status mapping instead).
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.
