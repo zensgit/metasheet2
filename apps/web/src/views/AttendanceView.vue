@@ -716,6 +716,129 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Rule Preview (Engine)</h4>
+                <button class="attendance__btn" :disabled="rulePreviewLoading" @click="runRulePreview">
+                  {{ rulePreviewLoading ? 'Running...' : 'Run preview' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-preview-rule-set">
+                  <span>Rule set</span>
+                  <select
+                    id="attendance-preview-rule-set"
+                    v-model="rulePreviewForm.ruleSetId"
+                    :disabled="ruleSets.length === 0"
+                  >
+                    <option value="">(Optional) Use default rule</option>
+                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-preview-user">
+                  <span>User ID</span>
+                  <input
+                    id="attendance-preview-user"
+                    v-model="rulePreviewForm.userId"
+                    type="text"
+                    placeholder="Required"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-preview-work-date">
+                  <span>Work date</span>
+                  <input id="attendance-preview-work-date" v-model="rulePreviewForm.workDate" type="date" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-clock-in">
+                  <span>Clock in</span>
+                  <input id="attendance-preview-clock-in" v-model="rulePreviewForm.clockInAt" type="time" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-clock-out">
+                  <span>Clock out</span>
+                  <input id="attendance-preview-clock-out" v-model="rulePreviewForm.clockOutAt" type="time" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-shift">
+                  <span>Shift name</span>
+                  <input id="attendance-preview-shift" v-model="rulePreviewForm.shiftName" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-group">
+                  <span>Attendance group</span>
+                  <input id="attendance-preview-group" v-model="rulePreviewForm.attendanceGroup" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-role-tags">
+                  <span>Role tags</span>
+                  <input
+                    id="attendance-preview-role-tags"
+                    v-model="rulePreviewForm.roleTags"
+                    type="text"
+                    placeholder="security,driver"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-preview-dept">
+                  <span>Department</span>
+                  <input id="attendance-preview-dept" v-model="rulePreviewForm.department" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-exception">
+                  <span>Exception reason</span>
+                  <input id="attendance-preview-exception" v-model="rulePreviewForm.exceptionReason" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-work-hours">
+                  <span>Actual hours</span>
+                  <input id="attendance-preview-work-hours" v-model="rulePreviewForm.actualHours" type="number" min="0" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-overtime">
+                  <span>Overtime hours</span>
+                  <input id="attendance-preview-overtime" v-model="rulePreviewForm.overtimeHours" type="number" min="0" />
+                </label>
+                <label class="attendance__field" for="attendance-preview-leave">
+                  <span>Leave hours</span>
+                  <input id="attendance-preview-leave" v-model="rulePreviewForm.leaveHours" type="number" min="0" />
+                </label>
+                <label class="attendance__field attendance__field--checkbox">
+                  <span>Use current config</span>
+                  <input v-model="rulePreviewForm.useCurrentConfig" type="checkbox" />
+                </label>
+              </div>
+              <div v-if="rulePreviewResult" class="attendance__preview-card">
+                <div class="attendance__preview-grid">
+                  <div>
+                    <div class="attendance__preview-label">Status</div>
+                    <div>{{ formatStatus(rulePreviewResult.status) }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Work minutes</div>
+                    <div>{{ rulePreviewResult.workMinutes }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Late minutes</div>
+                    <div>{{ rulePreviewResult.lateMinutes }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Early leave</div>
+                    <div>{{ rulePreviewResult.earlyLeaveMinutes }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Leave minutes</div>
+                    <div>{{ rulePreviewResult.leaveMinutes ?? 0 }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Overtime minutes</div>
+                    <div>{{ rulePreviewResult.overtimeMinutes ?? 0 }}</div>
+                  </div>
+                </div>
+                <div v-if="rulePreviewResult.engine" class="attendance__preview-engine">
+                  <div class="attendance__preview-label">Applied rules</div>
+                  <div>{{ formatList(rulePreviewResult.engine.appliedRules) }}</div>
+                  <div class="attendance__preview-label">Warnings</div>
+                  <div>{{ formatList(rulePreviewResult.engine.warnings) }}</div>
+                  <div class="attendance__preview-label">Reasons</div>
+                  <div>{{ formatList(rulePreviewResult.engine.reasons) }}</div>
+                </div>
+              </div>
+              <div v-else class="attendance__empty">No preview run yet.</div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Import (DingTalk / Manual)</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
                   {{ importLoading ? 'Loading...' : 'Load template' }}
@@ -2110,6 +2233,24 @@ interface AttendanceImportPreviewItem {
   userGroups?: string[]
 }
 
+interface AttendanceRulePreviewItem {
+  userId: string
+  workDate: string
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  status: string
+  leaveMinutes?: number
+  overtimeMinutes?: number
+  engine?: {
+    appliedRules?: string[]
+    warnings?: string[]
+    reasons?: string[]
+    overrides?: Record<string, any> | null
+    base?: Record<string, any> | null
+  } | null
+}
+
 interface AttendanceShift {
   id: string
   orgId?: string
@@ -2254,6 +2395,7 @@ const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
 const importLoading = ref(false)
+const rulePreviewLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
@@ -2270,6 +2412,7 @@ const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
+const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
@@ -2576,6 +2719,23 @@ const importForm = reactive({
   payload: '{}',
 })
 
+const rulePreviewForm = reactive({
+  ruleSetId: '',
+  userId: '',
+  workDate: toDateInput(today),
+  clockInAt: '',
+  clockOutAt: '',
+  shiftName: '',
+  attendanceGroup: '',
+  roleTags: '',
+  department: '',
+  exceptionReason: '',
+  actualHours: '',
+  overtimeHours: '',
+  leaveHours: '',
+  useCurrentConfig: true,
+})
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
@@ -2673,6 +2833,14 @@ function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null
   } catch {
     return null
   }
+}
+
+function parseNumberInput(value: string | number): number | null {
+  const trimmed = String(value).trim()
+  if (!trimmed) return null
+  const numberValue = Number(trimmed)
+  if (!Number.isFinite(numberValue)) return null
+  return numberValue
 }
 
 function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
@@ -3021,6 +3189,74 @@ function buildImportPayload(): Record<string, any> | null {
   return payload
 }
 
+function buildRulePreviewPayload(): Record<string, any> | null {
+  if (!rulePreviewForm.workDate) {
+    setStatus('Work date is required for rule preview.', 'error')
+    return null
+  }
+
+  const fields: Record<string, any> = {}
+  if (rulePreviewForm.clockInAt) fields.clockInAt = rulePreviewForm.clockInAt
+  if (rulePreviewForm.clockOutAt) fields.clockOutAt = rulePreviewForm.clockOutAt
+
+  const shiftName = rulePreviewForm.shiftName.trim()
+  if (shiftName) fields.shiftName = shiftName
+  const attendanceGroup = rulePreviewForm.attendanceGroup.trim()
+  if (attendanceGroup) fields.attendanceGroup = attendanceGroup
+  const roleTags = rulePreviewForm.roleTags.trim()
+  if (roleTags) fields.roleTags = roleTags
+  const department = rulePreviewForm.department.trim()
+  if (department) fields.department = department
+  const exceptionReason = rulePreviewForm.exceptionReason.trim()
+  if (exceptionReason) fields.exceptionReason = exceptionReason
+
+  const actualHours = parseNumberInput(rulePreviewForm.actualHours)
+  if (actualHours !== null) fields.actualHours = actualHours
+  const overtimeHours = parseNumberInput(rulePreviewForm.overtimeHours)
+  if (overtimeHours !== null) fields.overtimeHours = overtimeHours
+  const leaveHours = parseNumberInput(rulePreviewForm.leaveHours)
+  if (leaveHours !== null) fields.leaveHours = leaveHours
+
+  const payload: Record<string, any> = {
+    source: 'manual',
+    mapping: {
+      columns: [
+        { sourceField: 'clockInAt', targetField: 'firstInAt', dataType: 'time' },
+        { sourceField: 'clockOutAt', targetField: 'lastOutAt', dataType: 'time' },
+        { sourceField: 'actualHours', targetField: 'workHours', dataType: 'hours' },
+        { sourceField: 'overtimeHours', targetField: 'overtimeMinutes', dataType: 'hours' },
+        { sourceField: 'leaveHours', targetField: 'leaveMinutes', dataType: 'hours' },
+      ],
+    },
+    rows: [
+      {
+        workDate: rulePreviewForm.workDate,
+        fields,
+      },
+    ],
+  }
+
+  const resolvedOrgId = normalizedOrgId()
+  if (resolvedOrgId) payload.orgId = resolvedOrgId
+
+  const userId = rulePreviewForm.userId.trim() || normalizedUserId()
+  if (userId) payload.userId = userId
+
+  if (rulePreviewForm.ruleSetId) payload.ruleSetId = rulePreviewForm.ruleSetId
+  if (defaultTimezone) payload.timezone = defaultTimezone
+
+  if (rulePreviewForm.useCurrentConfig) {
+    const config = parseJsonConfig(ruleSetForm.config)
+    if (!config) {
+      setStatus('Rule set config must be valid JSON before previewing.', 'error')
+      return null
+    }
+    if (config.engine) payload.engine = config.engine
+  }
+
+  return payload
+}
+
 function payrollTemplateName(templateId?: string | null): string {
   if (!templateId) return 'Manual'
   const found = payrollTemplates.value.find(item => item.id === templateId)
@@ -3066,6 +3302,35 @@ async function previewImport() {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
   } finally {
     importLoading.value = false
+  }
+}
+
+async function runRulePreview() {
+  const payload = buildRulePreviewPayload()
+  if (!payload) return
+
+  rulePreviewLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to run rule preview')
+    }
+    adminForbidden.value = false
+    const items = data.data?.items ?? []
+    rulePreviewResult.value = items.length > 0 ? items[0] : null
+    setStatus('Rule preview completed.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to run rule preview', 'error')
+  } finally {
+    rulePreviewLoading.value = false
   }
 }
 
@@ -5278,6 +5543,34 @@ watch(orgId, () => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.attendance__preview-card {
+  border: 1px solid #e6e6e6;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 16px;
+}
+
+.attendance__preview-label {
+  font-size: 12px;
+  color: #777;
+  margin-bottom: 4px;
+}
+
+.attendance__preview-engine {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
 }
 
 .attendance__template-group {
