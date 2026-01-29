@@ -79,6 +79,15 @@ function matchesWhen(when, facts) {
     if (key.endsWith('_contains')) {
       const field = key.replace(/_contains$/, '')
       const actual = facts[field]
+      if (Array.isArray(expected)) {
+        if (Array.isArray(actual)) {
+          return expected.every((value) => actual.includes(value))
+        }
+        if (typeof actual === 'string') {
+          return expected.every((value) => actual.includes(String(value)))
+        }
+        return false
+      }
       if (Array.isArray(actual)) return actual.includes(expected)
       if (typeof actual === 'string') return actual.includes(String(expected))
       return false
@@ -88,6 +97,18 @@ function matchesWhen(when, facts) {
       const actual = facts[field]
       const diff = compareTime(actual, expected)
       return diff != null && diff > 0
+    }
+    if (key.endsWith('_gte')) {
+      const field = key.replace(/_gte$/, '')
+      const actual = Number(facts[field])
+      if (!Number.isFinite(actual)) return false
+      return actual >= Number(expected)
+    }
+    if (key.endsWith('_lte')) {
+      const field = key.replace(/_lte$/, '')
+      const actual = Number(facts[field])
+      if (!Number.isFinite(actual)) return false
+      return actual <= Number(expected)
     }
     if (key.endsWith('_eq')) {
       const field = key.replace(/_eq$/, '')

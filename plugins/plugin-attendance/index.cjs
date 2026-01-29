@@ -4432,6 +4432,58 @@ module.exports = {
                       when: { shift: '休息', approval_contains: '出差' },
                       then: { overtime_hours: 8, reason: '单休车间休息日出差默认8小时' },
                     },
+                    {
+                      id: 'after7_no_overtime_warning',
+                      when: { clockOut2_after: '19:00', overtime_hours_eq: 0 },
+                      then: { warning: '下班晚但无加班单' },
+                    },
+                    {
+                      id: 'rest_punch_no_overtime_warning',
+                      when: { exceptionReason_contains: '休息并打卡', overtime_hours_eq: 0 },
+                      then: { warning: '休息日打卡但无加班单' },
+                    },
+                  ],
+                },
+                {
+                  name: '角色规则',
+                  scope: { role_tags: ['security', 'driver'] },
+                  rules: [
+                    {
+                      id: 'security_base_hours',
+                      when: { role: 'security' },
+                      then: { required_hours: 8 },
+                    },
+                    {
+                      id: 'security_holiday_overtime',
+                      when: { role: 'security', is_holiday: true, has_punch: true },
+                      then: { overtime_hours: 8, reason: '保安节假日算加班' },
+                    },
+                    {
+                      id: 'driver_rest_punch_overtime',
+                      when: { role: 'driver', shift: '休息', clockIn1_exists: true },
+                      then: { overtime_hours: 8, reason: '司机休息日打卡算加班' },
+                    },
+                  ],
+                },
+                {
+                  name: '部门提醒',
+                  scope: { department: ['国内销售', '服务测试部-调试'] },
+                  rules: [
+                    {
+                      id: 'trip_and_leave_warning',
+                      when: { exceptionReason_contains: ['出差', '事假'] },
+                      then: { warning: '出差+事假请核对' },
+                    },
+                    {
+                      id: 'trip_and_sick_warning',
+                      when: { exceptionReason_contains: ['出差', '病假'] },
+                      then: { warning: '出差+病假请核对' },
+                    },
+                    {
+                      id: 'trip_and_injury_warning',
+                      when: { exceptionReason_contains: ['出差', '工伤假'] },
+                      then: { warning: '出差+工伤假请核对' },
+                    },
                   ],
                 },
               ],
@@ -4939,17 +4991,19 @@ module.exports = {
                   ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
                   : []
 
-              engineResult = engine.evaluate({
-                record: {
-                  shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
-                  attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                  clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
-                  clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
-                  clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
-                  clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
-                  overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
-                  actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
-                },
+                engineResult = engine.evaluate({
+                  record: {
+                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
+                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
+                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
+                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
+                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    is_holiday: Boolean(context.holiday),
+                    is_workday: context.isWorkingDay,
+                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
+                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
+                  },
                 profile: {
                   roleTags,
                   department: valueFor('department'),
@@ -5151,6 +5205,8 @@ module.exports = {
                     clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
                     clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
                     clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    is_holiday: Boolean(context.holiday),
+                    is_workday: context.isWorkingDay,
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
                     actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
                   },

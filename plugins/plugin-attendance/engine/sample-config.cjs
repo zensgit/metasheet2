@@ -100,6 +100,11 @@ module.exports = {
             warning: '下班晚但无加班单',
           },
         },
+        {
+          id: 'rest_punch_no_overtime_warning',
+          when: { exceptionReason_contains: '休息并打卡', overtime_hours_eq: 0 },
+          then: { warning: '休息日打卡但无加班单' },
+        },
       ],
     },
     {
@@ -120,6 +125,27 @@ module.exports = {
           id: 'driver_rest_punch_overtime',
           when: { role: 'driver', shift: '休息', clockIn1_exists: true },
           then: { overtime_hours: 8, reason: '司机休息日打卡算加班' },
+        },
+      ],
+    },
+    {
+      name: '部门提醒',
+      scope: { department: ['国内销售', '服务测试部-调试'] },
+      rules: [
+        {
+          id: 'trip_and_leave_warning',
+          when: { exceptionReason_contains: ['出差', '事假'] },
+          then: { warning: '出差+事假请核对' },
+        },
+        {
+          id: 'trip_and_sick_warning',
+          when: { exceptionReason_contains: ['出差', '病假'] },
+          then: { warning: '出差+病假请核对' },
+        },
+        {
+          id: 'trip_and_injury_warning',
+          when: { exceptionReason_contains: ['出差', '工伤假'] },
+          then: { warning: '出差+工伤假请核对' },
         },
       ],
     },
