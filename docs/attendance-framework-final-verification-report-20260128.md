@@ -58,6 +58,11 @@
 - Policy engine preview/import UI smoke not re-run after latest policy changes.
 - Attendance API import for full 3080-row CSV output not executed (only 10-row sample attempted).
 - Import preview/import with `statusMap` normalization not executed (we removed status mapping instead).
+ - Full import initially failed with nginx 413; retried using 200-row batches.
+
+## Full Import (Batched) Result
+- ✅ Full CSV import succeeded in 16 batches (200 rows each, last 80). Batch log saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-batched.json`.
+- ✅ Summary API verified for sample user: `docs/attendance-summary-核对-20260120-20260127.json`.
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.
