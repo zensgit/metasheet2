@@ -1,7 +1,7 @@
 # Attendance Rule Preview (Engine) Update
 
 ## Overview
-Added a Rule Preview (Engine) panel in the Attendance admin UI to simulate a single-day record against the rule engine and show the resulting metrics plus engine diagnostics (applied rules, warnings, reasons).
+Added a Rule Preview (Engine) panel in the Attendance admin UI to simulate a single-day record against the rule engine and show the resulting metrics plus engine diagnostics (applied rules, warnings, reasons, overrides/base).
 
 ## What Changed
 - New admin section **Rule Preview (Engine)** with inputs for:
@@ -10,6 +10,7 @@ Added a Rule Preview (Engine) panel in the Attendance admin UI to simulate a sin
   - Actual/overtime/leave hours
   - Toggle to use the current (unsaved) rule set config as engine input
 - Run Preview button that calls `/api/attendance/import/preview` and displays a compact summary + engine diagnostics.
+- Engine diagnostics include `overrides` and `base` blocks for quick diffing.
 - UI styling for the preview card and result blocks.
 
 ## Key Files

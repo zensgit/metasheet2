@@ -832,6 +832,10 @@
                   <div>{{ formatList(rulePreviewResult.engine.warnings) }}</div>
                   <div class="attendance__preview-label">Reasons</div>
                   <div>{{ formatList(rulePreviewResult.engine.reasons) }}</div>
+                  <div class="attendance__preview-label">Overrides</div>
+                  <pre class="attendance__preview-json">{{ formatJson(rulePreviewResult.engine.overrides) }}</pre>
+                  <div class="attendance__preview-label">Base metrics</div>
+                  <pre class="attendance__preview-json">{{ formatJson(rulePreviewResult.engine.base) }}</pre>
                 </div>
               </div>
               <div v-else class="attendance__empty">No preview run yet.</div>
@@ -2771,6 +2775,13 @@ function formatStatus(value: string): string {
 function formatList(items?: Array<string> | null): string {
   if (!items || items.length === 0) return '--'
   return items.map(item => String(item)).filter(Boolean).join(', ')
+}
+
+function formatJson(value?: Record<string, any> | null): string {
+  if (!value || typeof value !== 'object') return '--'
+  const keys = Object.keys(value)
+  if (keys.length === 0) return '--'
+  return JSON.stringify(value, null, 2)
 }
 
 function formatPolicyList(item: AttendanceImportPreviewItem): string {
@@ -5571,6 +5582,17 @@ watch(orgId, () => {
   display: grid;
   gap: 6px;
   font-size: 13px;
+}
+
+.attendance__preview-json {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #e3e3e3;
+  background: #fff;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .attendance__template-group {
