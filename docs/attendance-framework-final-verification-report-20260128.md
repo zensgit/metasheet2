@@ -10,6 +10,9 @@
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend migrate"`
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend test:integration:attendance"`
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend build"`
+- `tar -xzf /tmp/plugin-attendance.tar.gz -C /tmp`
+- `docker cp /tmp/plugin-attendance/. metasheet-backend:/app/plugins/plugin-attendance`
+- `docker exec metasheet-postgres psql -U metasheet -d metasheet -c "ALTER TABLE attendance_records ALTER COLUMN status TYPE VARCHAR(64);"`
 - `docker restart metasheet-backend`
 - `tar -xzf ~/metasheet-web-dist.tgz -C ~/web-dist`
 - `docker exec metasheet-web sh -lc "rm -rf /usr/share/nginx/html/*"`
@@ -36,6 +39,8 @@
 - ✅ Records API verified: `/api/attendance/records` returned 5 rows per user (files `docs/attendance-records-server-*.json`).
 - ⚠️ Re-run preview with timezone-corrected payload failed due to 401 (token expired); needs fresh admin token to re-validate.
 - ✅ Backend container rebuilt and restarted
+- ✅ Attendance plugin hotpatched in container (statusMap substring matching) and backend restarted
+- ✅ DB schema updated: `attendance_records.status` length set to `VARCHAR(64)`
 - ✅ Web static assets updated and container restarted
 - ✅ Web root responded `200`
 - ✅ UI smoke: `/attendance` loaded; Rule Sets / Payroll Templates / Payroll Cycles sections visible; no auth error banner.
@@ -43,22 +48,24 @@
 - ✅ UI records (MCP): same range, user `0613271732687725` shows 5 records; Summary totals 5 days / 0 minutes / Absent 5; status `Absent`.
 - ✅ API E2E: rule set, payroll template, payroll cycle created; summary + CSV export succeeded.
  - ⚠️ Policy rules preview/import validation not executed after latest changes (see Not Run).
+- ✅ Import preview (full payload, statusMap) now normalizes to allowed statuses. Output: `docs/attendance-import-preview-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
+- ✅ Full CSV import (single request, statusMap) succeeded for 3080 rows. Output: `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
+- ✅ Summary API verified after statusMap import: `docs/attendance-summary-核对-20260120-20260127-statusmap.json`.
 
 ## Addendum (Local CSV Validation)
 - ✅ `node scripts/attendance/dingtalk-csv-to-import.mjs --input /Users/huazhou/Downloads/核对(2).csv --columns docs/dingtalk-columns-alias-20260128.json --user-map /Users/huazhou/Downloads/dingtalk-csv-userid-map-核对.json --out artifacts/attendance/import-核对-20260120-20260127.json --from 2026-01-20 --to 2026-01-27 --debug 1`
 - ✅ Output generated: `artifacts/attendance/import-核对-20260120-20260127.json` (3080 rows)
 - ✅ API preview (mapped sample) succeeded for 10 rows. Output saved in `docs/attendance-import-preview-核对-20260120-20260127.json`.
-- ❌ API import (same payload) failed with `INTERNAL_ERROR` (HTTP 500). Response saved in `docs/attendance-import-核对-20260120-20260127.json`. Needs backend logs for root cause.
+- ❌ API import (same payload) failed with `INTERNAL_ERROR` (HTTP 500) before server hotfix. Response saved in `docs/attendance-import-核对-20260120-20260127.json`.
 - ✅ API preview re-run after removing status mapping succeeded. Output saved in `docs/attendance-import-preview-核对-20260120-20260127-nostatus.json`.
 - ✅ API import succeeded for 10 rows after removing status mapping. Output saved in `docs/attendance-import-核对-20260120-20260127-nostatus.json`.
+- ✅ StatusMap preview/import now succeeds after server hotfix (see Full Import section).
 - ✅ Records API verified for sample user: `docs/attendance-records-核对-20260120-20260124.json`.
 
 ## Not Run
 - Full integration suite (`pnpm --filter @metasheet/core-backend test:integration`) not executed.
 - Policy engine preview/import UI smoke not re-run after latest policy changes.
-- Attendance API import for full 3080-row CSV output not executed (only 10-row sample attempted).
-- Import preview/import with `statusMap` normalization not executed (we removed status mapping instead).
- - Full import initially failed with nginx 413; retried using 200-row batches.
+- Full import initially failed with nginx 413; retried using 200-row batches.
 
 ## Full Import (Batched) Result
 - ✅ Full CSV import succeeded in 16 batches (200 rows each, last 80). Batch log saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-batched.json`.
@@ -67,9 +74,10 @@
 
 ## Full Import (Single Request) Result
 - ✅ Full CSV import succeeded as a single request after nginx limit increase (no status mapping). Output saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-single.json`.
-- ❌ Full CSV import with `statusMap` still failed (`value too long for type character varying(20)`), even after adding prefix matching in code. Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap.json`.
-- ❌ Full CSV import with pre-normalized `attend_result` and expanded `statusMap` still failed (same error). Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized.json`.
-- ⚠️ Recommendation: keep status mapping disabled (use computed status) for now, or instrument backend to log offending status values.
+- ✅ Full CSV import with `statusMap` succeeded after server hotfix + DB column update. Output saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
+- ✅ Preview with `statusMap` now returns only allowed statuses. Output saved in `docs/attendance-import-preview-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
+- ✅ Summary API verified for statusMap import: `docs/attendance-summary-核对-20260120-20260127-statusmap.json`.
+- ℹ️ Previous failure responses retained for reference: `docs/attendance-import-核对-20260120-20260127-full-statusmap.json`, `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized.json`.
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.

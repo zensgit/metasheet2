@@ -78,6 +78,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Record-level leave/overtime minutes are computed on read via a batch query per date range.
 - Rule-set preview uses rule/shift/holiday context but does not yet apply complex break or overtime rules.
 - Import now supports policy overrides via rule-set config; complex overtime/leave logic should be encoded in policy rules.
+- Preview/Stage hotfix applied: attendance plugin updated to use substring statusMap matching and DB status length extended to `VARCHAR(64)` to unblock statusMap imports.
 
 ## Recommended Next Steps
 - Add per-day leave/overtime impact on work minutes if required by payroll rules.
