@@ -1025,6 +1025,40 @@ function applyAttendancePolicies({ policies, facts, fieldValues, metrics }) {
   return { metrics: nextMetrics, warnings, appliedRules, userGroups: Array.from(userGroups) }
 }
 
+function applyEngineOverrides(metrics, engineResult) {
+  if (!engineResult || typeof engineResult !== 'object') {
+    return { metrics, meta: null }
+  }
+  const toMinutes = (hours) => Number.isFinite(hours) ? Math.round(Number(hours) * 60) : null
+  const base = {
+    workMinutes: metrics.workMinutes,
+    overtimeMinutes: metrics.overtimeMinutes,
+    requiredMinutes: metrics.requiredMinutes,
+  }
+  const overrides = {}
+  const nextMetrics = { ...metrics }
+
+  const overtimeMinutes = toMinutes(engineResult.overtime_hours)
+  if (overtimeMinutes != null) {
+    nextMetrics.overtimeMinutes = overtimeMinutes
+    overrides.overtimeMinutes = overtimeMinutes
+  }
+  const workMinutes = toMinutes(engineResult.actual_hours)
+  if (workMinutes != null) {
+    nextMetrics.workMinutes = workMinutes
+    overrides.workMinutes = workMinutes
+  }
+  const requiredMinutes = toMinutes(engineResult.required_hours)
+  if (requiredMinutes != null) {
+    overrides.requiredMinutes = requiredMinutes
+  }
+
+  if (Object.keys(overrides).length === 0) {
+    return { metrics, meta: null }
+  }
+  return { metrics: nextMetrics, meta: { base, overrides } }
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const rows = await db.query(
     `SELECT
@@ -5014,20 +5048,27 @@ module.exports = {
                   leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
                   exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
                 },
-              })
+                })
             }
+            const baseMetrics = {
+              ...effective,
+              leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : (leaveMinutes ?? 0),
+              overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : (overtimeMinutes ?? 0),
+            }
+            const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
+            const finalMetrics = engineAdjustment.metrics
 
             preview.push({
               userId,
               workDate,
               firstInAt: firstInAt ? firstInAt.toISOString() : null,
               lastOutAt: lastOutAt ? lastOutAt.toISOString() : null,
-              workMinutes: effective.workMinutes,
-              lateMinutes: effective.lateMinutes,
-              earlyLeaveMinutes: effective.earlyLeaveMinutes,
-              leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : (leaveMinutes ?? 0),
-              overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : (overtimeMinutes ?? 0),
-              status: effective.status,
+              workMinutes: finalMetrics.workMinutes,
+              lateMinutes: finalMetrics.lateMinutes,
+              earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+              leaveMinutes: finalMetrics.leaveMinutes,
+              overtimeMinutes: finalMetrics.overtimeMinutes,
+              status: finalMetrics.status,
               isWorkday: context.isWorkingDay,
               warnings: policyResult.warnings,
               appliedPolicies: policyResult.appliedRules,
@@ -5037,6 +5078,8 @@ module.exports = {
                     appliedRules: engineResult.appliedRules,
                     warnings: engineResult.warnings,
                     reasons: engineResult.reasons,
+                    overrides: engineAdjustment.meta?.overrides ?? null,
+                    base: engineAdjustment.meta?.base ?? null,
                   }
                 : null,
             })
@@ -5222,11 +5265,18 @@ module.exports = {
                   },
                 })
               }
-              const effectiveLeaveMinutes = Number.isFinite(effective.leaveMinutes)
-                ? effective.leaveMinutes
+              const baseMetrics = {
+                ...effective,
+                leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
+                overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
+              }
+              const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
+              const finalMetrics = engineAdjustment.metrics
+              const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
+                ? finalMetrics.leaveMinutes
                 : leaveMinutes
-              const effectiveOvertimeMinutes = Number.isFinite(effective.overtimeMinutes)
-                ? effective.overtimeMinutes
+              const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
+                ? finalMetrics.overtimeMinutes
                 : overtimeMinutes
 
               let meta = null
@@ -5245,6 +5295,8 @@ module.exports = {
                   appliedRules: engineResult.appliedRules,
                   warnings: engineResult.warnings,
                   reasons: engineResult.reasons,
+                  overrides: engineAdjustment.meta?.overrides ?? null,
+                  base: engineAdjustment.meta?.base ?? null,
                 }
               }
 
@@ -5259,10 +5311,10 @@ module.exports = {
                 mode: parsed.data.mode ?? 'override',
                 statusOverride,
                 overrideMetrics: {
-                  workMinutes: effective.workMinutes,
-                  lateMinutes: effective.lateMinutes,
-                  earlyLeaveMinutes: effective.earlyLeaveMinutes,
-                  status: effective.status,
+                  workMinutes: finalMetrics.workMinutes,
+                  lateMinutes: finalMetrics.lateMinutes,
+                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+                  status: finalMetrics.status,
                 },
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: effectiveLeaveMinutes,
@@ -5278,6 +5330,8 @@ module.exports = {
                       appliedRules: engineResult.appliedRules,
                       warnings: engineResult.warnings,
                       reasons: engineResult.reasons,
+                      overrides: engineAdjustment.meta?.overrides ?? null,
+                      base: engineAdjustment.meta?.base ?? null,
                     }
                   : null,
               })

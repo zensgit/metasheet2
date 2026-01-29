@@ -22,6 +22,8 @@ function buildFacts(input) {
   const profile = input?.profile ?? {}
   const calc = input?.calc ?? {}
   const approvals = input?.approvals ?? []
+  const leaveHours = calc.leaveHours ?? calc.leave_hours
+  const exceptionReason = calc.exceptionReason ?? calc.exception_reason
 
   const clockIn1 = record.clockIn1 ?? record.clock_in_1 ?? record['1_on_duty_user_check_time']
   const clockOut1 = record.clockOut1 ?? record.clock_out_1 ?? record['1_off_duty_user_check_time']
@@ -44,6 +46,8 @@ function buildFacts(input) {
     clockIn2,
     clockOut2,
     has_punch: hasPunch,
+    leave_hours: leaveHours,
+    exceptionReason,
   }
 }
 
