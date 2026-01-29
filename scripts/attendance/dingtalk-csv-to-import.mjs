@@ -10,6 +10,7 @@ function usage() {
 Options:
   --user-map <user-map-json>   Map empNo -> userId/name (optional)
   --mapping <mapping-json>     Attach import mapping (optional)
+  --status-map <json>          Attach statusMap to payload (optional)
   --source <source>            Source tag (default: dingtalk_csv)
   --from <YYYY-MM-DD>          Filter start date (inclusive)
   --to <YYYY-MM-DD>            Filter end date (inclusive)
@@ -106,6 +107,12 @@ function loadMapping(mappingPath) {
   return null
 }
 
+function loadStatusMap(statusMapPath) {
+  if (!statusMapPath) return null
+  const data = loadJson(statusMapPath)
+  return data.statusMap ?? data
+}
+
 function parseCsv(raw) {
   const rows = []
   let row = []
@@ -171,6 +178,7 @@ function main() {
 
   const userMap = loadUserMap(args['user-map'])
   const mapping = loadMapping(args.mapping)
+  const statusMap = loadStatusMap(args['status-map'])
 
   const csvRaw = fs.readFileSync(inputPath, 'utf-8')
   if (debug) {
@@ -230,6 +238,7 @@ function main() {
 
   const output = { source, rows }
   if (mapping) output.mapping = mapping
+  if (statusMap) output.statusMap = statusMap
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
   fs.writeFileSync(outPath, JSON.stringify(output, null, 2))

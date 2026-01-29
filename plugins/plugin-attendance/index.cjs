@@ -229,6 +229,30 @@ function normalizeStatusLabel(value) {
   return map[text] ?? map[normalized] ?? normalized.replace(/\s+/g, '_')
 }
 
+function resolveStatusOverride(value, statusMap) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  if (!text) return null
+  if (statusMap && typeof statusMap === 'object') {
+    const direct = statusMap[text] ?? statusMap[text.toLowerCase()]
+    if (typeof direct === 'string' && direct.trim()) return direct.trim()
+    const keys = Object.keys(statusMap)
+    let bestMatch = null
+    for (const key of keys) {
+      if (!key) continue
+      const lowerKey = String(key).toLowerCase()
+      const lowerText = text.toLowerCase()
+      if (lowerText.startsWith(lowerKey) || lowerText.includes(lowerKey)) {
+        if (!bestMatch || key.length > bestMatch.length) bestMatch = key
+      }
+    }
+    if (bestMatch && typeof statusMap[bestMatch] === 'string') {
+      return String(statusMap[bestMatch]).trim()
+    }
+  }
+  return normalizeStatusLabel(text)
+}
+
 function parseMinutesValue(value, dataType) {
   if (value === null || value === undefined || value === '') return null
   const numeric = parseNumber(value, null)
@@ -4825,7 +4849,7 @@ module.exports = {
             const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
             const statusRaw = valueFor('status')
             const statusOverride = statusRaw != null
-              ? statusMap[String(statusRaw)] ?? statusMap[String(statusRaw).toLowerCase()] ?? normalizeStatusLabel(statusRaw)
+              ? resolveStatusOverride(statusRaw, statusMap)
               : null
 
             const workMinutes = parseMinutesValue(
@@ -4977,7 +5001,7 @@ module.exports = {
               const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
-                ? statusMap[String(statusRaw)] ?? statusMap[String(statusRaw).toLowerCase()] ?? normalizeStatusLabel(statusRaw)
+                ? resolveStatusOverride(statusRaw, statusMap)
                 : null
 
               const workMinutes = parseMinutesValue(

@@ -63,6 +63,7 @@
 ## Full Import (Batched) Result
 - ✅ Full CSV import succeeded in 16 batches (200 rows each, last 80). Batch log saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-batched.json`.
 - ✅ Summary API verified for sample user: `docs/attendance-summary-核对-20260120-20260127.json`.
+- ✅ Nginx `client_max_body_size` increased to 50m in `metasheet-web` container to avoid 413 (server-side config change).
 
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.

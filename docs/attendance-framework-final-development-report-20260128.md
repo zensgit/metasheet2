@@ -23,6 +23,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Policy template added: `docs/attendance-dingtalk-policies-template.json`.
 - Rule-set config sample added: `docs/attendance-dingtalk-rule-set-config.json`.
 - Policy DSL extended with numeric comparisons and additive actions (see `docs/attendance-rule-dsl-spec-20260128.md`).
+- Status normalization supports prefix matching via `statusMap` (see `docs/attendance-status-map-20260129.json`).
 
 ### 4) Admin UI
 - Rule sets, payroll templates, payroll cycles management.
@@ -36,6 +37,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Policy evaluation runs during preview/import (warnings + applied policies surfaced).
 - Added DingTalk CSV -> import payload script (`scripts/attendance/dingtalk-csv-to-import.mjs`) with BOM handling, date-range filters, and userId mapping.
 - Expanded DingTalk CSV column alias map to cover all exported columns: `docs/dingtalk-columns-alias-20260128.json`.
+- Added statusMap payload support in CSV import script (`--status-map`).
 - Merged DingTalk column-value samples into `docs/dingtalk-column-vals-merged-20260128.json` for reference.
 
 ### 6) OpenAPI + Tests

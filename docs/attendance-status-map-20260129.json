@@ -1,0 +1,15 @@
+{
+  "statusMap": {
+    "正常": "normal",
+    "迟到": "late",
+    "早退": "early_leave",
+    "迟到早退": "late_early",
+    "缺卡": "partial",
+    "补卡": "adjusted",
+    "旷工": "absent",
+    "休息": "off",
+    "请假": "adjusted",
+    "外出": "adjusted",
+    "出差": "adjusted"
+  }
+}
