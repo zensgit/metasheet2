@@ -1,5 +1,6 @@
 const { randomUUID } = require('crypto')
 const { z } = require('zod')
+const { createRuleEngine } = require('./engine/index.cjs')
 
 const DEFAULT_ORG_ID = 'default'
 const DEFAULT_RULE = {
@@ -1991,6 +1992,7 @@ module.exports = {
         cycleMode: z.enum(['template', 'manual']).optional(),
         templateId: z.string().optional(),
       }).optional(),
+      engine: z.record(z.unknown()).optional(),
       policies: z.object({
         userGroups: z.array(
           z.object({
@@ -2062,6 +2064,7 @@ module.exports = {
       userId: z.string().optional(),
       timezone: z.string().optional(),
       ruleSetId: z.string().uuid().optional(),
+      engine: z.record(z.unknown()).optional(),
       mapping: z.object({
         columns: z.array(z.object({
           sourceField: z.string().min(1),
@@ -4819,6 +4822,16 @@ module.exports = {
             ?? ruleSetConfig?.mappings?.fields
             ?? []
 
+          let engine = null
+          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
+          if (engineConfig) {
+            try {
+              engine = createRuleEngine({ config: engineConfig, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (preview)', error)
+            }
+          }
+
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
             : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
@@ -4899,6 +4912,41 @@ module.exports = {
               },
             })
             const effective = policyResult.metrics
+            let engineResult = null
+            if (engine) {
+              const approvalSummary = valueFor('approvalSummary')
+                ?? valueFor('attendance_approve')
+                ?? valueFor('attendanceApprove')
+              const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
+              const roleTags = Array.isArray(rawRoleTags)
+                ? rawRoleTags
+                : typeof rawRoleTags === 'string' && rawRoleTags.trim()
+                  ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+                  : []
+
+              engineResult = engine.evaluate({
+                record: {
+                  shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
+                  attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                  clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
+                  clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
+                  clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
+                  clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                  overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
+                  actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
+                },
+                profile: {
+                  roleTags,
+                  department: valueFor('department'),
+                  attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                },
+                approvals: approvalSummary ?? [],
+                calc: {
+                  leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
+                  exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
+                },
+              })
+            }
 
             preview.push({
               userId,
@@ -4915,6 +4963,13 @@ module.exports = {
               warnings: policyResult.warnings,
               appliedPolicies: policyResult.appliedRules,
               userGroups: policyResult.userGroups,
+              engine: engineResult
+                ? {
+                    appliedRules: engineResult.appliedRules,
+                    warnings: engineResult.warnings,
+                    reasons: engineResult.reasons,
+                  }
+                : null,
             })
           }
 
@@ -4969,6 +5024,16 @@ module.exports = {
             ?? ruleSetConfig?.mappings?.columns
             ?? ruleSetConfig?.mappings?.fields
             ?? []
+
+          let engine = null
+          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
+          if (engineConfig) {
+            try {
+              engine = createRuleEngine({ config: engineConfig, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (import)', error)
+            }
+          }
 
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
@@ -5051,12 +5116,66 @@ module.exports = {
                 },
               })
               const effective = policyResult.metrics
+              let engineResult = null
+              if (engine) {
+                const approvalSummary = valueFor('approvalSummary')
+                  ?? valueFor('attendance_approve')
+                  ?? valueFor('attendanceApprove')
+                const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
+                const roleTags = Array.isArray(rawRoleTags)
+                  ? rawRoleTags
+                  : typeof rawRoleTags === 'string' && rawRoleTags.trim()
+                    ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+                    : []
+
+                engineResult = engine.evaluate({
+                  record: {
+                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
+                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
+                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
+                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
+                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
+                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
+                  },
+                  profile: {
+                    roleTags,
+                    department: valueFor('department'),
+                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                  },
+                  approvals: approvalSummary ?? [],
+                  calc: {
+                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
+                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
+                  },
+                })
+              }
               const effectiveLeaveMinutes = Number.isFinite(effective.leaveMinutes)
                 ? effective.leaveMinutes
                 : leaveMinutes
               const effectiveOvertimeMinutes = Number.isFinite(effective.overtimeMinutes)
                 ? effective.overtimeMinutes
                 : overtimeMinutes
+
+              let meta = null
+              if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+                meta = {
+                  policy: {
+                    warnings: policyResult.warnings,
+                    appliedRules: policyResult.appliedRules,
+                    userGroups: policyResult.userGroups,
+                  },
+                }
+              }
+              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
+                meta = meta ?? {}
+                meta.engine = {
+                  appliedRules: engineResult.appliedRules,
+                  warnings: engineResult.warnings,
+                  reasons: engineResult.reasons,
+                }
+              }
 
               const record = await upsertAttendanceRecord({
                 userId,
@@ -5077,12 +5196,20 @@ module.exports = {
                 isWorkday: context.isWorkingDay,
                 leaveMinutes: effectiveLeaveMinutes,
                 overtimeMinutes: effectiveOvertimeMinutes,
-                meta: (policyResult.warnings.length || policyResult.appliedRules.length)
-                  ? { policy: { warnings: policyResult.warnings, appliedRules: policyResult.appliedRules, userGroups: policyResult.userGroups } }
-                  : undefined,
+                meta: meta ?? undefined,
                 client: trx,
               })
-              results.push({ id: record.id, workDate })
+              results.push({
+                id: record.id,
+                workDate,
+                engine: engineResult
+                  ? {
+                      appliedRules: engineResult.appliedRules,
+                      warnings: engineResult.warnings,
+                      reasons: engineResult.reasons,
+                    }
+                  : null,
+              })
             }
           })
 
