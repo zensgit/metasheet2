@@ -4459,6 +4459,8 @@ module.exports = {
               templates: [
                 {
                   name: '单休车间规则',
+                  category: 'system',
+                  editable: false,
                   scope: { attendance_group: ['单休车间'] },
                   rules: [
                     {
@@ -4489,6 +4491,8 @@ module.exports = {
                 },
                 {
                   name: '通用提醒',
+                  category: 'system',
+                  editable: false,
                   rules: [
                     {
                       id: 'overtime_approval_no_punch_warning',
@@ -4534,6 +4538,8 @@ module.exports = {
                 },
                 {
                   name: '角色规则',
+                  category: 'system',
+                  editable: false,
                   scope: { role_tags: ['security', 'driver'] },
                   rules: [
                     {
@@ -4555,6 +4561,8 @@ module.exports = {
                 },
                 {
                   name: '部门提醒',
+                  category: 'system',
+                  editable: false,
                   scope: { department: ['国内销售', '服务测试部-调试'] },
                   rules: [
                     {
@@ -4573,6 +4581,13 @@ module.exports = {
                       then: { warning: '出差+工伤假请核对' },
                     },
                   ],
+                },
+                {
+                  name: '用户自定义',
+                  category: 'custom',
+                  editable: true,
+                  description: '为考勤管理员预留的自定义规则模板',
+                  rules: [],
                 },
               ],
             },

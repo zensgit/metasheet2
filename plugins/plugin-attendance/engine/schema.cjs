@@ -20,11 +20,16 @@ const RuleSchema = z.object({
   then: RuleActionSchema,
 })
 
-const TemplateSchema = z.object({
-  name: z.string(),
-  scope: z.record(z.any()).optional(),
-  rules: z.array(RuleSchema),
-})
+const TemplateSchema = z
+  .object({
+    name: z.string(),
+    category: z.enum(['system', 'custom']).optional(),
+    editable: z.boolean().optional(),
+    description: z.string().optional(),
+    scope: z.record(z.any()).optional(),
+    rules: z.array(RuleSchema),
+  })
+  .passthrough()
 
 const MappingSchema = z
   .object({
