@@ -10,6 +10,13 @@
     "休息": "off",
     "请假": "adjusted",
     "外出": "adjusted",
-    "出差": "adjusted"
+    "出差": "adjusted",
+    "事假": "adjusted",
+    "病假": "adjusted",
+    "工伤假": "adjusted",
+    "调休": "adjusted",
+    "加班": "adjusted",
+    "补卡申请": "adjusted",
+    "外勤": "adjusted"
   }
 }

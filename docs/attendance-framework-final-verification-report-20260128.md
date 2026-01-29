@@ -65,6 +65,10 @@
 - ✅ Summary API verified for sample user: `docs/attendance-summary-核对-20260120-20260127.json`.
 - ✅ Nginx `client_max_body_size` increased to 50m in `metasheet-web` container to avoid 413 (server-side config change).
 
+## Full Import (Single Request) Result
+- ✅ Full CSV import succeeded as a single request after nginx limit increase (no status mapping). Output saved in `docs/attendance-import-核对-20260120-20260127-full-nostatus-single.json`.
+- ❌ Full CSV import with `statusMap` still failed (`value too long for type character varying(20)`). Response saved in `docs/attendance-import-核对-20260120-20260127-full-statusmap.json`. Backend image needs update or further status normalization.
+
 ## Notes
 - No runtime UI/API smoke tests executed beyond the integration test above.
 - E2E API run created objects: Rule Set `d019f58c-2697-43f6-b9c7-bb6c483ad28e`, Template `b3379adb-9b5f-4d36-818e-47ec088b5fd1`, Cycle `b051e6bf-0fd7-461f-9771-5c7f0b8ac4a9`.

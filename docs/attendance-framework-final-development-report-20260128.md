@@ -23,7 +23,7 @@ Delivered a reusable attendance framework layer with rule sets, payroll cycles, 
 - Policy template added: `docs/attendance-dingtalk-policies-template.json`.
 - Rule-set config sample added: `docs/attendance-dingtalk-rule-set-config.json`.
 - Policy DSL extended with numeric comparisons and additive actions (see `docs/attendance-rule-dsl-spec-20260128.md`).
-- Status normalization supports prefix matching via `statusMap` (see `docs/attendance-status-map-20260129.json`).
+- Status normalization supports prefix matching via `statusMap` (see `docs/attendance-status-map-20260129.json`, expanded for leave/travel cases).
 
 ### 4) Admin UI
 - Rule sets, payroll templates, payroll cycles management.
