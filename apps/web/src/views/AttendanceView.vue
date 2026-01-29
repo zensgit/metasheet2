@@ -2494,6 +2494,61 @@ const customTemplateEditingName = ref<string | null>(null)
 const customTemplateDraftDescription = ref('')
 const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
 
+const RULE_FIELD_WHITELIST = new Set([
+  'attendance_group',
+  'attendanceGroup',
+  'role',
+  'role_tags',
+  'department',
+  'shift',
+  'clockIn1',
+  'clockOut1',
+  'clockIn2',
+  'clockOut2',
+  'clockIn3',
+  'clockOut3',
+  'has_punch',
+  'leave_hours',
+  'exceptionReason',
+  'exception_reason',
+  'approval',
+  'approvals',
+  'approvalSummary',
+  'overtime_hours',
+  'required_hours',
+  'actual_hours',
+  'actualAttendanceHours',
+  'requiredAttendanceHours',
+])
+
+const RULE_FIELD_PATTERNS = [/^clock(In|Out)\d+$/]
+
+const RULE_OPERATORS = [
+  { suffix: '_contains_any', type: 'contains' },
+  { suffix: '_not_contains', type: 'contains' },
+  { suffix: '_contains', type: 'contains' },
+  { suffix: '_exists', type: 'exists' },
+  { suffix: '_before', type: 'time' },
+  { suffix: '_after', type: 'time' },
+  { suffix: '_gte', type: 'number' },
+  { suffix: '_lte', type: 'number' },
+  { suffix: '_gt', type: 'number' },
+  { suffix: '_lt', type: 'number' },
+  { suffix: '_eq', type: 'primitive' },
+  { suffix: '_ne', type: 'primitive' },
+]
+
+const RULE_ACTION_FIELDS: Record<string, 'number' | 'string' | 'stringArray'> = {
+  overtime_hours: 'number',
+  overtime_add: 'number',
+  required_hours: 'number',
+  actual_hours: 'number',
+  warning: 'string',
+  warnings: 'stringArray',
+  reason: 'string',
+  reasons: 'stringArray',
+}
+
 const payrollTemplateForm = reactive({
   name: '',
   timezone: defaultTimezone,
@@ -2737,6 +2792,131 @@ function parseRuleJson(text: string, label: string) {
   }
 }
 
+function isWhitelistedField(field: string): boolean {
+  if (RULE_FIELD_WHITELIST.has(field)) return true
+  return RULE_FIELD_PATTERNS.some(pattern => pattern.test(field))
+}
+
+function resolveOperator(key: string) {
+  if (key === 'role') return { field: 'role', operator: 'role', type: 'string' as const }
+  for (const op of RULE_OPERATORS) {
+    if (key.endsWith(op.suffix)) {
+      const field = key.slice(0, -op.suffix.length)
+      return { field, operator: op.suffix, type: op.type }
+    }
+  }
+  return { field: key, operator: 'eq', type: 'primitive' as const }
+}
+
+function validateRuleValue(label: string, key: string, expected: any, type: string): string | null {
+  if (type === 'exists') {
+    if (typeof expected !== 'boolean') {
+      return `${label}: ${key} expects boolean (true/false)`
+    }
+    return null
+  }
+  if (type === 'time') {
+    if (typeof expected !== 'string' || !/^\d{1,2}:\d{2}(:\d{2})?$/.test(expected)) {
+      return `${label}: ${key} expects time string (HH:MM)`
+    }
+    return null
+  }
+  if (type === 'number') {
+    const num = typeof expected === 'number' ? expected : Number(expected)
+    if (!Number.isFinite(num)) {
+      return `${label}: ${key} expects number`
+    }
+    return null
+  }
+  if (type === 'contains') {
+    if (Array.isArray(expected)) {
+      if (expected.length === 0) {
+        return `${label}: ${key} expects non-empty array`
+      }
+      if (!expected.every(item => ['string', 'number'].includes(typeof item))) {
+        return `${label}: ${key} array values must be string or number`
+      }
+      return null
+    }
+    if (['string', 'number'].includes(typeof expected)) return null
+    return `${label}: ${key} expects string/number or array`
+  }
+  if (type === 'string') {
+    if (typeof expected !== 'string' || expected.trim().length === 0) {
+      return `${label}: ${key} expects non-empty string`
+    }
+    return null
+  }
+  if (Array.isArray(expected)) {
+    if (!expected.every(item => ['string', 'number', 'boolean'].includes(typeof item))) {
+      return `${label}: ${key} array values must be string/number/boolean`
+    }
+    return null
+  }
+  if (!['string', 'number', 'boolean'].includes(typeof expected)) {
+    return `${label}: ${key} expects string/number/boolean`
+  }
+  return null
+}
+
+function validateCustomTemplateRules(rules: Array<Record<string, any>>): string[] {
+  const errors: string[] = []
+  const seenIds = new Set<string>()
+  rules.forEach((rule, index) => {
+    const id = String(rule.id ?? '').trim()
+    const label = id ? `Rule ${id}` : `Rule #${index + 1}`
+    if (!id) {
+      errors.push(`${label}: rule id is required`)
+    } else if (seenIds.has(id)) {
+      errors.push(`${label}: duplicate rule id`)
+    }
+    if (id) seenIds.add(id)
+    const when = rule.when
+    if (!when || typeof when !== 'object' || Array.isArray(when)) {
+      errors.push(`${label}: when must be an object`)
+      return
+    }
+    Object.entries(when).forEach(([key, expected]) => {
+      const { field, type } = resolveOperator(key)
+      if (!field) {
+        errors.push(`${label}: invalid condition key "${key}"`)
+        return
+      }
+      if (!isWhitelistedField(field)) {
+        errors.push(`${label}: condition field "${field}" is not allowed`)
+      }
+      const valueError = validateRuleValue(label, key, expected, type)
+      if (valueError) errors.push(valueError)
+    })
+    const thenBlock = rule.then
+    if (!thenBlock || typeof thenBlock !== 'object' || Array.isArray(thenBlock)) {
+      errors.push(`${label}: then must be an object`)
+      return
+    }
+    Object.entries(thenBlock).forEach(([key, value]) => {
+      const expectedType = RULE_ACTION_FIELDS[key]
+      if (!expectedType) {
+        errors.push(`${label}: action field "${key}" is not allowed`)
+        return
+      }
+      if (expectedType === 'number') {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          errors.push(`${label}: action "${key}" expects number`)
+        }
+      } else if (expectedType === 'string') {
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          errors.push(`${label}: action "${key}" expects non-empty string`)
+        }
+      } else if (expectedType === 'stringArray') {
+        if (!Array.isArray(value) || value.length === 0 || !value.every(item => typeof item === 'string')) {
+          errors.push(`${label}: action "${key}" expects string array`)
+        }
+      }
+    })
+  })
+  return errors
+}
+
 function saveCustomTemplate() {
   const name = customTemplateEditingName.value?.trim()
   if (!name) {
@@ -2759,6 +2939,11 @@ function saveCustomTemplate() {
     }))
   } catch (error: any) {
     setStatus(error?.message || 'Invalid rule JSON.', 'error')
+    return
+  }
+  const validationErrors = validateCustomTemplateRules(rules)
+  if (validationErrors.length > 0) {
+    setStatus(validationErrors[0], 'error')
     return
   }
 
