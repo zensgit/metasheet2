@@ -1,0 +1,140 @@
+{
+  "ok": true,
+  "data": {
+    "items": [
+      {
+        "userId": "09141829115765",
+        "workDate": "2025-12-01",
+        "firstInAt": "2025-12-01T07:45:00.000Z",
+        "lastOutAt": "2025-12-01T17:04:00.000Z",
+        "workMinutes": 480,
+        "lateMinutes": 0,
+        "earlyLeaveMinutes": 46,
+        "leaveMinutes": 0,
+        "overtimeMinutes": 0,
+        "status": "early_leave",
+        "isWorkday": true
+      },
+      {
+        "userId": "09141829115765",
+        "workDate": "2025-12-02",
+        "firstInAt": "2025-12-02T07:47:00.000Z",
+        "lastOutAt": "2025-12-02T17:04:00.000Z",
+        "workMinutes": 480,
+        "lateMinutes": 0,
+        "earlyLeaveMinutes": 46,
+        "leaveMinutes": 0,
+        "overtimeMinutes": 0,
+        "status": "early_leave",
+        "isWorkday": true
+      },
+      {
+        "userId": "09141829115765",
+        "workDate": "2025-12-03",
+        "firstInAt": "2025-12-03T07:43:00.000Z",
+        "lastOutAt": "2025-12-03T17:04:00.000Z",
+        "workMinutes": 480,
+        "lateMinutes": 0,
+        "earlyLeaveMinutes": 46,
+        "leaveMinutes": 0,
+        "overtimeMinutes": 0,
+        "status": "early_leave",
+        "isWorkday": true
+      },
+      {
+        "userId": "09141829115765",
+        "workDate": "2025-12-04",
+        "firstInAt": "2025-12-04T07:48:00.000Z",
+        "lastOutAt": "2025-12-04T17:04:00.000Z",
+        "workMinutes": 480,
+        "lateMinutes": 0,
+        "earlyLeaveMinutes": 46,
+        "leaveMinutes": 0,
+        "overtimeMinutes": 0,
+        "status": "early_leave",
+        "isWorkday": true
+      },
+      {
+        "userId": "09141829115765",
+        "workDate": "2025-12-05",
+        "firstInAt": "2025-12-05T07:43:00.000Z",
+        "lastOutAt": "2025-12-05T17:12:00.000Z",
+        "workMinutes": 480,
+        "lateMinutes": 0,
+        "earlyLeaveMinutes": 38,
+        "leaveMinutes": 0,
+        "overtimeMinutes": 0,
+        "status": "early_leave",
+        "isWorkday": true
+      }
+    ],
+    "total": 5,
+    "mappingUsed": [
+      {
+        "sourceField": "1_on_duty_user_check_time",
+        "targetField": "firstInAt",
+        "dataType": "datetime"
+      },
+      {
+        "sourceField": "1_off_duty_user_check_time",
+        "targetField": "lastOutAt",
+        "dataType": "datetime"
+      },
+      {
+        "sourceField": "attend_result",
+        "targetField": "status",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_work_time",
+        "targetField": "workMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "late_minute",
+        "targetField": "lateMinutes",
+        "dataType": "minutes"
+      },
+      {
+        "sourceField": "leave_early_minute",
+        "targetField": "earlyLeaveMinutes",
+        "dataType": "minutes"
+      },
+      {
+        "sourceField": "leave_hours",
+        "targetField": "leaveMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "overtime_duration",
+        "targetField": "overtimeMinutes",
+        "dataType": "hours"
+      },
+      {
+        "sourceField": "plan_detail",
+        "targetField": "shiftName",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_class",
+        "targetField": "attendanceClass",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_approve",
+        "targetField": "approvalSummary",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_group",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "考勤组",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      }
+    ]
+  }
+}

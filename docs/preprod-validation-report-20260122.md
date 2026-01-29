@@ -117,9 +117,7 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - Check-in succeeds (`Check in recorded.`).
 - Adjustment request submitted and appears in recent list.
 - Admin console accessible (no forbidden message).
-- Screenshot: `docs/attendance-ui-20260123.png`
-- Approval flow: submitted a request and approved it in UI.
-- Approval screenshot: `docs/attendance-approval-ui-20260123.png`
+- Screenshot: `/tmp/attendance-ui.png`
 
 ## Artifacts
 - Logs: N/A
@@ -130,11 +128,3 @@ curl http://127.0.0.1:8900/api/attendance/settings
 - QA: TBD
 - Dev: TBD
 - Ops: TBD
-
-## 验证补充记录（2026-01-23）
-
-- 分支：sync/main（基于 origin/main）
-- 验证项：AuthService 单测
-- 命令：pnpm --filter @metasheet/core-backend exec vitest run tests/unit/AuthService.test.ts --watch=false
-- 结果：✅ 2/2 通过
-- 备注：仅补充验证本次 AuthService.verifyToken 相关逻辑

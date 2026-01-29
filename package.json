@@ -24,6 +24,7 @@
     "verify:plm-ui-full": "bash scripts/verify-plm-ui-full.sh",
     "verify:plm-regression": "bash scripts/verify-plm-regression.sh",
     "verify:attendance-ui": "node scripts/verify-attendance-ui.mjs",
+    "verify:attendance-import-ui": "node scripts/verify-attendance-import-ui.mjs",
     "verify:attendance-ui:optional": "bash -c 'if [ \"${RUN_ATTENDANCE_UI_SMOKE}\" = \"true\" ]; then node scripts/verify-attendance-ui.mjs; else echo \"skip attendance ui (set RUN_ATTENDANCE_UI_SMOKE=true)\"; fi'",
     "verify:univer-ui-smoke": "node scripts/verify-univer-ui-smoke.mjs",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",

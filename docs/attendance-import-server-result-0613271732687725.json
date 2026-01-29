@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "data": {
+    "imported": 5,
+    "items": [
+      {
+        "id": "961d57f9-11f6-4bb3-89f0-bf0fe55b0907",
+        "workDate": "2025-12-01"
+      },
+      {
+        "id": "eea5853d-405f-420d-b8e4-380ef5cfea17",
+        "workDate": "2025-12-02"
+      },
+      {
+        "id": "f625f90a-9d09-41be-9405-c642bdb868c7",
+        "workDate": "2025-12-03"
+      },
+      {
+        "id": "ae3d1c50-03d5-4ccc-b1dd-af3d8da41ea9",
+        "workDate": "2025-12-04"
+      },
+      {
+        "id": "b19a29ae-8d76-4d70-83ae-a799d34aa204",
+        "workDate": "2025-12-05"
+      }
+    ]
+  }
+}

@@ -354,6 +354,117 @@ describe('Attendance Plugin Integration', () => {
     const rotationAssignmentId = (rotationAssignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(rotationAssignmentId).toBeTruthy()
 
+    const ruleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Default Rule Set',
+        scope: 'org',
+        version: 1,
+        config: { source: 'dingtalk' },
+        isDefault: true,
+      }),
+    })
+
+    expect([201, 409]).toContain(ruleSetRes.status)
+
+    const ruleSetListRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(ruleSetListRes.status).toBe(200)
+
+    const payrollTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'Monthly Payroll',
+        timezone: 'UTC',
+        startDay: 25,
+        endDay: 6,
+        endMonthOffset: 1,
+        autoGenerate: true,
+      }),
+    })
+
+    expect([201, 409]).toContain(payrollTemplateRes.status)
+    let payrollTemplateId = (payrollTemplateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    if (!payrollTemplateId) {
+      const payrollTemplateListRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      const items = (payrollTemplateListRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+      payrollTemplateId = items.find(item => item.name === 'Monthly Payroll')?.id
+    }
+
+    if (payrollTemplateId) {
+      const payrollCycleRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          templateId: payrollTemplateId,
+          anchorDate: workDate,
+          status: 'open',
+        }),
+      })
+
+      expect([201, 409]).toContain(payrollCycleRes.status)
+    }
+
+    const importTemplateRes = await requestJson(`${baseUrl}/api/attendance/import/template`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateRes.status).toBe(200)
+
+    const importPayload = {
+      userId: 'attendance-test',
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+    }
+
+    const importPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(importPayload),
+    })
+    expect(importPreviewRes.status).toBe(200)
+
+    const importRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(importPayload),
+    })
+    expect(importRes.status).toBe(200)
+
     const reportRes = await requestJson(`${baseUrl}/api/attendance/reports/requests?from=${workDate}&to=${workDate}`, {
       headers: {
         Authorization: `Bearer ${token}`,

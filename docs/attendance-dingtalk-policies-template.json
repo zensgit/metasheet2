@@ -1,0 +1,183 @@
+{
+  "source": "dingtalk",
+  "mappings": {
+    "columns": [
+      {
+        "sourceField": "plan_detail",
+        "targetField": "shiftName",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_class",
+        "targetField": "attendanceClass",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attendance_approve",
+        "targetField": "approvalSummary",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "attend_result",
+        "targetField": "attend_result",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "late_times",
+        "targetField": "late_times",
+        "dataType": "number"
+      },
+      {
+        "sourceField": "leave_early_times",
+        "targetField": "leave_early_times",
+        "dataType": "number"
+      },
+      {
+        "sourceField": "making_up_lack_times",
+        "targetField": "making_up_lack_times",
+        "dataType": "number"
+      },
+      {
+        "sourceField": "attendance_group",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      },
+      {
+        "sourceField": "考勤组",
+        "targetField": "attendanceGroup",
+        "dataType": "string"
+      }
+    ]
+  },
+  "policies": {
+    "userGroups": [
+      {
+        "name": "security",
+        "userIds": [
+          "<security-user-id>"
+        ]
+      },
+      {
+        "name": "driver",
+        "userIds": [
+          "<driver-user-id>"
+        ]
+      },
+      {
+        "name": "special_user_10h",
+        "userIds": [
+          "16256197521696414"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "name": "holiday-default-8h",
+        "when": {
+          "isHoliday": true,
+          "isWorkingDay": false
+        },
+        "then": {
+          "setWorkMinutes": 480,
+          "setStatus": "adjusted",
+          "addWarning": "Holiday default 8h applied"
+        }
+      },
+      {
+        "name": "holiday-security-overtime",
+        "when": {
+          "isHoliday": true,
+          "userGroup": "security"
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Security holiday overtime = 8h"
+        }
+      },
+      {
+        "name": "missing-punch-warning",
+        "when": {
+          "fieldContains": {
+            "attend_result": "缺卡"
+          }
+        },
+        "then": {
+          "addWarning": "Missing punch detected"
+        }
+      },
+      {
+        "name": "supplement-punch-warning",
+        "when": {
+          "fieldContains": {
+            "approvalSummary": "补卡"
+          }
+        },
+        "then": {
+          "addWarning": "Supplement punch approval detected"
+        }
+      }
+    ],
+    "disabledRules": [
+      {
+        "name": "driver-rest-day-overtime-check-in",
+        "when": {
+          "userGroup": "driver",
+          "fieldContains": {
+            "shiftName": "休息"
+          },
+          "fieldExists": [
+            "1_on_duty_user_check_time"
+          ]
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Driver rest day punch => overtime 8h"
+        }
+      },
+      {
+        "name": "driver-rest-day-overtime-check-out",
+        "when": {
+          "userGroup": "driver",
+          "fieldContains": {
+            "shiftName": "休息"
+          },
+          "fieldExists": [
+            "1_off_duty_user_check_time"
+          ]
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Driver rest day punch => overtime 8h"
+        }
+      },
+      {
+        "name": "single-rest-travel-overtime",
+        "when": {
+          "fieldContains": {
+            "shiftName": "休息",
+            "approvalSummary": "出差",
+            "attendanceGroup": "单休车间"
+          }
+        },
+        "then": {
+          "setOvertimeMinutes": 480,
+          "addWarning": "Rest + Travel => overtime 8h"
+        }
+      },
+      {
+        "name": "special-user-manual-review",
+        "when": {
+          "userGroup": "special_user_10h"
+        },
+        "then": {
+          "addWarning": "Special user 10h/10.5h rule requires manual policy logic"
+        }
+      }
+    ]
+  },
+  "notes": [
+    "This file is a policy template. Replace placeholders with real user IDs and ensure fields exist in import rows.",
+    "Policies are AND-based. For OR logic, split into multiple rules.",
+    "Complex arithmetic (date comparisons, duration deltas) should be handled in a custom policy evaluator or pre-processing step."
+  ]
+}
