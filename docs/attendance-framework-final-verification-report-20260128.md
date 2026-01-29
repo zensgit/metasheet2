@@ -5,6 +5,8 @@
 - `pnpm --filter @metasheet/web build`
 - `pnpm --filter @metasheet/core-backend test:integration:attendance`
 - `python3 docs/attendance-import-preview-payload.json -> POST /api/attendance/import/preview`
+- `pnpm install --no-frozen-lockfile`
+- `gh workflow run docker-build.yml --ref feat/attendance-framework-20260128`
 
 ## Commands Run (Server: 142.171.239.56)
 - `docker exec metasheet-backend sh -lc "pnpm --filter @metasheet/core-backend migrate"`
@@ -20,6 +22,8 @@
 - `docker restart metasheet-web`
 - `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8081/`
 - `docker exec metasheet-backend sh -lc "node -e '...jwt.sign(...)'"` (generate short-lived admin token)
+- `docker compose -f /home/mainuser/metasheet2/docker-compose.app.yml pull backend`
+- `docker compose -f /home/mainuser/metasheet2/docker-compose.app.yml up -d backend`
 - `python3` script to call:
   - `POST /api/attendance/rule-sets`
   - `POST /api/attendance/payroll-templates`
@@ -30,6 +34,8 @@
 ## Results
 - ✅ Backend build succeeded
 - ✅ Web build succeeded
+- ✅ Docker build workflow re-run on branch after lockfile checksum refresh (run `21463337505`) and pushed latest backend/frontend images.
+- ⚠️ Initial docker build failed due to `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`; resolved by updating `pnpm-lock.yaml` checksum and re-running workflow.
 - ✅ DB migration executed: `zzzz20260128120000_create_attendance_rule_sets_and_payroll`
 - ✅ Attendance integration test passed (1 test)
 - ⚠️ Test run logged DB auth errors from Workflow engine init (password auth failed for user `metasheet`), but test still passed.
@@ -39,6 +45,7 @@
 - ✅ Records API verified: `/api/attendance/records` returned 5 rows per user (files `docs/attendance-records-server-*.json`).
 - ⚠️ Re-run preview with timezone-corrected payload failed due to 401 (token expired); needs fresh admin token to re-validate.
 - ✅ Backend container rebuilt and restarted
+- ✅ Backend redeployed from GHCR `latest` via docker compose pull/up.
 - ✅ Attendance plugin hotpatched in container (statusMap substring matching) and backend restarted
 - ✅ DB schema updated: `attendance_records.status` length set to `VARCHAR(64)`
 - ✅ Web static assets updated and container restarted
@@ -51,6 +58,7 @@
 - ✅ Import preview (full payload, statusMap) now normalizes to allowed statuses. Output: `docs/attendance-import-preview-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
 - ✅ Full CSV import (single request, statusMap) succeeded for 3080 rows. Output: `docs/attendance-import-核对-20260120-20260127-full-statusmap-normalized-afterpatch.json`.
 - ✅ Summary API verified after statusMap import: `docs/attendance-summary-核对-20260120-20260127-statusmap.json`.
+- ✅ Post-image redeploy checks: import preview sample OK (`docs/attendance-import-preview-statusmap-postimage.json`) and summary OK (`docs/attendance-summary-核对-20260120-20260127-statusmap-postimage.json`).
 
 ## Addendum (Local CSV Validation)
 - ✅ `node scripts/attendance/dingtalk-csv-to-import.mjs --input /Users/huazhou/Downloads/核对(2).csv --columns docs/dingtalk-columns-alias-20260128.json --user-map /Users/huazhou/Downloads/dingtalk-csv-userid-map-核对.json --out artifacts/attendance/import-核对-20260120-20260127.json --from 2026-01-20 --to 2026-01-27 --debug 1`
