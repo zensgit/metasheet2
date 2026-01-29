@@ -5197,6 +5197,10 @@ module.exports = {
           emitEvent('attendance.payrollTemplate.created', { orgId, templateId: mapped.id })
           res.status(201).json({ ok: true, data: mapped })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Payroll template already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -5455,6 +5459,10 @@ module.exports = {
           emitEvent('attendance.payrollCycle.created', { orgId, payrollCycleId: mapped.id })
           res.status(201).json({ ok: true, data: mapped })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Payroll cycle already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
