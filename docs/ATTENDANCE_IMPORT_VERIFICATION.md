@@ -7,6 +7,7 @@ Date: 2026-01-29
 - **Sample payload review**: verified `payloadExample` in `/api/attendance/import/template` now uses `dingtalk_csv` + `entries`.
 - **Field mapping**: confirmed CSV headers map to import targets (see `docs/ATTENDANCE_IMPORT_DINGTALK_CSV.md`).
 - **Preview (partial rows)**: executed preview with 200 rows (2026-01-20) and mapping applied successfully.
+- **Preview (entries + userMap)**: executed preview with 1066 entries (2026-01-20) using `dingtalk_csv` + `userMap`; 342 items returned with per-user IDs resolved.
 
 ## Manual Verification Steps (when DB is available)
 1. Open Attendance → Admin → Import.
