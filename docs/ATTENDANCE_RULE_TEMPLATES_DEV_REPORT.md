@@ -17,6 +17,7 @@ Date: 2026-01-30
   - Added system template selection + parameter panel.
   - Added “Create custom template” action to clone system templates with parameters applied.
   - Added “Import Reconcile” section to diff `entries` vs `rows` preview results.
+  - Added template params export/import (JSON) and reconcile export (CSV/JSON).
 
 ## Files Touched
 - `plugins/plugin-attendance/index.cjs`

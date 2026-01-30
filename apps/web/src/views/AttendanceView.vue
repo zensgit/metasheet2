@@ -663,9 +663,24 @@
                     </label>
                   </template>
                 </div>
+                <label class="attendance__field attendance__field--full" for="attendance-template-param-json">
+                  <span>Params JSON</span>
+                  <textarea
+                    id="attendance-template-param-json"
+                    v-model="templateParamJson"
+                    rows="4"
+                    placeholder='{"template":"...","params":{"lateAfter":"09:10"}}'
+                  />
+                </label>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn attendance__btn--primary" type="button" @click="applySystemTemplate">
                     Create custom template
+                  </button>
+                  <button class="attendance__btn" type="button" @click="exportTemplateParams">
+                    Export params
+                  </button>
+                  <button class="attendance__btn" type="button" @click="importTemplateParams">
+                    Import params
                   </button>
                 </div>
               </div>
@@ -1062,6 +1077,12 @@
                 </button>
                 <button class="attendance__btn" :disabled="reconcileLoading" @click="clearReconcile">
                   Clear
+                </button>
+                <button class="attendance__btn" :disabled="!reconcileResult" @click="exportReconcileJson">
+                  Export JSON
+                </button>
+                <button class="attendance__btn" :disabled="!reconcileResult" @click="exportReconcileCsv">
+                  Export CSV
                 </button>
               </div>
               <div v-if="!reconcileResult" class="attendance__empty">No reconcile data.</div>
@@ -2863,6 +2884,7 @@ const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
 const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
 const selectedSystemTemplateName = ref<string | null>(null)
 const templateParamValues = reactive<Record<string, any>>({})
+const templateParamJson = ref('')
 const customTemplateEditingName = ref<string | null>(null)
 const customTemplateDraftDescription = ref('')
 const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
@@ -3175,6 +3197,7 @@ function defaultParamValue(param: AttendanceTemplateParam): any {
 
 function resetTemplateParams(template: AttendanceEngineTemplate | null) {
   Object.keys(templateParamValues).forEach((key) => delete templateParamValues[key])
+  templateParamJson.value = ''
   if (!template || !Array.isArray(template.params)) return
   template.params.forEach((param) => {
     templateParamValues[param.key] = defaultParamValue(param)
@@ -3184,6 +3207,50 @@ function resetTemplateParams(template: AttendanceEngineTemplate | null) {
 function selectSystemTemplate(template: AttendanceEngineTemplate) {
   selectedSystemTemplateName.value = template.name
   resetTemplateParams(template)
+}
+
+function exportTemplateParams() {
+  const template = selectedSystemTemplate.value
+  if (!template) {
+    setStatus('Select a system template first.', 'error')
+    return
+  }
+  const payload = {
+    template: template.name,
+    params: buildTemplateParamMap(template),
+  }
+  templateParamJson.value = JSON.stringify(payload, null, 2)
+  setStatus('Template params exported.')
+}
+
+function importTemplateParams() {
+  const template = selectedSystemTemplate.value
+  if (!template) {
+    setStatus('Select a system template first.', 'error')
+    return
+  }
+  let text = templateParamJson.value.trim()
+  if (!text) {
+    text = window.prompt('Paste template params JSON') ?? ''
+  }
+  if (!text.trim()) return
+  try {
+    const parsed = JSON.parse(text)
+    const params = parsed?.params ?? parsed
+    if (!params || typeof params !== 'object') {
+      throw new Error('params missing')
+    }
+    const paramDefs = Array.isArray(template.params) ? template.params : []
+    paramDefs.forEach((param) => {
+      if (params[param.key] !== undefined) {
+        templateParamValues[param.key] = params[param.key]
+      }
+    })
+    templateParamJson.value = JSON.stringify({ template: template.name, params }, null, 2)
+    setStatus('Template params imported.')
+  } catch {
+    setStatus('Invalid template params JSON.', 'error')
+  }
 }
 
 function syncRuleSetTemplates(config?: Record<string, any> | null) {
@@ -3815,6 +3882,62 @@ function clearReconcile() {
   reconcileForm.entriesPayload = ''
   reconcileForm.rowsPayload = ''
   reconcileResult.value = null
+}
+
+function escapeCsvValue(value: any): string {
+  if (value === null || value === undefined) return ''
+  const text = String(value)
+  if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function downloadText(filename: string, content: string, mime = 'application/json') {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function exportReconcileJson() {
+  if (!reconcileResult.value) {
+    setStatus('No reconcile result to export.', 'error')
+    return
+  }
+  downloadText(
+    `attendance-reconcile-${Date.now()}.json`,
+    JSON.stringify(reconcileResult.value, null, 2),
+    'application/json'
+  )
+  setStatus('Reconcile JSON exported.')
+}
+
+function exportReconcileCsv() {
+  if (!reconcileResult.value) {
+    setStatus('No reconcile result to export.', 'error')
+    return
+  }
+  const lines = [['user_id', 'work_date', 'field', 'entries', 'rows']]
+  reconcileResult.value.diffs.forEach((diff) => {
+    Object.entries(diff.differences).forEach(([field, values]) => {
+      lines.push([
+        diff.userId,
+        diff.workDate,
+        field,
+        values.entries ?? '',
+        values.rows ?? '',
+      ])
+    })
+  })
+  const csv = lines.map((row) => row.map(escapeCsvValue).join(',')).join('\n')
+  downloadText(`attendance-reconcile-${Date.now()}.csv`, csv, 'text/csv')
+  setStatus('Reconcile CSV exported.')
 }
 
 function buildRulePreviewPayload(): Record<string, any> | null {

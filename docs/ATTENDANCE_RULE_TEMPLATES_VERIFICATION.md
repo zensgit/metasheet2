@@ -12,11 +12,14 @@ Date: 2026-01-30
    - 缺卡补卡核对
    - 休息日加班
 3. Select a system template, adjust parameters, and click **Create custom template**.
+   - Optionally click **Export params** and verify JSON appears.
+   - Paste the JSON into **Params JSON** and click **Import params**.
 4. Verify the custom template appears under Custom templates and rules are populated.
 5. Save the rule set and run **Rule Preview** to confirm engine warnings/reasons appear.
 6. Open **Import Reconcile**:
    - Paste an `entries` payload and a corresponding `rows` payload.
    - Click **Reconcile** and verify summary counts + diff list.
+   - Click **Export JSON** and **Export CSV** to download results.
 
 ## Notes
 - Reconcile output depends on `/api/attendance/import/preview` and respects the selected rule set and timezone.
