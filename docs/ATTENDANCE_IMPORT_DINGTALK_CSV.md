@@ -104,3 +104,4 @@ These are included in `/api/attendance/import/template`:
 ## Notes
 - If `userId` is not provided per row, the import falls back to the request user. Use `userMap` + `userMapKeyField` to resolve per-row `userId`.
 - `attendance_group` is used by rule engine `scope` and should map to `attendanceGroup` / `attendance_group`.
+- `statusMap` uses substring matching; add keys like `外勤` → `adjusted` to normalize DingTalk status labels. The helper script includes a default mapping.

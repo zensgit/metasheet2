@@ -1,12 +1,12 @@
 # Attendance Import Verification
 
-Date: 2026-01-29
+Date: 2026-01-30
 
 ## Checks Performed
 - **Syntax check**: `node --check plugins/plugin-attendance/index.cjs` ✅
 - **Sample payload review**: verified `payloadExample` in `/api/attendance/import/template` now uses `dingtalk_csv` + `entries`.
 - **Field mapping**: confirmed CSV headers map to import targets (see `docs/ATTENDANCE_IMPORT_DINGTALK_CSV.md`).
-- **Preview (partial rows)**: executed preview with 200 rows (2026-01-20) and mapping applied successfully.
+- **Preview (rows)**: executed preview for 2026-01-20 rows payload; mapping + statusMap applied successfully.
 - **Preview (entries + userMap)**: executed preview with 1066 entries (2026-01-20) using `dingtalk_csv` + `userMap`; 342 items returned with per-user IDs resolved.
 - **Import (entries + userMap)**: imported 342 rows for 2026-01-20 using the same payload.
 - **Import (entries, 2026-01-21~2026-01-27)**:
@@ -18,6 +18,16 @@ Date: 2026-01-29
   - 2026-01-26 → 329 rows
   - 2026-01-27 → 334 rows
   - Summary: `artifacts/attendance-import-summary-20260120-20260127.json`
+- **Import (rows, 2026-01-20~2026-01-27)**:
+  - 2026-01-20 → 385 rows
+  - 2026-01-21 → 385 rows
+  - 2026-01-22 → 385 rows
+  - 2026-01-23 → 385 rows
+  - 2026-01-24 → 385 rows
+  - 2026-01-25 → 385 rows
+  - 2026-01-26 → 385 rows
+  - 2026-01-27 → 385 rows
+  - Summary: `artifacts/attendance-import-rows-核对-20260120-20260127-summary.json`
 - **Import (entries, 2025-12)**: imported daily slices successfully:
   - 2025-12-01 → 328 rows
   - 2025-12-02 → 333 rows

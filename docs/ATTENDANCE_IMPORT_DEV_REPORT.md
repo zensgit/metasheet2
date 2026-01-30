@@ -1,6 +1,6 @@
 # Attendance Import Dev Report (DingTalk CSV)
 
-Date: 2026-01-29
+Date: 2026-01-30
 
 ## Scope
 - Extend attendance import to accept DingTalk CSV-derived payloads (`entries`) and per-row user resolution via `userMap`.
@@ -26,12 +26,14 @@ Date: 2026-01-29
 - **Docs**
   - Added `docs/ATTENDANCE_IMPORT_DINGTALK_CSV.md` with payload examples and mapping notes.
   - Added conversion helper: `scripts/convert-dingtalk-csv-to-import.mjs`.
+  - Added default `statusMap` in the helper (includes `外勤`, `外出`, `出差`, `休息`, `补卡`) to normalize DingTalk status strings.
 
 ## Generated Artifacts
 - `artifacts/attendance-import-payload-核对-20260120-20260127.json` (entries + userMap)
 - `artifacts/attendance-import-payload-20251201-20251231.json` (entries + userMap)
 - `artifacts/attendance-import-rows-核对-20260120-20260127.json` (rows + userMap)
-- `artifacts/attendance-import-rows-20251201-20251231.json` (rows + userMap)
+- `artifacts/attendance-import-rows-核对-20260120-20260127-summary.json` (rows count per day)
+- `artifacts/attendance-import-rows-import-2026-01-20.json` … `attendance-import-rows-import-2026-01-27.json` (row import results)
 
 ## Files Touched
 - `plugins/plugin-attendance/index.cjs`
