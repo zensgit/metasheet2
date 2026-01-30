@@ -9,6 +9,10 @@ Date: 2026-01-29
 - **Preview (partial rows)**: executed preview with 200 rows (2026-01-20) and mapping applied successfully.
 - **Preview (entries + userMap)**: executed preview with 1066 entries (2026-01-20) using `dingtalk_csv` + `userMap`; 342 items returned with per-user IDs resolved.
 - **Import (entries + userMap)**: imported 342 rows for 2026-01-20 using the same payload.
+- **Import (entries, 2025-12)**: imported daily slices successfully:
+  - 2025-12-01 → 328 rows
+  - 2025-12-02 → 333 rows
+  - 2025-12-03 → 333 rows
 
 ## Manual Verification Steps (when DB is available)
 1. Open Attendance → Admin → Import.
