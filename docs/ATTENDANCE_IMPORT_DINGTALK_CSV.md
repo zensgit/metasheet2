@@ -111,5 +111,14 @@ These are included in `/api/attendance/import/template`:
 - `attendance_group` is used by rule engine `scope` and should map to `attendanceGroup` / `attendance_group`.
 - `statusMap` uses substring matching; add keys like `外勤` → `adjusted` to normalize DingTalk status labels. The helper script includes a default mapping.
 
+## Derived Policy Fields
+During import preview/import, the backend derives additional fields for policy evaluation:
+- `entry_after_work_date` (boolean)
+- `entry_on_or_before_work_date` (boolean)
+- `resign_on_or_before_work_date` (boolean)
+- `resign_before_work_date` (boolean)
+
+These are computed from `entryTime` / `resignTime` vs `workDate` and can be used in `policies.rules[].when.fieldEquals`.
+
 ## CSV Header Notes
 Some DingTalk exports prepend report title/time rows (e.g. “每日汇总… / 报表生成时间…”). The helper script auto-detects the first row containing headers like `姓名`/`日期`/`考勤组`.

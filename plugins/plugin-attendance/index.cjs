@@ -923,6 +923,54 @@ function normalizeNumber(value) {
   return null
 }
 
+function normalizeDateOnly(value) {
+  if (!value) return null
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10)
+  }
+  const raw = String(value).trim()
+  if (!raw) return null
+  if (/^\d{10,13}$/.test(raw)) {
+    const ts = Number(raw.length === 10 ? `${raw}000` : raw)
+    if (Number.isFinite(ts)) return new Date(ts).toISOString().slice(0, 10)
+  }
+  const match = raw.match(/(\d{2,4})-(\d{1,2})-(\d{1,2})/)
+  if (match) {
+    let year = match[1]
+    const month = match[2].padStart(2, '0')
+    const day = match[3].padStart(2, '0')
+    if (year.length === 2) year = `20${year}`
+    return `${year.padStart(4, '0')}-${month}-${day}`
+  }
+  if (raw.includes('T')) return raw.slice(0, 10)
+  if (raw.includes(' ')) return raw.split(' ')[0]
+  return raw.slice(0, 10)
+}
+
+function augmentFieldValuesWithDates(fieldValues, workDate) {
+  if (!fieldValues || typeof fieldValues !== 'object') return fieldValues
+  const normalizedWorkDate = normalizeDateOnly(workDate)
+  const entryDate = normalizeDateOnly(
+    fieldValues.entryTime ?? fieldValues.entry_time ?? fieldValues['入职时间']
+  )
+  const resignDate = normalizeDateOnly(
+    fieldValues.resignTime ?? fieldValues.resign_time ?? fieldValues['离职时间']
+  )
+
+  if (normalizedWorkDate) fieldValues.workDate = normalizedWorkDate
+  if (entryDate) fieldValues.entry_date = entryDate
+  if (resignDate) fieldValues.resign_date = resignDate
+
+  if (normalizedWorkDate) {
+    fieldValues.entry_after_work_date = entryDate ? entryDate > normalizedWorkDate : false
+    fieldValues.entry_on_or_before_work_date = entryDate ? entryDate <= normalizedWorkDate : true
+    fieldValues.resign_on_or_before_work_date = resignDate ? resignDate <= normalizedWorkDate : false
+    fieldValues.resign_before_work_date = resignDate ? resignDate < normalizedWorkDate : false
+  }
+
+  return fieldValues
+}
+
 function matchesNumberGte(actual, expected) {
   const actualNum = normalizeNumber(actual)
   const expectedNum = normalizeNumber(expected)
@@ -4756,12 +4804,55 @@ module.exports = {
                   name: 'security',
                   userIds: [],
                 },
+                {
+                  name: 'driver',
+                  userIds: [],
+                },
+                {
+                  name: 'single_rest_workshop',
+                  fieldContains: { attendance_group: '单休车间' },
+                },
               ],
               rules: [
                 {
+                  name: 'holiday-entry-after-zero',
+                  when: { isHoliday: true, fieldEquals: { entry_after_work_date: true } },
+                  then: { setWorkMinutes: 0, setStatus: 'off', addWarning: '入职晚于节假日，出勤设为0' },
+                },
+                {
+                  name: 'holiday-resigned-zero',
+                  when: { isHoliday: true, fieldEquals: { resign_on_or_before_work_date: true } },
+                  then: { setWorkMinutes: 0, setStatus: 'off', addWarning: '离职日期早于/等于节假日，出勤设为0' },
+                },
+                {
                   name: 'holiday-default-8h',
-                  when: { isHoliday: true, isWorkingDay: false },
-                  then: { setWorkMinutes: 480, setStatus: 'adjusted', addWarning: 'Holiday default applied' },
+                  when: { isHoliday: true, fieldEquals: { entry_on_or_before_work_date: true, resign_on_or_before_work_date: false } },
+                  then: { setWorkMinutes: 480, setStatus: 'adjusted', addWarning: '节假日默认8小时' },
+                },
+                {
+                  name: 'single-rest-trip-overtime',
+                  when: { userGroup: 'single_rest_workshop', fieldContains: { shiftName: '休息', approvalSummary: '出差' } },
+                  then: { setOvertimeMinutes: 480, addWarning: '单休车间休息日出差默认8小时加班' },
+                },
+                {
+                  name: 'security-base-hours',
+                  when: { userGroup: 'security' },
+                  then: { setWorkMinutes: 480, setStatus: 'adjusted', addWarning: '保安默认按8小时出勤' },
+                },
+                {
+                  name: 'security-holiday-overtime',
+                  when: { userGroup: 'security', isHoliday: true, fieldExists: ['firstInAt'] },
+                  then: { setOvertimeMinutes: 480, addWarning: '保安节假日出勤算加班' },
+                },
+                {
+                  name: 'driver-rest-overtime',
+                  when: { userGroup: 'driver', fieldContains: { shiftName: '休息' }, fieldExists: ['firstInAt'] },
+                  then: { setOvertimeMinutes: 480, addWarning: '司机休息日打卡算加班' },
+                },
+                {
+                  name: 'special-user-fixed-hours',
+                  when: { userIds: ['16256197521696414'] },
+                  then: { setWorkMinutes: 600, setStatus: 'adjusted', addWarning: '特殊十小时班次' },
                 },
               ],
             },
@@ -5287,6 +5378,7 @@ module.exports = {
             }
 
             const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+            augmentFieldValuesWithDates(fieldValues, workDate)
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
               facts: {
@@ -5517,6 +5609,7 @@ module.exports = {
               }
 
               const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+              augmentFieldValuesWithDates(fieldValues, workDate)
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
                 facts: {
