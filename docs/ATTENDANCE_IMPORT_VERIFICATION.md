@@ -9,6 +9,15 @@ Date: 2026-01-29
 - **Preview (partial rows)**: executed preview with 200 rows (2026-01-20) and mapping applied successfully.
 - **Preview (entries + userMap)**: executed preview with 1066 entries (2026-01-20) using `dingtalk_csv` + `userMap`; 342 items returned with per-user IDs resolved.
 - **Import (entries + userMap)**: imported 342 rows for 2026-01-20 using the same payload.
+- **Import (entries, 2026-01-21~2026-01-27)**:
+  - 2026-01-21 → 340 rows
+  - 2026-01-22 → 336 rows
+  - 2026-01-23 → 330 rows
+  - 2026-01-24 → 232 rows
+  - 2026-01-25 → 65 rows
+  - 2026-01-26 → 329 rows
+  - 2026-01-27 → 334 rows
+  - Summary: `artifacts/attendance-import-summary-20260120-20260127.json`
 - **Import (entries, 2025-12)**: imported daily slices successfully:
   - 2025-12-01 → 328 rows
   - 2025-12-02 → 333 rows
