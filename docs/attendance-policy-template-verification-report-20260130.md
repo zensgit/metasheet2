@@ -30,6 +30,15 @@
     - `partial`: 20
   - Sample item confirms `firstInAt/lastOutAt` parsed (e.g. `07:54` → `2025-12-01T07:54:00.000Z`).
   - Applied policies: 0 (no matching `attendance_group` for `security/driver/单休车间` in this subset).
+- Policy preview with rule set (2025-12-01..2025-12-07):
+  - Created rule set from template: `policy-preview-2026-01-30` (`56e27e53-a16f-4ff9-b4c4-8d20d858e6db`).
+  - Filtered rows: 106 total (`单休车间` 50, `保安` 56). Larger payloads triggered `413 Request Entity Too Large`, so preview used the reduced set.
+  - User groups matched:
+    - `single_rest_workshop`: 50
+    - `security`: 0 (template defines `security`/`driver` with empty `userIds`, no `attendance_group` match)
+  - Applied policies:
+    - `special-user-fixed-hours` triggered once for user `16256197521696414` on `2025-12-01`.
+    - `security-*` and `driver-*` rules did not trigger due to missing group matches in template.
 
 ## Notes
 - Derived policy fields are applied during import preview/import; no DB mutation required for evaluation.
