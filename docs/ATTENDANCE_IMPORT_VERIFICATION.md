@@ -13,6 +13,35 @@ Date: 2026-01-29
   - 2025-12-01 → 328 rows
   - 2025-12-02 → 333 rows
   - 2025-12-03 → 333 rows
+  - 2025-12-04 → 337 rows
+  - 2025-12-05 → 335 rows
+  - 2025-12-06 → 330 rows
+  - 2025-12-07 → 93 rows
+  - 2025-12-08 → 333 rows
+  - 2025-12-09 → 337 rows
+  - 2025-12-10 → 330 rows
+  - 2025-12-11 → 333 rows
+  - 2025-12-12 → 331 rows
+  - 2025-12-13 → 227 rows
+  - 2025-12-14 → 87 rows
+  - 2025-12-15 → 330 rows
+  - 2025-12-16 → 335 rows
+  - 2025-12-17 → 338 rows
+  - 2025-12-18 → 335 rows
+  - 2025-12-19 → 336 rows
+  - 2025-12-20 → 332 rows
+  - 2025-12-21 → 93 rows
+  - 2025-12-22 → 333 rows
+  - 2025-12-23 → 337 rows
+  - 2025-12-24 → 338 rows
+  - 2025-12-25 → 333 rows
+  - 2025-12-26 → 335 rows
+  - 2025-12-27 → 330 rows
+  - 2025-12-28 → 83 rows
+  - 2025-12-29 → 333 rows
+  - 2025-12-30 → 331 rows
+  - 2025-12-31 → 338 rows
+  - Summary: `artifacts/attendance-import-summary-202512.json`
 
 ## Manual Verification Steps (when DB is available)
 1. Open Attendance → Admin → Import.
