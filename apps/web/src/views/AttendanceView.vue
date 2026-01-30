@@ -3411,8 +3411,8 @@ function applyParamPaths(template: AttendanceEngineTemplate, params: Record<stri
   const cloned: AttendanceEngineTemplate = JSON.parse(JSON.stringify(template))
   const paramDefs = Array.isArray(template.params) ? template.params : []
   paramDefs.forEach((param) => {
-    const paths = Array.isArray((param as any).paths) ? (param as any).paths : []
-    paths.forEach((path) => {
+    const paths = Array.isArray(param.paths) ? param.paths : []
+    paths.forEach((path: string) => {
       if (typeof path === 'string' && path.trim().length > 0) {
         setValueByPath(cloned as Record<string, any>, path, params[param.key])
       }
