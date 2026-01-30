@@ -622,6 +622,13 @@
                     Reset
                   </button>
                 </div>
+                <input
+                  ref="templateParamFileInput"
+                  type="file"
+                  accept="application/json"
+                  class="attendance__file-input"
+                  @change="handleTemplateParamFile"
+                />
                 <div class="attendance__admin-grid">
                   <div v-if="!selectedSystemTemplate.params || selectedSystemTemplate.params.length === 0" class="attendance__empty">
                     No parameters for this template.
@@ -679,8 +686,14 @@
                   <button class="attendance__btn" type="button" @click="exportTemplateParams">
                     Export params
                   </button>
+                  <button class="attendance__btn" type="button" @click="exportTemplateParamsFile">
+                    Export file
+                  </button>
                   <button class="attendance__btn" type="button" @click="importTemplateParams">
                     Import params
+                  </button>
+                  <button class="attendance__btn" type="button" @click="triggerTemplateParamFile">
+                    Import file
                   </button>
                 </div>
               </div>
@@ -2885,6 +2898,7 @@ const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
 const selectedSystemTemplateName = ref<string | null>(null)
 const templateParamValues = reactive<Record<string, any>>({})
 const templateParamJson = ref('')
+const templateParamFileInput = ref<HTMLInputElement | null>(null)
 const customTemplateEditingName = ref<string | null>(null)
 const customTemplateDraftDescription = ref('')
 const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
@@ -3223,6 +3237,21 @@ function exportTemplateParams() {
   setStatus('Template params exported.')
 }
 
+function exportTemplateParamsFile() {
+  const template = selectedSystemTemplate.value
+  if (!template) {
+    setStatus('Select a system template first.', 'error')
+    return
+  }
+  const payload = {
+    template: template.name,
+    params: buildTemplateParamMap(template),
+  }
+  const filename = `attendance-template-params-${template.name.replace(/\s+/g, '_')}-${Date.now()}.json`
+  downloadText(filename, JSON.stringify(payload, null, 2), 'application/json')
+  setStatus('Template params file exported.')
+}
+
 function importTemplateParams() {
   const template = selectedSystemTemplate.value
   if (!template) {
@@ -3250,6 +3279,29 @@ function importTemplateParams() {
     setStatus('Template params imported.')
   } catch {
     setStatus('Invalid template params JSON.', 'error')
+  }
+}
+
+function triggerTemplateParamFile() {
+  if (!selectedSystemTemplate.value) {
+    setStatus('Select a system template first.', 'error')
+    return
+  }
+  templateParamFileInput.value?.click()
+}
+
+async function handleTemplateParamFile(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const file = input?.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    templateParamJson.value = text
+    importTemplateParams()
+  } catch {
+    setStatus('Failed to read template params file.', 'error')
+  } finally {
+    if (input) input.value = ''
   }
 }
 
@@ -3923,7 +3975,17 @@ function exportReconcileCsv() {
     setStatus('No reconcile result to export.', 'error')
     return
   }
-  const lines = [['user_id', 'work_date', 'field', 'entries', 'rows']]
+  const lines = [
+    ['metric', 'value'],
+    ['entries_total', reconcileResult.value.entriesTotal],
+    ['rows_total', reconcileResult.value.rowsTotal],
+    ['matched', reconcileResult.value.matched],
+    ['mismatched', reconcileResult.value.mismatched],
+    ['missing_in_entries', reconcileResult.value.missingInEntries],
+    ['missing_in_rows', reconcileResult.value.missingInRows],
+    [],
+    ['user_id', 'work_date', 'field', 'entries', 'rows'],
+  ]
   reconcileResult.value.diffs.forEach((diff) => {
     Object.entries(diff.differences).forEach(([field, values]) => {
       lines.push([
@@ -6456,6 +6518,10 @@ watch(orgId, () => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.attendance__file-input {
+  display: none;
 }
 
 .attendance__template-hint {
