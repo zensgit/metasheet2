@@ -345,6 +345,72 @@ function buildRowsFromDingTalk({ columns, data }) {
   return Array.from(rowsByDate.values())
 }
 
+function buildRowsFromEntries({ entries }) {
+  if (!Array.isArray(entries)) return []
+  const rowsByKey = new Map()
+  for (const entry of entries) {
+    const meta = entry?.meta ?? {}
+    const workDate = entry?.workDate ?? meta.workDate ?? (entry?.occurredAt ? String(entry.occurredAt).slice(0, 10) : null)
+    if (!workDate) continue
+    const userId = entry?.userId ?? meta.userId
+    const rowKey = `${userId ?? meta.sourceUserKey ?? 'unknown'}|${workDate}`
+    if (!rowsByKey.has(rowKey)) {
+      rowsByKey.set(rowKey, { workDate, fields: {}, userId })
+    }
+    const row = rowsByKey.get(rowKey)
+    if (!row.userId && userId) row.userId = userId
+    const column = meta.column ?? entry?.column ?? entry?.field
+    const rawValue = meta.rawTime ?? meta.value ?? entry?.value ?? entry?.occurredAt ?? ''
+    if (column && row.fields[column] === undefined) {
+      row.fields[column] = rawValue
+    }
+    if (meta.sourceUserKey && row.fields.sourceUserKey === undefined) {
+      row.fields.sourceUserKey = meta.sourceUserKey
+    }
+    if (meta.sourceUserName && row.fields.sourceUserName === undefined) {
+      row.fields.sourceUserName = meta.sourceUserName
+    }
+    if (meta.sourceUserKey && row.fields.empNo === undefined) {
+      row.fields.empNo = meta.sourceUserKey
+    }
+    if (entry?.eventType && row.fields.eventType === undefined) {
+      row.fields.eventType = entry.eventType
+    }
+  }
+  return Array.from(rowsByKey.values())
+}
+
+function resolveUserMapValue(userMap, key) {
+  if (!userMap || !key) return null
+  const entry = userMap[key]
+  if (typeof entry === 'string') return entry
+  if (entry && typeof entry === 'object') {
+    return entry.userId ?? entry.id ?? entry.user_id ?? null
+  }
+  return null
+}
+
+function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
+  if (!row) return fallbackUserId ?? null
+  if (row.userId) return row.userId
+  if (row.user_id) return row.user_id
+  const fields = row.fields ?? {}
+  const direct = fields.userId ?? fields.user_id
+  if (direct) return direct
+  const candidates = []
+  if (userMapKeyField) candidates.push(userMapKeyField)
+  if (Array.isArray(userMapSourceFields)) candidates.push(...userMapSourceFields)
+  candidates.push('empNo', '工号', 'sourceUserKey', 'userKey', 'userName', '姓名')
+  for (const key of candidates) {
+    if (!key) continue
+    const value = fields[key]
+    if (value === null || value === undefined || value === '') continue
+    const mapped = resolveUserMapValue(userMap, String(value).trim())
+    if (mapped) return mapped
+  }
+  return fallbackUserId ?? null
+}
+
 function applyFieldMappings(fields, mappings) {
   const normalized = {}
   if (!Array.isArray(mappings)) return normalized
@@ -2090,15 +2156,20 @@ module.exports = {
     const importRowSchema = z.object({
       workDate: z.string().min(1),
       fields: z.record(z.unknown()),
+      userId: z.string().optional(),
+      user_id: z.string().optional(),
     })
 
     const importPayloadSchema = z.object({
-      source: z.enum(['dingtalk', 'manual']).optional(),
+      source: z.enum(['dingtalk', 'manual', 'dingtalk_csv']).optional(),
       orgId: z.string().optional(),
       userId: z.string().optional(),
       timezone: z.string().optional(),
       ruleSetId: z.string().uuid().optional(),
       engine: z.record(z.unknown()).optional(),
+      userMap: z.record(z.unknown()).optional(),
+      userMapKeyField: z.string().optional(),
+      userMapSourceFields: z.array(z.string()).optional(),
       mapping: z.object({
         columns: z.array(z.object({
           sourceField: z.string().min(1),
@@ -2122,6 +2193,17 @@ module.exports = {
         })).optional(),
       }).optional(),
       rows: z.array(importRowSchema).optional(),
+      entries: z.array(z.object({
+        userId: z.string().optional(),
+        occurredAt: z.string().optional(),
+        eventType: z.string().optional(),
+        timezone: z.string().optional(),
+        workDate: z.string().optional(),
+        column: z.string().optional(),
+        field: z.string().optional(),
+        value: z.unknown().optional(),
+        meta: z.record(z.unknown()).optional(),
+      })).optional(),
       statusMap: z.record(z.string()).optional(),
       mode: z.enum(['merge', 'override']).optional(),
     })
@@ -4923,36 +5005,84 @@ module.exports = {
             mapping: {
               columns: [
                 { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
                 { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+                { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
+                { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
+                { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
+                { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
                 { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+                { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+                { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
+                { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
                 { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
+                { sourceField: '应出勤小时', targetField: 'workHours', dataType: 'hours' },
+                { sourceField: '总工时', targetField: 'workHours', dataType: 'hours' },
+                { sourceField: '实出勤工时(测试)', targetField: 'workHours', dataType: 'hours' },
+                { sourceField: '实出勤工时', targetField: 'workMinutes', dataType: 'hours' },
                 { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
+                { sourceField: '迟到时长', targetField: 'lateMinutes', dataType: 'minutes' },
+                { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'minutes' },
                 { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+                { sourceField: '早退时长', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+                { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
                 { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
+                { sourceField: '请假小时', targetField: 'leaveHours', dataType: 'hours' },
+                { sourceField: '调休小时', targetField: 'leaveHours', dataType: 'hours' },
                 { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
+                { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+                { sourceField: '加班总时长', targetField: 'overtimeHours', dataType: 'hours' },
                 { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
+                { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
                 { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
+                { sourceField: '出勤班次', targetField: 'attendanceClass', dataType: 'string' },
                 { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
+                { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
                 { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: '部门', targetField: 'department', dataType: 'string' },
+                { sourceField: '职位', targetField: 'role', dataType: 'string' },
+                { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
+                { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+                { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
               ],
             },
             payloadExample: {
-              source: 'dingtalk',
-              userId: '16890353051678207',
+              source: 'dingtalk_csv',
               ruleSetId: '<ruleSetId>',
-              columns: [
-                { id: 14888299, name: '上班1打卡时间', alias: '1_on_duty_user_check_time' },
-                { id: 14888301, name: '下班1打卡时间', alias: '1_off_duty_user_check_time' },
-                { id: 14888297, name: '考勤结果', alias: 'attend_result' },
-              ],
-              data: {
-                column_vals: [
-                  {
-                    column_vo: { id: 14888299 },
-                    column_vals: [{ date: '2025-12-31 00:00:00', value: '07:55' }],
-                  },
-                ],
+              userMapKeyField: 'empNo',
+              userMap: {
+                A0054: { userId: 'tmp_9cf257fde42ac517bc769838', name: '秦夫林', empNo: 'A0054' },
               },
+              entries: [
+                {
+                  userId: 'tmp_9cf257fde42ac517bc769838',
+                  occurredAt: '2026-01-20T07:51:00',
+                  eventType: 'check_in',
+                  timezone: 'Asia/Shanghai',
+                  meta: {
+                    workDate: '2026-01-20',
+                    column: '上班1打卡时间',
+                    rawTime: '07:51',
+                    sourceUserKey: 'A0054',
+                    sourceUserName: '秦夫林',
+                  },
+                },
+                {
+                  userId: 'tmp_9cf257fde42ac517bc769838',
+                  occurredAt: '2026-01-20T17:05:00',
+                  eventType: 'check_out',
+                  timezone: 'Asia/Shanghai',
+                  meta: {
+                    workDate: '2026-01-20',
+                    column: '下班1打卡时间',
+                    rawTime: '17:05',
+                    sourceUserKey: 'A0054',
+                    sourceUserName: '秦夫林',
+                  },
+                },
+              ],
             },
           },
         })
@@ -5004,7 +5134,9 @@ module.exports = {
 
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
-            : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+            : Array.isArray(parsed.data.entries)
+              ? buildRowsFromEntries({ entries: parsed.data.entries })
+              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
 
           if (rows.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
@@ -5021,10 +5153,17 @@ module.exports = {
           const preview = []
           for (const row of rows) {
             const workDate = row.workDate
+            const rowUserId = resolveRowUserId({
+              row,
+              fallbackUserId: userId,
+              userMap: parsed.data.userMap,
+              userMapKeyField: parsed.data.userMapKeyField,
+              userMapSourceFields: parsed.data.userMapSourceFields,
+            })
             const context = await resolveWorkContext({
               db,
               orgId,
-              userId,
+              userId: rowUserId,
               workDate,
               defaultRule: ruleOverride,
             })
@@ -5067,7 +5206,7 @@ module.exports = {
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
               facts: {
-                userId,
+                userId: rowUserId,
                 orgId,
                 workDate,
                 shiftName: context.rule?.name ?? null,
@@ -5128,7 +5267,7 @@ module.exports = {
             const finalMetrics = engineAdjustment.metrics
 
             preview.push({
-              userId,
+              userId: rowUserId,
               workDate,
               firstInAt: firstInAt ? firstInAt.toISOString() : null,
               lastOutAt: lastOutAt ? lastOutAt.toISOString() : null,
@@ -5218,7 +5357,9 @@ module.exports = {
 
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
-            : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+            : Array.isArray(parsed.data.entries)
+              ? buildRowsFromEntries({ entries: parsed.data.entries })
+              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
 
           if (rows.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
@@ -5236,10 +5377,17 @@ module.exports = {
           await db.transaction(async (trx) => {
             for (const row of rows) {
               const workDate = row.workDate
+              const rowUserId = resolveRowUserId({
+                row,
+                fallbackUserId: userId,
+                userMap: parsed.data.userMap,
+                userMapKeyField: parsed.data.userMapKeyField,
+                userMapSourceFields: parsed.data.userMapSourceFields,
+              })
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
-                userId,
+                userId: rowUserId,
                 workDate,
                 defaultRule: ruleOverride,
               })
@@ -5282,7 +5430,7 @@ module.exports = {
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
                 facts: {
-                  userId,
+                  userId: rowUserId,
                   orgId,
                   workDate,
                   shiftName: context.rule?.name ?? null,
@@ -5370,7 +5518,7 @@ module.exports = {
               }
 
               const record = await upsertAttendanceRecord({
-                userId,
+                userId: rowUserId,
                 orgId,
                 workDate,
                 timezone: context.rule.timezone,
@@ -5393,6 +5541,7 @@ module.exports = {
               })
               results.push({
                 id: record.id,
+                userId: rowUserId,
                 workDate,
                 engine: engineResult
                   ? {

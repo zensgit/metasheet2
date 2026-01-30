@@ -1736,6 +1736,10 @@ paths:
                 columns: { type: array, items: { type: object } }
                 data: { type: object }
                 rows: { type: array, items: { type: object } }
+                entries: { type: array, items: { type: object } }
+                userMap: { type: object }
+                userMapKeyField: { type: string }
+                userMapSourceFields: { type: array, items: { type: string } }
                 statusMap: { type: object }
                 mode: { type: string }
       responses:
@@ -1780,6 +1784,10 @@ paths:
                 columns: { type: array, items: { type: object } }
                 data: { type: object }
                 rows: { type: array, items: { type: object } }
+                entries: { type: array, items: { type: object } }
+                userMap: { type: object }
+                userMapKeyField: { type: string }
+                userMapSourceFields: { type: array, items: { type: string } }
                 statusMap: { type: object }
                 mode: { type: string }
       responses:

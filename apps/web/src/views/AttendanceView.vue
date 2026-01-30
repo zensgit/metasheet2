@@ -2725,6 +2725,11 @@ const CUSTOM_RULE_SAMPLES: Array<Record<string, any>> = [
     when: { leave_hours_gt: 0, has_punch: true },
     then: { warning: '请假但仍有打卡记录' },
   },
+  {
+    id: 'group_attention',
+    when: { attendance_group_contains: '单休' },
+    then: { warning: '单休考勤组请核对', reason: 'Attendance group reminder' },
+  },
 ]
 
 const payrollTemplateForm = reactive({
