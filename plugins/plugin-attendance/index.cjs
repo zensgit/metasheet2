@@ -4543,6 +4543,11 @@ module.exports = {
                   name: '单休车间规则',
                   category: 'system',
                   editable: false,
+                  params: [
+                    { key: 'groupName', label: 'Attendance group', type: 'string', default: '单休车间', paths: ['scope.attendance_group[0]'] },
+                    { key: 'restTripOvertimeHours', label: 'Rest day trip overtime (hours)', type: 'number', default: 8, paths: ['rules[0].then.overtime_hours'] },
+                    { key: 'lateWarningAfter', label: 'Late checkout warning after', type: 'string', default: '19:00', paths: ['rules[1].when.clockOut2_after'] },
+                  ],
                   scope: { attendance_group: ['单休车间'] },
                   rules: [
                     {
@@ -4615,6 +4620,67 @@ module.exports = {
                       id: 'trip_and_injury_conflict_warning',
                       when: { exceptionReason_contains: ['出差', '工伤假'] },
                       then: { warning: '出差+工伤假请核对' },
+                    },
+                  ],
+                },
+                {
+                  name: '标准上下班提醒',
+                  category: 'system',
+                  editable: false,
+                  params: [
+                    { key: 'lateAfter', label: 'Late after (HH:MM)', type: 'string', default: '09:10', paths: ['rules[0].when.clockIn1_after'] },
+                    { key: 'earlyBefore', label: 'Leave before (HH:MM)', type: 'string', default: '17:50', paths: ['rules[1].when.clockOut1_before'] },
+                    { key: 'lateWarning', label: 'Late warning text', type: 'string', default: '迟到，请核对', paths: ['rules[0].then.warning'] },
+                    { key: 'earlyWarning', label: 'Early leave warning text', type: 'string', default: '早退，请核对', paths: ['rules[1].then.warning'] },
+                  ],
+                  rules: [
+                    {
+                      id: 'late_after_warning',
+                      when: { clockIn1_after: '09:10' },
+                      then: { warning: '迟到，请核对' },
+                    },
+                    {
+                      id: 'early_leave_warning',
+                      when: { clockOut1_before: '17:50' },
+                      then: { warning: '早退，请核对' },
+                    },
+                  ],
+                },
+                {
+                  name: '缺卡补卡核对',
+                  category: 'system',
+                  editable: false,
+                  rules: [
+                    {
+                      id: 'missing_checkout_warning',
+                      when: { clockIn1_exists: true, clockOut1_exists: false },
+                      then: { warning: '缺少下班卡' },
+                    },
+                    {
+                      id: 'missing_checkin_warning',
+                      when: { clockIn1_exists: false, clockOut1_exists: true },
+                      then: { warning: '缺少上班卡' },
+                    },
+                    {
+                      id: 'makeup_missing_second_in',
+                      when: { exceptionReason_contains_any: ['补卡', '缺卡'], clockIn2_exists: false },
+                      then: { warning: '缺卡/补卡但未找到上班2打卡' },
+                    },
+                  ],
+                },
+                {
+                  name: '休息日加班',
+                  category: 'system',
+                  editable: false,
+                  params: [
+                    { key: 'restOvertimeHours', label: 'Rest day overtime (hours)', type: 'number', default: 8, paths: ['rules[0].then.overtime_hours'] },
+                    { key: 'restReason', label: 'Reason text', type: 'string', default: '休息日打卡算加班', paths: ['rules[0].then.reason'] },
+                  ],
+                  rules: [
+                    {
+                      id: 'rest_day_punch_overtime',
+                      when: { shift_contains: '休息', has_punch: true },
+                      then: { overtime_hours: 8, reason: '休息日打卡算加班' },
                     },
                   ],
                 },

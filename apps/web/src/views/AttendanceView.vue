@@ -569,9 +569,19 @@
                     No system templates detected.
                   </div>
                   <ul v-else class="attendance__template-list">
-                    <li v-for="tpl in ruleSetSystemTemplates" :key="tpl.name" class="attendance__template-item">
-                      <div class="attendance__template-name">{{ tpl.name }}</div>
-                      <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                    <li
+                      v-for="tpl in ruleSetSystemTemplates"
+                      :key="tpl.name"
+                      class="attendance__template-item"
+                      :class="{ 'attendance__template-item--active': tpl.name === selectedSystemTemplateName }"
+                    >
+                      <div>
+                        <div class="attendance__template-name">{{ tpl.name }}</div>
+                        <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                      </div>
+                      <button class="attendance__btn attendance__btn--sm" type="button" @click="selectSystemTemplate(tpl)">
+                        Use
+                      </button>
                     </li>
                   </ul>
                 </div>
@@ -601,6 +611,63 @@
               </div>
               <div class="attendance__template-hint">
                 System templates are locked. You can add or modify custom templates in <code>engine.templates</code>.
+              </div>
+              <div v-if="selectedSystemTemplate" class="attendance__template-params">
+                <div class="attendance__template-editor-header">
+                  <div>
+                    <div class="attendance__template-editor-title">Template parameters</div>
+                    <div class="attendance__template-editor-name">{{ selectedSystemTemplate.name }}</div>
+                  </div>
+                  <button class="attendance__btn attendance__btn--sm" type="button" @click="resetTemplateParams(selectedSystemTemplate)">
+                    Reset
+                  </button>
+                </div>
+                <div class="attendance__admin-grid">
+                  <div v-if="!selectedSystemTemplate.params || selectedSystemTemplate.params.length === 0" class="attendance__empty">
+                    No parameters for this template.
+                  </div>
+                  <template v-else>
+                    <label
+                      v-for="param in selectedSystemTemplate.params"
+                      :key="param.key"
+                      class="attendance__field"
+                      :for="`attendance-template-param-${param.key}`"
+                    >
+                      <span>{{ param.label }}</span>
+                      <input
+                        v-if="param.type === 'number'"
+                        :id="`attendance-template-param-${param.key}`"
+                        v-model.number="templateParamValues[param.key]"
+                        type="number"
+                      />
+                      <input
+                        v-else-if="param.type === 'boolean'"
+                        :id="`attendance-template-param-${param.key}`"
+                        v-model="templateParamValues[param.key]"
+                        type="checkbox"
+                      />
+                      <textarea
+                        v-else-if="param.type === 'stringArray'"
+                        :id="`attendance-template-param-${param.key}`"
+                        v-model="templateParamValues[param.key]"
+                        rows="2"
+                        placeholder="Comma or newline separated"
+                      />
+                      <input
+                        v-else
+                        :id="`attendance-template-param-${param.key}`"
+                        v-model="templateParamValues[param.key]"
+                        type="text"
+                      />
+                      <small v-if="param.description" class="attendance__field-hint">{{ param.description }}</small>
+                    </label>
+                  </template>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn attendance__btn--primary" type="button" @click="applySystemTemplate">
+                    Create custom template
+                  </button>
+                </div>
               </div>
               <div v-if="customTemplateEditingName" class="attendance__template-editor">
                 <div class="attendance__template-editor-header">
@@ -930,6 +997,123 @@
                     </tr>
                   </tbody>
                 </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Import Reconcile</h4>
+                <button class="attendance__btn" :disabled="reconcileLoading" @click="runReconcile">
+                  {{ reconcileLoading ? 'Reconciling...' : 'Run reconcile' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-reconcile-rule-set">
+                  <span>Rule set</span>
+                  <select
+                    id="attendance-reconcile-rule-set"
+                    v-model="reconcileForm.ruleSetId"
+                    :disabled="ruleSets.length === 0"
+                  >
+                    <option value="">(Optional) Use default rule</option>
+                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-reconcile-timezone">
+                  <span>Timezone</span>
+                  <input
+                    id="attendance-reconcile-timezone"
+                    v-model="reconcileForm.timezone"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-reconcile-config">
+                  <span>Use current rule set config</span>
+                  <input
+                    id="attendance-reconcile-config"
+                    v-model="reconcileForm.useCurrentConfig"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-reconcile-entries">
+                  <span>Entries payload (JSON)</span>
+                  <textarea
+                    id="attendance-reconcile-entries"
+                    v-model="reconcileForm.entriesPayload"
+                    rows="6"
+                    placeholder='{"source":"dingtalk_csv","entries":[...]}'
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-reconcile-rows">
+                  <span>Rows payload (JSON)</span>
+                  <textarea
+                    id="attendance-reconcile-rows"
+                    v-model="reconcileForm.rowsPayload"
+                    rows="6"
+                    placeholder='{"source":"dingtalk_csv","rows":[...]}'
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="reconcileLoading" @click="runReconcile">
+                  {{ reconcileLoading ? 'Reconciling...' : 'Reconcile' }}
+                </button>
+                <button class="attendance__btn" :disabled="reconcileLoading" @click="clearReconcile">
+                  Clear
+                </button>
+              </div>
+              <div v-if="!reconcileResult" class="attendance__empty">No reconcile data.</div>
+              <div v-else class="attendance__preview-card">
+                <div class="attendance__preview-grid">
+                  <div>
+                    <div class="attendance__preview-label">Entries items</div>
+                    <div>{{ reconcileResult.entriesTotal }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Rows items</div>
+                    <div>{{ reconcileResult.rowsTotal }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Matched</div>
+                    <div>{{ reconcileResult.matched }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Mismatched</div>
+                    <div>{{ reconcileResult.mismatched }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Missing in entries</div>
+                    <div>{{ reconcileResult.missingInEntries }}</div>
+                  </div>
+                  <div>
+                    <div class="attendance__preview-label">Missing in rows</div>
+                    <div>{{ reconcileResult.missingInRows }}</div>
+                  </div>
+                </div>
+                <div class="attendance__preview-label">First 50 diffs</div>
+                <div v-if="reconcileResult.diffs.length === 0" class="attendance__empty">
+                  No differences found.
+                </div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table">
+                    <thead>
+                      <tr>
+                        <th>User ID</th>
+                        <th>Work date</th>
+                        <th>Diffs</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="diff in reconcileResult.diffs.slice(0, 50)" :key="diff.key">
+                        <td>{{ diff.userId }}</td>
+                        <td>{{ diff.workDate }}</td>
+                        <td><pre class="attendance__preview-json">{{ formatJson(diff.differences) }}</pre></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
 
@@ -2191,7 +2375,17 @@ interface AttendanceEngineTemplate {
   editable?: boolean
   description?: string
   scope?: Record<string, any>
+  params?: AttendanceTemplateParam[]
   rules?: Array<Record<string, any>>
+}
+
+interface AttendanceTemplateParam {
+  key: string
+  label: string
+  type?: 'string' | 'number' | 'boolean' | 'stringArray'
+  default?: any
+  description?: string
+  paths?: string[]
 }
 
 interface AttendanceRuleDraft {
@@ -2256,6 +2450,23 @@ interface AttendanceRulePreviewItem {
     overrides?: Record<string, any> | null
     base?: Record<string, any> | null
   } | null
+}
+
+interface AttendanceReconcileDiff {
+  key: string
+  userId: string
+  workDate: string
+  differences: Record<string, { entries: any; rows: any }>
+}
+
+interface AttendanceReconcileResult {
+  entriesTotal: number
+  rowsTotal: number
+  matched: number
+  mismatched: number
+  missingInEntries: number
+  missingInRows: number
+  diffs: AttendanceReconcileDiff[]
 }
 
 interface AttendanceShift {
@@ -2402,6 +2613,7 @@ const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
 const importLoading = ref(false)
+const reconcileLoading = ref(false)
 const rulePreviewLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -2419,6 +2631,7 @@ const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
+const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
 const shiftEditingId = ref<string | null>(null)
@@ -2629,7 +2842,15 @@ const ruleSetForm = reactive({
   config: '{}',
 })
 
-const SYSTEM_TEMPLATE_NAMES = ['单休车间规则', '通用提醒', '角色规则', '部门提醒']
+const SYSTEM_TEMPLATE_NAMES = [
+  '单休车间规则',
+  '通用提醒',
+  '标准上下班提醒',
+  '缺卡补卡核对',
+  '休息日加班',
+  '角色规则',
+  '部门提醒',
+]
 const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
   name: '用户自定义',
   category: 'custom',
@@ -2640,6 +2861,8 @@ const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
 
 const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
 const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
+const selectedSystemTemplateName = ref<string | null>(null)
+const templateParamValues = reactive<Record<string, any>>({})
 const customTemplateEditingName = ref<string | null>(null)
 const customTemplateDraftDescription = ref('')
 const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
@@ -2757,6 +2980,14 @@ const importForm = reactive({
   userId: '',
   timezone: defaultTimezone,
   payload: '{}',
+})
+
+const reconcileForm = reactive({
+  ruleSetId: '',
+  timezone: defaultTimezone,
+  entriesPayload: '',
+  rowsPayload: '',
+  useCurrentConfig: false,
 })
 
 const rulePreviewForm = reactive({
@@ -2930,6 +3161,31 @@ function splitTemplates(templates: AttendanceEngineTemplate[] = []) {
   return { system, custom, normalized }
 }
 
+const selectedSystemTemplate = computed(() => {
+  if (!selectedSystemTemplateName.value) return null
+  return ruleSetSystemTemplates.value.find((tpl) => tpl.name === selectedSystemTemplateName.value) ?? null
+})
+
+function defaultParamValue(param: AttendanceTemplateParam): any {
+  if (param.default !== undefined) return param.default
+  if (param.type === 'number') return 0
+  if (param.type === 'boolean') return false
+  return ''
+}
+
+function resetTemplateParams(template: AttendanceEngineTemplate | null) {
+  Object.keys(templateParamValues).forEach((key) => delete templateParamValues[key])
+  if (!template || !Array.isArray(template.params)) return
+  template.params.forEach((param) => {
+    templateParamValues[param.key] = defaultParamValue(param)
+  })
+}
+
+function selectSystemTemplate(template: AttendanceEngineTemplate) {
+  selectedSystemTemplateName.value = template.name
+  resetTemplateParams(template)
+}
+
 function syncRuleSetTemplates(config?: Record<string, any> | null) {
   const templates = Array.isArray(config?.engine?.templates)
     ? (config?.engine?.templates as AttendanceEngineTemplate[])
@@ -2959,6 +3215,141 @@ function applyTemplateLock(config: Record<string, any>) {
 
   engine.templates = Array.from(merged.values())
   return { ...config, engine }
+}
+
+function normalizeParamValue(param: AttendanceTemplateParam, raw: any): any {
+  if (param.type === 'number') {
+    const num = typeof raw === 'number' ? raw : Number(String(raw).trim())
+    if (Number.isFinite(num)) return num
+    return defaultParamValue(param)
+  }
+  if (param.type === 'boolean') {
+    return Boolean(raw)
+  }
+  if (param.type === 'stringArray') {
+    if (Array.isArray(raw)) return raw.filter(Boolean)
+    const text = String(raw ?? '').trim()
+    if (!text) return []
+    return text.split(/[\n,]/).map(item => item.trim()).filter(Boolean)
+  }
+  if (raw === null || raw === undefined) return defaultParamValue(param)
+  return String(raw)
+}
+
+function buildTemplateParamMap(template: AttendanceEngineTemplate): Record<string, any> {
+  const params = Array.isArray(template.params) ? template.params : []
+  const values: Record<string, any> = {}
+  params.forEach((param) => {
+    values[param.key] = normalizeParamValue(param, templateParamValues[param.key])
+  })
+  return values
+}
+
+function resolveTemplateValue(value: any, params: Record<string, any>): any {
+  if (typeof value === 'string') {
+    const exact = value.match(/^{{\s*([^}]+)\s*}}$/)
+    if (exact) {
+      const key = exact[1]
+      return params[key] ?? ''
+    }
+    return value.replace(/{{\s*([^}]+)\s*}}/g, (_match, key) => {
+      const replacement = params[key]
+      return replacement === undefined || replacement === null ? '' : String(replacement)
+    })
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => resolveTemplateValue(item, params))
+  }
+  if (value && typeof value === 'object') {
+    const output: Record<string, any> = Array.isArray(value) ? [] : {}
+    Object.entries(value).forEach(([key, entry]) => {
+      output[key] = resolveTemplateValue(entry, params)
+    })
+    return output
+  }
+  return value
+}
+
+function setValueByPath(target: Record<string, any>, path: string, value: any) {
+  const normalized = path.replace(/\[(\d+)\]/g, '.$1')
+  const parts = normalized.split('.').filter(Boolean)
+  let current: any = target
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const key = parts[i]
+    if (current[key] == null) {
+      const nextKey = parts[i + 1]
+      current[key] = /^\d+$/.test(nextKey) ? [] : {}
+    }
+    current = current[key]
+  }
+  const finalKey = parts[parts.length - 1]
+  if (finalKey !== undefined) {
+    current[finalKey] = value
+  }
+}
+
+function applyParamPaths(template: AttendanceEngineTemplate, params: Record<string, any>): AttendanceEngineTemplate {
+  const cloned: AttendanceEngineTemplate = JSON.parse(JSON.stringify(template))
+  const paramDefs = Array.isArray(template.params) ? template.params : []
+  paramDefs.forEach((param) => {
+    const paths = Array.isArray((param as any).paths) ? (param as any).paths : []
+    paths.forEach((path) => {
+      if (typeof path === 'string' && path.trim().length > 0) {
+        setValueByPath(cloned as Record<string, any>, path, params[param.key])
+      }
+    })
+  })
+  return cloned
+}
+
+function applySystemTemplate() {
+  const template = selectedSystemTemplate.value
+  if (!template) {
+    setStatus('Select a system template first.', 'error')
+    return
+  }
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    setStatus('Rule set config must be valid JSON before applying templates.', 'error')
+    return
+  }
+
+  const paramMap = buildTemplateParamMap(template)
+  const boundTemplate = applyParamPaths(template, paramMap)
+  const resolvedRules = resolveTemplateValue(boundTemplate.rules ?? [], paramMap)
+  const resolvedScope = resolveTemplateValue(boundTemplate.scope ?? {}, paramMap)
+  const proposedName = `${template.name} - Custom`
+  const nameInput = window.prompt('Custom template name', proposedName)
+  const name = nameInput?.trim()
+  if (!name) return
+  if (SYSTEM_TEMPLATE_NAMES.includes(name)) {
+    setStatus('Template name conflicts with a system template.', 'error')
+    return
+  }
+
+  const newTemplate: AttendanceEngineTemplate = {
+    name,
+    category: 'custom',
+    editable: true,
+    description: template.description,
+    scope: resolvedScope,
+    rules: resolvedRules,
+  }
+
+  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
+  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
+  const existingIndex = templates.findIndex((tpl) => tpl.name === name)
+  if (existingIndex >= 0) {
+    templates[existingIndex] = { ...templates[existingIndex], ...newTemplate }
+  } else {
+    templates.push(newTemplate)
+  }
+  engine.templates = templates
+  config.engine = engine
+  ruleSetForm.config = JSON.stringify(config, null, 2)
+  syncRuleSetTemplates(config)
+  openCustomTemplateEditor(newTemplate)
+  setStatus('Custom template created from system template.')
 }
 
 function buildRuleDrafts(rules: Array<Record<string, any>> = []): AttendanceRuleDraft[] {
@@ -3269,6 +3660,161 @@ function buildImportPayload(): Record<string, any> | null {
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
   return payload
+}
+
+function parsePayloadInput(value: string, label: string): Record<string, any> {
+  const trimmed = value.trim()
+  if (!trimmed) throw new Error(`${label} payload is required`)
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error(`${label} payload must be a JSON object`)
+    }
+    return parsed as Record<string, any>
+  } catch {
+    throw new Error(`${label} payload must be valid JSON`)
+  }
+}
+
+function enrichReconcilePayload(payload: Record<string, any>): Record<string, any> {
+  const resolved = { ...payload }
+  const resolvedOrgId = normalizedOrgId()
+  const resolvedUserId = normalizedUserId()
+  if (resolvedOrgId && !resolved.orgId) resolved.orgId = resolvedOrgId
+  if (resolvedUserId && !resolved.userId) resolved.userId = resolvedUserId
+  if (reconcileForm.ruleSetId && !resolved.ruleSetId) resolved.ruleSetId = reconcileForm.ruleSetId
+  if (reconcileForm.timezone && !resolved.timezone) resolved.timezone = reconcileForm.timezone
+  if (reconcileForm.useCurrentConfig) {
+    const config = parseJsonConfig(ruleSetForm.config)
+    if (config?.engine) resolved.engine = config.engine
+  }
+  return resolved
+}
+
+async function previewPayload(payload: Record<string, any>): Promise<AttendanceImportPreviewItem[]> {
+  const response = await apiFetch('/api/attendance/import/preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  const data = await response.json()
+  if (!response.ok || !data.ok) {
+    throw new Error(data?.error?.message || 'Failed to preview payload')
+  }
+  return data.data?.items ?? []
+}
+
+function diffPreviewItems(
+  entriesItems: AttendanceImportPreviewItem[],
+  rowsItems: AttendanceImportPreviewItem[],
+): AttendanceReconcileResult {
+  const left = new Map<string, AttendanceImportPreviewItem>()
+  const right = new Map<string, AttendanceImportPreviewItem>()
+  const buildKey = (item: AttendanceImportPreviewItem) => `${item.userId}::${item.workDate}`
+
+  entriesItems.forEach((item) => left.set(buildKey(item), item))
+  rowsItems.forEach((item) => right.set(buildKey(item), item))
+
+  const allKeys = new Set<string>([...left.keys(), ...right.keys()])
+  const diffs: AttendanceReconcileDiff[] = []
+  let matched = 0
+  let mismatched = 0
+  let missingInEntries = 0
+  let missingInRows = 0
+
+  const fields: Array<keyof AttendanceImportPreviewItem> = [
+    'status',
+    'workMinutes',
+    'lateMinutes',
+    'earlyLeaveMinutes',
+    'leaveMinutes',
+    'overtimeMinutes',
+  ]
+
+  allKeys.forEach((key) => {
+    const leftItem = left.get(key)
+    const rightItem = right.get(key)
+    if (!leftItem) {
+      missingInEntries += 1
+      diffs.push({
+        key,
+        userId: rightItem?.userId ?? '',
+        workDate: rightItem?.workDate ?? '',
+        differences: { missing: { entries: null, rows: rightItem } },
+      })
+      return
+    }
+    if (!rightItem) {
+      missingInRows += 1
+      diffs.push({
+        key,
+        userId: leftItem.userId,
+        workDate: leftItem.workDate,
+        differences: { missing: { entries: leftItem, rows: null } },
+      })
+      return
+    }
+
+    const differences: Record<string, { entries: any; rows: any }> = {}
+    fields.forEach((field) => {
+      const leftValue = leftItem[field] ?? null
+      const rightValue = rightItem[field] ?? null
+      if (leftValue === rightValue) return
+      if (typeof leftValue === 'number' || typeof rightValue === 'number') {
+        const leftNum = Number(leftValue ?? 0)
+        const rightNum = Number(rightValue ?? 0)
+        if (Number.isFinite(leftNum) && Number.isFinite(rightNum) && leftNum === rightNum) return
+        differences[field] = { entries: leftValue, rows: rightValue }
+        return
+      }
+      differences[field] = { entries: leftValue, rows: rightValue }
+    })
+
+    if (Object.keys(differences).length === 0) {
+      matched += 1
+      return
+    }
+    mismatched += 1
+    diffs.push({
+      key,
+      userId: leftItem.userId,
+      workDate: leftItem.workDate,
+      differences,
+    })
+  })
+
+  return {
+    entriesTotal: entriesItems.length,
+    rowsTotal: rowsItems.length,
+    matched,
+    mismatched,
+    missingInEntries,
+    missingInRows,
+    diffs,
+  }
+}
+
+async function runReconcile() {
+  reconcileLoading.value = true
+  try {
+    const entriesPayload = enrichReconcilePayload(parsePayloadInput(reconcileForm.entriesPayload, 'Entries'))
+    const rowsPayload = enrichReconcilePayload(parsePayloadInput(reconcileForm.rowsPayload, 'Rows'))
+    const [entriesItems, rowsItems] = await Promise.all([
+      previewPayload(entriesPayload),
+      previewPayload(rowsPayload),
+    ])
+    reconcileResult.value = diffPreviewItems(entriesItems, rowsItems)
+    setStatus('Reconcile completed.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to reconcile payloads', 'error')
+  } finally {
+    reconcileLoading.value = false
+  }
+}
+
+function clearReconcile() {
+  reconcileForm.entriesPayload = ''
+  reconcileForm.rowsPayload = ''
+  reconcileResult.value = null
 }
 
 function buildRulePreviewPayload(): Record<string, any> | null {
@@ -4749,6 +5295,8 @@ function resetRuleSetForm() {
   ruleSetForm.config = '{}'
   ruleSetSystemTemplates.value = []
   ruleSetCustomTemplates.value = []
+  selectedSystemTemplateName.value = null
+  resetTemplateParams(null)
   closeCustomTemplateEditor()
 }
 
@@ -4761,6 +5309,8 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
   syncRuleSetTemplates(item.config ?? {})
+  selectedSystemTemplateName.value = null
+  resetTemplateParams(null)
   closeCustomTemplateEditor()
 }
 
@@ -4864,6 +5414,8 @@ async function loadRuleSetTemplate() {
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
     syncRuleSetTemplates(data.data ?? {})
+    selectedSystemTemplateName.value = null
+    resetTemplateParams(null)
     closeCustomTemplateEditor()
     setStatus('Rule set template loaded.')
   } catch (error: any) {
@@ -5704,8 +6256,15 @@ watch(orgId, () => {
   border-radius: 10px;
   padding: 8px 10px;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.attendance__template-item--active {
+  border-color: #2f5ea5;
+  box-shadow: 0 0 0 1px rgba(47, 94, 165, 0.2);
 }
 
 .attendance__template-editor {
@@ -5766,9 +6325,26 @@ watch(orgId, () => {
   color: #666;
 }
 
+.attendance__template-params {
+  border: 1px dashed #d0d0d0;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .attendance__template-hint {
   font-size: 12px;
   color: #666;
+}
+
+.attendance__field-hint {
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+  display: inline-block;
 }
 
 .attendance__tag {
