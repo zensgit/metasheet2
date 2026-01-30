@@ -38,6 +38,16 @@ function normalizeDate(value) {
   if (!value) return ''
   const raw = String(value).trim()
   if (!raw) return ''
+  if (/^\d{10,13}$/.test(raw)) {
+    const ts = Number(raw.length === 10 ? `${raw}000` : raw)
+    if (Number.isFinite(ts)) {
+      return new Date(ts).toISOString().slice(0, 10)
+    }
+  }
+  if (/^\d{2}-\d{2}-\d{2}/.test(raw)) {
+    const [yy, mm, dd] = raw.slice(0, 8).split('-')
+    if (yy && mm && dd) return `20${yy}-${mm}-${dd}`
+  }
   if (raw.includes('T')) return raw.slice(0, 10)
   if (raw.includes(' ')) return raw.split(' ')[0]
   return raw.slice(0, 10)
@@ -76,9 +86,18 @@ function loadUserMap(userMapPath) {
 }
 
 function resolveUser(row, userMap) {
+  const directUserId = row['UserId'] || row['userId'] || row['userid'] || ''
   const empNo = row['工号'] || row['员工工号'] || row['empNo'] || ''
   const account = row['钉钉账号'] || row['账号'] || row['account'] || ''
   const name = row['姓名'] || row['name'] || ''
+
+  if (directUserId) {
+    return {
+      userId: String(directUserId).trim(),
+      name,
+      empNo,
+    }
+  }
 
   if (userMap && empNo && userMap[empNo]) {
     return {
@@ -134,6 +153,16 @@ function normalizeStatusText(value, statusMap) {
     if (lowerText.includes(lowerKey)) return key
   }
   return text.slice(0, 20)
+}
+
+function findHeaderRow(rows) {
+  const headerKeys = ['姓名', '日期', '考勤组']
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i].map((cell) => String(cell ?? '').trim())
+    if (headerKeys.every((key) => row.includes(key))) return i
+    if (row.includes('姓名') && (row.includes('日期') || row.includes('workDate'))) return i
+  }
+  return 0
 }
 
 function parseCsv(raw) {
@@ -199,6 +228,13 @@ function main() {
   columnMap.set('考勤组', 'attendance_group')
   columnMap.set('出勤班次', 'attendance_class')
   columnMap.set('班次', 'plan_detail')
+  columnMap.set('部门', 'department')
+  columnMap.set('职位', 'role')
+  columnMap.set('工号', 'empNo')
+  columnMap.set('姓名', 'userName')
+  columnMap.set('入职时间', 'entryTime')
+  columnMap.set('离职时间', 'resignTime')
+  columnMap.set('UserId', 'userId')
 
   const userMap = loadUserMap(args['user-map'])
   const mapping = loadMapping(args.mapping)
@@ -212,11 +248,12 @@ function main() {
   if (csvRows.length === 0) {
     throw new Error('CSV has no rows')
   }
-  const headers = csvRows[0].map((header) => header.trim())
+  const headerIndex = findHeaderRow(csvRows)
+  const headers = csvRows[headerIndex].map((header) => header.trim())
   if (headers.length > 0) {
     headers[0] = headers[0].replace(/^\uFEFF/, '')
   }
-  const records = csvRows.slice(1).map((row) => {
+  const records = csvRows.slice(headerIndex + 1).filter((row) => row.some((cell) => String(cell ?? '').trim() !== '')).map((row) => {
     const record = {}
     headers.forEach((header, index) => {
       record[header] = row[index] ?? ''
@@ -229,13 +266,15 @@ function main() {
 
   const rows = []
   for (const row of records) {
-    const workDate = normalizeDate(row['日期'] || row['date'] || row['Date'] || '')
+    const workDate = normalizeDate(
+      row['日期'] || row['考勤日期'] || row['date'] || row['Date'] || row['workDate'] || ''
+    )
     if (!withinRange(workDate, from, to)) continue
 
     const user = resolveUser(row, userMap)
     const fields = {}
     for (const [key, value] of Object.entries(row)) {
-      if (key === '日期' || key === 'date' || key === 'Date') continue
+      if (['日期', 'date', 'Date', 'workDate', '考勤日期'].includes(key)) continue
       if (value === '' || value === null || typeof value === 'undefined') continue
       const trimmedKey = key.trim()
       const alias = columnMap.get(trimmedKey) || trimmedKey

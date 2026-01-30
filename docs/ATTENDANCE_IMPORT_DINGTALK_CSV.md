@@ -73,15 +73,17 @@ If you have a daily summary CSV, convert it into `rows`:
 
 You can generate this payload via the helper script:
 ```bash
-node scripts/convert-dingtalk-csv-to-import.mjs <csvPath> <outputPath> <userMapPath>
+node scripts/attendance/dingtalk-csv-to-import.mjs --input <csvPath> --columns <columns-json> --out <output-json>
 ```
 
 Example:
 ```bash
-node scripts/convert-dingtalk-csv-to-import.mjs \\
-  \"/Users/huazhou/Downloads/核对(2).csv\" \\
-  \"artifacts/attendance-import-rows-核对-20260120-20260127.json\" \\
-  \"/Users/huazhou/Downloads/dingtalk-csv-userid-map-核对.json\"
+node scripts/attendance/dingtalk-csv-to-import.mjs \\
+  --input \"/Users/huazhou/Downloads/核对(2).csv\" \\
+  --columns \"/Users/huazhou/Downloads/dingtalk-columns.json\" \\
+  --user-map \"/Users/huazhou/Downloads/dingtalk-csv-userid-map-核对.json\" \\
+  --out \"artifacts/attendance-import-rows-核对-20260120-20260127.json\" \\
+  --normalize-status true
 ```
 
 ## Key field mappings (source → target)
@@ -100,8 +102,14 @@ These are included in `/api/attendance/import/template`:
 - `考勤组` → `attendanceGroup`
 - `部门` → `department`
 - `职位` → `role` / `roleTags`
+- `入职时间` → `entryTime`
+- `离职时间` → `resignTime`
+- `UserId` / `userId` → `userId`
 
 ## Notes
 - If `userId` is not provided per row, the import falls back to the request user. Use `userMap` + `userMapKeyField` to resolve per-row `userId`.
 - `attendance_group` is used by rule engine `scope` and should map to `attendanceGroup` / `attendance_group`.
 - `statusMap` uses substring matching; add keys like `外勤` → `adjusted` to normalize DingTalk status labels. The helper script includes a default mapping.
+
+## CSV Header Notes
+Some DingTalk exports prepend report title/time rows (e.g. “每日汇总… / 报表生成时间…”). The helper script auto-detects the first row containing headers like `姓名`/`日期`/`考勤组`.

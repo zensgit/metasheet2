@@ -56,6 +56,30 @@ This document provides ready-to-use examples for the **用户自定义** rule te
 }
 ```
 
+## 6) User-specific shift override
+```json
+{
+  "id": "special_user_shift",
+  "when": { "userId": "16256197521696414" },
+  "then": {
+    "required_hours": 10,
+    "warning": "特殊十小时班次"
+  }
+}
+```
+
+## 7) Attendance group specific overtime
+```json
+{
+  "id": "group_rest_overtime",
+  "when": { "attendance_group": "单休车间", "shift": "休息", "approval_contains": "出差" },
+  "then": {
+    "overtime_hours": 8,
+    "reason": "单休车间休息日出差默认8小时"
+  }
+}
+```
+
 ## Suggested Usage
 - Place these under `engine.templates` → `用户自定义` → `rules`.
 - Use **Rule Preview (Engine)** to validate effects before saving.

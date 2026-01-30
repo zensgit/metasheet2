@@ -4527,6 +4527,12 @@ module.exports = {
                 { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
                 { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
                 { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: 'department', targetField: 'department', dataType: 'string' },
+                { sourceField: 'role', targetField: 'role', dataType: 'string' },
+                { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
+                { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+                { sourceField: 'entryTime', targetField: 'entryTime', dataType: 'date' },
+                { sourceField: 'resignTime', targetField: 'resignTime', dataType: 'date' },
               ],
             },
             approvals: {
@@ -4688,6 +4694,11 @@ module.exports = {
                   name: '角色规则',
                   category: 'system',
                   editable: false,
+                  params: [
+                    { key: 'securityBaseHours', label: 'Security base hours', type: 'number', default: 8, paths: ['rules[0].then.required_hours'] },
+                    { key: 'securityHolidayOvertime', label: 'Security holiday overtime (hours)', type: 'number', default: 8, paths: ['rules[1].then.overtime_hours'] },
+                    { key: 'driverRestOvertime', label: 'Driver rest overtime (hours)', type: 'number', default: 8, paths: ['rules[2].then.overtime_hours'] },
+                  ],
                   scope: { role_tags: ['security', 'driver'] },
                   rules: [
                     {
@@ -5110,6 +5121,13 @@ module.exports = {
                 { sourceField: '部门', targetField: 'department', dataType: 'string' },
                 { sourceField: '职位', targetField: 'role', dataType: 'string' },
                 { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
+                { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
+                { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
+                { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+                { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
+                { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
+                { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
+                { sourceField: 'resign_time', targetField: 'resignTime', dataType: 'date' },
                 { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
                 { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
               ],
@@ -5301,27 +5319,33 @@ module.exports = {
 
                 engineResult = engine.evaluate({
                   record: {
+                    userId: rowUserId,
                     shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
                     attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
                     clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
                     clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
                     clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
                     clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                     is_holiday: Boolean(context.holiday),
                     is_workday: context.isWorkingDay,
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
                     actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
                   },
-                profile: {
-                  roleTags,
-                  department: valueFor('department'),
-                  attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
-                },
-                approvals: approvalSummary ?? [],
-                calc: {
-                  leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
-                  exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
-                },
+                  profile: {
+                    roleTags,
+                    role: valueFor('role') ?? valueFor('职位'),
+                    department: valueFor('department'),
+                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
+                  },
+                  approvals: approvalSummary ?? [],
+                  calc: {
+                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
+                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
+                  },
                 })
             }
             const baseMetrics = {
@@ -5525,12 +5549,15 @@ module.exports = {
 
                 engineResult = engine.evaluate({
                   record: {
+                    userId: rowUserId,
                     shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
                     attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
                     clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
                     clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
                     clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
                     clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                     is_holiday: Boolean(context.holiday),
                     is_workday: context.isWorkingDay,
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
@@ -5538,8 +5565,11 @@ module.exports = {
                   },
                   profile: {
                     roleTags,
+                    role: valueFor('role') ?? valueFor('职位'),
                     department: valueFor('department'),
                     attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                   },
                   approvals: approvalSummary ?? [],
                   calc: {
@@ -5547,7 +5577,7 @@ module.exports = {
                     exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
                   },
                 })
-              }
+            }
               const baseMetrics = {
                 ...effective,
                 leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
