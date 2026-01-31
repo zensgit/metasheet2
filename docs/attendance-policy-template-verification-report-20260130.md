@@ -39,6 +39,18 @@
   - Applied policies:
     - `special-user-fixed-hours` triggered once for user `16256197521696414` on `2025-12-01`.
     - `security-*` and `driver-*` rules did not trigger due to missing group matches in template.
+- Template update (2026-01-31):
+  - `security`/`driver` userGroups now match by `attendance_group` (`保安`/`司机`).
+  - Backend image updated and container recreated to pick up latest plugin bundle.
+- Policy preview after template update (2025-12-01..2025-12-07):
+  - Created rule set from updated template: `policy-preview-security-2026-01-31` (`03265b10-a84d-4f3c-9982-08f7bcd6e87e`).
+  - Filtered rows: 106 total (`单休车间` 50, `保安` 56).
+  - User groups matched:
+    - `single_rest_workshop`: 50
+    - `security`: 56
+  - Applied policies:
+    - `security-base-hours` triggered for all 56 `保安` rows (status adjusted).
+    - `single-rest-trip-overtime` not triggered in this subset (no holiday + 出差 + 休息 combination).
 
 ## Notes
 - Derived policy fields are applied during import preview/import; no DB mutation required for evaluation.
