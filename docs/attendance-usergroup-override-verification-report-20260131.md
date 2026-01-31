@@ -18,6 +18,7 @@ Date: 2026-01-31
 ## Runtime Checks Performed (Local)
 - Started backend: `pnpm --filter @metasheet/core-backend dev` (listening on `http://localhost:7778`).
 - Started frontend: `pnpm dev` (Vite on `http://localhost:8899`).
+- Ran migrations with local Postgres (`docker-compose.dev.yml` postgres on `localhost:5435`).
 - Verified plugin list API:
   - `GET http://localhost:7778/api/plugins` includes `plugin-attendance`.
 - Playwright verified redirect:
@@ -29,9 +30,16 @@ Date: 2026-01-31
 - Playwright verified Attendance view loads:
   - Heading `Attendance` present
   - Status shows `Missing Bearer token` (expected without auth token)
+- Playwright verified Attendance view with dev token:
+  - Dev token from `GET /api/auth/dev-token`
+  - Heading `Summary` present
+  - Status shows `Insufficient permissions`
+- API check:
+  - `GET /api/attendance/summary` with dev token returns `FORBIDDEN`
 
 ### Backend Notes
-- Backend started with DB auth error (`password authentication failed for user "metasheet"`), so data-dependent attendance APIs were **not** validated.
+- RBAC/permissions are required for attendance APIs. Dev token alone is insufficient.
+- Full data-dependent validation requires a real user/role seeded in DB or updated permissions.
 
 ## Recommended Runtime Checks (With Backend)
 1. **Plugin nav**
