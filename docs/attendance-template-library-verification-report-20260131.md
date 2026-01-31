@@ -4,7 +4,7 @@ Date: 2026-01-31
 
 ## Verification Summary
 - ✅ Static verification of updated templates, mappings, and UI integration.
-- ⚠️ Runtime verification not executed in this pass (depends on running backend + DB).
+- ✅ Runtime verification executed via local backend API (template + import mapping checks).
 
 ## Static Checks
 - `plugins/plugin-attendance/engine/template-library.cjs`
@@ -19,9 +19,16 @@ Date: 2026-01-31
 - `apps/web/src/views/AttendanceView.vue`
   - `SYSTEM_TEMPLATE_NAMES` includes `加班单核对`.
 
-## Recommended Runtime Checks (Optional)
-1. Start backend + frontend.
-2. Load Attendance > Rule Sets > Load Template.
-3. Verify system templates list includes `加班单核对` and parameters.
-4. Confirm `考勤组` mapping appears for both `attendanceGroup` and `attendance_group` in import template.
-5. Run import preview and verify driver/security groups are detected by `attendance_group`.
+## Runtime Checks Performed (Local Backend)
+- Backend: `pnpm --filter @metasheet/core-backend dev` (local Postgres + Redis).
+- Auth: `POST /api/auth/login` with `admin.local@metasheet.app`.
+- `GET /api/attendance/rule-sets/template`
+  - `engine.templates` length = 9
+  - Names include: `单休车间规则`, `通用提醒`, `标准上下班提醒`, `缺卡补卡核对`, `休息日加班`, `角色规则`, `部门提醒`, `加班单核对`, `用户自定义`.
+- `GET /api/attendance/import/template`
+  - `attendance_group` mapping present for both `attendanceGroup` and `attendance_group` targets.
+
+## Remaining Optional UI Checks
+1. Start frontend (`pnpm dev`) and load Attendance UI.
+2. Load rule‑set template in UI; confirm system templates list and parameter editor.
+3. Run import preview with CSV to confirm userGroup detection from `attendance_group`.
