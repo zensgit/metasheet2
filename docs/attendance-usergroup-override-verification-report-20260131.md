@@ -16,10 +16,22 @@ Date: 2026-01-31
   - Confirmed `/attendance` redirects to plugin host.
 
 ## Runtime Checks Performed (Local)
-- Launch `pnpm dev` (Vite on `http://localhost:8899`).
+- Started backend: `pnpm --filter @metasheet/core-backend dev` (listening on `http://localhost:7778`).
+- Started frontend: `pnpm dev` (Vite on `http://localhost:8899`).
+- Verified plugin list API:
+  - `GET http://localhost:7778/api/plugins` includes `plugin-attendance`.
 - Playwright verified redirect:
   - Opened `http://localhost:8899/attendance`
   - Final URL: `http://localhost:8899/p/plugin-attendance/attendance`
+- Playwright verified navigation link:
+  - `Attendance` nav entry exists
+  - `href = /p/plugin-attendance/attendance`
+- Playwright verified Attendance view loads:
+  - Heading `Attendance` present
+  - Status shows `Missing Bearer token` (expected without auth token)
+
+### Backend Notes
+- Backend started with DB auth error (`password authentication failed for user "metasheet"`), so data-dependent attendance APIs were **not** validated.
 
 ## Recommended Runtime Checks (With Backend)
 1. **Plugin nav**
