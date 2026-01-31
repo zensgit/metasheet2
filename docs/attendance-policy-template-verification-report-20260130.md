@@ -42,6 +42,9 @@
 - Template update (2026-01-31):
   - `security`/`driver` userGroups now match by `attendance_group` (`保安`/`司机`).
   - Backend image updated and container recreated to pick up latest plugin bundle.
+- Template update (2026-01-31, driver role):
+  - `driver` userGroup now matches by `role` contains `司机` (CSV uses position for drivers).
+  - Backend image updated and container recreated to pick up latest plugin bundle.
 - Policy preview after template update (2025-12-01..2025-12-07):
   - Created rule set from updated template: `policy-preview-security-2026-01-31` (`03265b10-a84d-4f3c-9982-08f7bcd6e87e`).
   - Filtered rows: 106 total (`单休车间` 50, `保安` 56).
@@ -51,6 +54,13 @@
   - Applied policies:
     - `security-base-hours` triggered for all 56 `保安` rows (status adjusted).
     - `single-rest-trip-overtime` not triggered in this subset (no holiday + 出差 + 休息 combination).
+- Driver preview after role-based match (2025-12-01..2025-12-07):
+  - Created rule set from updated template: `policy-preview-driver-2-2026-01-31` (`e191cdd0-f0dc-45c9-b887-dc433d5b4213`).
+  - Filtered rows: 7 total (`职位=司机`, 考勤组为 `单休办公`).
+  - User groups matched:
+    - `driver`: 7
+  - Applied policies:
+    - `driver-rest-overtime` not triggered (no rest-day punch; the only `休息` row lacks打卡时间).
 
 ## Notes
 - Derived policy fields are applied during import preview/import; no DB mutation required for evaluation.
