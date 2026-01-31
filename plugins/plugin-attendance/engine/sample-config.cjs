@@ -1,3 +1,5 @@
+const { DEFAULT_TEMPLATES } = require('./template-library.cjs')
+
 module.exports = {
   mapping: {
     source: 'DingTalkDailyReport',
@@ -74,49 +76,7 @@ module.exports = {
       warn_if_actual_plus_leave_less_than_required: true,
     },
   },
-  templates: [
-    {
-      name: '单休车间规则',
-      category: 'system',
-      editable: false,
-      scope: { attendance_group: ['单休车间'] },
-      rules: [
-        {
-          id: 'rest_trip_default_overtime',
-          when: {
-            shift: '休息',
-            approval_contains: '出差',
-          },
-          then: {
-            overtime_hours: 8,
-            reason: '单休车间休息日出差默认8小时',
-          },
-        },
-        {
-          id: 'after7_no_overtime_warning',
-          when: {
-            clockOut2_after: '19:00',
-            overtime_hours_eq: 0,
-          },
-          then: {
-            warning: '下班晚但无加班单',
-          },
-        },
-        {
-          id: 'rest_punch_no_overtime_warning',
-          when: { exceptionReason_contains: '休息并打卡', overtime_hours_eq: 0 },
-          then: { warning: '休息日打卡但无加班单' },
-        },
-        {
-          id: 'rest_punch_missing_checkout_warning',
-          when: {
-            exceptionReason_contains: '休息并打卡',
-            clockIn1_exists: true,
-            clockOut1_exists: false,
-          },
-          then: { warning: '休息日打卡但缺少下班卡' },
-        },
-      ],
+  templates: DEFAULT_TEMPLATES,
     },
     {
       name: '通用提醒',

@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
+const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 
 const DEFAULT_ORG_ID = 'default'
 const DEFAULT_RULE = {
@@ -4578,6 +4579,9 @@ module.exports = {
                 { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
                 { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
                 { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
+                { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+                { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
                 { sourceField: 'department', targetField: 'department', dataType: 'string' },
                 { sourceField: 'role', targetField: 'role', dataType: 'string' },
                 { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
@@ -4595,217 +4599,17 @@ module.exports = {
               templateId: '',
             },
             engine: {
-              templates: [
-                {
-                  name: '单休车间规则',
-                  category: 'system',
-                  editable: false,
-                  params: [
-                    { key: 'groupName', label: 'Attendance group', type: 'string', default: '单休车间', paths: ['scope.attendance_group[0]'] },
-                    { key: 'restTripOvertimeHours', label: 'Rest day trip overtime (hours)', type: 'number', default: 8, paths: ['rules[0].then.overtime_hours'] },
-                    { key: 'lateWarningAfter', label: 'Late checkout warning after', type: 'string', default: '19:00', paths: ['rules[1].when.clockOut2_after'] },
-                  ],
-                  scope: { attendance_group: ['单休车间'] },
-                  rules: [
-                    {
-                      id: 'rest_trip_default_overtime',
-                      when: { shift: '休息', approval_contains: '出差' },
-                      then: { overtime_hours: 8, reason: '单休车间休息日出差默认8小时' },
-                    },
-                    {
-                      id: 'after7_no_overtime_warning',
-                      when: { clockOut2_after: '19:00', overtime_hours_eq: 0 },
-                      then: { warning: '下班晚但无加班单' },
-                    },
-                    {
-                      id: 'rest_punch_no_overtime_warning',
-                      when: { exceptionReason_contains: '休息并打卡', overtime_hours_eq: 0 },
-                      then: { warning: '休息日打卡但无加班单' },
-                    },
-                    {
-                      id: 'rest_punch_missing_checkout_warning',
-                      when: {
-                        exceptionReason_contains: '休息并打卡',
-                        clockIn1_exists: true,
-                        clockOut1_exists: false,
-                      },
-                      then: { warning: '休息日打卡但缺少下班卡' },
-                    },
-                  ],
-                },
-                {
-                  name: '通用提醒',
-                  category: 'system',
-                  editable: false,
-                  rules: [
-                    {
-                      id: 'overtime_approval_no_punch_warning',
-                      when: { approval_contains: '加班', has_punch: false },
-                      then: { warning: '有加班单但未打卡' },
-                    },
-                    {
-                      id: 'trip_and_overtime_warning',
-                      when: { exceptionReason_contains: '出差', overtime_hours_gt: 0 },
-                      then: { warning: '出差同时存在加班工时，请核对' },
-                    },
-                    {
-                      id: 'trip_low_hours_warning',
-                      when: {
-                        exceptionReason_contains: '出差',
-                        shift_not_contains: '休息',
-                        actual_hours_lt: 8,
-                        department_not_contains: ['国内销售', '服务测试部-调试'],
-                      },
-                      then: { warning: '出差当天实际工时不足8小时，请核对' },
-                    },
-                    {
-                      id: 'leave_makeup_missing_punch_warning',
-                      when: { exceptionReason_contains: ['缺卡', '补卡'], clockIn2_exists: false },
-                      then: { warning: '缺卡且补卡，但未找到上班2打卡，请核对' },
-                    },
-                    {
-                      id: 'trip_and_leave_conflict_warning',
-                      when: { exceptionReason_contains: ['出差', '事假'] },
-                      then: { warning: '出差+事假请核对' },
-                    },
-                    {
-                      id: 'trip_and_sick_conflict_warning',
-                      when: { exceptionReason_contains: ['出差', '病假'] },
-                      then: { warning: '出差+病假请核对' },
-                    },
-                    {
-                      id: 'trip_and_injury_conflict_warning',
-                      when: { exceptionReason_contains: ['出差', '工伤假'] },
-                      then: { warning: '出差+工伤假请核对' },
-                    },
-                  ],
-                },
-                {
-                  name: '标准上下班提醒',
-                  category: 'system',
-                  editable: false,
-                  params: [
-                    { key: 'lateAfter', label: 'Late after (HH:MM)', type: 'string', default: '09:10', paths: ['rules[0].when.clockIn1_after'] },
-                    { key: 'earlyBefore', label: 'Leave before (HH:MM)', type: 'string', default: '17:50', paths: ['rules[1].when.clockOut1_before'] },
-                    { key: 'lateWarning', label: 'Late warning text', type: 'string', default: '迟到，请核对', paths: ['rules[0].then.warning'] },
-                    { key: 'earlyWarning', label: 'Early leave warning text', type: 'string', default: '早退，请核对', paths: ['rules[1].then.warning'] },
-                  ],
-                  rules: [
-                    {
-                      id: 'late_after_warning',
-                      when: { clockIn1_after: '09:10' },
-                      then: { warning: '迟到，请核对' },
-                    },
-                    {
-                      id: 'early_leave_warning',
-                      when: { clockOut1_before: '17:50' },
-                      then: { warning: '早退，请核对' },
-                    },
-                  ],
-                },
-                {
-                  name: '缺卡补卡核对',
-                  category: 'system',
-                  editable: false,
-                  rules: [
-                    {
-                      id: 'missing_checkout_warning',
-                      when: { clockIn1_exists: true, clockOut1_exists: false },
-                      then: { warning: '缺少下班卡' },
-                    },
-                    {
-                      id: 'missing_checkin_warning',
-                      when: { clockIn1_exists: false, clockOut1_exists: true },
-                      then: { warning: '缺少上班卡' },
-                    },
-                    {
-                      id: 'makeup_missing_second_in',
-                      when: { exceptionReason_contains_any: ['补卡', '缺卡'], clockIn2_exists: false },
-                      then: { warning: '缺卡/补卡但未找到上班2打卡' },
-                    },
-                  ],
-                },
-                {
-                  name: '休息日加班',
-                  category: 'system',
-                  editable: false,
-                  params: [
-                    { key: 'restOvertimeHours', label: 'Rest day overtime (hours)', type: 'number', default: 8, paths: ['rules[0].then.overtime_hours'] },
-                    { key: 'restReason', label: 'Reason text', type: 'string', default: '休息日打卡算加班', paths: ['rules[0].then.reason'] },
-                  ],
-                  rules: [
-                    {
-                      id: 'rest_day_punch_overtime',
-                      when: { shift_contains: '休息', has_punch: true },
-                      then: { overtime_hours: 8, reason: '休息日打卡算加班' },
-                    },
-                  ],
-                },
-                {
-                  name: '角色规则',
-                  category: 'system',
-                  editable: false,
-                  params: [
-                    { key: 'securityBaseHours', label: 'Security base hours', type: 'number', default: 8, paths: ['rules[0].then.required_hours'] },
-                    { key: 'securityHolidayOvertime', label: 'Security holiday overtime (hours)', type: 'number', default: 8, paths: ['rules[1].then.overtime_hours'] },
-                    { key: 'driverRestOvertime', label: 'Driver rest overtime (hours)', type: 'number', default: 8, paths: ['rules[2].then.overtime_hours'] },
-                  ],
-                  scope: { role_tags: ['security', 'driver'] },
-                  rules: [
-                    {
-                      id: 'security_base_hours',
-                      when: { role: 'security' },
-                      then: { required_hours: 8 },
-                    },
-                    {
-                      id: 'security_holiday_overtime',
-                      when: { role: 'security', is_holiday: true, has_punch: true },
-                      then: { overtime_hours: 8, reason: '保安节假日算加班' },
-                    },
-                    {
-                      id: 'driver_rest_punch_overtime',
-                      when: { role: 'driver', shift: '休息', clockIn1_exists: true },
-                      then: { overtime_hours: 8, reason: '司机休息日打卡算加班' },
-                    },
-                  ],
-                },
-                {
-                  name: '部门提醒',
-                  category: 'system',
-                  editable: false,
-                  scope: { department: ['国内销售', '服务测试部-调试'] },
-                  rules: [
-                    {
-                      id: 'trip_and_leave_warning',
-                      when: { exceptionReason_contains: ['出差', '事假'] },
-                      then: { warning: '出差+事假请核对' },
-                    },
-                    {
-                      id: 'trip_and_sick_warning',
-                      when: { exceptionReason_contains: ['出差', '病假'] },
-                      then: { warning: '出差+病假请核对' },
-                    },
-                    {
-                      id: 'trip_and_injury_warning',
-                      when: { exceptionReason_contains: ['出差', '工伤假'] },
-                      then: { warning: '出差+工伤假请核对' },
-                    },
-                  ],
-                },
-                {
-                  name: '用户自定义',
-                  category: 'custom',
-                  editable: true,
-                  description: '为考勤管理员预留的自定义规则模板',
-                  rules: [],
-                },
-              ],
+              templates: DEFAULT_TEMPLATES,
             },
             policies: {
               userGroups: [
                 {
                   name: 'security',
                   fieldContains: { attendance_group: '保安' },
+                },
+                {
+                  name: 'security',
+                  fieldContains: { attendanceGroup: '保安' },
                 },
                 {
                   name: 'security',
@@ -4820,8 +4624,16 @@ module.exports = {
                   fieldContains: { attendance_group: '司机' },
                 },
                 {
+                  name: 'driver',
+                  fieldContains: { attendanceGroup: '司机' },
+                },
+                {
                   name: 'single_rest_workshop',
                   fieldContains: { attendance_group: '单休车间' },
+                },
+                {
+                  name: 'single_rest_workshop',
+                  fieldContains: { attendanceGroup: '单休车间' },
                 },
               ],
               rules: [
@@ -5219,7 +5031,9 @@ module.exports = {
                 { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
                 { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
                 { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
                 { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
                 { sourceField: '部门', targetField: 'department', dataType: 'string' },
                 { sourceField: '职位', targetField: 'role', dataType: 'string' },
                 { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },

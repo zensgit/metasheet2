@@ -2884,6 +2884,7 @@ const SYSTEM_TEMPLATE_NAMES = [
   '休息日加班',
   '角色规则',
   '部门提醒',
+  '加班单核对',
 ]
 const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
   name: '用户自定义',
