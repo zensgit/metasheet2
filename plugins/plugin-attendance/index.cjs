@@ -4806,7 +4806,7 @@ module.exports = {
                 },
                 {
                   name: 'driver',
-                  fieldContains: { attendance_group: '司机' },
+                  fieldContains: { role: '司机' },
                 },
                 {
                   name: 'single_rest_workshop',
