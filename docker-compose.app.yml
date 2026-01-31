@@ -50,6 +50,8 @@ services:
     container_name: metasheet-web
     ports:
       - "8081:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
     restart: unless-stopped
