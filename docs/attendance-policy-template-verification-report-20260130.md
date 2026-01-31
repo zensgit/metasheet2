@@ -66,6 +66,11 @@
   - Simulated `休息` row with punch times (`08:10` / `17:30`) for preview only (no DB insert).
   - Applied policies:
     - `driver-rest-overtime` triggered for user `17224712726141831`, warning `司机休息日打卡算加班`.
+- Driver preview with authorized simulated rest-day punch (2025-12-07):
+  - Created rule set from template: `policy-preview-driver-sim-2026-01-31` (`1dc8af17-039a-46b0-993c-5c18ff56f7d2`).
+  - Authorized supplement of `休息` row punch times (`08:10` / `17:30`) for preview only (no DB insert).
+  - Applied policies:
+    - `driver-rest-overtime` triggered for user `17224712726141831`, status `off`, warning `司机休息日打卡算加班`.
 
 ## Notes
 - Derived policy fields are applied during import preview/import; no DB mutation required for evaluation.
