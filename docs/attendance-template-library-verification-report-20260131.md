@@ -27,6 +27,11 @@ Date: 2026-01-31
   - Names include: `单休车间规则`, `通用提醒`, `标准上下班提醒`, `缺卡补卡核对`, `休息日加班`, `角色规则`, `部门提醒`, `加班单核对`, `用户自定义`.
 - `GET /api/attendance/import/template`
   - `attendance_group` mapping present for both `attendanceGroup` and `attendance_group` targets.
+- Import preview (CSV):
+  - Source: `浙江亚光科技股份有限公司_每日汇总（新）_20251201-20251231(2) (1).csv`
+  - Driver/Security subset: 279 rows
+    - userGroups: `security` = 248, `driver` = 31
+  - Sample 100 rows: userGroups `single_rest_workshop` = 31
 
 ## Remaining Optional UI Checks
 1. Start frontend (`pnpm dev`) and load Attendance UI.
