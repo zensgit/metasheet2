@@ -4802,11 +4802,11 @@ module.exports = {
               userGroups: [
                 {
                   name: 'security',
-                  userIds: [],
+                  fieldContains: { attendance_group: '保安' },
                 },
                 {
                   name: 'driver',
-                  userIds: [],
+                  fieldContains: { attendance_group: '司机' },
                 },
                 {
                   name: 'single_rest_workshop',
