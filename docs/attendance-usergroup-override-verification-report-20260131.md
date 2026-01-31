@@ -43,6 +43,20 @@ Date: 2026-01-31
 - API check:
   - `GET /api/attendance/summary` with admin JWT returns `ok: true`
 
+## Import Preview Verification (CSV)
+- Source: `/Users/huazhou/Downloads/浙江亚光科技股份有限公司_每日汇总（新）_20251201-20251231(2) (1).csv`
+- Filter: `职位 = 司机`
+- Rows previewed: 20
+
+### Rule Set: `driver-policy-test`
+- Policies: `driver` group via `role=司机` or `attendance_group` contains 司机
+- Result: `userGroups.driver` matched **20 / 20** rows
+
+### Rule Set: `driver-policy-userid-test`
+- Policies: `driver` + `vip` (userIds override)
+- Result: `userGroups.vip` matched **20 / 20** rows
+- Sample: `userGroups = ['driver', 'vip']`
+
 ### Backend Notes
 - RBAC/permissions are required for attendance APIs; admin role resolves access successfully.
 - Attendance data tables are empty in fresh local DB; summary returns zeros (expected).
