@@ -34,8 +34,10 @@ Date: 2026-01-31
 - Playwright verified Attendance view loads:
   - Heading `Attendance` present
   - Status shows `Missing Bearer token` (expected without auth token)
-- Playwright verified Attendance view with **admin JWT** (local secret):
-  - Custom JWT signed with `JWT_SECRET=dev-secret` and `id=<admin user id>`
+- Verified admin login:
+  - `POST /api/auth/login` with `admin.local@metasheet.app` succeeded
+  - Returned bearer token used for UI/API checks
+- Playwright verified Attendance view with admin JWT:
   - Heading `Summary` present
   - Status banner empty (no `Missing Bearer token` / `Insufficient permissions`)
 - API check:
