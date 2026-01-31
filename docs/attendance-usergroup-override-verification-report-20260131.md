@@ -19,6 +19,10 @@ Date: 2026-01-31
 - Started backend: `pnpm --filter @metasheet/core-backend dev` (listening on `http://localhost:7778`).
 - Started frontend: `pnpm dev` (Vite on `http://localhost:8899`).
 - Ran migrations with local Postgres (`docker-compose.dev.yml` postgres on `localhost:5435`).
+- Seeded local admin user + RBAC:
+  - `admin.local@metasheet.app` promoted to `admin` role
+  - `user_roles` contains `admin` role for the user
+  - `attendance:*` permissions present via role + legacy user permissions
 - Verified plugin list API:
   - `GET http://localhost:7778/api/plugins` includes `plugin-attendance`.
 - Playwright verified redirect:
@@ -30,16 +34,16 @@ Date: 2026-01-31
 - Playwright verified Attendance view loads:
   - Heading `Attendance` present
   - Status shows `Missing Bearer token` (expected without auth token)
-- Playwright verified Attendance view with dev token:
-  - Dev token from `GET /api/auth/dev-token`
+- Playwright verified Attendance view with **admin JWT** (local secret):
+  - Custom JWT signed with `JWT_SECRET=dev-secret` and `id=<admin user id>`
   - Heading `Summary` present
-  - Status shows `Insufficient permissions`
+  - Status banner empty (no `Missing Bearer token` / `Insufficient permissions`)
 - API check:
-  - `GET /api/attendance/summary` with dev token returns `FORBIDDEN`
+  - `GET /api/attendance/summary` with admin JWT returns `ok: true`
 
 ### Backend Notes
-- RBAC/permissions are required for attendance APIs. Dev token alone is insufficient.
-- Full data-dependent validation requires a real user/role seeded in DB or updated permissions.
+- RBAC/permissions are required for attendance APIs; admin role resolves access successfully.
+- Attendance data tables are empty in fresh local DB; summary returns zeros (expected).
 
 ## Recommended Runtime Checks (With Backend)
 1. **Plugin nav**
