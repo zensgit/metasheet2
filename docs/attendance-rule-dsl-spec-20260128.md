@@ -28,6 +28,9 @@ User groups provide reusable labels (e.g. `security`, `driver`, `single_rest_wor
 }
 ```
 
+> Note: `userIds` acts as a **manual override**. If the current `userId` is in the list, the group matches even when other conditions do not.
+> For OR-style matching across different fields, define multiple group entries with the same `name`.
+
 ### Rules
 Rules are evaluated **in order**. If `when` matches, `then` actions apply. Multiple rules can apply to the same row.
 

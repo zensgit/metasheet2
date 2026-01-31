@@ -619,7 +619,7 @@ export class MetaSheetServer {
             status: state?.status ?? 'inactive',
             error: state?.error,
             lastAttempt: state?.lastAttempt,
-            contributes: loaded.manifest.contributes ? { views: loaded.manifest.contributes.views } : undefined,
+            contributes: loaded.manifest.contributes ?? undefined,
           }
         })
         const summary = (this.pluginLoader as unknown as Record<string, () => Record<string, unknown>>).getSummary?.() || {}

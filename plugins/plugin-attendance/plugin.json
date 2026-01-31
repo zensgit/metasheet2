@@ -8,6 +8,17 @@
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "index.cjs",
   "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": [
+      {
+        "id": "attendance",
+        "name": "Attendance",
+        "component": "AttendanceView",
+        "location": "main-nav",
+        "order": 50
+      }
+    ]
+  },
   "permissions": [
     "database.read",
     "database.write",

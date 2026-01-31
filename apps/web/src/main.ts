@@ -14,10 +14,10 @@ import CalendarView from './views/CalendarView.vue'
 import GalleryView from './views/GalleryView.vue'
 import FormView from './views/FormView.vue'
 import PlmProductView from './views/PlmProductView.vue'
-import AttendanceView from './views/AttendanceView.vue'
 import SpreadsheetsView from './views/SpreadsheetsView.vue'
 import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
 import PluginManagerView from './views/PluginManagerView.vue'
+import PluginViewHost from './views/PluginViewHost.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -58,8 +58,13 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/attendance',
     name: 'attendance',
-    component: AttendanceView,
-    meta: { title: 'Attendance' }
+    redirect: '/p/plugin-attendance/attendance'
+  },
+  {
+    path: '/p/:plugin/:viewId',
+    name: 'plugin-view',
+    component: PluginViewHost,
+    meta: { title: 'Plugin' }
   },
   {
     path: '/spreadsheets',

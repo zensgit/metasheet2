@@ -1004,10 +1004,13 @@ function resolveUserGroups(userGroups, facts, fieldValues) {
     if (!group || typeof group !== 'object') continue
     const name = String(group.name ?? '').trim()
     if (!name) continue
-    const conditions = []
-    if (Array.isArray(group.userIds) && group.userIds.length > 0) {
-      conditions.push(group.userIds.includes(facts.userId))
+    const matchedByUserId =
+      Array.isArray(group.userIds) && group.userIds.length > 0 && group.userIds.includes(facts.userId)
+    if (matchedByUserId) {
+      groups.add(name)
+      continue
     }
+    const conditions = []
     if (Array.isArray(group.shiftNames) && group.shiftNames.length > 0) {
       conditions.push(group.shiftNames.includes(facts.shiftName))
     }
@@ -4805,8 +4808,16 @@ module.exports = {
                   fieldContains: { attendance_group: '保安' },
                 },
                 {
+                  name: 'security',
+                  fieldContains: { role: '保安' },
+                },
+                {
                   name: 'driver',
                   fieldContains: { role: '司机' },
+                },
+                {
+                  name: 'driver',
+                  fieldContains: { attendance_group: '司机' },
                 },
                 {
                   name: 'single_rest_workshop',
