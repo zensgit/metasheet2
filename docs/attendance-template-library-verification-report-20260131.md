@@ -32,6 +32,7 @@ Date: 2026-01-31
   - Driver/Security subset: 279 rows
     - userGroups: `security` = 248, `driver` = 31
   - Sample 100 rows: userGroups `single_rest_workshop` = 31
+  - Note: policy rules apply only when `ruleSetId` is provided (preview uses a temporary rule set created from template).
 
 ## Remaining Optional UI Checks
 1. Start frontend (`pnpm dev`) and load Attendance UI.
