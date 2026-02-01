@@ -436,6 +436,13 @@ function resolveUserMapValue(userMap, key) {
   return null
 }
 
+function resolveUserMapEntry(userMap, key) {
+  if (!userMap || !key) return null
+  const entry = userMap[key]
+  if (entry && typeof entry === 'object') return entry
+  return null
+}
+
 function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
   if (!row) return fallbackUserId ?? null
   if (row.userId) return row.userId
@@ -455,6 +462,58 @@ function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userM
     if (mapped) return mapped
   }
   return fallbackUserId ?? null
+}
+
+function resolveRowUserProfile({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
+  if (!row || !userMap) return null
+  const fields = row.fields ?? {}
+  const candidates = []
+  if (row.userId) candidates.push(row.userId)
+  if (row.user_id) candidates.push(row.user_id)
+  const direct = fields.userId ?? fields.user_id
+  if (direct) candidates.push(direct)
+  if (fallbackUserId) candidates.push(fallbackUserId)
+  if (userMapKeyField && fields[userMapKeyField] !== undefined) {
+    candidates.push(fields[userMapKeyField])
+  }
+  if (Array.isArray(userMapSourceFields)) {
+    userMapSourceFields.forEach((field) => {
+      if (field && fields[field] !== undefined) candidates.push(fields[field])
+    })
+  }
+  candidates.push(fields.empNo, fields['工号'], fields.sourceUserKey, fields.userKey, fields.userName, fields['姓名'])
+  for (const value of candidates) {
+    if (value === null || value === undefined || value === '') continue
+    const entry = resolveUserMapEntry(userMap, String(value).trim())
+    if (entry) {
+      return entry.profile && typeof entry.profile === 'object' ? entry.profile : entry
+    }
+  }
+  return null
+}
+
+const PROFILE_FIELD_ALIASES = {
+  attendance_group: ['attendance_group', 'attendanceGroup', '考勤组'],
+  attendanceGroup: ['attendanceGroup', 'attendance_group', '考勤组'],
+  department: ['department', '部门'],
+  role: ['role', '职位'],
+  roleTags: ['roleTags', 'role_tags', '角色标签'],
+  role_tags: ['role_tags', 'roleTags', '角色标签'],
+  empNo: ['empNo', '工号', 'employeeNo', 'employee_no'],
+  userName: ['userName', 'name', '姓名'],
+  entryTime: ['entryTime', 'entry_time', '入职时间'],
+  resignTime: ['resignTime', 'resign_time', '离职时间'],
+}
+
+function resolveProfileValue(profile, key) {
+  if (!profile || typeof profile !== 'object') return undefined
+  if (profile[key] !== undefined) return profile[key]
+  const aliases = PROFILE_FIELD_ALIASES[key]
+  if (!aliases) return undefined
+  for (const alias of aliases) {
+    if (profile[alias] !== undefined) return profile[alias]
+  }
+  return undefined
 }
 
 function applyFieldMappings(fields, mappings) {
@@ -1060,7 +1119,7 @@ function matchesNumberLte(actual, expected) {
   return actualNum <= expectedNum
 }
 
-function buildFieldValueMap(rawFields, mappedFields) {
+function buildFieldValueMap(rawFields, mappedFields, profile) {
   const values = { ...(rawFields || {}) }
   if (mappedFields && typeof mappedFields === 'object') {
     for (const [key, detail] of Object.entries(mappedFields)) {
@@ -1068,6 +1127,16 @@ function buildFieldValueMap(rawFields, mappedFields) {
         values[key] = detail.value
       }
     }
+  }
+  if (profile && typeof profile === 'object') {
+    for (const [key, value] of Object.entries(profile)) {
+      if (values[key] === undefined) values[key] = value
+    }
+    Object.keys(PROFILE_FIELD_ALIASES).forEach((canonical) => {
+      if (values[canonical] !== undefined) return
+      const resolved = resolveProfileValue(profile, canonical)
+      if (resolved !== undefined) values[canonical] = resolved
+    })
   }
   return values
 }
@@ -5152,7 +5221,17 @@ module.exports = {
               ruleSetId: '<ruleSetId>',
               userMapKeyField: 'empNo',
               userMap: {
-                A0054: { userId: 'tmp_9cf257fde42ac517bc769838', name: '秦夫林', empNo: 'A0054' },
+                A0054: {
+                  userId: 'tmp_9cf257fde42ac517bc769838',
+                  name: '秦夫林',
+                  empNo: 'A0054',
+                  profile: {
+                    attendanceGroup: '单休办公',
+                    department: '亚光科技-人力行政部-后勤',
+                    role: '司机',
+                    roleTags: ['driver'],
+                  },
+                },
               },
               entries: [
                 {
@@ -5294,6 +5373,13 @@ module.exports = {
               userMapKeyField: parsed.data.userMapKeyField,
               userMapSourceFields: parsed.data.userMapSourceFields,
             })
+            const userProfile = resolveRowUserProfile({
+              row,
+              fallbackUserId: userId,
+              userMap: parsed.data.userMap,
+              userMapKeyField: parsed.data.userMapKeyField,
+              userMapSourceFields: parsed.data.userMapSourceFields,
+            })
             const context = await resolveWorkContext({
               db,
               orgId,
@@ -5302,7 +5388,13 @@ module.exports = {
               defaultRule: ruleOverride,
             })
             const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-            const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+            const valueFor = (key) => {
+              if (mapped[key]?.value !== undefined) return mapped[key].value
+              if (row.fields?.[key] !== undefined) return row.fields[key]
+              const profileValue = resolveProfileValue(userProfile, key)
+              if (profileValue !== undefined) return profileValue
+              return undefined
+            }
             const dataTypeFor = (key) => mapped[key]?.dataType
 
             const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
@@ -5336,7 +5428,7 @@ module.exports = {
               status: statusOverride ?? computed.status,
             }
 
-            const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+            const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
             augmentFieldValuesWithDates(fieldValues, workDate)
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
@@ -5556,6 +5648,13 @@ module.exports = {
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
+              const userProfile = resolveRowUserProfile({
+                row,
+                fallbackUserId: requesterId,
+                userMap: parsed.data.userMap,
+                userMapKeyField: parsed.data.userMapKeyField,
+                userMapSourceFields: parsed.data.userMapSourceFields,
+              })
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -5564,7 +5663,13 @@ module.exports = {
                 defaultRule: ruleOverride,
               })
               const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-              const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+              const valueFor = (key) => {
+                if (mapped[key]?.value !== undefined) return mapped[key].value
+                if (row.fields?.[key] !== undefined) return row.fields[key]
+                const profileValue = resolveProfileValue(userProfile, key)
+                if (profileValue !== undefined) return profileValue
+                return undefined
+              }
               const dataTypeFor = (key) => mapped[key]?.dataType
 
               const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
@@ -5598,7 +5703,7 @@ module.exports = {
                 status: statusOverride ?? computed.status,
               }
 
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
               augmentFieldValuesWithDates(fieldValues, workDate)
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
@@ -5856,6 +5961,13 @@ module.exports = {
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
+              const userProfile = resolveRowUserProfile({
+                row,
+                fallbackUserId: userId,
+                userMap: parsed.data.userMap,
+                userMapKeyField: parsed.data.userMapKeyField,
+                userMapSourceFields: parsed.data.userMapSourceFields,
+              })
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -5864,7 +5976,13 @@ module.exports = {
                 defaultRule: ruleOverride,
               })
               const mapped = applyFieldMappings(row.fields ?? {}, mapping)
-              const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+              const valueFor = (key) => {
+                if (mapped[key]?.value !== undefined) return mapped[key].value
+                if (row.fields?.[key] !== undefined) return row.fields[key]
+                const profileValue = resolveProfileValue(userProfile, key)
+                if (profileValue !== undefined) return profileValue
+                return undefined
+              }
               const dataTypeFor = (key) => mapped[key]?.dataType
 
               const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
@@ -5898,7 +6016,7 @@ module.exports = {
                 status: statusOverride ?? computed.status,
               }
 
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
               augmentFieldValuesWithDates(fieldValues, workDate)
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
