@@ -5,6 +5,22 @@
    - `pnpm --filter @metasheet/web build`
    - Result: ✅ success
 
+2) Dev server smoke check:
+   - `pnpm --filter @metasheet/web dev`
+   - `curl -I http://localhost:8899/` → `200 OK`
+   - Result: ✅ UI served
+
+3) UI interaction (manual):
+   - Open `http://localhost:8899/`
+   - Ensure Attendance page loads
+   - In Admin > Import:
+     - Run **Preview** and **Import** (uses prepare → commit)
+     - Confirm **Import Batches** list updates
+     - Open a batch and verify **Batch Items**
+     - Trigger **Rollback** and confirm status changes to `rolled_back`
+   - Note: MCP automation unavailable (transport closed), so UI clicks are manual.
+
 ## Result
 - UI changes compile successfully (TypeScript + Vite build).
-- No runtime verification performed in browser (requires running dev server + login).
+- UI served in dev mode (HTTP 200).
+- Manual UI interaction still required for end-to-end verification.
