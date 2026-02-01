@@ -14,16 +14,15 @@
    - `POST /api/attendance/import/prepare` → `commit` → list → items → rollback
    - Result: ✅ batch committed, items=1, rollback=`rolled_back`
 
-4) UI interaction (manual):
-   - Open `http://localhost:8899/`
-   - Ensure Attendance page loads
-   - In Admin > Import:
-      - Run **Preview** and **Import** (uses prepare → commit)
-      - Confirm **Import Batches** list updates
-      - Open a batch and verify **Batch Items**
-      - Click **View** to display preview snapshot JSON
-      - Trigger **Rollback** and confirm status changes to `rolled_back`
-   - Note: MCP automation unavailable (transport closed), so UI clicks are manual.
+4) UI interaction (Playwright):
+   - Navigated to `http://localhost:8899/p/plugin-attendance/attendance`
+   - Filled import payload, ran **Preview** and **Import**
+   - Captured **Import Batches** list
+   - Opened **Batch Items** and snapshot viewer
+   - Triggered **Rollback** via confirmation dialog
+   - Screenshots:
+     - `artifacts/attendance-ui-verify/import-batches.png`
+     - `artifacts/attendance-ui-verify/import-item-snapshot.png`
 
 ## Result
 - UI changes compile successfully (TypeScript + Vite build).
