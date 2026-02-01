@@ -1033,7 +1033,26 @@
                   {{ importBatchesLoading ? 'Loading...' : 'Reload' }}
                 </button>
               </div>
-              <div v-if="importBatches.length === 0" class="attendance__empty">No import batches.</div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-import-batch-status">
+                  <span>Status</span>
+                  <select id="attendance-import-batch-status" v-model="importBatchStatusFilter">
+                    <option value="all">All</option>
+                    <option value="committed">committed</option>
+                    <option value="rolled_back">rolled_back</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-import-batch-search">
+                  <span>Search</span>
+                  <input
+                    id="attendance-import-batch-search"
+                    v-model="importBatchSearch"
+                    type="text"
+                    placeholder="Batch ID / source / rule set"
+                  />
+                </label>
+              </div>
+              <div v-if="filteredImportBatches.length === 0" class="attendance__empty">No import batches.</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -1048,7 +1067,7 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="batch in importBatches" :key="batch.id">
+                    <tr v-for="batch in filteredImportBatches" :key="batch.id">
                       <td>{{ formatShortId(batch.id) }}</td>
                       <td>
                         <span class="attendance__status-chip" :class="`attendance__status-chip--${batch.status}`">
@@ -1146,6 +1165,10 @@
                 </div>
                 <div v-if="selectedImportItemId" class="attendance__preview-engine">
                   <div class="attendance__preview-label">Preview snapshot</div>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" type="button" @click="copyImportItemSnapshot">Copy JSON</button>
+                    <button class="attendance__btn" type="button" @click="downloadImportItemSnapshot">Download JSON</button>
+                  </div>
                   <pre class="attendance__preview-json">{{ formatJson(selectedImportItemSnapshot) }}</pre>
                 </div>
               </div>
@@ -2865,11 +2888,29 @@ const importBatchItemsPageSize = 5
 const importBatchItemsTotal = ref(0)
 const importBatchItemsTotalPages = computed(() => Math.max(1, Math.ceil(importBatchItemsTotal.value / importBatchItemsPageSize)))
 const selectedImportItemId = ref<string | null>(null)
+const importBatchStatusFilter = ref('all')
+const importBatchSearch = ref('')
 const selectedImportItem = computed(() => {
   if (!selectedImportItemId.value) return null
   return importBatchItems.value.find(item => item.id === selectedImportItemId.value) ?? null
 })
 const selectedImportItemSnapshot = computed(() => selectedImportItem.value?.previewSnapshot ?? null)
+
+const filteredImportBatches = computed(() => {
+  const status = importBatchStatusFilter.value
+  const query = importBatchSearch.value.trim().toLowerCase()
+  return importBatches.value.filter((batch) => {
+    if (status !== 'all' && batch.status !== status) return false
+    if (!query) return true
+    const haystack = [
+      batch.id,
+      batch.source,
+      batch.ruleSetId,
+      batch.createdBy,
+    ].filter(Boolean).join(' ').toLowerCase()
+    return haystack.includes(query)
+  })
+})
 
 const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const calendarLabel = computed(() => {
@@ -4131,6 +4172,30 @@ function downloadText(filename: string, content: string, mime = 'application/jso
   URL.revokeObjectURL(url)
 }
 
+async function copyToClipboard(text: string) {
+  if (!text) return false
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.top = '0'
+    textarea.style.left = '0'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.select()
+    try {
+      const success = document.execCommand('copy')
+      return success
+    } finally {
+      textarea.remove()
+    }
+  }
+}
+
 function exportReconcileJson() {
   if (!reconcileResult.value) {
     setStatus('No reconcile result to export.', 'error')
@@ -4481,6 +4546,27 @@ async function runImport() {
   } finally {
     importLoading.value = false
   }
+}
+
+async function copyImportItemSnapshot() {
+  if (!selectedImportItemSnapshot.value) {
+    setStatus('No snapshot to copy.', 'error')
+    return
+  }
+  const text = JSON.stringify(selectedImportItemSnapshot.value, null, 2)
+  const ok = await copyToClipboard(text)
+  setStatus(ok ? 'Snapshot copied.' : 'Copy failed.', ok ? 'info' : 'error')
+}
+
+function downloadImportItemSnapshot() {
+  if (!selectedImportItemSnapshot.value || !selectedImportItemId.value) {
+    setStatus('No snapshot to download.', 'error')
+    return
+  }
+  const text = JSON.stringify(selectedImportItemSnapshot.value, null, 2)
+  const filename = `attendance-import-snapshot-${selectedImportItemId.value}.json`
+  downloadText(filename, text, 'application/json')
+  setStatus('Snapshot downloaded.')
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {

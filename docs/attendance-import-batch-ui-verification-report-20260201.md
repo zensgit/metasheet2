@@ -17,14 +17,17 @@
 4) UI interaction (Playwright):
    - Navigated to `http://localhost:8899/p/plugin-attendance/attendance`
    - Filled import payload, ran **Preview** and **Import**
-   - Captured **Import Batches** list
+   - Captured **Import Batches** list (with status filter + search visible)
    - Opened **Batch Items** and snapshot viewer
+   - Triggered **Copy JSON** and **Download JSON**
    - Triggered **Rollback** via confirmation dialog
    - Screenshots:
      - `artifacts/attendance-ui-verify/import-batches.png`
      - `artifacts/attendance-ui-verify/import-item-snapshot.png`
+   - Downloads:
+     - `artifacts/attendance-ui-verify/import-item-snapshot.json`
 
 ## Result
 - UI changes compile successfully (TypeScript + Vite build).
 - UI served in dev mode (HTTP 200).
-- Manual UI interaction still required for end-to-end verification.
+- Playwright automated the admin import flow, batch inspection, snapshot copy/download, and rollback.
