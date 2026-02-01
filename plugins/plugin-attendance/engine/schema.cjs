@@ -20,6 +20,17 @@ const RuleSchema = z.object({
   then: RuleActionSchema,
 })
 
+const TemplateParamSchema = z
+  .object({
+    key: z.string(),
+    label: z.string().optional(),
+    type: z.enum(['string', 'number', 'boolean', 'stringArray']).optional(),
+    default: z.any().optional(),
+    paths: z.array(z.string()).optional(),
+    description: z.string().optional(),
+  })
+  .passthrough()
+
 const TemplateSchema = z
   .object({
     name: z.string(),
@@ -27,6 +38,7 @@ const TemplateSchema = z
     editable: z.boolean().optional(),
     description: z.string().optional(),
     scope: z.record(z.any()).optional(),
+    params: z.array(TemplateParamSchema).optional(),
     rules: z.array(RuleSchema),
   })
   .passthrough()

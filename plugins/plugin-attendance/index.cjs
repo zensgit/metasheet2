@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
+const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
 const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 
 const DEFAULT_ORG_ID = 'default'
@@ -96,6 +97,15 @@ class HttpError extends Error {
     this.status = status
     this.code = code
   }
+}
+
+function formatEngineConfigError(error) {
+  const details = Array.isArray(error?.details) ? error.details : null
+  const first = details && details.length > 0 ? details[0] : null
+  const message = first
+    ? `Invalid engine config: ${first.path || 'config'} ${first.message}`
+    : (error?.message || 'Invalid engine config')
+  return { message, details }
 }
 
 function isDatabaseSchemaError(error) {
@@ -4781,6 +4791,15 @@ module.exports = {
           return
         }
         payload.config = configValidation.data
+        if (payload.config?.engine) {
+          try {
+            validateEngineConfig(payload.config.engine)
+          } catch (error) {
+            const { message, details } = formatEngineConfigError(error)
+            res.status(400).json({ ok: false, error: { code: 'INVALID_ENGINE_CONFIG', message, details } })
+            return
+          }
+        }
 
         try {
           const ruleSet = await db.transaction(async (trx) => {
@@ -4862,6 +4881,15 @@ module.exports = {
             return
           }
           payload.config = configValidation.data
+          if (payload.config?.engine) {
+            try {
+              validateEngineConfig(payload.config.engine)
+            } catch (error) {
+              const { message, details } = formatEngineConfigError(error)
+              res.status(400).json({ ok: false, error: { code: 'INVALID_ENGINE_CONFIG', message, details } })
+              return
+            }
+          }
 
           const updated = await db.transaction(async (trx) => {
             if (payload.isDefault) {
