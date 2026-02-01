@@ -1,4 +1,4 @@
-# Attendance Import Commit/Rollback Verification (2026-01-31)
+# Attendance Import Commit/Rollback Verification (2026-02-01)
 
 ## Environment
 - Backend: `pnpm --filter @metasheet/core-backend dev`
@@ -24,7 +24,13 @@ Used dev-token for admin user (token not recorded).
 - Payload: 1 row (`workDate=2026-01-30`, `firstInAt`, `lastOutAt`, `workMinutes`)
 - Result: `ok: true`, `imported: 1`, `batchId` returned
 
-3) **Rollback import batch**
+3) **List batches + items**
+- `GET /api/attendance/import/batches`
+- `GET /api/attendance/import/batches/:id`
+- `GET /api/attendance/import/batches/:id/items`
+- Result: list returned total >= 1, batch status `committed`, items total `1`
+
+4) **Rollback import batch**
 - `POST /api/attendance/import/rollback/:batchId`
 - Result: `ok: true`, `status: rolled_back`
 
