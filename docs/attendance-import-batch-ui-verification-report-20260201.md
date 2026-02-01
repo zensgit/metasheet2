@@ -18,10 +18,11 @@
    - Open `http://localhost:8899/`
    - Ensure Attendance page loads
    - In Admin > Import:
-     - Run **Preview** and **Import** (uses prepare → commit)
-     - Confirm **Import Batches** list updates
-     - Open a batch and verify **Batch Items**
-     - Trigger **Rollback** and confirm status changes to `rolled_back`
+      - Run **Preview** and **Import** (uses prepare → commit)
+      - Confirm **Import Batches** list updates
+      - Open a batch and verify **Batch Items**
+      - Click **View** to display preview snapshot JSON
+      - Trigger **Rollback** and confirm status changes to `rolled_back`
    - Note: MCP automation unavailable (transport closed), so UI clicks are manual.
 
 ## Result

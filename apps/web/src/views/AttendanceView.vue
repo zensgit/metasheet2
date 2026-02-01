@@ -1109,6 +1109,7 @@
                         <th>Work date</th>
                         <th>Record</th>
                         <th>Created</th>
+                        <th>Snapshot</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1117,6 +1118,11 @@
                         <td>{{ item.workDate ?? '--' }}</td>
                         <td>{{ formatShortId(item.recordId) }}</td>
                         <td>{{ formatDateTime(item.createdAt ?? null) }}</td>
+                        <td class="attendance__table-actions">
+                          <button class="attendance__btn" @click="toggleImportItemSnapshot(item.id)">
+                            {{ selectedImportItemId === item.id ? 'Hide' : 'View' }}
+                          </button>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -1137,6 +1143,10 @@
                   >
                     Next
                   </button>
+                </div>
+                <div v-if="selectedImportItemId" class="attendance__preview-engine">
+                  <div class="attendance__preview-label">Preview snapshot</div>
+                  <pre class="attendance__preview-json">{{ formatJson(selectedImportItemSnapshot) }}</pre>
                 </div>
               </div>
             </div>
@@ -2854,6 +2864,12 @@ const importBatchItemsPage = ref(1)
 const importBatchItemsPageSize = 5
 const importBatchItemsTotal = ref(0)
 const importBatchItemsTotalPages = computed(() => Math.max(1, Math.ceil(importBatchItemsTotal.value / importBatchItemsPageSize)))
+const selectedImportItemId = ref<string | null>(null)
+const selectedImportItem = computed(() => {
+  if (!selectedImportItemId.value) return null
+  return importBatchItems.value.find(item => item.id === selectedImportItemId.value) ?? null
+})
+const selectedImportItemSnapshot = computed(() => selectedImportItem.value?.previewSnapshot ?? null)
 
 const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const calendarLabel = computed(() => {
@@ -4339,6 +4355,10 @@ async function loadImportBatchItems(batchId: string, page = 1) {
     importBatchItems.value = data.data?.items ?? []
     importBatchItemsTotal.value = data.data?.total ?? 0
     importBatchItemsPage.value = data.data?.page ?? page
+    if (selectedImportItemId.value) {
+      const stillVisible = importBatchItems.value.some((item) => item.id === selectedImportItemId.value)
+      if (!stillVisible) selectedImportItemId.value = null
+    }
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load import items', 'error')
   } finally {
@@ -4351,10 +4371,16 @@ async function toggleImportBatch(batchId: string) {
     selectedImportBatchId.value = null
     importBatchItems.value = []
     importBatchItemsTotal.value = 0
+    selectedImportItemId.value = null
     return
   }
   selectedImportBatchId.value = batchId
+  selectedImportItemId.value = null
   await loadImportBatchItems(batchId, 1)
+}
+
+function toggleImportItemSnapshot(itemId: string) {
+  selectedImportItemId.value = selectedImportItemId.value === itemId ? null : itemId
 }
 
 async function rollbackImportBatch(batchId: string) {
