@@ -989,6 +989,9 @@
                     rows="6"
                     placeholder='{\"source\":\"dingtalk\",\"userId\":\"...\",\"columns\":[],\"data\":{}}'
                   />
+                  <small class="attendance__field-hint">
+                    userMap profile fields supported: attendanceGroup, department, role, roleTags, entryTime, resignTime.
+                  </small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
@@ -1004,6 +1007,7 @@
                 <table class="attendance__table">
                   <thead>
                     <tr>
+                      <th>User</th>
                       <th>Work date</th>
                       <th>Work minutes</th>
                       <th>Late</th>
@@ -1014,7 +1018,8 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in importPreview" :key="item.workDate">
+                    <tr v-for="item in importPreview" :key="`${item.userId}::${item.workDate}`">
+                      <td>{{ formatShortId(item.userId) }}</td>
                       <td>{{ item.workDate }}</td>
                       <td>{{ item.workMinutes }}</td>
                       <td>{{ item.lateMinutes }}</td>
