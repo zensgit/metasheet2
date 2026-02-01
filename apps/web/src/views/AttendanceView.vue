@@ -1026,6 +1026,119 @@
                   </tbody>
                 </table>
               </div>
+
+              <div class="attendance__requests-header">
+                <h4>Import Batches</h4>
+                <button class="attendance__btn" :disabled="importBatchesLoading" @click="loadImportBatches(importBatchesPage)">
+                  {{ importBatchesLoading ? 'Loading...' : 'Reload' }}
+                </button>
+              </div>
+              <div v-if="importBatches.length === 0" class="attendance__empty">No import batches.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Batch</th>
+                      <th>Status</th>
+                      <th>Rows</th>
+                      <th>Source</th>
+                      <th>Rule set</th>
+                      <th>Created</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="batch in importBatches" :key="batch.id">
+                      <td>{{ formatShortId(batch.id) }}</td>
+                      <td>
+                        <span class="attendance__status-chip" :class="`attendance__status-chip--${batch.status}`">
+                          {{ batch.status }}
+                        </span>
+                      </td>
+                      <td>{{ batch.rowCount }}</td>
+                      <td>{{ batch.source ?? '--' }}</td>
+                      <td>{{ formatShortId(batch.ruleSetId) }}</td>
+                      <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="toggleImportBatch(batch.id)">
+                          {{ selectedImportBatchId === batch.id ? 'Hide items' : 'View items' }}
+                        </button>
+                        <button
+                          class="attendance__btn attendance__btn--danger"
+                          :disabled="batch.status === 'rolled_back'"
+                          @click="rollbackImportBatch(batch.id)"
+                        >
+                          Rollback
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="attendance__pagination" v-if="importBatchesTotalPages > 1">
+                <button class="attendance__btn" :disabled="importBatchesPage <= 1 || importBatchesLoading" @click="loadImportBatches(importBatchesPage - 1)">
+                  Prev
+                </button>
+                <span>Page {{ importBatchesPage }} / {{ importBatchesTotalPages }}</span>
+                <button
+                  class="attendance__btn"
+                  :disabled="importBatchesPage >= importBatchesTotalPages || importBatchesLoading"
+                  @click="loadImportBatches(importBatchesPage + 1)"
+                >
+                  Next
+                </button>
+              </div>
+
+              <div v-if="selectedImportBatchId" class="attendance__import-items">
+                <div class="attendance__requests-header">
+                  <h4>Batch Items</h4>
+                  <button
+                    class="attendance__btn"
+                    :disabled="importBatchItemsLoading"
+                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage)"
+                  >
+                    {{ importBatchItemsLoading ? 'Loading...' : 'Reload items' }}
+                  </button>
+                </div>
+                <div v-if="importBatchItems.length === 0" class="attendance__empty">No items for this batch.</div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table">
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Work date</th>
+                        <th>Record</th>
+                        <th>Created</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in importBatchItems" :key="item.id">
+                        <td>{{ formatShortId(item.userId) }}</td>
+                        <td>{{ item.workDate ?? '--' }}</td>
+                        <td>{{ formatShortId(item.recordId) }}</td>
+                        <td>{{ formatDateTime(item.createdAt ?? null) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="attendance__pagination" v-if="importBatchItemsTotalPages > 1">
+                  <button
+                    class="attendance__btn"
+                    :disabled="importBatchItemsPage <= 1 || importBatchItemsLoading"
+                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage - 1)"
+                  >
+                    Prev
+                  </button>
+                  <span>Page {{ importBatchItemsPage }} / {{ importBatchItemsTotalPages }}</span>
+                  <button
+                    class="attendance__btn"
+                    :disabled="importBatchItemsPage >= importBatchItemsTotalPages || importBatchItemsLoading"
+                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage + 1)"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div class="attendance__admin-section">
@@ -2503,6 +2616,30 @@ interface AttendanceReconcileResult {
   diffs: AttendanceReconcileDiff[]
 }
 
+interface AttendanceImportBatch {
+  id: string
+  orgId?: string
+  createdBy?: string | null
+  source?: string | null
+  ruleSetId?: string | null
+  rowCount: number
+  status: string
+  meta?: Record<string, any> | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+interface AttendanceImportItem {
+  id: string
+  batchId: string
+  orgId?: string
+  userId?: string | null
+  workDate?: string | null
+  recordId?: string | null
+  previewSnapshot?: Record<string, any> | null
+  createdAt?: string | null
+}
+
 interface AttendanceShift {
   id: string
   orgId?: string
@@ -2647,6 +2784,8 @@ const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
 const importLoading = ref(false)
+const importBatchesLoading = ref(false)
+const importBatchItemsLoading = ref(false)
 const reconcileLoading = ref(false)
 const rulePreviewLoading = ref(false)
 const adminForbidden = ref(false)
@@ -2665,6 +2804,8 @@ const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
+const importBatches = ref<AttendanceImportBatch[]>([])
+const importBatchItems = ref<AttendanceImportItem[]>([])
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
@@ -2703,6 +2844,16 @@ const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
+
+const importBatchesPage = ref(1)
+const importBatchesPageSize = 5
+const importBatchesTotal = ref(0)
+const importBatchesTotalPages = computed(() => Math.max(1, Math.ceil(importBatchesTotal.value / importBatchesPageSize)))
+const selectedImportBatchId = ref<string | null>(null)
+const importBatchItemsPage = ref(1)
+const importBatchItemsPageSize = 5
+const importBatchItemsTotal = ref(0)
+const importBatchItemsTotalPages = computed(() => Math.max(1, Math.ceil(importBatchItemsTotal.value / importBatchItemsPageSize)))
 
 const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const calendarLabel = computed(() => {
@@ -3060,6 +3211,12 @@ function formatDateTime(value: string | null): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '--'
   return date.toLocaleString()
+}
+
+function formatShortId(value?: string | null): string {
+  if (!value) return '--'
+  if (value.length <= 8) return value
+  return `${value.slice(0, 8)}…`
 }
 
 function formatStatus(value: string): string {
@@ -4106,16 +4263,126 @@ async function previewImport() {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to preview import')
     }
+    adminForbidden.value = false
     importPreview.value = data.data?.items ?? []
     setStatus(`Preview loaded (${importPreview.value.length} rows).`)
   } catch (error) {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
   } finally {
     importLoading.value = false
+  }
+}
+
+async function loadImportBatches(page = importBatchesPage.value) {
+  importBatchesLoading.value = true
+  try {
+    const query = buildQuery({
+      page: String(page),
+      pageSize: String(importBatchesPageSize),
+      orgId: normalizedOrgId(),
+    })
+    const response = await apiFetch(`/api/attendance/import/batches?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import batches')
+    }
+    adminForbidden.value = false
+    importBatches.value = data.data?.items ?? []
+    importBatchesTotal.value = data.data?.total ?? 0
+    importBatchesPage.value = data.data?.page ?? page
+
+    if (selectedImportBatchId.value) {
+      const stillVisible = importBatches.value.some((batch) => batch.id === selectedImportBatchId.value)
+      if (!stillVisible) {
+        selectedImportBatchId.value = null
+        importBatchItems.value = []
+        importBatchItemsTotal.value = 0
+      }
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load import batches', 'error')
+  } finally {
+    importBatchesLoading.value = false
+  }
+}
+
+async function loadImportBatchItems(batchId: string, page = 1) {
+  importBatchItemsLoading.value = true
+  try {
+    const query = buildQuery({
+      page: String(page),
+      pageSize: String(importBatchItemsPageSize),
+      orgId: normalizedOrgId(),
+    })
+    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import items')
+    }
+    adminForbidden.value = false
+    importBatchItems.value = data.data?.items ?? []
+    importBatchItemsTotal.value = data.data?.total ?? 0
+    importBatchItemsPage.value = data.data?.page ?? page
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load import items', 'error')
+  } finally {
+    importBatchItemsLoading.value = false
+  }
+}
+
+async function toggleImportBatch(batchId: string) {
+  if (selectedImportBatchId.value === batchId) {
+    selectedImportBatchId.value = null
+    importBatchItems.value = []
+    importBatchItemsTotal.value = 0
+    return
+  }
+  selectedImportBatchId.value = batchId
+  await loadImportBatchItems(batchId, 1)
+}
+
+async function rollbackImportBatch(batchId: string) {
+  const confirmed = window.confirm('Rollback this import batch? This will delete imported records.')
+  if (!confirmed) return
+  importBatchItemsLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to rollback import batch')
+    }
+    adminForbidden.value = false
+    setStatus('Import batch rolled back.')
+    await loadImportBatches(importBatchesPage.value)
+    if (selectedImportBatchId.value === batchId) {
+      await loadImportBatchItems(batchId, importBatchItemsPage.value)
+    }
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to rollback import batch', 'error')
+  } finally {
+    importBatchItemsLoading.value = false
   }
 }
 
@@ -4156,17 +4423,33 @@ async function runImport() {
   }
   importLoading.value = true
   try {
-    const response = await apiFetch('/api/attendance/import', {
+    const prepareResponse = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    if (prepareResponse.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const prepareData = await prepareResponse.json()
+    if (!prepareResponse.ok || !prepareData.ok) {
+      throw new Error(prepareData?.error?.message || 'Failed to prepare import')
+    }
+    payload.commitToken = prepareData.data?.commitToken
+    const response = await apiFetch('/api/attendance/import/commit', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to import attendance')
     }
+    adminForbidden.value = false
     const count = data.data?.imported ?? 0
-    setStatus(`Imported ${count} rows.`)
-    await loadRecords()
+    const batchId = data.data?.batchId
+    setStatus(batchId ? `Imported ${count} rows (batch ${formatShortId(batchId)}).` : `Imported ${count} rows.`)
+    await Promise.all([loadRecords(), loadImportBatches()])
   } catch (error) {
     setStatus((error as Error).message || 'Failed to import attendance', 'error')
   } finally {
@@ -5896,6 +6179,7 @@ async function loadAdminData() {
     loadAssignments(),
     loadRotationAssignments(),
     loadHolidays(),
+    loadImportBatches(),
   ])
 }
 
@@ -6212,6 +6496,10 @@ watch(orgId, () => {
   gap: 8px;
 }
 
+.attendance__import-items {
+  margin-top: 16px;
+}
+
 .attendance__requests-header {
   display: flex;
   justify-content: space-between;
@@ -6274,6 +6562,16 @@ watch(orgId, () => {
 .attendance__status-chip--cancelled {
   background: #eceff1;
   color: #546e7a;
+}
+
+.attendance__status-chip--committed {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.attendance__status-chip--rolled_back {
+  background: #fff3e0;
+  color: #e65100;
 }
 
 .attendance__table {
