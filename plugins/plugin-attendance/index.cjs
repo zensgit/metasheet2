@@ -564,7 +564,11 @@ function resolvePayrollWindow(template, anchorDate) {
   const { year, month, day } = getUtcParts(anchor)
   const startDay = Number(template.startDay ?? template.start_day ?? 1)
   const endDay = Number(template.endDay ?? template.end_day ?? 30)
-  const offset = Number(template.endMonthOffset ?? template.end_month_offset ?? 0)
+  let offset = Number(template.endMonthOffset ?? template.end_month_offset ?? 0)
+  if (!Number.isFinite(offset)) offset = 0
+  if (offset === 0 && Number.isFinite(startDay) && Number.isFinite(endDay) && endDay < startDay) {
+    offset = 1
+  }
 
   const startMonthOffset = day >= startDay ? 0 : -1
   const startAnchor = addMonthsUtc(year, month, startMonthOffset)
@@ -6615,16 +6619,26 @@ module.exports = {
 
         const orgId = getOrgId(req)
         let template = null
-        if (parsed.data.templateId) {
+        let resolvedTemplateId = parsed.data.templateId ?? null
+        if (resolvedTemplateId) {
           const templateRows = await db.query(
             'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
-            [parsed.data.templateId, orgId]
+            [resolvedTemplateId, orgId]
           )
           if (!templateRows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
             return
           }
           template = templateRows[0]
+        } else if (parsed.data.anchorDate || !parsed.data.startDate || !parsed.data.endDate) {
+          const defaultRows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE org_id = $1 AND is_default = true LIMIT 1',
+            [orgId]
+          )
+          if (defaultRows.length) {
+            template = defaultRows[0]
+            resolvedTemplateId = template.id
+          }
         }
 
         let startDate = parsed.data.startDate
@@ -6637,7 +6651,15 @@ module.exports = {
         }
 
         if (!startDate || !endDate) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'startDate and endDate are required' } })
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: template
+                ? 'startDate and endDate are required'
+                : 'startDate/endDate or a payroll template is required',
+            },
+          })
           return
         }
 
@@ -6649,7 +6671,7 @@ module.exports = {
         }
 
         const payload = {
-          templateId: parsed.data.templateId ?? null,
+          templateId: resolvedTemplateId,
           name: parsed.data.name ?? null,
           startDate,
           endDate,
@@ -6718,21 +6740,35 @@ module.exports = {
           const existing = existingRows[0]
 
           let template = null
-          if (parsed.data.templateId) {
+          let resolvedTemplateId = parsed.data.templateId ?? existing.template_id ?? null
+          if (resolvedTemplateId) {
             const templateRows = await db.query(
               'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
-              [parsed.data.templateId, orgId]
+              [resolvedTemplateId, orgId]
             )
             if (!templateRows.length) {
               res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
               return
             }
             template = templateRows[0]
+          } else if (parsed.data.anchorDate) {
+            const defaultRows = await db.query(
+              'SELECT * FROM attendance_payroll_templates WHERE org_id = $1 AND is_default = true LIMIT 1',
+              [orgId]
+            )
+            if (defaultRows.length) {
+              template = defaultRows[0]
+              resolvedTemplateId = template.id
+            }
           }
 
           let startDate = parsed.data.startDate ?? existing.start_date
           let endDate = parsed.data.endDate ?? existing.end_date
-          if (parsed.data.anchorDate && template) {
+          if (parsed.data.anchorDate) {
+            if (!template) {
+              res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Payroll template required for anchorDate' } })
+              return
+            }
             const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
             const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
             startDate = resolved.startDate
@@ -6747,7 +6783,7 @@ module.exports = {
           }
 
           const payload = {
-            templateId: parsed.data.templateId ?? existing.template_id ?? null,
+            templateId: resolvedTemplateId,
             name: parsed.data.name ?? existing.name,
             startDate,
             endDate,
