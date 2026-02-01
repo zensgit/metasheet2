@@ -10,7 +10,11 @@
    - `curl -I http://localhost:8899/` → `200 OK`
    - Result: ✅ UI served
 
-3) UI interaction (manual):
+3) Backend API smoke check (to seed batch for UI):
+   - `POST /api/attendance/import/prepare` → `commit` → list → items → rollback
+   - Result: ✅ batch committed, items=1, rollback=`rolled_back`
+
+4) UI interaction (manual):
    - Open `http://localhost:8899/`
    - Ensure Attendance page loads
    - In Admin > Import:
