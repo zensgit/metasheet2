@@ -55,6 +55,41 @@ let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 
+const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
+const requireImportCommitToken = process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'
+const importCommitTokens = new Map()
+
+function pruneImportCommitTokens() {
+  const now = Date.now()
+  for (const [token, entry] of importCommitTokens.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      importCommitTokens.delete(token)
+    }
+  }
+}
+
+function createImportCommitToken({ orgId, userId }) {
+  pruneImportCommitTokens()
+  const token = randomUUID()
+  const expiresAt = Date.now() + IMPORT_COMMIT_TOKEN_TTL_MS
+  importCommitTokens.set(token, { orgId, userId, expiresAt })
+  return { token, expiresAt }
+}
+
+function consumeImportCommitToken(token, { orgId, userId }) {
+  pruneImportCommitTokens()
+  const entry = importCommitTokens.get(token)
+  if (!entry) return false
+  if (entry.orgId !== orgId) return false
+  if (entry.userId !== userId) return false
+  if (entry.expiresAt <= Date.now()) {
+    importCommitTokens.delete(token)
+    return false
+  }
+  importCommitTokens.delete(token)
+  return true
+}
+
 class HttpError extends Error {
   constructor(status, code, message) {
     super(message)
@@ -625,6 +660,35 @@ function mapPayrollCycleRow(row) {
     endDate: row.end_date,
     status: row.status ?? 'open',
     metadata: normalizeMetadata(row.metadata),
+  }
+}
+
+function mapImportBatchRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    createdBy: row.created_by,
+    source: row.source ?? null,
+    ruleSetId: row.rule_set_id ?? null,
+    mapping: normalizeMetadata(row.mapping),
+    rowCount: Number(row.row_count ?? 0),
+    status: row.status ?? 'committed',
+    meta: normalizeMetadata(row.meta),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function mapImportItemRow(row) {
+  return {
+    id: row.id,
+    batchId: row.batch_id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    userId: row.user_id,
+    workDate: row.work_date,
+    recordId: row.record_id ?? null,
+    previewSnapshot: normalizeMetadata(row.preview_snapshot),
+    createdAt: row.created_at,
   }
 }
 
@@ -1587,6 +1651,7 @@ async function upsertAttendanceRecord(options) {
     leaveMinutes,
     overtimeMinutes,
     meta,
+    sourceBatchId,
     client,
   } = options
 
@@ -1597,10 +1662,12 @@ async function upsertAttendanceRecord(options) {
 
   let firstInAt = existing[0]?.first_in_at ?? null
   let lastOutAt = existing[0]?.last_out_at ?? null
+  const existingSourceBatchId = existing[0]?.source_batch_id ?? null
   const existingMeta = normalizeMetadata(existing[0]?.meta)
   const finalMeta = meta && typeof meta === 'object'
     ? { ...existingMeta, ...meta }
     : existingMeta
+  const finalSourceBatchId = sourceBatchId ?? existingSourceBatchId
 
   if (mode === 'override') {
     if (updateFirstInAt) firstInAt = updateFirstInAt
@@ -1640,8 +1707,8 @@ async function upsertAttendanceRecord(options) {
 
   const updated = await client.query(
     `INSERT INTO attendance_records
-      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
      ON CONFLICT (user_id, work_date, org_id)
      DO UPDATE SET
        org_id = EXCLUDED.org_id,
@@ -1654,6 +1721,7 @@ async function upsertAttendanceRecord(options) {
        status = EXCLUDED.status,
        is_workday = EXCLUDED.is_workday,
        meta = EXCLUDED.meta,
+       source_batch_id = EXCLUDED.source_batch_id,
        updated_at = now()
      RETURNING *`,
     [
@@ -1669,6 +1737,7 @@ async function upsertAttendanceRecord(options) {
       status,
       isWorkday !== false,
       JSON.stringify(finalMeta ?? {}),
+      finalSourceBatchId,
     ]
   )
 
@@ -2234,6 +2303,8 @@ module.exports = {
           dataType: z.string().optional(),
         })).optional(),
       }).optional(),
+      commitToken: z.string().optional(),
+      batchMeta: z.record(z.unknown()).optional(),
       columns: z.array(importColumnSchema).optional(),
       data: z.object({
         column_vals: z.array(z.object({
@@ -5091,6 +5162,29 @@ module.exports = {
 
     context.api.http.addRoute(
       'POST',
+      '/api/attendance/import/prepare',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+          return
+        }
+
+        const { token, expiresAt } = createImportCommitToken({ orgId, userId: requesterId })
+        res.json({
+          ok: true,
+          data: {
+            commitToken: token,
+            expiresAt: new Date(expiresAt).toISOString(),
+            ttlSeconds: Math.floor(IMPORT_COMMIT_TOKEN_TTL_MS / 1000),
+          },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
       '/api/attendance/import/preview',
       withPermission('attendance:admin', async (req, res) => {
         const parsed = importPayloadSchema.safeParse(req.body ?? {})
@@ -5104,6 +5198,18 @@ module.exports = {
         if (!userId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
           return
+        }
+        if (requireImportCommitToken) {
+          const commitToken = parsed.data.commitToken
+          if (!commitToken) {
+            res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+            return
+          }
+          const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId })
+          if (!tokenOk) {
+            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+            return
+          }
         }
 
         try {
@@ -5315,6 +5421,337 @@ module.exports = {
           }
           logger.error('Attendance import preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview import' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/import/commit',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+          return
+        }
+
+        const commitToken = parsed.data.commitToken
+        if (!commitToken) {
+          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+          return
+        }
+        const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId: requesterId })
+        if (!tokenOk) {
+          res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+          return
+        }
+
+        try {
+          let ruleSetConfig = null
+          if (parsed.data.ruleSetId) {
+            const rows = await db.query(
+              'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+              [parsed.data.ruleSetId, orgId]
+            )
+            if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
+          }
+
+          const mapping = parsed.data.mapping?.columns
+            ?? parsed.data.mapping?.fields
+            ?? ruleSetConfig?.mappings?.columns
+            ?? ruleSetConfig?.mappings?.fields
+            ?? []
+
+          let engine = null
+          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
+          if (engineConfig) {
+            try {
+              engine = createRuleEngine({ config: engineConfig, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (commit)', error)
+            }
+          }
+
+          const rows = Array.isArray(parsed.data.rows)
+            ? parsed.data.rows
+            : Array.isArray(parsed.data.entries)
+              ? buildRowsFromEntries({ entries: parsed.data.entries })
+              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+
+          if (rows.length === 0) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+            return
+          }
+
+          const baseRule = await loadDefaultRule(db, orgId)
+          const override = normalizeRuleOverride(ruleSetConfig?.rule)
+          const ruleOverride = override
+            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+            : baseRule
+
+          const statusMap = parsed.data.statusMap ?? {}
+          const results = []
+          const batchId = randomUUID()
+          const batchMeta = parsed.data.batchMeta ?? {}
+
+          await db.transaction(async (trx) => {
+            await trx.query(
+              `INSERT INTO attendance_import_batches
+               (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
+              [
+                batchId,
+                orgId,
+                requesterId,
+                parsed.data.source ?? null,
+                parsed.data.ruleSetId ?? null,
+                JSON.stringify(mapping),
+                rows.length,
+                'committed',
+                JSON.stringify(batchMeta),
+              ]
+            )
+
+            for (const row of rows) {
+              const workDate = row.workDate
+              const rowUserId = resolveRowUserId({
+                row,
+                fallbackUserId: requesterId,
+                userMap: parsed.data.userMap,
+                userMapKeyField: parsed.data.userMapKeyField,
+                userMapSourceFields: parsed.data.userMapSourceFields,
+              })
+              const context = await resolveWorkContext({
+                db: trx,
+                orgId,
+                userId: rowUserId,
+                workDate,
+                defaultRule: ruleOverride,
+              })
+              const mapped = applyFieldMappings(row.fields ?? {}, mapping)
+              const valueFor = (key) => (mapped[key]?.value !== undefined ? mapped[key].value : row.fields?.[key])
+              const dataTypeFor = (key) => mapped[key]?.dataType
+
+              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
+              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+              const statusRaw = valueFor('status')
+              const statusOverride = statusRaw != null
+                ? resolveStatusOverride(statusRaw, statusMap)
+                : null
+
+              const workMinutes = parseMinutesValue(
+                valueFor('workMinutes') ?? valueFor('workHours'),
+                dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
+              )
+              const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
+              const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+              const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
+              const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+              const computed = computeMetrics({
+                rule: context.rule,
+                firstInAt,
+                lastOutAt,
+                isWorkingDay: context.isWorkingDay,
+                leaveMinutes,
+                overtimeMinutes,
+              })
+              const initialMetrics = {
+                workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
+                lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
+                earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
+                status: statusOverride ?? computed.status,
+              }
+
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped)
+              augmentFieldValuesWithDates(fieldValues, workDate)
+              const policyResult = applyAttendancePolicies({
+                policies: ruleSetConfig?.policies,
+                facts: {
+                  userId: rowUserId,
+                  orgId,
+                  workDate,
+                  shiftName: context.rule?.name ?? null,
+                  isHoliday: Boolean(context.holiday),
+                  isWorkingDay: context.isWorkingDay,
+                },
+                fieldValues,
+                metrics: {
+                  ...initialMetrics,
+                  leaveMinutes: leaveMinutes ?? 0,
+                  overtimeMinutes: overtimeMinutes ?? 0,
+                },
+              })
+              const effective = policyResult.metrics
+              let engineResult = null
+              if (engine) {
+                const approvalSummary = valueFor('approvalSummary')
+                  ?? valueFor('attendance_approve')
+                  ?? valueFor('attendanceApprove')
+                const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
+                const roleTags = Array.isArray(rawRoleTags)
+                  ? rawRoleTags
+                  : typeof rawRoleTags === 'string' && rawRoleTags.trim()
+                    ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+                    : []
+
+                engineResult = engine.evaluate({
+                  record: {
+                    userId: rowUserId,
+                    shift: valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass'),
+                    attendance_group: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    clockIn1: valueFor('clockIn1') ?? valueFor('firstInAt') ?? valueFor('1_on_duty_user_check_time'),
+                    clockOut1: valueFor('clockOut1') ?? valueFor('lastOutAt') ?? valueFor('1_off_duty_user_check_time'),
+                    clockIn2: valueFor('clockIn2') ?? valueFor('2_on_duty_user_check_time'),
+                    clockOut2: valueFor('clockOut2') ?? valueFor('2_off_duty_user_check_time'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
+                    is_holiday: Boolean(context.holiday),
+                    is_workday: context.isWorkingDay,
+                    overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
+                    actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
+                  },
+                  profile: {
+                    roleTags,
+                    role: valueFor('role') ?? valueFor('职位'),
+                    department: valueFor('department'),
+                    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+                    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+                    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
+                  },
+                  approvals: approvalSummary ?? [],
+                  calc: {
+                    leaveHours: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes / 60 : undefined,
+                    exceptionReason: valueFor('exceptionReason') ?? valueFor('exception_reason'),
+                  },
+                })
+              }
+              const baseMetrics = {
+                ...effective,
+                leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
+                overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
+              }
+              const engineAdjustment = engineResult ? applyEngineOverrides(baseMetrics, engineResult) : { metrics: baseMetrics, meta: null }
+              const finalMetrics = engineAdjustment.metrics
+              const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
+                ? finalMetrics.leaveMinutes
+                : leaveMinutes
+              const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
+                ? finalMetrics.overtimeMinutes
+                : overtimeMinutes
+
+              let meta = null
+              if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+                meta = {
+                  policy: {
+                    warnings: policyResult.warnings,
+                    appliedRules: policyResult.appliedRules,
+                    userGroups: policyResult.userGroups,
+                  },
+                }
+              }
+              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
+                meta = meta ?? {}
+                meta.engine = {
+                  appliedRules: engineResult.appliedRules,
+                  warnings: engineResult.warnings,
+                  reasons: engineResult.reasons,
+                  overrides: engineAdjustment.meta?.overrides ?? null,
+                  base: engineAdjustment.meta?.base ?? null,
+                }
+              }
+
+              const record = await upsertAttendanceRecord({
+                userId: rowUserId,
+                orgId,
+                workDate,
+                timezone: context.rule.timezone,
+                rule: context.rule,
+                updateFirstInAt: firstInAt,
+                updateLastOutAt: lastOutAt,
+                mode: parsed.data.mode ?? 'override',
+                statusOverride,
+                overrideMetrics: {
+                  workMinutes: finalMetrics.workMinutes,
+                  lateMinutes: finalMetrics.lateMinutes,
+                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+                  status: finalMetrics.status,
+                },
+                isWorkday: context.isWorkingDay,
+                leaveMinutes: effectiveLeaveMinutes,
+                overtimeMinutes: effectiveOvertimeMinutes,
+                meta: meta ?? undefined,
+                sourceBatchId: batchId,
+                client: trx,
+              })
+
+              const snapshot = {
+                metrics: {
+                  workMinutes: finalMetrics.workMinutes,
+                  lateMinutes: finalMetrics.lateMinutes,
+                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+                  leaveMinutes: effectiveLeaveMinutes,
+                  overtimeMinutes: effectiveOvertimeMinutes,
+                  status: finalMetrics.status,
+                },
+                policy: meta?.policy ?? null,
+                engine: meta?.engine ?? null,
+              }
+
+              await trx.query(
+                `INSERT INTO attendance_import_items
+                 (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+                [
+                  randomUUID(),
+                  batchId,
+                  orgId,
+                  rowUserId,
+                  workDate,
+                  record.id,
+                  JSON.stringify(snapshot),
+                ]
+              )
+
+              results.push({
+                id: record.id,
+                userId: rowUserId,
+                workDate,
+                engine: engineResult
+                  ? {
+                      appliedRules: engineResult.appliedRules,
+                      warnings: engineResult.warnings,
+                      reasons: engineResult.reasons,
+                      overrides: engineAdjustment.meta?.overrides ?? null,
+                      base: engineAdjustment.meta?.base ?? null,
+                    }
+                  : null,
+              })
+            }
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              batchId,
+              imported: results.length,
+              items: results,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import commit failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
         }
       })
     )
@@ -5584,6 +6021,159 @@ module.exports = {
           }
           logger.error('Attendance import failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/import/batches',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_import_batches WHERE org_id = $1',
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_import_batches
+             WHERE org_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapImportBatchRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import batches query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load import batches' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/import/batches/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const batchId = req.params.id
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+            [batchId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import batch not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapImportBatchRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import batch lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load import batch' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/import/batches/:id/items',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const batchId = req.params.id
+        const { page, pageSize, offset } = parsePagination(req.query)
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_import_items WHERE batch_id = $1 AND org_id = $2',
+            [batchId, orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_import_items
+             WHERE batch_id = $1 AND org_id = $2
+             ORDER BY created_at DESC
+             LIMIT $3 OFFSET $4`,
+            [batchId, orgId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapImportItemRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import items query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load import items' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/import/rollback/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const batchId = req.params.id
+        try {
+          const batchRows = await db.query(
+            'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+            [batchId, orgId]
+          )
+          if (!batchRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import batch not found' } })
+            return
+          }
+          const batch = batchRows[0]
+          if (batch.status === 'rolled_back') {
+            res.json({ ok: true, data: { id: batchId, deleted: 0, status: 'rolled_back' } })
+            return
+          }
+
+          let deletedCount = 0
+          await db.transaction(async (trx) => {
+            const deleted = await trx.query(
+              'DELETE FROM attendance_records WHERE source_batch_id = $1 AND org_id = $2 RETURNING id',
+              [batchId, orgId]
+            )
+            deletedCount = deleted.length
+            await trx.query(
+              'UPDATE attendance_import_batches SET status = $3, updated_at = now() WHERE id = $1 AND org_id = $2',
+              [batchId, orgId, 'rolled_back']
+            )
+          })
+
+          res.json({ ok: true, data: { id: batchId, deleted: deletedCount, status: 'rolled_back' } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance import rollback failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rollback import batch' } })
         }
       })
     )
