@@ -8,13 +8,9 @@
 ## Backend Tests
 - Targeted attendance integration test:
   - Command: `ATTENDANCE_TEST_DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts`
-  - Result: ✅ passed
-  - Note: BPMN workflow engine logs a DB connection warning when Postgres is unavailable, but the attendance test still passed.
-
-- Full integration suite attempt (unintended scope):
-  - Command: `pnpm --filter @metasheet/core-backend test:integration -- attendance-plugin.test.ts`
-  - Result: ❌ failed (ran full integration suite; several tests require DB on 5432).
-  - Reason: Postgres expected at 127.0.0.1:5432 for non-attendance tests; connection refused.
+  - Result: ❌ failed
+  - Reason: DB auth failed for user `metasheet` during BPMN/EventBus init; test aborted before assertions.
+  - Follow-up: verify DB credentials or set the core backend DB env vars to the same Postgres instance used by the attendance tests.
 
 ## UI Acceptance (Playwright)
 - Command: `pnpm exec node scripts/attendance-ui-verify.mjs`

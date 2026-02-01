@@ -608,9 +608,39 @@
                     </li>
                   </ul>
                 </div>
+                <div class="attendance__template-group">
+                  <div class="attendance__template-header">
+                    <span>Template library</span>
+                    <div class="attendance__template-header-actions">
+                      <button class="attendance__btn attendance__btn--sm" type="button" @click="loadTemplateLibrary">
+                        {{ templateLibraryLoading ? 'Loading...' : 'Reload' }}
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="templateLibraryLoading" class="attendance__empty">Loading library...</div>
+                  <div v-else-if="libraryTemplates.length === 0" class="attendance__empty">
+                    No library templates yet.
+                  </div>
+                  <ul v-else class="attendance__template-list">
+                    <li v-for="tpl in libraryTemplates" :key="tpl.name" class="attendance__template-item">
+                      <div>
+                        <div class="attendance__template-name">{{ tpl.name }}</div>
+                        <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
+                      </div>
+                      <div class="attendance__template-actions">
+                        <button class="attendance__btn attendance__btn--sm" type="button" @click="applyLibraryTemplate(tpl)">
+                          Use
+                        </button>
+                        <button class="attendance__btn attendance__btn--danger attendance__btn--sm" type="button" @click="removeLibraryTemplate(tpl.name)">
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
               </div>
               <div class="attendance__template-hint">
-                System templates are locked. You can add or modify custom templates in <code>engine.templates</code>.
+                System templates are locked. Custom templates can be promoted into the shared library for reuse.
               </div>
               <div v-if="selectedSystemTemplate" class="attendance__template-params">
                 <div class="attendance__template-editor-header">
@@ -763,6 +793,9 @@
                   </button>
                   <button class="attendance__btn attendance__btn--primary" type="button" @click="saveCustomTemplate">
                     Save template
+                  </button>
+                  <button class="attendance__btn" type="button" @click="saveCustomTemplateToLibrary">
+                    Save to library
                   </button>
                 </div>
               </div>
@@ -961,6 +994,25 @@
                     </option>
                   </select>
                 </label>
+                <label class="attendance__field" for="attendance-import-profile">
+                  <span>Mapping profile</span>
+                  <select
+                    id="attendance-import-profile"
+                    v-model="importProfileId"
+                    :disabled="importMappingProfiles.length === 0"
+                  >
+                    <option value="">(Optional) Select profile</option>
+                    <option v-for="profile in importMappingProfiles" :key="profile.id" :value="profile.id">
+                      {{ profile.name }}
+                    </option>
+                  </select>
+                  <small v-if="selectedImportProfile?.description" class="attendance__field-hint">
+                    {{ selectedImportProfile.description }}
+                  </small>
+                  <small v-if="selectedImportProfile?.requiredFields?.length" class="attendance__field-hint">
+                    Required fields: {{ selectedImportProfile.requiredFields.join(', ') }}
+                  </small>
+                </label>
                 <label class="attendance__field" for="attendance-import-user">
                   <span>User ID</span>
                   <input
@@ -995,6 +1047,9 @@
                 </label>
               </div>
               <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="importLoading" @click="applyImportProfile">
+                  Apply profile
+                </button>
                 <button class="attendance__btn" :disabled="importLoading" @click="previewImport">
                   {{ importLoading ? 'Working...' : 'Preview' }}
                 </button>
@@ -1534,6 +1589,69 @@
                   @click="resetPayrollCycleForm"
                 >
                   Cancel edit
+                </button>
+              </div>
+              <div class="attendance__admin-divider" />
+              <div class="attendance__admin-section-header attendance__admin-section-header--sub">
+                <h5>Generate cycles</h5>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-payroll-generate-template">
+                  <span>Template</span>
+                  <select
+                    id="attendance-payroll-generate-template"
+                    v-model="payrollGenerateForm.templateId"
+                    :disabled="payrollTemplates.length === 0"
+                  >
+                    <option value="">Default template</option>
+                    <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-payroll-generate-anchor">
+                  <span>Anchor date</span>
+                  <input
+                    id="attendance-payroll-generate-anchor"
+                    v-model="payrollGenerateForm.anchorDate"
+                    type="date"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-generate-count">
+                  <span>Count (months)</span>
+                  <input
+                    id="attendance-payroll-generate-count"
+                    v-model.number="payrollGenerateForm.count"
+                    type="number"
+                    min="1"
+                    max="24"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-payroll-generate-status">
+                  <span>Status</span>
+                  <select id="attendance-payroll-generate-status" v-model="payrollGenerateForm.status">
+                    <option value="open">Open</option>
+                    <option value="closed">Closed</option>
+                    <option value="archived">Archived</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-payroll-generate-prefix">
+                  <span>Name prefix</span>
+                  <input
+                    id="attendance-payroll-generate-prefix"
+                    v-model="payrollGenerateForm.namePrefix"
+                    type="text"
+                    placeholder="Optional"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn"
+                  :disabled="payrollGenerateLoading"
+                  @click="generatePayrollCycles"
+                >
+                  {{ payrollGenerateLoading ? 'Generating...' : 'Generate cycles' }}
                 </button>
               </div>
               <div v-if="payrollCycleSummary" class="attendance__summary">
@@ -2619,6 +2737,24 @@ interface AttendanceImportPreviewItem {
   userGroups?: string[]
 }
 
+interface AttendanceImportMappingProfile {
+  id: string
+  name: string
+  description?: string
+  source?: string
+  mapping?: {
+    columns?: Array<{
+      sourceField: string
+      targetField: string
+      dataType?: string
+    }>
+  }
+  userMapKeyField?: string
+  userMapSourceFields?: string[]
+  payloadExample?: Record<string, any>
+  requiredFields?: string[]
+}
+
 interface AttendanceRulePreviewItem {
   userId: string
   workDate: string
@@ -2821,6 +2957,7 @@ const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
+const payrollGenerateLoading = ref(false)
 const importLoading = ref(false)
 const importBatchesLoading = ref(false)
 const importBatchItemsLoading = ref(false)
@@ -2841,6 +2978,8 @@ const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
+const templateLibrary = ref<AttendanceEngineTemplate[]>([])
+const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
@@ -2859,6 +2998,7 @@ const ruleSetEditingId = ref<string | null>(null)
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
+const importProfileId = ref('')
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -3109,6 +3249,8 @@ const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
 
 const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
 const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
+const templateLibraryLoading = ref(false)
+const templateLibrarySaving = ref(false)
 const selectedSystemTemplateName = ref<string | null>(null)
 const templateParamValues = reactive<Record<string, any>>({})
 const templateParamJson = ref('')
@@ -3223,6 +3365,14 @@ const payrollCycleForm = reactive({
   startDate: '',
   endDate: '',
   status: 'open',
+})
+
+const payrollGenerateForm = reactive({
+  templateId: '',
+  anchorDate: '',
+  count: 1,
+  status: 'open',
+  namePrefix: '',
 })
 
 const importForm = reactive({
@@ -3422,6 +3572,15 @@ const selectedSystemTemplate = computed(() => {
   return ruleSetSystemTemplates.value.find((tpl) => tpl.name === selectedSystemTemplateName.value) ?? null
 })
 
+const libraryTemplates = computed(() => {
+  return templateLibrary.value.map((tpl) => normalizeTemplate(tpl)).filter((tpl) => tpl.category !== 'system')
+})
+
+const selectedImportProfile = computed(() => {
+  if (!importProfileId.value) return null
+  return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
+})
+
 function defaultParamValue(param: AttendanceTemplateParam): any {
   if (param.default !== undefined) return param.default
   if (param.type === 'number') return 0
@@ -3532,6 +3691,121 @@ function syncRuleSetTemplates(config?: Record<string, any> | null) {
   const { system, custom } = splitTemplates(templates)
   ruleSetSystemTemplates.value = system
   ruleSetCustomTemplates.value = custom
+}
+
+async function loadTemplateLibrary() {
+  templateLibraryLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/rule-templates')
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load template library')
+    }
+    adminForbidden.value = false
+    templateLibrary.value = Array.isArray(data.data?.library)
+      ? data.data.library
+      : (Array.isArray(data.data?.templates) ? data.data.templates : [])
+    setStatus('Template library loaded.')
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to load template library', 'error')
+  } finally {
+    templateLibraryLoading.value = false
+  }
+}
+
+async function persistTemplateLibrary(nextTemplates: AttendanceEngineTemplate[]) {
+  templateLibrarySaving.value = true
+  try {
+    const response = await apiFetch('/api/attendance/rule-templates', {
+      method: 'PUT',
+      body: JSON.stringify({ templates: nextTemplates }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save template library')
+    }
+    adminForbidden.value = false
+    templateLibrary.value = data.data?.templates ?? nextTemplates
+    setStatus('Template library updated.')
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to save template library', 'error')
+  } finally {
+    templateLibrarySaving.value = false
+  }
+}
+
+function normalizeLibraryTemplate(template: AttendanceEngineTemplate): AttendanceEngineTemplate {
+  const normalized = normalizeTemplate(template)
+  return {
+    ...normalized,
+    category: 'custom',
+    editable: true,
+    rules: normalized.rules ?? [],
+  }
+}
+
+function upsertLibraryTemplate(template: AttendanceEngineTemplate) {
+  const normalized = normalizeLibraryTemplate(template)
+  const next = templateLibrary.value.filter((tpl) => tpl.name !== normalized.name)
+  next.push(normalized)
+  persistTemplateLibrary(next)
+}
+
+function removeLibraryTemplate(name: string) {
+  if (!window.confirm(`Remove template "${name}" from library?`)) return
+  const next = templateLibrary.value.filter((tpl) => tpl.name !== name)
+  persistTemplateLibrary(next)
+}
+
+function applyLibraryTemplate(template: AttendanceEngineTemplate) {
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    setStatus('Rule set config must be valid JSON before applying library templates.', 'error')
+    return
+  }
+  const normalized = normalizeLibraryTemplate(template)
+  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
+  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
+  const index = templates.findIndex((tpl) => tpl.name === normalized.name)
+  if (index >= 0) {
+    templates[index] = { ...templates[index], ...normalized }
+  } else {
+    templates.push(normalized)
+  }
+  engine.templates = templates
+  config.engine = engine
+  ruleSetForm.config = JSON.stringify(config, null, 2)
+  syncRuleSetTemplates(config)
+  openCustomTemplateEditor(normalized)
+  setStatus('Library template added to rule set.')
+}
+
+function saveCustomTemplateToLibrary() {
+  const name = customTemplateEditingName.value?.trim()
+  if (!name) {
+    setStatus('Select a custom template before saving to the library.', 'error')
+    return
+  }
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    setStatus('Rule set config must be valid JSON before saving to the library.', 'error')
+    return
+  }
+  const templates = Array.isArray(config.engine?.templates) ? (config.engine.templates as AttendanceEngineTemplate[]) : []
+  const template = templates.find((tpl) => tpl.name === name)
+  if (!template) {
+    setStatus('Template not found in rule set config.', 'error')
+    return
+  }
+  upsertLibraryTemplate(template)
 }
 
 function applyTemplateLock(config: Record<string, any>) {
@@ -4329,12 +4603,42 @@ async function loadImportTemplate() {
       throw new Error(data?.error?.message || 'Failed to load import template')
     }
     importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles)
+      ? data.data.mappingProfiles
+      : []
+    if (!importProfileId.value && importMappingProfiles.value.length > 0) {
+      importProfileId.value = importMappingProfiles.value[0].id
+    }
     setStatus('Import template loaded.')
   } catch (error) {
     setStatus((error as Error).message || 'Failed to load import template', 'error')
   } finally {
     importLoading.value = false
   }
+}
+
+function applyImportProfile() {
+  const profile = selectedImportProfile.value
+  if (!profile) {
+    setStatus('Select an import mapping profile first.', 'error')
+    return
+  }
+  const base = parseJsonConfig(importForm.payload)
+  if (!base) {
+    setStatus('Import payload must be valid JSON before applying profile.', 'error')
+    return
+  }
+  let next = { ...base }
+  if (profile.payloadExample && Object.keys(base).length === 0) {
+    next = { ...profile.payloadExample }
+  } else {
+    if (profile.source) next.source = profile.source
+    if (profile.mapping) next.mapping = profile.mapping
+    if (profile.userMapKeyField) next.userMapKeyField = profile.userMapKeyField
+    if (profile.userMapSourceFields) next.userMapSourceFields = profile.userMapSourceFields
+  }
+  importForm.payload = JSON.stringify(next, null, 2)
+  setStatus(`Applied mapping profile: ${profile.name}`)
 }
 
 async function previewImport() {
@@ -6000,6 +6304,9 @@ async function loadRuleSetTemplate() {
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
     syncRuleSetTemplates(data.data ?? {})
+    if (Array.isArray(data.data?.templateLibrary)) {
+      templateLibrary.value = data.data.templateLibrary
+    }
     selectedSystemTemplateName.value = null
     resetTemplateParams(null)
     closeCustomTemplateEditor()
@@ -6048,6 +6355,10 @@ async function loadPayrollTemplates() {
     }
     adminForbidden.value = false
     payrollTemplates.value = data.data?.items ?? []
+    if (!payrollGenerateForm.templateId && payrollTemplates.value.length > 0) {
+      const preferred = payrollTemplates.value.find((tpl) => tpl.isDefault) ?? payrollTemplates.value[0]
+      payrollGenerateForm.templateId = preferred?.id ?? ''
+    }
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load payroll templates', 'error')
   } finally {
@@ -6208,6 +6519,45 @@ async function savePayrollCycle() {
   }
 }
 
+async function generatePayrollCycles() {
+  if (!payrollGenerateForm.anchorDate) {
+    setStatus('Anchor date is required to generate cycles.', 'error')
+    return
+  }
+  payrollGenerateLoading.value = true
+  try {
+    const payload: Record<string, any> = {
+      templateId: payrollGenerateForm.templateId || undefined,
+      anchorDate: payrollGenerateForm.anchorDate,
+      count: Number(payrollGenerateForm.count) || 1,
+      status: payrollGenerateForm.status,
+      namePrefix: payrollGenerateForm.namePrefix.trim() || undefined,
+      orgId: normalizedOrgId(),
+    }
+    const response = await apiFetch('/api/attendance/payroll-cycles/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to generate payroll cycles')
+    }
+    adminForbidden.value = false
+    const created = data.data?.created?.length ?? 0
+    const skipped = data.data?.skipped?.length ?? 0
+    await loadPayrollCycles()
+    setStatus(`Generated ${created} cycles (skipped ${skipped}).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to generate payroll cycles', 'error')
+  } finally {
+    payrollGenerateLoading.value = false
+  }
+}
+
 async function deletePayrollCycle(id: string) {
   if (!window.confirm('Delete this payroll cycle?')) return
   try {
@@ -6286,6 +6636,7 @@ async function loadAdminData() {
     loadSettings(),
     loadRule(),
     loadRuleSets(),
+    loadTemplateLibrary(),
     loadPayrollTemplates(),
     loadPayrollCycles(),
     loadLeaveTypes(),
@@ -6296,6 +6647,7 @@ async function loadAdminData() {
     loadAssignments(),
     loadRotationAssignments(),
     loadHolidays(),
+    loadImportTemplate(),
     loadImportBatches(),
   ])
 }
@@ -6768,6 +7120,23 @@ watch(orgId, () => {
   gap: 12px;
 }
 
+.attendance__admin-section-header--sub {
+  margin-top: 4px;
+}
+
+.attendance__admin-section-header--sub h5 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.attendance__admin-divider {
+  height: 1px;
+  width: 100%;
+  background: #eee;
+  margin: 4px 0;
+}
+
 .attendance__admin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -6778,6 +7147,11 @@ watch(orgId, () => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.attendance__template-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .attendance__preview-card {

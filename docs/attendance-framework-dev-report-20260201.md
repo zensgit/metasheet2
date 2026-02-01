@@ -1,7 +1,7 @@
 # Attendance Framework Development Report (2026-02-01)
 
 ## Summary
-Implemented rule-set validation, strengthened import/profile mapping, improved payroll cycle resolution, and refined admin UI for import preview.
+Expanded the attendance framework with a shared rule-template library, payroll cycle auto-generation, and standardized import profiles plus missing-field safeguards.
 
 ## Delivery by Day
 ### Day 1 — Inventory + Plan
@@ -32,10 +32,19 @@ Implemented rule-set validation, strengthened import/profile mapping, improved p
 - Added hint text for supported userMap profile fields.
 - File: `apps/web/src/views/AttendanceView.vue`
 
+### Day 6 — Template library + payroll generation + import standardization
+- Added org-level rule-template library endpoints and cache; system templates + library merged in rule-set template response.
+- UI now supports template library (list/apply/delete) and “save custom template to library”.
+- Added payroll cycle generation endpoint (template + anchor + count) and UI generator.
+- Import template now exposes mapping profiles; preview/commit skip rows missing userId/workDate and record skipped rows in batch meta.
+- Files:
+  - `plugins/plugin-attendance/index.cjs`
+  - `apps/web/src/views/AttendanceView.vue`
+
 ## Git Commits
 - `docs(attendance): add 7-day framework plan`
 - `feat(attendance): validate rule set engine config`
 - `feat(attendance): merge user profile into import`
 - `feat(attendance): improve payroll cycle resolution`
 - `feat(attendance): improve import preview UI`
-
+- `chore(attendance): add template library + payroll generator + import profiles`

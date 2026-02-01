@@ -38,6 +38,8 @@ const REQUEST_TYPES = [
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
+const TEMPLATE_LIBRARY_KEY = 'attendance.template_library'
+const TEMPLATE_LIBRARY_CACHE_TTL_MS = 60000
 const DEFAULT_SETTINGS = {
   autoAbsence: {
     enabled: false,
@@ -55,6 +57,9 @@ let autoAbsenceTimeout = null
 let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
+let templateLibraryCache = { value: [], loadedAt: 0 }
+
+const SYSTEM_TEMPLATE_NAMES = new Set(DEFAULT_TEMPLATES.map((tpl) => tpl.name))
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
 const requireImportCommitToken = process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'
@@ -581,6 +586,12 @@ function resolvePayrollWindow(template, anchorDate) {
     startDate: formatDateOnly(startDate),
     endDate: formatDateOnly(endDate),
   }
+}
+
+function addMonthsToDate(anchorDate, delta) {
+  const { year, month, day } = getUtcParts(anchorDate)
+  const next = addMonthsUtc(year, month, delta)
+  return buildUtcDate(next.year, next.month, day)
 }
 
 function normalizeRuleOverride(value) {
@@ -1440,6 +1451,65 @@ async function saveSettings(db, settings) {
   )
   settingsCache = { value: normalized, loadedAt: Date.now() }
   return normalized
+}
+
+function normalizeTemplateLibrary(raw) {
+  const templates = Array.isArray(raw?.templates)
+    ? raw.templates
+    : Array.isArray(raw)
+      ? raw
+      : []
+  return templates
+    .filter((template) => template && typeof template === 'object')
+    .map((template) => {
+      const name = String(template.name ?? '').trim()
+      if (!name) return null
+      return {
+        ...template,
+        name,
+        category: 'custom',
+        editable: true,
+      }
+    })
+    .filter(Boolean)
+    .filter((template) => !SYSTEM_TEMPLATE_NAMES.has(template.name))
+}
+
+async function loadTemplateLibrary(db) {
+  try {
+    const rows = await db.query('SELECT value FROM system_configs WHERE key = $1', [TEMPLATE_LIBRARY_KEY])
+    if (!rows.length) return []
+    const raw = JSON.parse(rows[0].value)
+    const normalized = normalizeTemplateLibrary(raw)
+    const validated = validateEngineConfig({ templates: normalized })
+    return Array.isArray(validated?.templates) ? validated.templates : []
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    return []
+  }
+}
+
+async function getTemplateLibrary(db) {
+  if (Date.now() - templateLibraryCache.loadedAt < TEMPLATE_LIBRARY_CACHE_TTL_MS) {
+    return templateLibraryCache.value
+  }
+  const next = await loadTemplateLibrary(db)
+  templateLibraryCache = { value: next, loadedAt: Date.now() }
+  return next
+}
+
+async function saveTemplateLibrary(db, templates) {
+  const normalized = normalizeTemplateLibrary(templates)
+  const validated = validateEngineConfig({ templates: normalized })
+  const stored = Array.isArray(validated?.templates) ? validated.templates : []
+  await db.query(
+    `INSERT INTO system_configs (key, value, is_encrypted, updated_at)
+     VALUES ($1, $2, false, now())
+     ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+    [TEMPLATE_LIBRARY_KEY, JSON.stringify({ templates: stored })]
+  )
+  templateLibraryCache = { value: stored, loadedAt: Date.now() }
+  return stored
 }
 
 async function loadDefaultRule(db, orgId) {
@@ -2351,6 +2421,13 @@ module.exports = {
       }).optional(),
     }).catchall(z.unknown())
 
+    const templateLibrarySchema = z
+      .object({
+        templates: z.array(z.record(z.unknown())).optional(),
+        library: z.array(z.record(z.unknown())).optional(),
+      })
+      .catchall(z.unknown())
+
     const importColumnSchema = z.object({
       id: z.union([z.string(), z.number()]),
       name: z.string().optional(),
@@ -2438,6 +2515,15 @@ module.exports = {
       orgId: z.string().optional(),
     })
     const payrollCycleUpdateSchema = payrollCycleCreateSchema.partial()
+    const payrollCycleGenerateSchema = z.object({
+      templateId: z.string().uuid().optional(),
+      anchorDate: z.string().min(1),
+      count: z.number().int().min(1).max(24).optional(),
+      status: z.enum(['open', 'closed', 'archived']).optional(),
+      namePrefix: z.string().optional(),
+      metadata: z.record(z.unknown()).optional(),
+      orgId: z.string().optional(),
+    })
 
     const approvalStepSchema = z.object({
       name: z.string().optional(),
@@ -4718,8 +4804,51 @@ module.exports = {
 
     context.api.http.addRoute(
       'GET',
+      '/api/attendance/rule-templates',
+      withPermission('attendance:admin', async (_req, res) => {
+        const library = await getTemplateLibrary(db)
+        res.json({
+          ok: true,
+          data: {
+            system: DEFAULT_TEMPLATES,
+            library,
+          },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/rule-templates',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = templateLibrarySchema.safeParse(req.body ?? {})
+        let templates = null
+        if (Array.isArray(req.body)) {
+          templates = req.body
+        } else if (parsed.success) {
+          templates = parsed.data.templates ?? parsed.data.library ?? null
+        }
+
+        if (!Array.isArray(templates)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templates is required' } })
+          return
+        }
+
+        try {
+          const saved = await saveTemplateLibrary(db, templates)
+          res.json({ ok: true, data: { templates: saved } })
+        } catch (error) {
+          const { message, details } = formatEngineConfigError(error)
+          res.status(400).json({ ok: false, error: { code: 'INVALID_TEMPLATE_LIBRARY', message, details } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
       '/api/attendance/rule-sets/template',
       withPermission('attendance:admin', async (_req, res) => {
+        const templateLibrary = await getTemplateLibrary(db)
         res.json({
           ok: true,
           data: {
@@ -4753,8 +4882,9 @@ module.exports = {
               templateId: '',
             },
             engine: {
-              templates: DEFAULT_TEMPLATES,
+              templates: [...DEFAULT_TEMPLATES, ...templateLibrary],
             },
+            templateLibrary,
             policies: {
               userGroups: [
                 {
@@ -5161,65 +5291,95 @@ module.exports = {
       'GET',
       '/api/attendance/import/template',
       withPermission('attendance:admin', async (_req, res) => {
+        const mappingColumns = [
+          { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
+          { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
+          { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
+          { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
+          { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+          { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
+          { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
+          { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
+          { sourceField: '应出勤小时', targetField: 'workHours', dataType: 'hours' },
+          { sourceField: '总工时', targetField: 'workHours', dataType: 'hours' },
+          { sourceField: '实出勤工时(测试)', targetField: 'workHours', dataType: 'hours' },
+          { sourceField: '实出勤工时', targetField: 'workMinutes', dataType: 'hours' },
+          { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
+          { sourceField: '迟到时长', targetField: 'lateMinutes', dataType: 'minutes' },
+          { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'minutes' },
+          { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+          { sourceField: '早退时长', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+          { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+          { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
+          { sourceField: '请假小时', targetField: 'leaveHours', dataType: 'hours' },
+          { sourceField: '调休小时', targetField: 'leaveHours', dataType: 'hours' },
+          { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
+          { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+          { sourceField: '加班总时长', targetField: 'overtimeHours', dataType: 'hours' },
+          { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
+          { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
+          { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
+          { sourceField: '出勤班次', targetField: 'attendanceClass', dataType: 'string' },
+          { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
+          { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
+          { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+          { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '部门', targetField: 'department', dataType: 'string' },
+          { sourceField: '职位', targetField: 'role', dataType: 'string' },
+          { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
+          { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
+          { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
+          { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
+          { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
+          { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
+          { sourceField: 'resign_time', targetField: 'resignTime', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
+        ]
+        const mappingProfiles = [
+          {
+            id: 'dingtalk_csv_daily_summary',
+            name: 'DingTalk CSV Daily Summary',
+            description: 'CSV导出（日汇总）模板：日期/工号/姓名/考勤组/打卡时间。',
+            source: 'dingtalk_csv',
+            mapping: { columns: mappingColumns },
+            userMapKeyField: '工号',
+            userMapSourceFields: ['empNo', '工号', '姓名'],
+            requiredFields: ['日期', '上班1打卡时间', '下班1打卡时间'],
+          },
+          {
+            id: 'dingtalk_api_columns',
+            name: 'DingTalk API Column Values',
+            description: '钉钉接口 column_vals 结构（字段ID + 日期值）。',
+            source: 'dingtalk',
+            mapping: { columns: mappingColumns },
+            requiredFields: ['workDate'],
+          },
+          {
+            id: 'manual_rows',
+            name: 'Manual Rows Payload',
+            description: '自定义 rows/entries JSON 输入。',
+            source: 'manual',
+            mapping: { columns: mappingColumns },
+            requiredFields: ['workDate'],
+          },
+        ]
         res.json({
           ok: true,
           data: {
             source: 'dingtalk',
             mapping: {
-              columns: [
-                { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
-                { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
-                { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
-                { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
-                { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
-                { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
-                { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
-                { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
-                { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
-                { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
-                { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
-                { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
-                { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
-                { sourceField: '应出勤小时', targetField: 'workHours', dataType: 'hours' },
-                { sourceField: '总工时', targetField: 'workHours', dataType: 'hours' },
-                { sourceField: '实出勤工时(测试)', targetField: 'workHours', dataType: 'hours' },
-                { sourceField: '实出勤工时', targetField: 'workMinutes', dataType: 'hours' },
-                { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
-                { sourceField: '迟到时长', targetField: 'lateMinutes', dataType: 'minutes' },
-                { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'minutes' },
-                { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-                { sourceField: '早退时长', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-                { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-                { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
-                { sourceField: '请假小时', targetField: 'leaveHours', dataType: 'hours' },
-                { sourceField: '调休小时', targetField: 'leaveHours', dataType: 'hours' },
-                { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
-                { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
-                { sourceField: '加班总时长', targetField: 'overtimeHours', dataType: 'hours' },
-                { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
-                { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
-                { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
-                { sourceField: '出勤班次', targetField: 'attendanceClass', dataType: 'string' },
-                { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
-                { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
-                { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
-                { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
-                { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
-                { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
-                { sourceField: '部门', targetField: 'department', dataType: 'string' },
-                { sourceField: '职位', targetField: 'role', dataType: 'string' },
-                { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
-                { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
-                { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
-                { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
-                { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
-                { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
-                { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
-                { sourceField: 'resign_time', targetField: 'resignTime', dataType: 'date' },
-                { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
-                { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
-              ],
+              columns: mappingColumns,
             },
+            mappingProfiles,
             payloadExample: {
               source: 'dingtalk_csv',
               ruleSetId: '<ruleSetId>',
@@ -5384,6 +5544,28 @@ module.exports = {
               userMapKeyField: parsed.data.userMapKeyField,
               userMapSourceFields: parsed.data.userMapSourceFields,
             })
+            const importWarnings = []
+            if (!rowUserId) importWarnings.push('Missing userId')
+            if (!workDate) importWarnings.push('Missing workDate')
+            if (importWarnings.length) {
+              preview.push({
+                userId: rowUserId ?? 'unknown',
+                workDate: workDate ?? '',
+                firstInAt: null,
+                lastOutAt: null,
+                workMinutes: 0,
+                lateMinutes: 0,
+                earlyLeaveMinutes: 0,
+                leaveMinutes: 0,
+                overtimeMinutes: 0,
+                status: 'invalid',
+                isWorkday: undefined,
+                warnings: importWarnings,
+                appliedPolicies: [],
+                userGroups: [],
+              })
+              continue
+            }
             const context = await resolveWorkContext({
               db,
               orgId,
@@ -5515,7 +5697,7 @@ module.exports = {
               overtimeMinutes: finalMetrics.overtimeMinutes,
               status: finalMetrics.status,
               isWorkday: context.isWorkingDay,
-              warnings: policyResult.warnings,
+              warnings: [...policyResult.warnings, ...importWarnings],
               appliedPolicies: policyResult.appliedRules,
               userGroups: policyResult.userGroups,
               engine: engineResult
@@ -5622,6 +5804,7 @@ module.exports = {
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
+          const skipped = []
           const batchId = randomUUID()
           const batchMeta = parsed.data.batchMeta ?? {}
 
@@ -5659,6 +5842,17 @@ module.exports = {
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
+              const importWarnings = []
+              if (!rowUserId) importWarnings.push('Missing userId')
+              if (!workDate) importWarnings.push('Missing workDate')
+              if (importWarnings.length) {
+                skipped.push({
+                  userId: rowUserId ?? null,
+                  workDate: workDate ?? null,
+                  warnings: importWarnings,
+                })
+                continue
+              }
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -5872,6 +6066,18 @@ module.exports = {
                   : null,
               })
             }
+
+            if (skipped.length) {
+              const updatedMeta = {
+                ...(batchMeta ?? {}),
+                skippedCount: skipped.length,
+                skippedRows: skipped.slice(0, 50),
+              }
+              await trx.query(
+                'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+                [batchId, orgId, JSON.stringify(updatedMeta)]
+              )
+            }
           })
 
           res.json({
@@ -5880,6 +6086,7 @@ module.exports = {
               batchId,
               imported: results.length,
               items: results,
+              skipped,
             },
           })
         } catch (error) {
@@ -5955,6 +6162,7 @@ module.exports = {
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
+          const skipped = []
           await db.transaction(async (trx) => {
             for (const row of rows) {
               const workDate = row.workDate
@@ -5972,6 +6180,17 @@ module.exports = {
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
+              const importWarnings = []
+              if (!rowUserId) importWarnings.push('Missing userId')
+              if (!workDate) importWarnings.push('Missing workDate')
+              if (importWarnings.length) {
+                skipped.push({
+                  userId: rowUserId ?? null,
+                  workDate: workDate ?? null,
+                  warnings: importWarnings,
+                })
+                continue
+              }
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -6162,6 +6381,7 @@ module.exports = {
             data: {
               imported: results.length,
               items: results,
+              skipped,
             },
           })
         } catch (error) {
@@ -6711,6 +6931,118 @@ module.exports = {
           }
           logger.error('Attendance payroll cycle creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/payroll-cycles/generate',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = payrollCycleGenerateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        let template = null
+        let resolvedTemplateId = parsed.data.templateId ?? null
+        if (resolvedTemplateId) {
+          const templateRows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+            [resolvedTemplateId, orgId]
+          )
+          if (!templateRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          template = templateRows[0]
+        } else {
+          const defaultRows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE org_id = $1 AND is_default = true LIMIT 1',
+            [orgId]
+          )
+          if (defaultRows.length) {
+            template = defaultRows[0]
+            resolvedTemplateId = template.id
+          }
+        }
+
+        if (!template) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Payroll template required for generation' } })
+          return
+        }
+
+        const anchorBase = parseDateInput(parsed.data.anchorDate)
+        if (!anchorBase) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid anchorDate' } })
+          return
+        }
+
+        const count = parsed.data.count ?? 1
+        const status = parsed.data.status ?? 'open'
+        const namePrefix = parsed.data.namePrefix && parsed.data.namePrefix.trim().length > 0
+          ? parsed.data.namePrefix.trim()
+          : template.name
+
+        const created = []
+        const skipped = []
+        try {
+          await db.transaction(async (trx) => {
+            for (let i = 0; i < count; i += 1) {
+              const anchor = addMonthsToDate(anchorBase, i)
+              const window = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+              const name = `${namePrefix} ${window.startDate}~${window.endDate}`
+              const metadata = {
+                ...(parsed.data.metadata ?? {}),
+                generatedFrom: resolvedTemplateId,
+                anchorDate: formatDateOnly(anchor),
+                index: i + 1,
+              }
+              try {
+                const rows = await trx.query(
+                  `INSERT INTO attendance_payroll_cycles
+                   (id, org_id, template_id, name, start_date, end_date, status, metadata)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                   RETURNING *`,
+                  [
+                    randomUUID(),
+                    orgId,
+                    resolvedTemplateId,
+                    name,
+                    window.startDate,
+                    window.endDate,
+                    status,
+                    JSON.stringify(metadata),
+                  ]
+                )
+                created.push(mapPayrollCycleRow(rows[0]))
+              } catch (error) {
+                if (error?.code === '23505') {
+                  skipped.push({ startDate: window.startDate, endDate: window.endDate })
+                  continue
+                }
+                throw error
+              }
+            }
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              templateId: resolvedTemplateId,
+              created,
+              skipped,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle generation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to generate payroll cycles' } })
         }
       })
     )
