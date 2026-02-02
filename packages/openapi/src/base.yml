@@ -460,6 +460,83 @@ components:
               workDate:
                 type: string
                 format: date
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              userId:
+                type: string
+                nullable: true
+              workDate:
+                type: string
+                format: date
+                nullable: true
+              warnings:
+                type: array
+                items:
+                  type: string
+        batchId:
+          type: string
+          nullable: true
+        csvWarnings:
+          type: array
+          items:
+            type: string
+    AttendanceIntegration:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        config:
+          type: object
+        lastSyncAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AttendanceIntegrationRun:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        integrationId:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+          nullable: true
+        meta:
+          type: object
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     AttendanceShift:
       type: object
       properties:
