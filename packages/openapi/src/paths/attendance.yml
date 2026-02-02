@@ -1732,9 +1732,14 @@ paths:
                 userId: { type: string }
                 timezone: { type: string }
                 ruleSetId: { type: string }
+                mappingProfileId: { type: string }
+                commitToken: { type: string }
+                engine: { type: object }
                 mapping: { type: object }
                 columns: { type: array, items: { type: object } }
                 data: { type: object }
+                csvText: { type: string }
+                csvOptions: { type: object }
                 rows: { type: array, items: { type: object } }
                 entries: { type: array, items: { type: object } }
                 userMap: { type: object }
@@ -1759,6 +1764,9 @@ paths:
                         items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
                       total: { type: integer }
                       mappingUsed: { type: array, items: { type: object } }
+                      csvWarnings:
+                        type: array
+                        items: { type: string }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -1780,9 +1788,14 @@ paths:
                 userId: { type: string }
                 timezone: { type: string }
                 ruleSetId: { type: string }
+                mappingProfileId: { type: string }
+                commitToken: { type: string }
+                engine: { type: object }
                 mapping: { type: object }
                 columns: { type: array, items: { type: object } }
                 data: { type: object }
+                csvText: { type: string }
+                csvOptions: { type: object }
                 rows: { type: array, items: { type: object } }
                 entries: { type: array, items: { type: object } }
                 userMap: { type: object }
@@ -1803,6 +1816,209 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/integrations:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance integrations
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceIntegration' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create attendance integration
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                type: { type: string }
+                status: { type: string }
+                config: { type: object }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceIntegration' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/integrations/{id}:
+    x-plugin: plugin-attendance
+    put:
+      summary: Update attendance integration
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                type: { type: string }
+                status: { type: string }
+                config: { type: object }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceIntegration' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: Delete attendance integration
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/attendance/integrations/{id}/runs:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance integration runs
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceIntegrationRun' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/attendance/integrations/{id}/sync:
+    x-plugin: plugin-attendance
+    post:
+      summary: Run attendance integration sync
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: string }
+                to: { type: string }
+                dryRun: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      integrationId: { type: string }
+                      imported: { type: integer }
+                      skipped: { type: array, items: { type: object } }
+                      batchId: { type: string, nullable: true }
+                      run: { $ref: '#/components/schemas/AttendanceIntegrationRun' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/attendance/payroll-templates:
     x-plugin: plugin-attendance

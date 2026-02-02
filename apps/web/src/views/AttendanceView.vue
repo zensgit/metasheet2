@@ -1013,6 +1013,36 @@
                     Required fields: {{ selectedImportProfile.requiredFields.join(', ') }}
                   </small>
                 </label>
+                <label class="attendance__field" for="attendance-import-csv">
+                  <span>CSV file (optional)</span>
+                  <input
+                    id="attendance-import-csv"
+                    type="file"
+                    accept=".csv,text/csv"
+                    @change="handleImportCsvChange"
+                  />
+                  <small v-if="importCsvFileName" class="attendance__field-hint">Selected: {{ importCsvFileName }}</small>
+                </label>
+                <label class="attendance__field" for="attendance-import-csv-header">
+                  <span>CSV header row</span>
+                  <input
+                    id="attendance-import-csv-header"
+                    v-model="importCsvHeaderRow"
+                    type="number"
+                    min="0"
+                    placeholder="Auto-detect"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-import-csv-delimiter">
+                  <span>CSV delimiter</span>
+                  <input
+                    id="attendance-import-csv-delimiter"
+                    v-model="importCsvDelimiter"
+                    type="text"
+                    maxlength="2"
+                    placeholder=","
+                  />
+                </label>
                 <label class="attendance__field" for="attendance-import-user">
                   <span>User ID</span>
                   <input
@@ -1047,6 +1077,9 @@
                 </label>
               </div>
               <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="importLoading" @click="applyImportCsvFile">
+                  Load CSV
+                </button>
                 <button class="attendance__btn" :disabled="importLoading" @click="applyImportProfile">
                   Apply profile
                 </button>
@@ -1056,6 +1089,9 @@
                 <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
                   {{ importLoading ? 'Importing...' : 'Import' }}
                 </button>
+              </div>
+              <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
+                CSV warnings: {{ importCsvWarnings.join('; ') }}
               </div>
               <div v-if="importPreview.length === 0" class="attendance__empty">No preview data.</div>
               <div v-else class="attendance__table-wrapper">
@@ -2983,6 +3019,7 @@ const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
+const importCsvWarnings = ref<string[]>([])
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
@@ -2999,6 +3036,10 @@ const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
+const importCsvFile = ref<File | null>(null)
+const importCsvFileName = ref('')
+const importCsvHeaderRow = ref('')
+const importCsvDelimiter = ref(',')
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -4649,6 +4690,45 @@ function applyImportProfile() {
   setStatus(`Applied mapping profile: ${profile.name}`)
 }
 
+function handleImportCsvChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target?.files?.[0] ?? null
+  importCsvFile.value = file
+  importCsvFileName.value = file?.name ?? ''
+}
+
+async function applyImportCsvFile() {
+  if (!importCsvFile.value) {
+    setStatus('Select a CSV file first.', 'error')
+    return
+  }
+  try {
+    const csvText = await importCsvFile.value.text()
+    const base = parseJsonConfig(importForm.payload) ?? {}
+    const next: Record<string, any> = {
+      ...base,
+      source: base.source ?? 'dingtalk_csv',
+      csvText,
+    }
+    if (importProfileId.value && !next.mappingProfileId) {
+      next.mappingProfileId = importProfileId.value
+    }
+    const csvOptions: Record<string, any> = {}
+    if (importCsvHeaderRow.value !== '') {
+      const rowIndex = Number(importCsvHeaderRow.value)
+      if (Number.isFinite(rowIndex) && rowIndex >= 0) csvOptions.headerRowIndex = rowIndex
+    }
+    if (importCsvDelimiter.value && importCsvDelimiter.value !== ',') {
+      csvOptions.delimiter = importCsvDelimiter.value
+    }
+    if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
+    importForm.payload = JSON.stringify(next, null, 2)
+    setStatus(`CSV loaded: ${importCsvFileName.value || 'file'}`)
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to load CSV', 'error')
+  }
+}
+
 async function previewImport() {
   const payload = buildImportPayload()
   if (!payload) {
@@ -4671,6 +4751,7 @@ async function previewImport() {
     }
     adminForbidden.value = false
     importPreview.value = data.data?.items ?? []
+    importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
     setStatus(`Preview loaded (${importPreview.value.length} rows).`)
   } catch (error) {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
@@ -4854,6 +4935,7 @@ async function runImport() {
       throw new Error(data?.error?.message || 'Failed to import attendance')
     }
     adminForbidden.value = false
+    importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
     const count = data.data?.imported ?? 0
     const batchId = data.data?.batchId
     setStatus(batchId ? `Imported ${count} rows (batch ${formatShortId(batchId)}).` : `Imported ${count} rows.`)

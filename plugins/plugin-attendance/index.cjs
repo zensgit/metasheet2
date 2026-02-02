@@ -184,6 +184,75 @@ function consumeImportCommitToken(token, { orgId, userId }) {
   return true
 }
 
+function ensureStringArray(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean)
+  if (typeof value === 'string') {
+    return value.split(',').map((item) => item.trim()).filter(Boolean)
+  }
+  return []
+}
+
+function normalizeIntegrationConfig(config) {
+  if (!config || typeof config !== 'object') return {}
+  return {
+    ...config,
+    appKey: config.appKey ?? config.appkey ?? config.app_key,
+    appSecret: config.appSecret ?? config.appsecret ?? config.app_secret,
+    baseUrl: config.baseUrl ?? config.base_url ?? 'https://oapi.dingtalk.com',
+    userIds: ensureStringArray(config.userIds ?? config.user_ids ?? config.users),
+    columnIds: ensureStringArray(config.columnIds ?? config.column_id_list ?? config.columns).map((id) => String(id)),
+    columns: Array.isArray(config.columns) ? config.columns : [],
+    mappingProfileId: config.mappingProfileId ?? config.mapping_profile_id ?? null,
+    userMapKeyField: config.userMapKeyField ?? config.user_map_key_field ?? null,
+    userMapSourceFields: Array.isArray(config.userMapSourceFields) ? config.userMapSourceFields : undefined,
+    userMap: config.userMap ?? config.user_map ?? undefined,
+    timezone: config.timezone ?? 'Asia/Shanghai',
+    source: config.source ?? 'dingtalk_api',
+  }
+}
+
+async function fetchDingTalkAccessToken({ appKey, appSecret, baseUrl }) {
+  if (!appKey || !appSecret) {
+    throw new Error('DingTalk appKey/appSecret required')
+  }
+  const tokenUrl = `${baseUrl}/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`
+  const res = await fetch(tokenUrl)
+  const data = await res.json()
+  if (!res.ok || data?.errcode) {
+    throw new Error(data?.errmsg || 'Failed to obtain DingTalk token')
+  }
+  return data?.access_token
+}
+
+function normalizeDingTalkDateRange(value, fallback) {
+  if (!value) return fallback
+  const text = String(value).trim()
+  if (!text) return fallback
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return `${text} 00:00:00`
+  return text
+}
+
+async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnIds, fromDate, toDate }) {
+  const url = `${baseUrl}/topapi/attendance/getcolumnval?access_token=${encodeURIComponent(accessToken)}`
+  const body = {
+    userid: userId,
+    column_id_list: Array.isArray(columnIds) ? columnIds.join(',') : String(columnIds ?? ''),
+    from_date: fromDate,
+    to_date: toDate,
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok || data?.errcode) {
+    throw new Error(data?.errmsg || 'Failed to fetch DingTalk attendance')
+  }
+  return data?.result ?? {}
+}
+
 class HttpError extends Error {
   constructor(status, code, message) {
     super(message)
@@ -451,9 +520,10 @@ function buildDingTalkFieldMap(columns) {
   return map
 }
 
-function buildRowsFromDingTalk({ columns, data }) {
+function buildRowsFromDingTalk({ columns, data, userId }) {
   const map = buildDingTalkFieldMap(columns)
   const rowsByDate = new Map()
+  const resolvedUserId = data?.userId ?? data?.userid ?? userId ?? null
   const columnVals = data?.column_vals
   if (!Array.isArray(columnVals)) return []
   for (const columnEntry of columnVals) {
@@ -470,7 +540,11 @@ function buildRowsFromDingTalk({ columns, data }) {
       if (!dateRaw) continue
       const dateKey = String(dateRaw).slice(0, 10)
       if (!rowsByDate.has(dateKey)) {
-        rowsByDate.set(dateKey, { workDate: dateKey, fields: {} })
+        rowsByDate.set(dateKey, {
+          workDate: dateKey,
+          fields: {},
+          userId: resolvedUserId ?? undefined,
+        })
       }
       const row = rowsByDate.get(dateKey)
       const rawValue = entry?.value ?? entry?.date ?? ''
@@ -517,6 +591,129 @@ function buildRowsFromEntries({ entries }) {
     }
   }
   return Array.from(rowsByKey.values())
+}
+
+function parseCsvText(csvText, delimiter = ',') {
+  if (typeof csvText !== 'string' || !csvText.trim()) return []
+  const rows = []
+  let row = []
+  let field = ''
+  let inQuotes = false
+  const text = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]
+    if (inQuotes) {
+      if (char === '"') {
+        const next = text[i + 1]
+        if (next === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else {
+        field += char
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+    if (char === delimiter) {
+      row.push(field)
+      field = ''
+      continue
+    }
+    if (char === '\n') {
+      row.push(field)
+      field = ''
+      if (row.length > 1 || row[0]?.trim()) rows.push(row)
+      row = []
+      continue
+    }
+    field += char
+  }
+  row.push(field)
+  if (row.length > 1 || row[0]?.trim()) rows.push(row)
+  return rows
+}
+
+function normalizeCsvHeaderValue(value) {
+  if (value === undefined || value === null) return ''
+  const text = String(value).replace(/\ufeff/g, '').trim()
+  return text
+}
+
+function detectCsvHeaderIndex(rows) {
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i].map(normalizeCsvHeaderValue).filter(Boolean)
+    if (!row.length) continue
+    const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
+    const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
+    if (hasName && hasDate) return i
+  }
+  return 0
+}
+
+function normalizeCsvWorkDate(value) {
+  if (value === undefined || value === null) return null
+  const text = String(value).trim()
+  if (!text) return null
+  const numeric = text.replace(/[^0-9]/g, '')
+  if (/^\d{13}$/.test(numeric)) {
+    const date = new Date(Number(numeric))
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+  }
+  if (/^\d{10}$/.test(numeric)) {
+    const date = new Date(Number(numeric) * 1000)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+  }
+  const cleaned = text.split(' ')[0].trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned
+  if (/^\d{2}-\d{2}-\d{2}$/.test(cleaned)) {
+    const [yy, mm, dd] = cleaned.split('-')
+    return `20${yy}-${mm}-${dd}`
+  }
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(cleaned)) return cleaned.replace(/\//g, '-')
+  return null
+}
+
+function buildRowsFromCsv({ csvText, csvOptions }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const parsedRows = parseCsvText(csvText, delimiter)
+  if (!parsedRows.length) return { rows: [], warnings: ['CSV empty or unreadable'] }
+
+  const headerRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
+    ? Math.max(0, Number(csvOptions.headerRowIndex))
+    : detectCsvHeaderIndex(parsedRows)
+  const header = (parsedRows[headerRowIndex] || []).map(normalizeCsvHeaderValue)
+  if (!header.length) {
+    return { rows: [], warnings: ['CSV header row not found'] }
+  }
+  const rows = []
+  for (let i = headerRowIndex + 1; i < parsedRows.length; i += 1) {
+    const rawRow = parsedRows[i]
+    if (!rawRow) continue
+    const fields = {}
+    let hasValue = false
+    header.forEach((key, index) => {
+      if (!key) return
+      const value = rawRow[index] ?? ''
+      if (value !== '') hasValue = true
+      fields[key] = value
+    })
+    if (!hasValue) continue
+    const workDate = normalizeCsvWorkDate(fields.workDate ?? fields['日期'] ?? fields.date)
+    const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
+    rows.push({
+      workDate: workDate ?? '',
+      fields,
+      userId: userId ? String(userId).trim() : undefined,
+    })
+  }
+  return { rows, warnings: [] }
 }
 
 function resolveUserMapValue(userMap, key) {
@@ -614,6 +811,47 @@ function resolveRequiredFieldValue(row, field) {
   if (row.fields && row.fields[field] !== undefined) return row.fields[field]
   if (row[field] !== undefined) return row[field]
   return undefined
+}
+
+function buildProfileSnapshot({ valueFor, userProfile }) {
+  if (!valueFor) return null
+  const snapshot = {
+    attendanceGroup: valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+    department: valueFor('department'),
+    role: valueFor('role') ?? valueFor('职位'),
+    empNo: valueFor('empNo') ?? valueFor('工号'),
+    userName: valueFor('userName') ?? valueFor('name') ?? valueFor('姓名'),
+    entryTime: valueFor('entryTime') ?? valueFor('entry_time') ?? valueFor('入职时间'),
+    resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
+  }
+
+  const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
+  const roleTags = Array.isArray(rawRoleTags)
+    ? rawRoleTags
+    : typeof rawRoleTags === 'string'
+      ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+      : []
+  if (roleTags.length) snapshot.roleTags = roleTags
+
+  if (userProfile && typeof userProfile === 'object') {
+    Object.keys(snapshot).forEach((key) => {
+      if (snapshot[key] === undefined || snapshot[key] === null || snapshot[key] === '') {
+        const fallback = resolveProfileValue(userProfile, key)
+        if (fallback !== undefined && fallback !== null && fallback !== '') snapshot[key] = fallback
+      }
+    })
+    if (!snapshot.roleTags || snapshot.roleTags.length === 0) {
+      const fallbackTags = resolveProfileValue(userProfile, 'roleTags')
+      if (Array.isArray(fallbackTags) && fallbackTags.length) snapshot.roleTags = fallbackTags
+    }
+  }
+
+  const cleaned = {}
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined || value === null || value === '') continue
+    cleaned[key] = value
+  }
+  return Object.keys(cleaned).length ? cleaned : null
 }
 
 function applyFieldMappings(fields, mappings) {
@@ -869,6 +1107,62 @@ function mapImportItemRow(row) {
     previewSnapshot: normalizeMetadata(row.preview_snapshot),
     createdAt: row.created_at,
   }
+}
+
+function mapIntegrationRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    type: row.type,
+    status: row.status,
+    config: normalizeMetadata(row.config),
+    lastSyncAt: row.last_sync_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function mapIntegrationRunRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    integrationId: row.integration_id,
+    status: row.status,
+    message: row.message,
+    meta: normalizeMetadata(row.meta),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+async function createIntegrationRun(db, { orgId, integrationId }) {
+  const rows = await db.query(
+    `INSERT INTO attendance_integration_runs
+     (org_id, integration_id, status, started_at, created_at, updated_at)
+     VALUES ($1, $2, 'running', now(), now(), now())
+     RETURNING *`,
+    [orgId, integrationId]
+  )
+  return rows.length ? mapIntegrationRunRow(rows[0]) : null
+}
+
+async function updateIntegrationRun(db, runId, updates) {
+  const meta = updates?.meta ? JSON.stringify(updates.meta) : null
+  const rows = await db.query(
+    `UPDATE attendance_integration_runs
+     SET status = COALESCE($2, status),
+         message = COALESCE($3, message),
+         meta = COALESCE($4::jsonb, meta),
+         finished_at = COALESCE($5, finished_at),
+         updated_at = now()
+     WHERE id = $1
+     RETURNING *`,
+    [runId, updates?.status ?? null, updates?.message ?? null, meta, updates?.finishedAt ?? null]
+  )
+  return rows.length ? mapIntegrationRunRow(rows[0]) : null
 }
 
 function normalizeJsonArray(value, fallback = []) {
@@ -2599,7 +2893,7 @@ module.exports = {
     })
 
     const importPayloadSchema = z.object({
-      source: z.enum(['dingtalk', 'manual', 'dingtalk_csv']).optional(),
+      source: z.enum(['dingtalk', 'manual', 'dingtalk_csv', 'dingtalk_api', 'csv']).optional(),
       orgId: z.string().optional(),
       userId: z.string().optional(),
       timezone: z.string().optional(),
@@ -2633,6 +2927,11 @@ module.exports = {
           })).optional(),
         })).optional(),
       }).optional(),
+      csvText: z.string().optional(),
+      csvOptions: z.object({
+        delimiter: z.string().optional(),
+        headerRowIndex: z.number().int().nonnegative().optional(),
+      }).optional(),
       rows: z.array(importRowSchema).optional(),
       entries: z.array(z.object({
         userId: z.string().optional(),
@@ -2647,6 +2946,19 @@ module.exports = {
       })).optional(),
       statusMap: z.record(z.string()).optional(),
       mode: z.enum(['merge', 'override']).optional(),
+    })
+
+    const integrationCreateSchema = z.object({
+      name: z.string().min(1),
+      type: z.enum(['dingtalk']),
+      status: z.enum(['active', 'disabled']).optional(),
+      config: z.record(z.unknown()).optional(),
+    })
+    const integrationUpdateSchema = integrationCreateSchema.partial()
+    const integrationSyncSchema = z.object({
+      from: z.string().optional(),
+      to: z.string().optional(),
+      dryRun: z.boolean().optional(),
     })
 
     const payrollTemplateCreateSchema = z.object({
@@ -5593,11 +5905,25 @@ module.exports = {
             }
           }
 
+          let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
-            : Array.isArray(parsed.data.entries)
-              ? buildRowsFromEntries({ entries: parsed.data.entries })
-              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+            : parsed.data.csvText
+              ? (() => {
+                const result = buildRowsFromCsv({
+                  csvText: parsed.data.csvText,
+                  csvOptions: parsed.data.csvOptions,
+                })
+                csvWarnings = result.warnings
+                return result.rows
+              })()
+              : Array.isArray(parsed.data.entries)
+                ? buildRowsFromEntries({ entries: parsed.data.entries })
+                : buildRowsFromDingTalk({
+                  columns: parsed.data.columns,
+                  data: parsed.data.data,
+                  userId: parsed.data.userId ?? userId,
+                })
 
           if (rows.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
@@ -5811,6 +6137,7 @@ module.exports = {
               items: preview,
               total: preview.length,
               mappingUsed: mapping,
+              csvWarnings,
             },
           })
         } catch (error) {
@@ -5882,11 +6209,25 @@ module.exports = {
             }
           }
 
+          let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
-            : Array.isArray(parsed.data.entries)
-              ? buildRowsFromEntries({ entries: parsed.data.entries })
-              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+            : parsed.data.csvText
+              ? (() => {
+                const result = buildRowsFromCsv({
+                  csvText: parsed.data.csvText,
+                  csvOptions: parsed.data.csvOptions,
+                })
+                csvWarnings = result.warnings
+                return result.rows
+              })()
+              : Array.isArray(parsed.data.entries)
+                ? buildRowsFromEntries({ entries: parsed.data.entries })
+                : buildRowsFromDingTalk({
+                  columns: parsed.data.columns,
+                  data: parsed.data.data,
+                  userId: parsed.data.userId ?? requesterId,
+                })
 
           if (rows.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
@@ -5978,6 +6319,7 @@ module.exports = {
                 return undefined
               }
               const dataTypeFor = (key) => mapped[key]?.dataType
+              const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
 
               const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
               const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
@@ -6097,6 +6439,19 @@ module.exports = {
                   },
                 }
               }
+              if (profileSnapshot) {
+                meta = meta ?? {}
+                meta.profile = profileSnapshot
+              }
+              meta = meta ?? {}
+              meta.metrics = {
+                leaveMinutes: effectiveLeaveMinutes,
+                overtimeMinutes: effectiveOvertimeMinutes,
+              }
+              meta.source = {
+                source: parsed.data.source ?? null,
+                mappingProfileId: parsed.data.mappingProfileId ?? null,
+              }
               if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
                 meta = meta ?? {}
                 meta.engine = {
@@ -6196,6 +6551,7 @@ module.exports = {
               imported: results.length,
               items: results,
               skipped,
+              csvWarnings,
             },
           })
         } catch (error) {
@@ -6256,11 +6612,25 @@ module.exports = {
             }
           }
 
+          let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
-            : Array.isArray(parsed.data.entries)
-              ? buildRowsFromEntries({ entries: parsed.data.entries })
-              : buildRowsFromDingTalk({ columns: parsed.data.columns, data: parsed.data.data })
+            : parsed.data.csvText
+              ? (() => {
+                const result = buildRowsFromCsv({
+                  csvText: parsed.data.csvText,
+                  csvOptions: parsed.data.csvOptions,
+                })
+                csvWarnings = result.warnings
+                return result.rows
+              })()
+              : Array.isArray(parsed.data.entries)
+                ? buildRowsFromEntries({ entries: parsed.data.entries })
+                : buildRowsFromDingTalk({
+                  columns: parsed.data.columns,
+                  data: parsed.data.data,
+                  userId: parsed.data.userId ?? userId,
+                })
 
           if (rows.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
@@ -6448,6 +6818,19 @@ module.exports = {
                   },
                 }
               }
+              if (profileSnapshot) {
+                meta = meta ?? {}
+                meta.profile = profileSnapshot
+              }
+              meta = meta ?? {}
+              meta.metrics = {
+                leaveMinutes: effectiveLeaveMinutes,
+                overtimeMinutes: effectiveOvertimeMinutes,
+              }
+              meta.source = {
+                source: parsed.data.source ?? null,
+                mappingProfileId: parsed.data.mappingProfileId ?? null,
+              }
               if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
                 meta = meta ?? {}
                 meta.engine = {
@@ -6504,6 +6887,7 @@ module.exports = {
               imported: results.length,
               items: results,
               skipped,
+              csvWarnings,
             },
           })
         } catch (error) {
@@ -6513,6 +6897,578 @@ module.exports = {
           }
           logger.error('Attendance import failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/integrations',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const status = typeof req.query.status === 'string' ? req.query.status : null
+
+        try {
+          const where = ['org_id = $1']
+          const params = [orgId]
+          if (status) {
+            where.push(`status = $${params.length + 1}`)
+            params.push(status)
+          }
+          const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+          const totalRows = await db.query(
+            `SELECT COUNT(*)::int AS total FROM attendance_integrations ${whereClause}`,
+            params
+          )
+          const rows = await db.query(
+            `SELECT * FROM attendance_integrations
+             ${whereClause}
+             ORDER BY created_at DESC
+             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+            [...params, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapIntegrationRow),
+              total: totalRows[0]?.total ?? 0,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integrations query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load integrations' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/integrations',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = integrationCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const payload = parsed.data
+        const status = payload.status ?? 'active'
+        const config = payload.config ?? {}
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_integrations
+             (org_id, name, type, status, config, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
+             RETURNING *`,
+            [orgId, payload.name, payload.type, status, JSON.stringify(config)]
+          )
+          const mapped = rows.length ? mapIntegrationRow(rows[0]) : null
+          res.json({ ok: true, data: mapped })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integration creation failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create integration' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/integrations/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = integrationUpdateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const integrationId = req.params.id
+
+        try {
+          const existing = await db.query(
+            'SELECT * FROM attendance_integrations WHERE id = $1 AND org_id = $2',
+            [integrationId, orgId]
+          )
+          if (!existing.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } })
+            return
+          }
+          const current = mapIntegrationRow(existing[0])
+          const next = {
+            name: parsed.data.name ?? current.name,
+            type: parsed.data.type ?? current.type,
+            status: parsed.data.status ?? current.status,
+            config: parsed.data.config ?? current.config,
+          }
+          const rows = await db.query(
+            `UPDATE attendance_integrations
+             SET name = $3, type = $4, status = $5, config = $6::jsonb, updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [integrationId, orgId, next.name, next.type, next.status, JSON.stringify(next.config)]
+          )
+          res.json({ ok: true, data: mapIntegrationRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integration update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update integration' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/integrations/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const integrationId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_integrations WHERE id = $1 AND org_id = $2 RETURNING id',
+            [integrationId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: integrationId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integration delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete integration' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/integrations/:id/runs',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const integrationId = req.params.id
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const totalRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_integration_runs WHERE integration_id = $1 AND org_id = $2',
+            [integrationId, orgId]
+          )
+          const rows = await db.query(
+            `SELECT * FROM attendance_integration_runs
+             WHERE integration_id = $1 AND org_id = $2
+             ORDER BY started_at DESC
+             LIMIT $3 OFFSET $4`,
+            [integrationId, orgId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapIntegrationRunRow),
+              total: totalRows[0]?.total ?? 0,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integration runs query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load integration runs' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/integrations/:id/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = integrationSyncSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const integrationId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_integrations WHERE id = $1 AND org_id = $2',
+            [integrationId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } })
+            return
+          }
+          const integration = mapIntegrationRow(rows[0])
+          if (integration.status !== 'active') {
+            res.status(400).json({ ok: false, error: { code: 'INACTIVE', message: 'Integration is disabled' } })
+            return
+          }
+          const run = await createIntegrationRun(db, { orgId, integrationId })
+          const config = normalizeIntegrationConfig(integration.config)
+          const fromDate = normalizeDingTalkDateRange(parsed.data.from, new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10))
+          const toDate = normalizeDingTalkDateRange(parsed.data.to, new Date().toISOString().slice(0, 10))
+
+          let imported = 0
+          let skipped = []
+          let batchId = null
+
+          if (integration.type === 'dingtalk') {
+            const accessToken = await fetchDingTalkAccessToken({
+              appKey: config.appKey,
+              appSecret: config.appSecret,
+              baseUrl: config.baseUrl,
+            })
+            const columns = Array.isArray(config.columns) && config.columns.length
+              ? config.columns
+              : config.columnIds.map((id) => ({ id }))
+            if (!columns.length) {
+              throw new Error('DingTalk columnIds/columns required in integration config')
+            }
+            const userIds = config.userIds
+            if (!userIds.length) {
+              throw new Error('DingTalk userIds required in integration config')
+            }
+            const allRows = []
+            for (const userId of userIds) {
+              const result = await fetchDingTalkColumnValues({
+                baseUrl: config.baseUrl,
+                accessToken,
+                userId,
+                columnIds: config.columnIds,
+                fromDate,
+                toDate,
+              })
+              const payload = {
+                column_vals: result.column_vals ?? [],
+                userId,
+              }
+              const rowsForUser = buildRowsFromDingTalk({ columns, data: payload, userId })
+              allRows.push(...rowsForUser)
+            }
+            const payload = {
+              source: config.source ?? 'dingtalk_api',
+              rows: allRows,
+              userMap: config.userMap,
+              userMapKeyField: config.userMapKeyField,
+              userMapSourceFields: config.userMapSourceFields,
+              mappingProfileId: config.mappingProfileId ?? 'dingtalk_api_columns',
+            }
+            if (parsed.data.dryRun) {
+              imported = 0
+              skipped = []
+            } else {
+              const importResponse = await (async () => {
+                const parsedImport = importPayloadSchema.safeParse(payload)
+                if (!parsedImport.success) throw new Error(parsedImport.error.message)
+                const importUserId = payload.userId ?? requesterId
+                const importOrgId = orgId
+                const importRows = Array.isArray(parsedImport.data.rows) ? parsedImport.data.rows : []
+                let ruleSetConfig = null
+                const profile = findImportProfile(parsedImport.data.mappingProfileId)
+                const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
+                const mapping = parsedImport.data.mapping?.columns
+                  ?? parsedImport.data.mapping?.fields
+                  ?? (profileMapping.length ? profileMapping : undefined)
+                  ?? ruleSetConfig?.mappings?.columns
+                  ?? ruleSetConfig?.mappings?.fields
+                  ?? []
+                const requiredFields = profile?.requiredFields ?? []
+                const baseRule = await loadDefaultRule(db, orgId)
+                const override = normalizeRuleOverride(ruleSetConfig?.rule)
+                const ruleOverride = override
+                  ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+                  : baseRule
+                const statusMap = parsedImport.data.statusMap ?? {}
+                const results = []
+                const skippedRows = []
+                const newBatchId = randomUUID()
+                const batchMeta = {
+                  source: 'integration',
+                  integrationId,
+                  mappingProfileId: parsedImport.data.mappingProfileId ?? null,
+                }
+
+                await db.transaction(async (trx) => {
+                  await trx.query(
+                    `INSERT INTO attendance_import_batches
+                     (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
+                    [
+                      newBatchId,
+                      orgId,
+                      requesterId,
+                      payload.source ?? null,
+                      null,
+                      JSON.stringify(mapping),
+                      importRows.length,
+                      'committed',
+                      JSON.stringify(batchMeta),
+                    ]
+                  )
+
+                  for (const row of importRows) {
+                    const workDate = row.workDate
+                    const rowUserId = resolveRowUserId({
+                      row,
+                      fallbackUserId: importUserId,
+                      userMap: parsedImport.data.userMap,
+                      userMapKeyField: parsedImport.data.userMapKeyField,
+                      userMapSourceFields: parsedImport.data.userMapSourceFields,
+                    })
+                    const userProfile = resolveRowUserProfile({
+                      row,
+                      fallbackUserId: importUserId,
+                      userMap: parsedImport.data.userMap,
+                      userMapKeyField: parsedImport.data.userMapKeyField,
+                      userMapSourceFields: parsedImport.data.userMapSourceFields,
+                    })
+                    const importWarnings = []
+                    if (!rowUserId) importWarnings.push('Missing userId')
+                    if (!workDate) importWarnings.push('Missing workDate')
+                    if (requiredFields.length) {
+                      const missingRequired = requiredFields.filter((field) => {
+                        const value = resolveRequiredFieldValue(row, field)
+                        return value === undefined || value === null || value === ''
+                      })
+                      if (missingRequired.length) {
+                        importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                      }
+                    }
+                    if (importWarnings.length) {
+                      skippedRows.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings: importWarnings })
+                      continue
+                    }
+                    const context = await resolveWorkContext({
+                      db: trx,
+                      orgId,
+                      userId: rowUserId,
+                      workDate,
+                      defaultRule: ruleOverride,
+                    })
+                    const mapped = applyFieldMappings(row.fields ?? {}, mapping)
+                    const valueFor = (key) => {
+                      if (mapped[key]?.value !== undefined) return mapped[key].value
+                      if (row.fields?.[key] !== undefined) return row.fields[key]
+                      const profileValue = resolveProfileValue(userProfile, key)
+                      if (profileValue !== undefined) return profileValue
+                      return undefined
+                    }
+                    const dataTypeFor = (key) => mapped[key]?.dataType
+                    const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
+
+                    const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
+                    const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+                    const statusRaw = valueFor('status')
+                    const statusOverride = statusRaw != null
+                      ? resolveStatusOverride(statusRaw, statusMap)
+                      : null
+
+                    const workMinutes = parseMinutesValue(
+                      valueFor('workMinutes') ?? valueFor('workHours'),
+                      dataTypeFor('workMinutes') ?? dataTypeFor('workHours')
+                    )
+                    const lateMinutes = parseMinutesValue(valueFor('lateMinutes'), dataTypeFor('lateMinutes'))
+                    const earlyLeaveMinutes = parseMinutesValue(valueFor('earlyLeaveMinutes'), dataTypeFor('earlyLeaveMinutes'))
+                    const leaveMinutes = parseMinutesValue(valueFor('leaveMinutes') ?? valueFor('leaveHours'), dataTypeFor('leaveMinutes') ?? dataTypeFor('leaveHours'))
+                    const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
+
+                    const computed = computeMetrics({
+                      rule: context.rule,
+                      firstInAt,
+                      lastOutAt,
+                      isWorkingDay: context.isWorkingDay,
+                      leaveMinutes,
+                      overtimeMinutes,
+                    })
+                    const initialMetrics = {
+                      workMinutes: Number.isFinite(workMinutes) ? workMinutes : computed.workMinutes,
+                      lateMinutes: Number.isFinite(lateMinutes) ? lateMinutes : computed.lateMinutes,
+                      earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
+                      status: statusOverride ?? computed.status,
+                    }
+
+                    const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
+                    augmentFieldValuesWithDates(fieldValues, workDate)
+                    const policyResult = applyAttendancePolicies({
+                      policies: ruleSetConfig?.policies,
+                      facts: {
+                        userId: rowUserId,
+                        orgId,
+                        workDate,
+                        shiftName: context.rule?.name ?? null,
+                        isHoliday: Boolean(context.holiday),
+                        isWorkingDay: context.isWorkingDay,
+                      },
+                      fieldValues,
+                      metrics: {
+                        ...initialMetrics,
+                        leaveMinutes: leaveMinutes ?? 0,
+                        overtimeMinutes: overtimeMinutes ?? 0,
+                      },
+                    })
+                    const effective = policyResult.metrics
+                    const baseMetrics = {
+                      ...effective,
+                      leaveMinutes: Number.isFinite(effective.leaveMinutes) ? effective.leaveMinutes : leaveMinutes,
+                      overtimeMinutes: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes : overtimeMinutes,
+                    }
+                    const finalMetrics = baseMetrics
+                    const effectiveLeaveMinutes = Number.isFinite(finalMetrics.leaveMinutes)
+                      ? finalMetrics.leaveMinutes
+                      : leaveMinutes
+                    const effectiveOvertimeMinutes = Number.isFinite(finalMetrics.overtimeMinutes)
+                      ? finalMetrics.overtimeMinutes
+                      : overtimeMinutes
+
+                    let meta = null
+                    if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+                      meta = {
+                        policy: {
+                          warnings: policyResult.warnings,
+                          appliedRules: policyResult.appliedRules,
+                          userGroups: policyResult.userGroups,
+                        },
+                      }
+                    }
+                    if (profileSnapshot) {
+                      meta = meta ?? {}
+                      meta.profile = profileSnapshot
+                    }
+                    meta = meta ?? {}
+                    meta.metrics = {
+                      leaveMinutes: effectiveLeaveMinutes,
+                      overtimeMinutes: effectiveOvertimeMinutes,
+                    }
+                    meta.source = {
+                      source: payload.source ?? null,
+                      mappingProfileId: payload.mappingProfileId ?? null,
+                      integrationId,
+                    }
+
+                    const record = await upsertAttendanceRecord({
+                      userId: rowUserId,
+                      orgId,
+                      workDate,
+                      timezone: context.rule.timezone,
+                      rule: context.rule,
+                      updateFirstInAt: firstInAt,
+                      updateLastOutAt: lastOutAt,
+                      mode: parsedImport.data.mode ?? 'override',
+                      statusOverride,
+                      overrideMetrics: {
+                        workMinutes: finalMetrics.workMinutes,
+                        lateMinutes: finalMetrics.lateMinutes,
+                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+                        status: finalMetrics.status,
+                      },
+                      isWorkday: context.isWorkingDay,
+                      leaveMinutes: effectiveLeaveMinutes,
+                      overtimeMinutes: effectiveOvertimeMinutes,
+                      meta: meta ?? undefined,
+                      sourceBatchId: newBatchId,
+                      client: trx,
+                    })
+
+                    const snapshot = {
+                      metrics: {
+                        workMinutes: finalMetrics.workMinutes,
+                        lateMinutes: finalMetrics.lateMinutes,
+                        earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+                        leaveMinutes: effectiveLeaveMinutes,
+                        overtimeMinutes: effectiveOvertimeMinutes,
+                        status: finalMetrics.status,
+                      },
+                      policy: meta?.policy ?? null,
+                    }
+
+                    await trx.query(
+                      `INSERT INTO attendance_import_items
+                       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+                      [
+                        randomUUID(),
+                        newBatchId,
+                        orgId,
+                        rowUserId,
+                        workDate,
+                        record.id,
+                        JSON.stringify(snapshot),
+                      ]
+                    )
+
+                    results.push({ id: record.id, userId: rowUserId, workDate })
+                  }
+
+                  if (skippedRows.length) {
+                    await trx.query(
+                      'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+                      [newBatchId, orgId, JSON.stringify({ ...batchMeta, skippedCount: skippedRows.length, skippedRows: skippedRows.slice(0, 50) })]
+                    )
+                  }
+                })
+
+                return { results, skipped: skippedRows, batchId: newBatchId }
+              })()
+              imported = importResponse.results.length
+              skipped = importResponse.skipped
+              batchId = importResponse.batchId
+            }
+          }
+
+          await db.query(
+            'UPDATE attendance_integrations SET last_sync_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2',
+            [integrationId, orgId]
+          )
+          const runResult = await updateIntegrationRun(db, run.id, {
+            status: 'success',
+            message: parsed.data.dryRun ? 'Dry run completed' : 'Sync completed',
+            meta: { imported, skipped: skipped.length, batchId },
+            finishedAt: new Date().toISOString(),
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              integrationId,
+              imported,
+              skipped,
+              batchId,
+              run: runResult,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance integration sync failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: (error?.message || 'Integration sync failed') } })
         }
       })
     )
