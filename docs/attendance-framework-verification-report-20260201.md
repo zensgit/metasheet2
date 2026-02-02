@@ -7,10 +7,8 @@
 
 ## Backend Tests
 - Targeted attendance integration test:
-  - Command: `ATTENDANCE_TEST_DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts`
-  - Result: ❌ failed
-  - Reason: DB auth failed for user `metasheet` during BPMN/EventBus init; test aborted before assertions.
-  - Follow-up: verify DB credentials or set the core backend DB env vars to the same Postgres instance used by the attendance tests.
+  - Command: `DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet ATTENDANCE_TEST_DATABASE_URL=postgresql://metasheet:metasheet@localhost:5435/metasheet pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts`
+  - Result: ✅ passed
 
 ## UI Acceptance (Playwright)
 - Command: `pnpm exec node scripts/attendance-ui-verify.mjs`
@@ -18,6 +16,7 @@
 - Notes:
   - Preview rows rendered after import.
   - Batch snapshot JSON captured.
+  - Environment: backend on 8900 + frontend on 8899 (local dev).
 
 ## Re-run Instructions (optional)
 1) Ensure Postgres/Redis are running (e.g., docker compose or local services).
