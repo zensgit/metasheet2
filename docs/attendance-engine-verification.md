@@ -13,6 +13,7 @@ Date: 2026-02-02
   - `GET /api/attendance/integrations` -> `ok` with empty list.
   - `GET /api/attendance/rule-templates` -> returns system templates (driver/security/etc).
   - `PUT /api/attendance/rule-templates` -> org template library saved (12 templates).
+  - `GET /api/attendance/rule-sets/template` -> includes CSV mappings for 部门/职位/异常原因/审批单等字段.
 - UI smoke (Playwright):
   - Attendance page loads; Summary/Admin/Import/Payroll sections visible.
   - No `Missing Bearer token` or `Attendance module not enabled` banners.
