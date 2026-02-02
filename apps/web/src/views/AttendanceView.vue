@@ -2043,6 +2043,61 @@ interface AttendanceImportPreviewItem {
   userGroups?: string[]
 }
 
+interface AttendanceImportBatch {
+  id: string
+  orgId?: string
+  createdBy?: string | null
+  source?: string | null
+  ruleSetId?: string | null
+  mapping?: Record<string, any> | null
+  rowCount: number
+  status: string
+  meta?: Record<string, any> | null
+  createdAt?: string
+  updatedAt?: string
+}
+
+interface AttendanceImportItem {
+  id: string
+  batchId: string
+  orgId?: string
+  userId: string
+  workDate: string
+  recordId?: string | null
+  previewSnapshot?: Record<string, any> | null
+  createdAt?: string
+}
+
+interface AttendanceImportMappingProfile {
+  id: string
+  name: string
+  description?: string
+  source?: string
+  mapping?: Record<string, any>
+  requiredFields?: string[]
+  userMapKeyField?: string
+  userMapSourceFields?: string[]
+  payloadExample?: Record<string, any>
+}
+
+interface AttendanceReconcileResult {
+  summary?: Record<string, any>
+  warnings?: string[]
+}
+
+interface AttendanceRulePreviewItem {
+  userId: string
+  workDate: string
+  firstInAt?: string | null
+  lastOutAt?: string | null
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  status: string
+  isWorkingDay?: boolean
+  source?: string
+}
+
 interface AttendanceShift {
   id: string
   orgId?: string
@@ -2222,6 +2277,11 @@ const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
+const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
+const selectedImportProfile = computed(() => {
+  if (!importProfileId.value) return null
+  return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
+})
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvHeaderRow = ref('')
@@ -2600,6 +2660,7 @@ async function loadImportTemplate() {
       throw new Error(data?.error?.message || 'Failed to load import template')
     }
     importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     setStatus('Import template loaded.')
   } catch (error) {
     setStatus((error as Error).message || 'Failed to load import template', 'error')
