@@ -14,9 +14,14 @@ Date: 2026-02-02
   - `GET /api/attendance/rule-templates` -> returns system templates (driver/security/etc).
   - `PUT /api/attendance/rule-templates` -> org template library saved (12 templates).
   - `GET /api/attendance/rule-sets/template` -> includes CSV mappings for 部门/职位/异常原因/审批单等字段.
-- CSV preview (filtered sample):
-  - 司机数据命中规则：`driver-default-8h`
-  - 保安数据命中规则：`security-default-8h`
+- CSV preview (driver-only filter):
+  - Rows: 31
+  - Status counts: off 9; early_leave 22.
+  - Top rules: driver-default-8h 22.
+- CSV preview (security-only filter):
+  - Rows: 248
+  - Status counts: off 72; early_leave 170; absent 3; partial 2; normal 1.
+  - Top rules: security-default-8h 248.
 - CSV preview (full):
   - Rows: 11,966
   - Status counts: off 3,474; early_leave 6,770; absent 1,262; late_early 20; normal 244; partial 146; adjusted 49; late 1.

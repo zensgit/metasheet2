@@ -1,0 +1,36 @@
+# 考勤验收报告
+
+日期：2026-02-02
+
+## 环境
+- 服务：`metasheet-backend`（Docker）
+- 插件：`plugin-attendance`
+
+## 验收结果
+### 规则集 / 模板库
+- 默认 Rule Set 可读取并生效。
+- 组织模板库已写入，模板命中可在预览中看到。
+
+### CSV 预览（全量）
+- Rows：11,966
+- 状态统计：off 3,474；early_leave 6,770；absent 1,262；late_early 20；normal 244；partial 146；adjusted 49；late 1。
+- Top rules：trip-under-8h 297；security-default-8h 248；leave-but-punched 50；single-rest-trip-overtime 31；overtime-approval-no-punch 30；trip-overtime-conflict 30；driver-default-8h 22。
+
+### CSV 预览（司机）
+- Rows：31
+- 状态统计：off 9；early_leave 22
+- Top rules：driver-default-8h 22
+
+### CSV 预览（保安）
+- Rows：248
+- 状态统计：off 72；early_leave 170；absent 3；partial 2；normal 1
+- Top rules：security-default-8h 248
+
+### CSV 预览（司机 + 保安 + 单休车间）
+- Rows：6,789
+- 状态统计：off 1,971；early_leave 4,464；absent 349；partial 2；normal 1；late_early 2。
+- Top rules：security-default-8h 248；trip-under-8h 186；single-rest-trip-overtime 29；leave-but-punched 25；driver-default-8h 22。
+
+## 结论
+- 司机/保安规则命中一致，未发现 warnings。
+- 预览统计稳定，规则改动后结果可回归确认。
