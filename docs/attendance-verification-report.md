@@ -29,7 +29,7 @@
 ### CSV 预览（司机 + 保安 + 单休车间）
 - Rows：6,789
 - 状态统计：off 1,971；early_leave 4,464；absent 349；partial 2；normal 1；late_early 2。
-- Top rules：security-default-8h 248；trip-under-8h 186；single-rest-trip-overtime 29；leave-but-punched 25；driver-default-8h 22。
+- Top rules：security-default-8h 248；trip-under-8h 186；leave-but-punched 25；driver-default-8h 22；single-rest-trip-overtime 4。
 
 ## 结论
 - 司机/保安规则命中一致，未发现 warnings。
