@@ -23,6 +23,8 @@ Date: 2026-02-02
 - CSV preview (full, after tightening “missing-overtime-late-clockout” org template):
   - Rows: 11,966
   - Top rules: trip-under-8h 317; security-default-8h 248; leave-but-punched 50; single-rest-trip-overtime 31; overtime-approval-no-punch 30; trip-overtime-conflict 30; driver-default-8h 22.
+- CSV preview (full, after tightening “trip-under-8h” org template):
+  - Top rules: trip-under-8h 297; security-default-8h 248; leave-but-punched 50; single-rest-trip-overtime 31; overtime-approval-no-punch 30; trip-overtime-conflict 30; driver-default-8h 22.
 - UI smoke (Playwright):
   - Attendance page loads; Summary/Admin/Import/Payroll sections visible.
   - No `Missing Bearer token` or `Attendance module not enabled` banners.
