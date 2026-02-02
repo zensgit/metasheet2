@@ -14,6 +14,10 @@
 - 默认 Rule Set 可读取并生效。
 - 组织模板库已写入，模板命中可在预览中看到。
 
+### 计薪周期模板
+- 新建默认模板：CN Payroll 26-25（startDay 26 / endDay 25 / endMonthOffset 1）。
+- 生成接口 `POST /api/attendance/payroll-cycles/generate` 返回 500（待查看后端日志）；手工创建周期接口存在已有周期冲突（409）。
+
 ### CSV 预览（全量）
 - Rows：11,966
 - 状态统计：off 3,474；early_leave 6,770；absent 1,262；late_early 20；normal 244；partial 146；adjusted 49；late 1。
