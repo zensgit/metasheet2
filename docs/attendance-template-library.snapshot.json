@@ -1,5 +1,526 @@
 {
-  "generatedAt": "2026-02-02T13:30:48.003Z",
-  "system": [],
-  "library": []
+  "date": "2026-02-02",
+  "source": "org rule templates snapshot",
+  "templates": [
+    {
+      "name": "Org: Special User Fixed Hours",
+      "rules": [
+        {
+          "name": "special-user-fixed-hours",
+          "then": {
+            "set": {
+              "actual_hours": 10,
+              "required_hours": 10
+            },
+            "warn": "特殊人员默认10小时（请替换 userId）"
+          },
+          "when": {
+            "userIds": [
+              "__USER_ID__"
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 特殊人员固定工时（替换userId）"
+    },
+    {
+      "name": "Org: Security Default 8h",
+      "rules": [
+        {
+          "name": "security-default-8h",
+          "then": {
+            "set": {
+              "actual_hours": 8,
+              "required_hours": 8
+            },
+            "warn": "保安默认8小时"
+          },
+          "when": {
+            "any": [
+              {
+                "op": "contains",
+                "field": "profile.role",
+                "value": "保安"
+              },
+              {
+                "op": "contains",
+                "field": "record.attendance_group",
+                "value": "保安"
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 保安默认8小时"
+    },
+    {
+      "name": "Org: Security Holiday Overtime",
+      "rules": [
+        {
+          "name": "security-holiday-overtime",
+          "then": {
+            "set": {
+              "overtime_hours": 8
+            },
+            "warn": "保安节假日出勤算加班"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "eq",
+                "field": "record.is_holiday",
+                "value": true
+              },
+              {
+                "any": [
+                  {
+                    "op": "contains",
+                    "field": "profile.role",
+                    "value": "保安"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "record.attendance_group",
+                    "value": "保安"
+                  }
+                ]
+              },
+              {
+                "op": "exists",
+                "field": "record.clockIn1"
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 保安节假日加班8小时"
+    },
+    {
+      "name": "Org: Driver Rest Overtime",
+      "rules": [
+        {
+          "name": "driver-rest-overtime",
+          "then": {
+            "set": {
+              "overtime_hours": 8
+            },
+            "warn": "司机休息日打卡按加班"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "profile.role",
+                "value": "司机"
+              },
+              {
+                "op": "contains",
+                "field": "record.shift",
+                "value": "休息"
+              },
+              {
+                "op": "exists",
+                "field": "record.clockIn1"
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 司机休息日打卡记加班"
+    },
+    {
+      "name": "Org: Driver Default 8h",
+      "rules": [
+        {
+          "name": "driver-default-8h",
+          "then": {
+            "set": {
+              "actual_hours": 8,
+              "required_hours": 8
+            },
+            "warn": "司机默认8小时"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "profile.role",
+                "value": "司机"
+              },
+              {
+                "op": "eq",
+                "field": "record.is_workday",
+                "value": true
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 司机工作日默认8小时"
+    },
+    {
+      "name": "Org: Single-Rest Trip Overtime",
+      "rules": [
+        {
+          "name": "single-rest-trip-overtime",
+          "then": {
+            "set": {
+              "overtime_hours": 8
+            },
+            "warn": "单休休息日出差/外出且有打卡按加班"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "record.attendance_group",
+                "value": "单休"
+              },
+              {
+                "op": "contains",
+                "field": "record.shift",
+                "value": "休息"
+              },
+              {
+                "any": [
+                  {
+                    "op": "contains",
+                    "field": "approvals",
+                    "value": "出差"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "approvals",
+                    "value": "外出"
+                  }
+                ]
+              },
+              {
+                "any": [
+                  {
+                    "op": "exists",
+                    "field": "record.clockIn1"
+                  },
+                  {
+                    "op": "exists",
+                    "field": "record.clockOut1"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 单休车间休息日出差/外出且有打卡时记加班"
+    },
+    {
+      "name": "Org: Trip + Leave Conflict",
+      "rules": [
+        {
+          "name": "trip-leave-conflict",
+          "then": {
+            "warn": "出差与请假同时存在，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "calc.exceptionReason",
+                "value": "出差"
+              },
+              {
+                "any": [
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "事假"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "病假"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "工伤假"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 出差与请假冲突提醒"
+    },
+    {
+      "name": "Org: Leave but Punched",
+      "rules": [
+        {
+          "name": "leave-but-punched",
+          "then": {
+            "warn": "请假但仍正常打卡，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "any": [
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "请假"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "事假"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "病假"
+                  },
+                  {
+                    "op": "contains",
+                    "field": "calc.exceptionReason",
+                    "value": "工伤假"
+                  }
+                ]
+              },
+              {
+                "op": "exists",
+                "field": "record.clockIn1"
+              },
+              {
+                "op": "exists",
+                "field": "record.clockOut1"
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 请假但仍正常打卡提醒"
+    },
+    {
+      "name": "Org: Trip Under 8h Warning",
+      "rules": [
+        {
+          "name": "trip-under-8h",
+          "then": {
+            "warn": "出差工时不足6小时，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "calc.exceptionReason",
+                "value": "出差"
+              },
+              {
+                "op": "lt",
+                "field": "record.actual_hours",
+                "value": 6
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "record.shift",
+                  "value": "休息"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "approvals",
+                  "value": "加班"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "profile.department",
+                  "value": "国内销售"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "profile.department",
+                  "value": "服务测试部-调试"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 出差工时不足8小时提醒"
+    },
+    {
+      "name": "Org: Missing Overtime but Late Clockout",
+      "rules": [
+        {
+          "name": "missing-overtime-late-clockout",
+          "then": {
+            "warn": "单休车间晚下班无加班工时，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "record.attendance_group",
+                "value": "单休车间"
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "record.shift",
+                  "value": "休息"
+                }
+              },
+              {
+                "op": "exists",
+                "field": "record.clockOut2"
+              },
+              {
+                "op": "lte",
+                "field": "record.overtime_hours",
+                "value": 0
+              },
+              {
+                "op": "gte",
+                "field": "record.actual_hours",
+                "value": 8
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "approvals",
+                  "value": "加班"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "calc.exceptionReason",
+                  "value": "请假"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "calc.exceptionReason",
+                  "value": "事假"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "calc.exceptionReason",
+                  "value": "病假"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "calc.exceptionReason",
+                  "value": "工伤假"
+                }
+              },
+              {
+                "not": {
+                  "op": "contains",
+                  "field": "calc.exceptionReason",
+                  "value": "出差"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 单休车间晚下班无加班提醒"
+    },
+    {
+      "name": "Org: Overtime Approval Without Punch",
+      "rules": [
+        {
+          "name": "overtime-approval-no-punch",
+          "then": {
+            "warn": "有加班审批但未打卡，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "approvals",
+                "value": "加班"
+              },
+              {
+                "not": {
+                  "op": "exists",
+                  "field": "record.clockIn1"
+                }
+              },
+              {
+                "not": {
+                  "op": "exists",
+                  "field": "record.clockOut1"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 有加班审批但未打卡提醒"
+    },
+    {
+      "name": "Org: Trip + Overtime Conflict",
+      "rules": [
+        {
+          "name": "trip-overtime-conflict",
+          "then": {
+            "warn": "出差与加班审批同时存在，请核对"
+          },
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "approvals",
+                "value": "出差"
+              },
+              {
+                "op": "contains",
+                "field": "approvals",
+                "value": "加班"
+              }
+            ]
+          }
+        }
+      ],
+      "category": "custom",
+      "editable": true,
+      "description": "[Org] 出差与加班审批同时存在提醒"
+    }
+  ]
 }

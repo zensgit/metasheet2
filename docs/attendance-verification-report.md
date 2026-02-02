@@ -7,6 +7,9 @@
 - 插件：`plugin-attendance`
 
 ## 验收结果
+### 模板库快照
+- 已同步 `docs/attendance-template-library.snapshot.json`
+
 ### 规则集 / 模板库
 - 默认 Rule Set 可读取并生效。
 - 组织模板库已写入，模板命中可在预览中看到。

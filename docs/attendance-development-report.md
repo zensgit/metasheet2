@@ -7,6 +7,7 @@
 - CSV 字段映射补齐：考勤组/职位/班次/审批/异常原因/多次打卡等字段映射完成。
 - 默认 Rule Set 已支持 userGroups 与 userIds（可选覆盖）。
 - 司机/保安 userId 已写入默认 Rule Set（司机 1 人；保安 8 人）。
+- 规则模板快照已刷新：`docs/attendance-template-library.snapshot.json`
 
 ## 关键配置约定
 - 判组优先级：默认以“考勤组/职位”为主，userIds 作为兜底覆盖。
@@ -19,4 +20,3 @@
 
 ## 已知事项
 - 若需要更细粒度职位/班次策略，可继续扩展模板库与规则 DSL。
-
