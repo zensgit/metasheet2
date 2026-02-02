@@ -11,7 +11,10 @@ Date: 2026-02-02
 - API smoke checks:
   - `GET /api/plugins` -> `plugin-attendance` active.
   - `GET /api/attendance/integrations` -> `ok` with empty list.
-  - `GET /api/attendance/rule-templates` -> returns system templates.
+  - `GET /api/attendance/rule-templates` -> returns system templates (driver/security/etc).
+- UI smoke (Playwright):
+  - Attendance page loads; Summary/Admin/Import/Payroll sections visible.
+  - No `Missing Bearer token` or `Attendance module not enabled` banners.
 
 ## Result
 - Plugin loads successfully and core attendance endpoints respond as expected.
