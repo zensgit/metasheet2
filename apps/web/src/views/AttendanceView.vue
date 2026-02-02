@@ -4272,6 +4272,7 @@ function buildImportPayload(): Record<string, any> | null {
   if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
+  if (importProfileId.value && !payload.mappingProfileId) payload.mappingProfileId = importProfileId.value
   return payload
 }
 
@@ -4602,11 +4603,17 @@ async function loadImportTemplate() {
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load import template')
     }
-    importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    const payloadExample = data.data?.payloadExample ?? {}
+    importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles)
       ? data.data.mappingProfiles
       : []
-    if (!importProfileId.value && importMappingProfiles.value.length > 0) {
+    const payloadProfileId = typeof payloadExample?.mappingProfileId === 'string'
+      ? payloadExample.mappingProfileId
+      : ''
+    if (payloadProfileId && importMappingProfiles.value.some(profile => profile.id === payloadProfileId)) {
+      importProfileId.value = payloadProfileId
+    } else if (!importProfileId.value && importMappingProfiles.value.length > 0) {
       importProfileId.value = importMappingProfiles.value[0].id
     }
     setStatus('Import template loaded.')
@@ -4637,6 +4644,7 @@ function applyImportProfile() {
     if (profile.userMapKeyField) next.userMapKeyField = profile.userMapKeyField
     if (profile.userMapSourceFields) next.userMapSourceFields = profile.userMapSourceFields
   }
+  next.mappingProfileId = profile.id
   importForm.payload = JSON.stringify(next, null, 2)
   setStatus(`Applied mapping profile: ${profile.name}`)
 }

@@ -1,7 +1,7 @@
 # Attendance Framework Development Report (2026-02-01)
 
 ## Summary
-Expanded the attendance framework with a shared rule-template library, payroll cycle auto-generation, and standardized import profiles plus missing-field safeguards.
+Expanded the attendance framework with shared rule-template persistence, payroll cycle auto-generation, and standardized import profiles with reliable missing-field checks.
 
 ## Delivery by Day
 ### Day 1 — Inventory + Plan
@@ -41,6 +41,17 @@ Expanded the attendance framework with a shared rule-template library, payroll c
   - `plugins/plugin-attendance/index.cjs`
   - `apps/web/src/views/AttendanceView.vue`
 
+### Day 7 — Template library storage + import profile wiring
+- Persisted template library to a dedicated table with migration + org-level caching.
+- Import profiles now flow through payload (`mappingProfileId`) and required-field validation checks row-level values (e.g., workDate) in addition to field maps.
+- UI import builder now injects `mappingProfileId` when applying/previewing payloads.
+- Updated UI verification script to select the manual profile and hit `/attendance` redirect.
+- Files:
+  - `packages/core-backend/src/db/migrations/zzzz20260202090000_create_attendance_template_library.ts`
+  - `plugins/plugin-attendance/index.cjs`
+  - `apps/web/src/views/AttendanceView.vue`
+  - `scripts/attendance-ui-verify.mjs`
+
 ## Git Commits
 - `docs(attendance): add 7-day framework plan`
 - `feat(attendance): validate rule set engine config`
@@ -48,3 +59,4 @@ Expanded the attendance framework with a shared rule-template library, payroll c
 - `feat(attendance): improve payroll cycle resolution`
 - `feat(attendance): improve import preview UI`
 - `chore(attendance): add template library + payroll generator + import profiles`
+- `feat(attendance): persist template library + profile-aware import`

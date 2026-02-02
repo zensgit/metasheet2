@@ -21,12 +21,13 @@ await context.addInitScript((value) => {
 }, token)
 
 const page = await context.newPage()
-await page.goto(`${baseUrl}/p/plugin-attendance/attendance`, { waitUntil: 'domcontentloaded' })
+await page.goto(`${baseUrl}/attendance`, { waitUntil: 'domcontentloaded' })
 await page.waitForSelector('.attendance', { timeout: 30000 })
 await page.waitForTimeout(3000)
 
 const importSection = page.locator('.attendance__admin-section').filter({ hasText: 'Import (DingTalk / Manual)' })
 await importSection.getByLabel('User ID').fill(userId)
+await importSection.getByLabel('Mapping profile').selectOption('manual_rows')
 
 const payload = {
   source: 'manual',

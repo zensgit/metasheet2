@@ -57,9 +57,97 @@ let autoAbsenceTimeout = null
 let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
-let templateLibraryCache = { value: [], loadedAt: 0 }
+const templateLibraryCache = new Map()
 
 const SYSTEM_TEMPLATE_NAMES = new Set(DEFAULT_TEMPLATES.map((tpl) => tpl.name))
+
+const IMPORT_MAPPING_COLUMNS = [
+  { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
+  { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+  { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
+  { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+  { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
+  { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
+  { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
+  { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
+  { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
+  { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+  { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
+  { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
+  { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
+  { sourceField: '应出勤小时', targetField: 'workHours', dataType: 'hours' },
+  { sourceField: '总工时', targetField: 'workHours', dataType: 'hours' },
+  { sourceField: '实出勤工时(测试)', targetField: 'workHours', dataType: 'hours' },
+  { sourceField: '实出勤工时', targetField: 'workMinutes', dataType: 'hours' },
+  { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
+  { sourceField: '迟到时长', targetField: 'lateMinutes', dataType: 'minutes' },
+  { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'minutes' },
+  { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+  { sourceField: '早退时长', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+  { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
+  { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
+  { sourceField: '请假小时', targetField: 'leaveHours', dataType: 'hours' },
+  { sourceField: '调休小时', targetField: 'leaveHours', dataType: 'hours' },
+  { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
+  { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+  { sourceField: '加班总时长', targetField: 'overtimeHours', dataType: 'hours' },
+  { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
+  { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
+  { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
+  { sourceField: '出勤班次', targetField: 'attendanceClass', dataType: 'string' },
+  { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
+  { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
+  { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
+  { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
+  { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+  { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+  { sourceField: '部门', targetField: 'department', dataType: 'string' },
+  { sourceField: '职位', targetField: 'role', dataType: 'string' },
+  { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
+  { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
+  { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
+  { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+  { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
+  { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
+  { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
+  { sourceField: 'resign_time', targetField: 'resignTime', dataType: 'date' },
+  { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+  { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
+]
+
+const IMPORT_MAPPING_PROFILES = [
+  {
+    id: 'dingtalk_csv_daily_summary',
+    name: 'DingTalk CSV Daily Summary',
+    description: 'CSV导出（日汇总）模板：日期/工号/姓名/考勤组/打卡时间。',
+    source: 'dingtalk_csv',
+    mapping: { columns: IMPORT_MAPPING_COLUMNS },
+    userMapKeyField: '工号',
+    userMapSourceFields: ['empNo', '工号', '姓名'],
+    requiredFields: ['日期', '上班1打卡时间', '下班1打卡时间'],
+  },
+  {
+    id: 'dingtalk_api_columns',
+    name: 'DingTalk API Column Values',
+    description: '钉钉接口 column_vals 结构（字段ID + 日期值）。',
+    source: 'dingtalk',
+    mapping: { columns: IMPORT_MAPPING_COLUMNS },
+    requiredFields: ['workDate'],
+  },
+  {
+    id: 'manual_rows',
+    name: 'Manual Rows Payload',
+    description: '自定义 rows/entries JSON 输入。',
+    source: 'manual',
+    mapping: { columns: IMPORT_MAPPING_COLUMNS },
+    requiredFields: ['workDate'],
+  },
+]
+
+function findImportProfile(profileId) {
+  if (!profileId) return null
+  return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
+}
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
 const requireImportCommitToken = process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'
@@ -518,6 +606,13 @@ function resolveProfileValue(profile, key) {
   for (const alias of aliases) {
     if (profile[alias] !== undefined) return profile[alias]
   }
+  return undefined
+}
+
+function resolveRequiredFieldValue(row, field) {
+  if (!row || !field) return undefined
+  if (row.fields && row.fields[field] !== undefined) return row.fields[field]
+  if (row[field] !== undefined) return row[field]
   return undefined
 }
 
@@ -1475,7 +1570,20 @@ function normalizeTemplateLibrary(raw) {
     .filter((template) => !SYSTEM_TEMPLATE_NAMES.has(template.name))
 }
 
-async function loadTemplateLibrary(db) {
+function mapTemplateLibraryRow(row) {
+  const template = normalizeMetadata(row.template)
+  const name = String(row.name ?? template?.name ?? '').trim()
+  if (!name) return null
+  return {
+    ...(template || {}),
+    name,
+    description: row.description ?? template?.description,
+    category: 'custom',
+    editable: true,
+  }
+}
+
+async function loadLegacyTemplateLibrary(db) {
   try {
     const rows = await db.query('SELECT value FROM system_configs WHERE key = $1', [TEMPLATE_LIBRARY_KEY])
     if (!rows.length) return []
@@ -1489,26 +1597,75 @@ async function loadTemplateLibrary(db) {
   }
 }
 
-async function getTemplateLibrary(db) {
-  if (Date.now() - templateLibraryCache.loadedAt < TEMPLATE_LIBRARY_CACHE_TTL_MS) {
-    return templateLibraryCache.value
+async function loadTemplateLibrary(db, orgId) {
+  try {
+    const rows = await db.query(
+      `SELECT * FROM attendance_rule_template_library
+       WHERE org_id = $1
+       ORDER BY created_at DESC`,
+      [orgId]
+    )
+    if (rows.length) {
+      return rows.map(mapTemplateLibraryRow).filter(Boolean)
+    }
+    const legacy = await loadLegacyTemplateLibrary(db)
+    if (legacy.length) {
+      try {
+        await saveTemplateLibrary(db, orgId, legacy)
+      } catch {
+        return legacy
+      }
+      return legacy
+    }
+    return []
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return loadLegacyTemplateLibrary(db)
+    }
+    return []
   }
-  const next = await loadTemplateLibrary(db)
-  templateLibraryCache = { value: next, loadedAt: Date.now() }
+}
+
+function getTemplateLibraryCache(orgId) {
+  const entry = templateLibraryCache.get(orgId)
+  if (!entry) return null
+  if (Date.now() - entry.loadedAt >= TEMPLATE_LIBRARY_CACHE_TTL_MS) return null
+  return entry.value
+}
+
+async function getTemplateLibrary(db, orgId) {
+  const cached = getTemplateLibraryCache(orgId)
+  if (cached) return cached
+  const next = await loadTemplateLibrary(db, orgId)
+  templateLibraryCache.set(orgId, { value: next, loadedAt: Date.now() })
   return next
 }
 
-async function saveTemplateLibrary(db, templates) {
+async function saveTemplateLibrary(db, orgId, templates) {
   const normalized = normalizeTemplateLibrary(templates)
   const validated = validateEngineConfig({ templates: normalized })
   const stored = Array.isArray(validated?.templates) ? validated.templates : []
-  await db.query(
-    `INSERT INTO system_configs (key, value, is_encrypted, updated_at)
-     VALUES ($1, $2, false, now())
-     ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
-    [TEMPLATE_LIBRARY_KEY, JSON.stringify({ templates: stored })]
-  )
-  templateLibraryCache = { value: stored, loadedAt: Date.now() }
+  await db.transaction(async (trx) => {
+    await trx.query(
+      'DELETE FROM attendance_rule_template_library WHERE org_id = $1',
+      [orgId]
+    )
+    for (const template of stored) {
+      await trx.query(
+        `INSERT INTO attendance_rule_template_library
+         (id, org_id, name, description, template, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())`,
+        [
+          randomUUID(),
+          orgId,
+          template.name,
+          template.description ?? null,
+          JSON.stringify(template),
+        ]
+      )
+    }
+  })
+  templateLibraryCache.set(orgId, { value: stored, loadedAt: Date.now() })
   return stored
 }
 
@@ -2451,6 +2608,7 @@ module.exports = {
       userMap: z.record(z.unknown()).optional(),
       userMapKeyField: z.string().optional(),
       userMapSourceFields: z.array(z.string()).optional(),
+      mappingProfileId: z.string().optional(),
       mapping: z.object({
         columns: z.array(z.object({
           sourceField: z.string().min(1),
@@ -4806,7 +4964,8 @@ module.exports = {
       'GET',
       '/api/attendance/rule-templates',
       withPermission('attendance:admin', async (_req, res) => {
-        const library = await getTemplateLibrary(db)
+        const orgId = getOrgId(_req)
+        const library = await getTemplateLibrary(db, orgId)
         res.json({
           ok: true,
           data: {
@@ -4834,8 +4993,9 @@ module.exports = {
           return
         }
 
+        const orgId = getOrgId(req)
         try {
-          const saved = await saveTemplateLibrary(db, templates)
+          const saved = await saveTemplateLibrary(db, orgId, templates)
           res.json({ ok: true, data: { templates: saved } })
         } catch (error) {
           const { message, details } = formatEngineConfigError(error)
@@ -4848,7 +5008,8 @@ module.exports = {
       'GET',
       '/api/attendance/rule-sets/template',
       withPermission('attendance:admin', async (_req, res) => {
-        const templateLibrary = await getTemplateLibrary(db)
+        const orgId = getOrgId(_req)
+        const templateLibrary = await getTemplateLibrary(db, orgId)
         res.json({
           ok: true,
           data: {
@@ -5291,95 +5452,14 @@ module.exports = {
       'GET',
       '/api/attendance/import/template',
       withPermission('attendance:admin', async (_req, res) => {
-        const mappingColumns = [
-          { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
-          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
-          { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
-          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
-          { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
-          { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
-          { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
-          { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
-          { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
-          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
-          { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
-          { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
-          { sourceField: 'attendance_work_time', targetField: 'workMinutes', dataType: 'hours' },
-          { sourceField: '应出勤小时', targetField: 'workHours', dataType: 'hours' },
-          { sourceField: '总工时', targetField: 'workHours', dataType: 'hours' },
-          { sourceField: '实出勤工时(测试)', targetField: 'workHours', dataType: 'hours' },
-          { sourceField: '实出勤工时', targetField: 'workMinutes', dataType: 'hours' },
-          { sourceField: 'late_minute', targetField: 'lateMinutes', dataType: 'minutes' },
-          { sourceField: '迟到时长', targetField: 'lateMinutes', dataType: 'minutes' },
-          { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'minutes' },
-          { sourceField: 'leave_early_minute', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-          { sourceField: '早退时长', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-          { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'minutes' },
-          { sourceField: 'leave_hours', targetField: 'leaveMinutes', dataType: 'hours' },
-          { sourceField: '请假小时', targetField: 'leaveHours', dataType: 'hours' },
-          { sourceField: '调休小时', targetField: 'leaveHours', dataType: 'hours' },
-          { sourceField: 'overtime_duration', targetField: 'overtimeMinutes', dataType: 'hours' },
-          { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
-          { sourceField: '加班总时长', targetField: 'overtimeHours', dataType: 'hours' },
-          { sourceField: 'plan_detail', targetField: 'shiftName', dataType: 'string' },
-          { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
-          { sourceField: 'attendance_class', targetField: 'attendanceClass', dataType: 'string' },
-          { sourceField: '出勤班次', targetField: 'attendanceClass', dataType: 'string' },
-          { sourceField: 'attendance_approve', targetField: 'approvalSummary', dataType: 'string' },
-          { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
-          { sourceField: 'attendance_group', targetField: 'attendanceGroup', dataType: 'string' },
-          { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
-          { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
-          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
-          { sourceField: '部门', targetField: 'department', dataType: 'string' },
-          { sourceField: '职位', targetField: 'role', dataType: 'string' },
-          { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
-          { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
-          { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
-          { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
-          { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
-          { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
-          { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
-          { sourceField: 'resign_time', targetField: 'resignTime', dataType: 'date' },
-          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
-          { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
-        ]
-        const mappingProfiles = [
-          {
-            id: 'dingtalk_csv_daily_summary',
-            name: 'DingTalk CSV Daily Summary',
-            description: 'CSV导出（日汇总）模板：日期/工号/姓名/考勤组/打卡时间。',
-            source: 'dingtalk_csv',
-            mapping: { columns: mappingColumns },
-            userMapKeyField: '工号',
-            userMapSourceFields: ['empNo', '工号', '姓名'],
-            requiredFields: ['日期', '上班1打卡时间', '下班1打卡时间'],
-          },
-          {
-            id: 'dingtalk_api_columns',
-            name: 'DingTalk API Column Values',
-            description: '钉钉接口 column_vals 结构（字段ID + 日期值）。',
-            source: 'dingtalk',
-            mapping: { columns: mappingColumns },
-            requiredFields: ['workDate'],
-          },
-          {
-            id: 'manual_rows',
-            name: 'Manual Rows Payload',
-            description: '自定义 rows/entries JSON 输入。',
-            source: 'manual',
-            mapping: { columns: mappingColumns },
-            requiredFields: ['workDate'],
-          },
-        ]
         res.json({
           ok: true,
           data: {
             source: 'dingtalk',
             mapping: {
-              columns: mappingColumns,
+              columns: IMPORT_MAPPING_COLUMNS,
             },
-            mappingProfiles,
+            mappingProfiles: IMPORT_MAPPING_PROFILES,
             payloadExample: {
               source: 'dingtalk_csv',
               ruleSetId: '<ruleSetId>',
@@ -5493,11 +5573,15 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
+          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
+            ?? (profileMapping.length ? profileMapping : undefined)
             ?? ruleSetConfig?.mappings?.columns
             ?? ruleSetConfig?.mappings?.fields
             ?? []
+          const requiredFields = profile?.requiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -5547,6 +5631,15 @@ module.exports = {
             const importWarnings = []
             if (!rowUserId) importWarnings.push('Missing userId')
             if (!workDate) importWarnings.push('Missing workDate')
+            if (requiredFields.length) {
+              const missingRequired = requiredFields.filter((field) => {
+                const value = resolveRequiredFieldValue(row, field)
+                return value === undefined || value === null || value === ''
+              })
+              if (missingRequired.length) {
+                importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+              }
+            }
             if (importWarnings.length) {
               preview.push({
                 userId: rowUserId ?? 'unknown',
@@ -5769,11 +5862,15 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
+          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
+            ?? (profileMapping.length ? profileMapping : undefined)
             ?? ruleSetConfig?.mappings?.columns
             ?? ruleSetConfig?.mappings?.fields
             ?? []
+          const requiredFields = profile?.requiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -5806,7 +5903,10 @@ module.exports = {
           const results = []
           const skipped = []
           const batchId = randomUUID()
-          const batchMeta = parsed.data.batchMeta ?? {}
+          const batchMeta = {
+            ...(parsed.data.batchMeta ?? {}),
+            mappingProfileId: parsed.data.mappingProfileId ?? null,
+          }
 
           await db.transaction(async (trx) => {
             await trx.query(
@@ -5845,6 +5945,15 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
+              if (requiredFields.length) {
+                const missingRequired = requiredFields.filter((field) => {
+                  const value = resolveRequiredFieldValue(row, field)
+                  return value === undefined || value === null || value === ''
+                })
+                if (missingRequired.length) {
+                  importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                }
+              }
               if (importWarnings.length) {
                 skipped.push({
                   userId: rowUserId ?? null,
@@ -6127,11 +6236,15 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
+          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
+            ?? (profileMapping.length ? profileMapping : undefined)
             ?? ruleSetConfig?.mappings?.columns
             ?? ruleSetConfig?.mappings?.fields
             ?? []
+          const requiredFields = profile?.requiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -6183,6 +6296,15 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
+              if (requiredFields.length) {
+                const missingRequired = requiredFields.filter((field) => {
+                  const value = resolveRequiredFieldValue(row, field)
+                  return value === undefined || value === null || value === ''
+                })
+                if (missingRequired.length) {
+                  importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                }
+              }
               if (importWarnings.length) {
                 skipped.push({
                   userId: rowUserId ?? null,
