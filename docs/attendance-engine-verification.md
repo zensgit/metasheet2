@@ -12,6 +12,7 @@ Date: 2026-02-02
   - `GET /api/plugins` -> `plugin-attendance` active.
   - `GET /api/attendance/integrations` -> `ok` with empty list.
   - `GET /api/attendance/rule-templates` -> returns system templates (driver/security/etc).
+  - `PUT /api/attendance/rule-templates` -> org template library saved (12 templates).
 - UI smoke (Playwright):
   - Attendance page loads; Summary/Admin/Import/Payroll sections visible.
   - No `Missing Bearer token` or `Attendance module not enabled` banners.
