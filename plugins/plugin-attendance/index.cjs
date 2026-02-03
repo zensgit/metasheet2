@@ -6786,8 +6786,11 @@ module.exports = {
               baseUserGroups
             )
 
-            const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
-            const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+            const shiftRange = resolveShiftTimeRange(shiftNameRaw)
+            const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
+            const ruleForMetrics = shiftRange
+              ? baseRuleForMetrics
+              : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
             const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
             const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
@@ -7148,8 +7151,11 @@ module.exports = {
                 baseUserGroups
               )
 
-              const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
-              const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+              const shiftRange = resolveShiftTimeRange(shiftNameRaw)
+              const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
+              const ruleForMetrics = shiftRange
+                ? baseRuleForMetrics
+                : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
               const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
               const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
@@ -7571,8 +7577,11 @@ module.exports = {
                 baseUserGroups
               )
 
-              const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
-              const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+              const shiftRange = resolveShiftTimeRange(shiftNameRaw)
+              const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
+              const ruleForMetrics = shiftRange
+                ? baseRuleForMetrics
+                : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
               const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
               const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
@@ -8197,8 +8206,11 @@ module.exports = {
                       baseUserGroups
                     )
 
-                    const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
-                    const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+                    const shiftRange = resolveShiftTimeRange(shiftNameRaw)
+                    const baseRuleForMetrics = shiftRange ? { ...context.rule, ...shiftRange } : context.rule
+                    const ruleForMetrics = shiftRange
+                      ? baseRuleForMetrics
+                      : (shiftOverride ? { ...context.rule, ...shiftOverride } : baseRuleForMetrics)
 
                     const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
                     const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
