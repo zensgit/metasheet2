@@ -13,5 +13,11 @@
   - 增加打卡存在条件（clockIn1 / clockOut1 其一存在）。
   - 描述与 warn 文案同步调整。
 
+### Org: Missing Card Warning
+- 新增：缺卡异常提示规则（`calc.exceptionReason` 包含“缺卡”时提示补卡/审批）。
+
+### Org: Late/Early Warning
+- 新增：迟到/早退异常提示规则（`calc.exceptionReason` 包含“迟到/早退”时提示确认审批）。
+
 ## 影响
 - 组合验收中 `single-rest-trip-overtime` 命中从 29 降至 4（更符合“有出差/外出且有打卡”的规则定义）。

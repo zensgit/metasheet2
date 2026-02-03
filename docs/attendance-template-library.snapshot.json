@@ -1,5 +1,5 @@
 {
-  "date": "2026-02-02",
+  "date": "2026-02-03",
   "source": "org rule templates snapshot",
   "templates": [
     {
@@ -521,6 +521,57 @@
       "category": "custom",
       "editable": true,
       "description": "[Org] 出差与加班审批同时存在提醒"
+    },
+    {
+      "name": "Org: Missing Card Warning",
+      "description": "[Org] 缺卡异常提示",
+      "category": "custom",
+      "editable": true,
+      "rules": [
+        {
+          "name": "missing-card-warning",
+          "when": {
+            "all": [
+              {
+                "op": "contains",
+                "field": "calc.exceptionReason",
+                "value": "缺卡"
+              }
+            ]
+          },
+          "then": {
+            "warn": "缺卡异常，请补卡或发起审批"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Org: Late/Early Warning",
+      "description": "[Org] 迟到/早退异常提示",
+      "category": "custom",
+      "editable": true,
+      "rules": [
+        {
+          "name": "late-early-warning",
+          "when": {
+            "any": [
+              {
+                "op": "contains",
+                "field": "calc.exceptionReason",
+                "value": "迟到"
+              },
+              {
+                "op": "contains",
+                "field": "calc.exceptionReason",
+                "value": "早退"
+              }
+            ]
+          },
+          "then": {
+            "warn": "迟到/早退异常，请确认审批"
+          }
+        }
+      ]
     }
   ]
 }

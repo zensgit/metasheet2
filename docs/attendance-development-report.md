@@ -10,6 +10,8 @@
 - 规则模板快照已刷新：`docs/attendance-template-library.snapshot.json`
 - 计薪周期模板：新增默认模板 “CN Payroll 26-25” 并写入配置参考（见 `docs/attendance-payroll-config.md`）。
 - 计薪周期自动生成修复：避免事务因重复周期中断（使用 ON CONFLICT 跳过已存在周期）。
+- 新增异常提示模板：缺卡提示、迟到/早退提示。
+- 新增计薪 UI 指引文档：`docs/attendance-payroll-ui-guide.md`。
 
 ## 关键配置约定
 - 判组优先级：默认以“考勤组/职位”为主，userIds 作为兜底覆盖。
