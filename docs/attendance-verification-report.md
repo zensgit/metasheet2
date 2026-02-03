@@ -16,7 +16,9 @@
 
 ### 计薪周期模板
 - 新建默认模板：CN Payroll 26-25（startDay 26 / endDay 25 / endMonthOffset 1）。
-- 生成接口 `POST /api/attendance/payroll-cycles/generate` 返回 500（待查看后端日志）；手工创建周期接口存在已有周期冲突（409）。
+- 生成接口 `POST /api/attendance/payroll-cycles/generate` 已修复：
+  - created：2026-02-26~2026-03-25、2026-03-26~2026-04-25
+  - skipped：2026-01-26~2026-02-25（已存在）
 
 ### CSV 预览（全量）
 - Rows：11,966
