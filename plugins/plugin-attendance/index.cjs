@@ -52,6 +52,13 @@ const DEFAULT_SETTINGS = {
     overtimeAdds: true,
     overtimeSource: 'approval',
   },
+  holidaySync: {
+    source: 'holiday-cn',
+    baseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
+    years: [],
+    addDayIndex: true,
+    overwrite: false,
+  },
   ipAllowlist: [],
   geoFence: null,
   minPunchIntervalMinutes: 1,
@@ -1603,6 +1610,137 @@ function resolvePolicySkipRules(settings) {
   return skip
 }
 
+function parseHolidayCnDate(date) {
+  if (!date) return null
+  const trimmed = String(date).trim()
+  if (!trimmed) return null
+  const parts = trimmed.split('-')
+  if (parts.length !== 3) return trimmed
+  const year = parts[0].padStart(4, '0')
+  const month = parts[1].padStart(2, '0')
+  const day = parts[2].padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function normalizeHolidayCnDays(days, { addDayIndex }) {
+  const items = Array.isArray(days) ? days : []
+  const sorted = items
+    .map((item) => ({
+      date: parseHolidayCnDate(item?.date),
+      name: typeof item?.name === 'string' ? item.name.trim() : '',
+      isOffDay: Boolean(item?.isOffDay),
+    }))
+    .filter((item) => item.date)
+    .sort((a, b) => a.date.localeCompare(b.date))
+
+  let prevName = null
+  let prevIsOff = false
+  let prevDate = null
+  let dayIndex = 0
+
+  const output = []
+  for (const item of sorted) {
+    const { date, name, isOffDay } = item
+    const normalizedName = name || null
+    let labeledName = normalizedName
+
+    if (addDayIndex && isOffDay && normalizedName) {
+      const contiguous =
+        prevName === normalizedName &&
+        prevIsOff &&
+        prevDate &&
+        Math.round((new Date(`${date}T00:00:00Z`) - new Date(`${prevDate}T00:00:00Z`)) / 86400000) === 1
+      dayIndex = contiguous ? dayIndex + 1 : 1
+      labeledName = `${normalizedName}-${dayIndex}`
+    } else {
+      dayIndex = 0
+    }
+
+    output.push({
+      date,
+      name: labeledName,
+      isWorkingDay: !isOffDay,
+    })
+
+    prevName = normalizedName
+    prevIsOff = isOffDay
+    prevDate = date
+  }
+
+  return output
+}
+
+function resolveHolidaySyncYears(settings, payload) {
+  const payloadYears = Array.isArray(payload?.years) ? payload.years : null
+  const settingsYears = Array.isArray(settings?.holidaySync?.years) ? settings.holidaySync.years : null
+  if (payloadYears && payloadYears.length > 0) return payloadYears
+  if (settingsYears && settingsYears.length > 0) return settingsYears
+  const currentYear = new Date().getFullYear()
+  return [currentYear, currentYear + 1]
+}
+
+function resolveHolidaySyncConfig(settings, payload) {
+  const source = 'holiday-cn'
+  const baseUrl = typeof payload?.baseUrl === 'string' && payload.baseUrl.trim()
+    ? payload.baseUrl.trim()
+    : settings?.holidaySync?.baseUrl || DEFAULT_SETTINGS.holidaySync.baseUrl
+  const addDayIndex = typeof payload?.addDayIndex === 'boolean'
+    ? payload.addDayIndex
+    : (settings?.holidaySync?.addDayIndex ?? DEFAULT_SETTINGS.holidaySync.addDayIndex)
+  const overwrite = typeof payload?.overwrite === 'boolean'
+    ? payload.overwrite
+    : (settings?.holidaySync?.overwrite ?? DEFAULT_SETTINGS.holidaySync.overwrite)
+  return { source, baseUrl, addDayIndex, overwrite }
+}
+
+async function fetchHolidayCnYear({ year, baseUrl }) {
+  const sanitizedBase = String(baseUrl || DEFAULT_SETTINGS.holidaySync.baseUrl).replace(/\/$/, '')
+  const url = `${sanitizedBase}/${year}.json`
+  const fetchImpl = typeof fetch === 'function' ? fetch : null
+  if (!fetchImpl) {
+    throw new Error('Global fetch is not available in this runtime')
+  }
+  const response = await fetchImpl(url, {
+    headers: { 'user-agent': 'metasheet-attendance/holiday-sync' },
+  })
+  if (!response.ok) {
+    throw new Error(`Failed to fetch holiday-cn data for ${year}`)
+  }
+  const data = await response.json()
+  const days = Array.isArray(data?.days) ? data.days : []
+  return { url, year, days }
+}
+
+async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
+  if (!rows.length) return 0
+  const chunkSize = 200
+  let applied = 0
+
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize)
+    const values = []
+    const params = []
+    chunk.forEach((row, index) => {
+      const baseIndex = index * 5
+      values.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5})`)
+      params.push(randomUUID(), orgId, row.date, row.name ?? null, row.isWorkingDay)
+    })
+    const conflictAction = overwrite
+      ? 'DO UPDATE SET name = EXCLUDED.name, is_working_day = EXCLUDED.is_working_day'
+      : 'DO NOTHING'
+    const rowsInserted = await db.query(
+      `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (org_id, holiday_date) ${conflictAction}
+       RETURNING holiday_date`,
+      params
+    )
+    applied += rowsInserted.length
+  }
+
+  return applied
+}
+
 function matchesNumberGte(actual, expected) {
   const actualNum = normalizeNumber(actual)
   const expectedNum = normalizeNumber(expected)
@@ -1885,6 +2023,7 @@ function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
   const holidayPolicy = raw.holidayPolicy ?? {}
+  const holidaySync = raw.holidaySync ?? {}
   const ipAllowlist = Array.isArray(raw.ipAllowlist) ? raw.ipAllowlist.filter(Boolean) : []
   const geoFence = raw.geoFence && typeof raw.geoFence === 'object' ? raw.geoFence : null
   const overtimeSourceRaw = typeof holidayPolicy.overtimeSource === 'string'
@@ -1893,6 +2032,12 @@ function normalizeSettings(raw) {
   const overtimeSource = ['approval', 'clock', 'both'].includes(overtimeSourceRaw)
     ? overtimeSourceRaw
     : DEFAULT_SETTINGS.holidayPolicy.overtimeSource
+  const holidaySyncBaseUrl = typeof holidaySync.baseUrl === 'string' && holidaySync.baseUrl.trim()
+    ? holidaySync.baseUrl.trim()
+    : DEFAULT_SETTINGS.holidaySync.baseUrl
+  const holidaySyncYears = Array.isArray(holidaySync.years)
+    ? holidaySync.years.map((year) => parseNumber(year, null)).filter((year) => Number.isFinite(year))
+    : []
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -1907,6 +2052,13 @@ function normalizeSettings(raw) {
       overtimeAdds: parseBoolean(holidayPolicy.overtimeAdds, DEFAULT_SETTINGS.holidayPolicy.overtimeAdds),
       overtimeSource,
     },
+    holidaySync: {
+      source: 'holiday-cn',
+      baseUrl: holidaySyncBaseUrl,
+      years: holidaySyncYears,
+      addDayIndex: parseBoolean(holidaySync.addDayIndex, DEFAULT_SETTINGS.holidaySync.addDayIndex),
+      overwrite: parseBoolean(holidaySync.overwrite, DEFAULT_SETTINGS.holidaySync.overwrite),
+    },
     ipAllowlist,
     geoFence,
     minPunchIntervalMinutes: Math.max(0, parseNumber(raw.minPunchIntervalMinutes, DEFAULT_SETTINGS.minPunchIntervalMinutes)),
@@ -1920,6 +2072,14 @@ function mergeSettings(base, update) {
     autoAbsence: {
       ...(base?.autoAbsence || {}),
       ...(update?.autoAbsence || {}),
+    },
+    holidayPolicy: {
+      ...(base?.holidayPolicy || {}),
+      ...(update?.holidayPolicy || {}),
+    },
+    holidaySync: {
+      ...(base?.holidaySync || {}),
+      ...(update?.holidaySync || {}),
     },
   })
 }
@@ -2819,6 +2979,13 @@ module.exports = {
         overtimeAdds: z.boolean().optional(),
         overtimeSource: z.enum(['approval', 'clock', 'both']).optional(),
       }).optional(),
+      holidaySync: z.object({
+        source: z.enum(['holiday-cn']).optional(),
+        baseUrl: z.string().optional(),
+        years: z.array(z.number().int()).optional(),
+        addDayIndex: z.boolean().optional(),
+        overwrite: z.boolean().optional(),
+      }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
       geoFence: z.object({
         lat: z.number(),
@@ -2868,6 +3035,13 @@ module.exports = {
       orgId: z.string().optional(),
     })
     const holidayUpdateSchema = holidayCreateSchema.partial()
+    const holidaySyncSchema = z.object({
+      source: z.enum(['holiday-cn']).optional(),
+      baseUrl: z.string().optional(),
+      years: z.array(z.number().int()).optional(),
+      addDayIndex: z.boolean().optional(),
+      overwrite: z.boolean().optional(),
+    })
 
     const leaveTypeCreateSchema = z.object({
       code: z.string().min(1),
@@ -9149,6 +9323,58 @@ module.exports = {
           }
           logger.error('Attendance holidays query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load holidays' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/holidays/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = holidaySyncSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const settings = await getSettings(db)
+        const syncConfig = resolveHolidaySyncConfig(settings, parsed.data)
+        const years = resolveHolidaySyncYears(settings, parsed.data)
+
+        try {
+          let totalFetched = 0
+          let totalApplied = 0
+          const results = []
+
+          for (const year of years) {
+            const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
+            totalFetched += days.length
+            const rows = normalizeHolidayCnDays(days, { addDayIndex: syncConfig.addDayIndex })
+            const applied = await upsertHolidayRows(db, {
+              orgId,
+              rows,
+              overwrite: syncConfig.overwrite,
+            })
+            totalApplied += applied
+            results.push({ year, url, fetched: days.length, applied })
+          }
+
+          res.json({
+            ok: true,
+            data: {
+              source: syncConfig.source,
+              baseUrl: syncConfig.baseUrl,
+              years,
+              addDayIndex: syncConfig.addDayIndex,
+              overwrite: syncConfig.overwrite,
+              totalFetched,
+              totalApplied,
+              results,
+            },
+          })
+        } catch (error) {
+          logger.error('Attendance holiday sync failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to sync holidays' } })
         }
       })
     )

@@ -455,6 +455,54 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Holiday Sync</h4>
+                <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
+                  {{ holidaySyncLoading ? 'Syncing...' : 'Sync now' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-base-url">
+                  <span>Holiday source URL</span>
+                  <input
+                    id="attendance-holiday-sync-base-url"
+                    name="holidaySyncBaseUrl"
+                    v-model="settingsForm.holidaySyncBaseUrl"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-years">
+                  <span>Years (comma separated)</span>
+                  <input
+                    id="attendance-holiday-sync-years"
+                    name="holidaySyncYears"
+                    v-model="settingsForm.holidaySyncYears"
+                    type="text"
+                    placeholder="2025,2026"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
+                  <span>Append day index</span>
+                  <input
+                    id="attendance-holiday-sync-index"
+                    name="holidaySyncAddDayIndex"
+                    v-model="settingsForm.holidaySyncAddDayIndex"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-overwrite">
+                  <span>Overwrite existing</span>
+                  <input
+                    id="attendance-holiday-sync-overwrite"
+                    name="holidaySyncOverwrite"
+                    v-model="settingsForm.holidaySyncOverwrite"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Default Rule</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
                   {{ ruleLoading ? 'Loading...' : 'Reload rule' }}
@@ -2017,6 +2065,13 @@ interface AttendanceSettings {
     overtimeAdds?: boolean
     overtimeSource?: 'approval' | 'clock' | 'both'
   }
+  holidaySync?: {
+    source?: 'holiday-cn'
+    baseUrl?: string
+    years?: number[]
+    addDayIndex?: boolean
+    overwrite?: boolean
+  }
   ipAllowlist?: string[]
   geoFence?: {
     lat: number
@@ -2264,6 +2319,7 @@ const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
+const holidaySyncLoading = ref(false)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
 const shiftSaving = ref(false)
@@ -2441,6 +2497,10 @@ const settingsForm = reactive({
   holidayFirstDayBaseHours: 8,
   holidayOvertimeAdds: true,
   holidayOvertimeSource: 'approval',
+  holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
+  holidaySyncYears: '',
+  holidaySyncAddDayIndex: true,
+  holidaySyncOverwrite: false,
   ipAllowlist: '',
   geoFenceLat: '',
   geoFenceLng: '',
@@ -3155,6 +3215,13 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidayFirstDayBaseHours = settings.holidayPolicy?.firstDayBaseHours ?? 8
   settingsForm.holidayOvertimeAdds = settings.holidayPolicy?.overtimeAdds ?? true
   settingsForm.holidayOvertimeSource = settings.holidayPolicy?.overtimeSource ?? 'approval'
+  settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
+    || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
+  settingsForm.holidaySyncYears = Array.isArray(settings.holidaySync?.years)
+    ? settings.holidaySync?.years?.join(',')
+    : ''
+  settingsForm.holidaySyncAddDayIndex = settings.holidaySync?.addDayIndex ?? true
+  settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
@@ -3213,6 +3280,18 @@ async function saveSettings() {
         overtimeAdds: settingsForm.holidayOvertimeAdds,
         overtimeSource: settingsForm.holidayOvertimeSource || 'approval',
       },
+      holidaySync: {
+        source: 'holiday-cn',
+        baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
+        years: settingsForm.holidaySyncYears
+          ? settingsForm.holidaySyncYears
+              .split(/[\s,]+/)
+              .map(item => Number(item))
+              .filter(item => Number.isFinite(item))
+          : undefined,
+        addDayIndex: settingsForm.holidaySyncAddDayIndex,
+        overwrite: settingsForm.holidaySyncOverwrite,
+      },
       ipAllowlist,
       geoFence,
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
@@ -3237,6 +3316,42 @@ async function saveSettings() {
     setStatus(error?.message || 'Failed to save settings', 'error')
   } finally {
     settingsLoading.value = false
+  }
+}
+
+async function syncHolidays() {
+  holidaySyncLoading.value = true
+  try {
+    const years = settingsForm.holidaySyncYears
+      ? settingsForm.holidaySyncYears
+          .split(/[\s,]+/)
+          .map(item => Number(item))
+          .filter(item => Number.isFinite(item))
+      : undefined
+    const payload = {
+      source: 'holiday-cn',
+      baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
+      years,
+      addDayIndex: settingsForm.holidaySyncAddDayIndex,
+      overwrite: settingsForm.holidaySyncOverwrite,
+    }
+    const response = await apiFetch('/api/attendance/holidays/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Holiday sync failed')
+    }
+    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Holiday sync failed', 'error')
+  } finally {
+    holidaySyncLoading.value = false
   }
 }
 
