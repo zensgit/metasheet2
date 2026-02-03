@@ -61,6 +61,10 @@ const DEFAULT_SETTINGS = {
     dayIndexMaxDays: 7,
     dayIndexFormat: 'name-1',
     overwrite: false,
+    auto: {
+      enabled: false,
+      runAt: '02:00',
+    },
   },
   ipAllowlist: [],
   geoFence: null,
@@ -72,6 +76,8 @@ let rbacDegraded = false
 let autoAbsenceTimeout = null
 let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
+let autoHolidaySyncTimeout = null
+let autoHolidaySyncInterval = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 
@@ -1774,6 +1780,34 @@ async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
   return applied
 }
 
+async function performHolidaySync({ db, logger, orgId, settings, payload }) {
+  const syncConfig = resolveHolidaySyncConfig(settings, payload)
+  const years = resolveHolidaySyncYears(settings, payload)
+  let totalFetched = 0
+  let totalApplied = 0
+  const results = []
+
+  for (const year of years) {
+    const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
+    totalFetched += days.length
+    const rows = normalizeHolidayCnDays(days, {
+      addDayIndex: syncConfig.addDayIndex,
+      dayIndexHolidays: syncConfig.dayIndexHolidays,
+      dayIndexMaxDays: syncConfig.dayIndexMaxDays,
+      dayIndexFormat: syncConfig.dayIndexFormat,
+    })
+    const applied = await upsertHolidayRows(db, {
+      orgId,
+      rows,
+      overwrite: syncConfig.overwrite,
+    })
+    totalApplied += applied
+    results.push({ year, url, fetched: days.length, applied })
+  }
+
+  return { syncConfig, years, totalFetched, totalApplied, results }
+}
+
 function matchesNumberGte(actual, expected) {
   const actualNum = normalizeNumber(actual)
   const expectedNum = normalizeNumber(expected)
@@ -2057,6 +2091,7 @@ function normalizeSettings(raw) {
   const autoAbsence = raw.autoAbsence ?? {}
   const holidayPolicy = raw.holidayPolicy ?? {}
   const holidaySync = raw.holidaySync ?? {}
+  const holidaySyncAuto = holidaySync.auto ?? {}
   const ipAllowlist = Array.isArray(raw.ipAllowlist) ? raw.ipAllowlist.filter(Boolean) : []
   const geoFence = raw.geoFence && typeof raw.geoFence === 'object' ? raw.geoFence : null
   const overtimeSourceRaw = typeof holidayPolicy.overtimeSource === 'string'
@@ -2084,6 +2119,9 @@ function normalizeSettings(raw) {
   const holidaySyncDayIndexFormat = ['name-1', 'name第1天', 'name DAY1'].includes(holidaySyncDayIndexFormatRaw)
     ? holidaySyncDayIndexFormatRaw
     : DEFAULT_SETTINGS.holidaySync.dayIndexFormat
+  const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
+    ? holidaySyncAuto.runAt
+    : DEFAULT_SETTINGS.holidaySync.auto.runAt
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -2107,6 +2145,10 @@ function normalizeSettings(raw) {
       dayIndexMaxDays: holidaySyncDayIndexMaxDays,
       dayIndexFormat: holidaySyncDayIndexFormat,
       overwrite: parseBoolean(holidaySync.overwrite, DEFAULT_SETTINGS.holidaySync.overwrite),
+      auto: {
+        enabled: parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled),
+        runAt: holidaySyncAutoRunAt,
+      },
     },
     ipAllowlist,
     geoFence,
@@ -2790,6 +2832,17 @@ function clearAutoAbsenceSchedule() {
   }
 }
 
+function clearHolidaySyncSchedule() {
+  if (autoHolidaySyncTimeout) {
+    clearTimeout(autoHolidaySyncTimeout)
+    autoHolidaySyncTimeout = null
+  }
+  if (autoHolidaySyncInterval) {
+    clearInterval(autoHolidaySyncInterval)
+    autoHolidaySyncInterval = null
+  }
+}
+
 function scheduleAutoAbsence({ db, logger, emit }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
@@ -2866,6 +2919,61 @@ function scheduleAutoAbsence({ db, logger, emit }) {
   autoAbsenceTimeout = setTimeout(async () => {
     await run()
     autoAbsenceInterval = setInterval(run, 24 * 60 * 60 * 1000)
+  }, delay)
+}
+
+function scheduleHolidaySync({ db, logger, emit }) {
+  clearHolidaySyncSchedule()
+  const settings = settingsCache.value
+  const auto = settings.holidaySync?.auto
+  if (!auto?.enabled) return
+
+  const [hourStr, minuteStr] = String(auto.runAt || '').split(':')
+  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
+  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
+  const now = new Date()
+  const next = new Date(now)
+  next.setHours(hours, minutes, 0, 0)
+  if (next <= now) {
+    next.setDate(next.getDate() + 1)
+  }
+  const delay = next.getTime() - now.getTime()
+
+  const run = async () => {
+    try {
+      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
+      const orgIds = orgRows.length > 0
+        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
+        : [DEFAULT_ORG_ID]
+      for (const orgId of orgIds) {
+        const result = await performHolidaySync({
+          db,
+          logger,
+          orgId,
+          settings,
+          payload: {},
+        })
+        emit('attendance.holiday.sync', {
+          orgId,
+          years: result.years,
+          totalFetched: result.totalFetched,
+          totalApplied: result.totalApplied,
+        })
+        logger.info('Auto holiday sync completed', {
+          orgId,
+          years: result.years,
+          totalFetched: result.totalFetched,
+          totalApplied: result.totalApplied,
+        })
+      }
+    } catch (error) {
+      logger.error('Auto holiday sync failed', error)
+    }
+  }
+
+  autoHolidaySyncTimeout = setTimeout(async () => {
+    await run()
+    autoHolidaySyncInterval = setInterval(run, 24 * 60 * 60 * 1000)
   }, delay)
 }
 
@@ -3037,6 +3145,10 @@ module.exports = {
         dayIndexMaxDays: z.number().int().min(1).optional(),
         dayIndexFormat: z.enum(['name-1', 'name第1天', 'name DAY1']).optional(),
         overwrite: z.boolean().optional(),
+        auto: z.object({
+          enabled: z.boolean().optional(),
+          runAt: z.string().optional(),
+        }).optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
       geoFence: z.object({
@@ -3092,6 +3204,9 @@ module.exports = {
       baseUrl: z.string().optional(),
       years: z.array(z.number().int()).optional(),
       addDayIndex: z.boolean().optional(),
+      dayIndexHolidays: z.array(z.string()).optional(),
+      dayIndexMaxDays: z.number().int().min(1).optional(),
+      dayIndexFormat: z.enum(['name-1', 'name第1天', 'name DAY1']).optional(),
       overwrite: z.boolean().optional(),
     })
 
@@ -9390,31 +9505,15 @@ module.exports = {
         }
         const orgId = getOrgId(req)
         const settings = await getSettings(db)
-        const syncConfig = resolveHolidaySyncConfig(settings, parsed.data)
-        const years = resolveHolidaySyncYears(settings, parsed.data)
 
         try {
-          let totalFetched = 0
-          let totalApplied = 0
-          const results = []
-
-          for (const year of years) {
-            const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
-            totalFetched += days.length
-            const rows = normalizeHolidayCnDays(days, {
-              addDayIndex: syncConfig.addDayIndex,
-              dayIndexHolidays: syncConfig.dayIndexHolidays,
-              dayIndexMaxDays: syncConfig.dayIndexMaxDays,
-              dayIndexFormat: syncConfig.dayIndexFormat,
-            })
-            const applied = await upsertHolidayRows(db, {
-              orgId,
-              rows,
-              overwrite: syncConfig.overwrite,
-            })
-            totalApplied += applied
-            results.push({ year, url, fetched: days.length, applied })
-          }
+          const { syncConfig, years, totalFetched, totalApplied, results } = await performHolidaySync({
+            db,
+            logger,
+            orgId,
+            settings,
+            payload: parsed.data,
+          })
 
           res.json({
             ok: true,
@@ -9617,6 +9716,7 @@ module.exports = {
           const merged = mergeSettings(current, parsed.data)
           const saved = await saveSettings(db, merged)
           scheduleAutoAbsence({ db, logger, emit: emitEvent })
+          scheduleHolidaySync({ db, logger, emit: emitEvent })
           emitEvent('attendance.settings.updated', {
             settings: saved,
           })
@@ -9729,6 +9829,7 @@ module.exports = {
     try {
       await getSettings(db)
       scheduleAutoAbsence({ db, logger, emit: emitEvent })
+      scheduleHolidaySync({ db, logger, emit: emitEvent })
     } catch (error) {
       logger.warn('Attendance settings preload failed', error)
     }
@@ -9738,5 +9839,6 @@ module.exports = {
 
   async deactivate() {
     clearAutoAbsenceSchedule()
+    clearHolidaySyncSchedule()
   }
 }

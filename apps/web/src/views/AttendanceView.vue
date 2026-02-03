@@ -480,6 +480,24 @@
                     placeholder="2025,2026"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-auto">
+                  <span>Auto sync (daily)</span>
+                  <input
+                    id="attendance-holiday-sync-auto"
+                    name="holidaySyncAutoEnabled"
+                    v-model="settingsForm.holidaySyncAutoEnabled"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-auto-run">
+                  <span>Auto sync time</span>
+                  <input
+                    id="attendance-holiday-sync-auto-run"
+                    name="holidaySyncAutoRunAt"
+                    v-model="settingsForm.holidaySyncAutoRunAt"
+                    type="time"
+                  />
+                </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
                   <span>Append day index</span>
                   <input
@@ -2106,6 +2124,10 @@ interface AttendanceSettings {
     dayIndexMaxDays?: number
     dayIndexFormat?: 'name-1' | 'name第1天' | 'name DAY1'
     overwrite?: boolean
+    auto?: {
+      enabled?: boolean
+      runAt?: string
+    }
   }
   ipAllowlist?: string[]
   geoFence?: {
@@ -2539,6 +2561,8 @@ const settingsForm = reactive({
   holidaySyncDayIndexMaxDays: 7,
   holidaySyncDayIndexFormat: 'name-1',
   holidaySyncOverwrite: false,
+  holidaySyncAutoEnabled: false,
+  holidaySyncAutoRunAt: '02:00',
   ipAllowlist: '',
   geoFenceLat: '',
   geoFenceLng: '',
@@ -3265,6 +3289,8 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidaySyncDayIndexMaxDays = settings.holidaySync?.dayIndexMaxDays ?? 7
   settingsForm.holidaySyncDayIndexFormat = settings.holidaySync?.dayIndexFormat ?? 'name-1'
   settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
+  settingsForm.holidaySyncAutoEnabled = settings.holidaySync?.auto?.enabled ?? false
+  settingsForm.holidaySyncAutoRunAt = settings.holidaySync?.auto?.runAt ?? '02:00'
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
@@ -3353,6 +3379,10 @@ async function saveSettings() {
         dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
         dayIndexFormat,
         overwrite: settingsForm.holidaySyncOverwrite,
+        auto: {
+          enabled: settingsForm.holidaySyncAutoEnabled,
+          runAt: settingsForm.holidaySyncAutoRunAt || '02:00',
+        },
       },
       ipAllowlist,
       geoFence,
