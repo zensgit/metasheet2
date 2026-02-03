@@ -530,6 +530,36 @@ function parseImportedDateTime(value, workDate, timeZone) {
   return parseDateInput(text)
 }
 
+function normalizeTimeString(value) {
+  if (!value || typeof value !== 'string') return null
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+  const hours = Number(match[1])
+  const minutes = Number(match[2])
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null
+  const hh = String(hours).padStart(2, '0')
+  const mm = String(minutes).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function resolveShiftTimeRange(shiftName) {
+  if (!shiftName) return null
+  const text = String(shiftName)
+  const match = text.match(/(\d{1,2}:\d{2})\s*[-~—]\s*(\d{1,2}:\d{2})/)
+  if (!match) return null
+  const workStartTime = normalizeTimeString(match[1])
+  const workEndTime = normalizeTimeString(match[2])
+  if (!workStartTime || !workEndTime) return null
+  return { workStartTime, workEndTime }
+}
+
+function resolveRuleOverrideFromShiftName(rule, shiftName) {
+  const range = resolveShiftTimeRange(shiftName)
+  if (!range) return rule
+  return { ...rule, ...range }
+}
+
 function buildDingTalkFieldMap(columns) {
   const map = new Map()
   if (!Array.isArray(columns)) return map
@@ -2061,6 +2091,79 @@ function matchPolicyRule(ruleWhen, facts, fieldValues, userGroups, metrics) {
     }
   }
   return true
+}
+
+function matchShiftMapping(ruleWhen, facts, fieldValues, userGroups) {
+  if (!ruleWhen) return true
+  if (Array.isArray(ruleWhen.userIds) && ruleWhen.userIds.length > 0) {
+    if (!ruleWhen.userIds.includes(facts.userId)) return false
+  }
+  if (ruleWhen.userGroup) {
+    if (!userGroups.has(ruleWhen.userGroup)) return false
+  }
+  if (Array.isArray(ruleWhen.shiftNames) && ruleWhen.shiftNames.length > 0) {
+    if (!ruleWhen.shiftNames.includes(facts.shiftName)) return false
+  }
+  if (typeof ruleWhen.isHoliday === 'boolean' && ruleWhen.isHoliday !== facts.isHoliday) return false
+  if (typeof ruleWhen.isWorkingDay === 'boolean' && ruleWhen.isWorkingDay !== facts.isWorkingDay) return false
+  if (Array.isArray(ruleWhen.fieldExists)) {
+    for (const key of ruleWhen.fieldExists) {
+      if (!fieldHasValue(fieldValues[key])) return false
+    }
+  }
+  if (ruleWhen.fieldEquals && typeof ruleWhen.fieldEquals === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldEquals)) {
+      if (!matchFieldEquals(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldIn && typeof ruleWhen.fieldIn === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldIn)) {
+      if (!matchFieldIn(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldContains && typeof ruleWhen.fieldContains === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldContains)) {
+      if (!matchFieldContains(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldNumberGte && typeof ruleWhen.fieldNumberGte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldNumberGte)) {
+      if (!matchesNumberGte(fieldValues[key], expected)) return false
+    }
+  }
+  if (ruleWhen.fieldNumberLte && typeof ruleWhen.fieldNumberLte === 'object') {
+    for (const [key, expected] of Object.entries(ruleWhen.fieldNumberLte)) {
+      if (!matchesNumberLte(fieldValues[key], expected)) return false
+    }
+  }
+  return true
+}
+
+function normalizeShiftOverride(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  const workStartTime = normalizeTimeString(payload.workStartTime ?? payload.work_start_time)
+  const workEndTime = normalizeTimeString(payload.workEndTime ?? payload.work_end_time)
+  const timezone = typeof payload.timezone === 'string' && payload.timezone.trim()
+    ? payload.timezone.trim()
+    : null
+  if (!workStartTime && !workEndTime && !timezone) return null
+  return {
+    ...(workStartTime ? { workStartTime } : {}),
+    ...(workEndTime ? { workEndTime } : {}),
+    ...(timezone ? { timezone } : {}),
+  }
+}
+
+function resolveShiftOverrideFromMappings(shiftMappings, facts, fieldValues, userGroups) {
+  if (!Array.isArray(shiftMappings)) return null
+  for (const mapping of shiftMappings) {
+    if (!mapping || typeof mapping !== 'object') continue
+    if (!matchShiftMapping(mapping.when, facts, fieldValues, userGroups)) continue
+    const payload = mapping.then ?? mapping.shift ?? mapping
+    const normalized = normalizeShiftOverride(payload)
+    if (normalized) return normalized
+  }
+  return null
 }
 
 function applyAttendancePolicies({ policies, facts, fieldValues, metrics, options }) {
@@ -6627,8 +6730,35 @@ module.exports = {
             }
             const dataTypeFor = (key) => mapped[key]?.dataType
 
-            const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
-            const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+            const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
+            const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
+            augmentFieldValuesWithDates(fieldValues, workDate)
+            const holidayMeta = resolveHolidayMeta(context.holiday)
+            if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+            if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+            fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+            const baseFacts = {
+              userId: rowUserId,
+              orgId,
+              workDate,
+              shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+              isHoliday: Boolean(context.holiday),
+              isWorkingDay: context.isWorkingDay,
+            }
+            const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+            const shiftOverride = resolveShiftOverrideFromMappings(
+              ruleSetConfig?.policies?.shiftMappings,
+              baseFacts,
+              fieldValues,
+              baseUserGroups
+            )
+
+            const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
+            const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+
+            const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
+            const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
             const statusRaw = valueFor('status')
             const statusOverride = statusRaw != null
               ? resolveStatusOverride(statusRaw, statusMap)
@@ -6644,7 +6774,7 @@ module.exports = {
             const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
 
             const computed = computeMetrics({
-              rule: context.rule,
+              rule: ruleForMetrics,
               firstInAt,
               lastOutAt,
               isWorkingDay: context.isWorkingDay,
@@ -6657,13 +6787,6 @@ module.exports = {
               earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
               status: statusOverride ?? computed.status,
             }
-
-            const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-            augmentFieldValuesWithDates(fieldValues, workDate)
-            const holidayMeta = resolveHolidayMeta(context.holiday)
-            if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-            if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-            fieldValues.holiday_first_day = holidayMeta.isFirstDay
 
             const approvalSummary = valueFor('approvalSummary')
               ?? valueFor('attendance_approve')
@@ -6683,14 +6806,14 @@ module.exports = {
             })
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
-              facts: {
-                userId: rowUserId,
-                orgId,
-                workDate,
-                shiftName: context.rule?.name ?? null,
-                isHoliday: Boolean(context.holiday),
-                isWorkingDay: context.isWorkingDay,
-                holidayName: holidayMeta.name,
+                facts: {
+                  userId: rowUserId,
+                  orgId,
+                  workDate,
+                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+                  isHoliday: Boolean(context.holiday),
+                  isWorkingDay: context.isWorkingDay,
+                  holidayName: holidayMeta.name,
                 holidayDayIndex: holidayMeta.dayIndex,
                 holidayFirstDay: holidayMeta.isFirstDay,
               },
@@ -6969,8 +7092,35 @@ module.exports = {
               const dataTypeFor = (key) => mapped[key]?.dataType
               const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+              const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
+              augmentFieldValuesWithDates(fieldValues, workDate)
+              const holidayMeta = resolveHolidayMeta(context.holiday)
+              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+              fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+              const baseFacts = {
+                userId: rowUserId,
+                orgId,
+                workDate,
+                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+                isHoliday: Boolean(context.holiday),
+                isWorkingDay: context.isWorkingDay,
+              }
+              const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+              const shiftOverride = resolveShiftOverrideFromMappings(
+                ruleSetConfig?.policies?.shiftMappings,
+                baseFacts,
+                fieldValues,
+                baseUserGroups
+              )
+
+              const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
+              const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+
+              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
+              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -6986,7 +7136,7 @@ module.exports = {
               const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
 
               const computed = computeMetrics({
-                rule: context.rule,
+                rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
                 isWorkingDay: context.isWorkingDay,
@@ -6999,13 +7149,6 @@ module.exports = {
                 earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
                 status: statusOverride ?? computed.status,
               }
-
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-              augmentFieldValuesWithDates(fieldValues, workDate)
-              const holidayMeta = resolveHolidayMeta(context.holiday)
-              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-              fieldValues.holiday_first_day = holidayMeta.isFirstDay
 
               const approvalSummary = valueFor('approvalSummary')
                 ?? valueFor('attendance_approve')
@@ -7029,7 +7172,7 @@ module.exports = {
                   userId: rowUserId,
                   orgId,
                   workDate,
-                  shiftName: context.rule?.name ?? null,
+                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
                   isHoliday: Boolean(context.holiday),
                   isWorkingDay: context.isWorkingDay,
                   holidayName: holidayMeta.name,
@@ -7372,8 +7515,35 @@ module.exports = {
               }
               const dataTypeFor = (key) => mapped[key]?.dataType
 
-              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
-              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+              const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
+              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
+              augmentFieldValuesWithDates(fieldValues, workDate)
+              const holidayMeta = resolveHolidayMeta(context.holiday)
+              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+              fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+              const baseFacts = {
+                userId: rowUserId,
+                orgId,
+                workDate,
+                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+                isHoliday: Boolean(context.holiday),
+                isWorkingDay: context.isWorkingDay,
+              }
+              const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+              const shiftOverride = resolveShiftOverrideFromMappings(
+                ruleSetConfig?.policies?.shiftMappings,
+                baseFacts,
+                fieldValues,
+                baseUserGroups
+              )
+
+              const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
+              const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+
+              const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
+              const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
               const statusRaw = valueFor('status')
               const statusOverride = statusRaw != null
                 ? resolveStatusOverride(statusRaw, statusMap)
@@ -7389,7 +7559,7 @@ module.exports = {
               const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
 
               const computed = computeMetrics({
-                rule: context.rule,
+                rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
                 isWorkingDay: context.isWorkingDay,
@@ -7402,13 +7572,6 @@ module.exports = {
                 earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
                 status: statusOverride ?? computed.status,
               }
-
-              const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-              augmentFieldValuesWithDates(fieldValues, workDate)
-              const holidayMeta = resolveHolidayMeta(context.holiday)
-              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-              fieldValues.holiday_first_day = holidayMeta.isFirstDay
 
               const approvalSummary = valueFor('approvalSummary')
                 ?? valueFor('attendance_approve')
@@ -7432,7 +7595,7 @@ module.exports = {
                   userId: rowUserId,
                   orgId,
                   workDate,
-                  shiftName: context.rule?.name ?? null,
+                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
                   isHoliday: Boolean(context.holiday),
                   isWorkingDay: context.isWorkingDay,
                   holidayName: holidayMeta.name,
@@ -7978,8 +8141,35 @@ module.exports = {
                     const dataTypeFor = (key) => mapped[key]?.dataType
                     const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
 
-                    const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, context.rule.timezone)
-                    const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, context.rule.timezone)
+                    const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
+                    const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
+                    augmentFieldValuesWithDates(fieldValues, workDate)
+                    const holidayMeta = resolveHolidayMeta(context.holiday)
+                    if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+                    if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+                    fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+                    const baseFacts = {
+                      userId: rowUserId,
+                      orgId,
+                      workDate,
+                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+                      isHoliday: Boolean(context.holiday),
+                      isWorkingDay: context.isWorkingDay,
+                    }
+                    const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+                    const shiftOverride = resolveShiftOverrideFromMappings(
+                      ruleSetConfig?.policies?.shiftMappings,
+                      baseFacts,
+                      fieldValues,
+                      baseUserGroups
+                    )
+
+                    const baseRuleForMetrics = resolveRuleOverrideFromShiftName(context.rule, shiftNameRaw)
+                    const ruleForMetrics = shiftOverride ? { ...baseRuleForMetrics, ...shiftOverride } : baseRuleForMetrics
+
+                    const firstInAt = parseImportedDateTime(valueFor('firstInAt'), workDate, ruleForMetrics.timezone)
+                    const lastOutAt = parseImportedDateTime(valueFor('lastOutAt'), workDate, ruleForMetrics.timezone)
                     const statusRaw = valueFor('status')
                     const statusOverride = statusRaw != null
                       ? resolveStatusOverride(statusRaw, statusMap)
@@ -7995,7 +8185,7 @@ module.exports = {
                     const overtimeMinutes = parseMinutesValue(valueFor('overtimeMinutes') ?? valueFor('overtimeHours'), dataTypeFor('overtimeMinutes') ?? dataTypeFor('overtimeHours'))
 
                     const computed = computeMetrics({
-                      rule: context.rule,
+                      rule: ruleForMetrics,
                       firstInAt,
                       lastOutAt,
                       isWorkingDay: context.isWorkingDay,
@@ -8008,13 +8198,6 @@ module.exports = {
                       earlyLeaveMinutes: Number.isFinite(earlyLeaveMinutes) ? earlyLeaveMinutes : computed.earlyLeaveMinutes,
                       status: statusOverride ?? computed.status,
                     }
-
-                    const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
-                    augmentFieldValuesWithDates(fieldValues, workDate)
-                    const holidayMeta = resolveHolidayMeta(context.holiday)
-                    if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
-                    if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
-                    fieldValues.holiday_first_day = holidayMeta.isFirstDay
 
                     const approvalSummary = valueFor('approvalSummary')
                       ?? valueFor('attendance_approve')
@@ -8038,7 +8221,7 @@ module.exports = {
                         userId: rowUserId,
                         orgId,
                         workDate,
-                        shiftName: context.rule?.name ?? null,
+                      shiftName: shiftNameRaw ?? context.rule?.name ?? null,
                         isHoliday: Boolean(context.holiday),
                         isWorkingDay: context.isWorkingDay,
                         holidayName: holidayMeta.name,
