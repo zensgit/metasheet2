@@ -729,7 +729,7 @@ function buildRowsFromCsv({ csvText, csvOptions }) {
       fields[key] = value
     })
     if (!hasValue) continue
-    const workDate = normalizeCsvWorkDate(fields.workDate ?? fields['日期'] ?? fields.date)
+    const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
     const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
     rows.push({
       workDate: workDate ?? '',
