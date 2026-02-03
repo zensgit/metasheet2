@@ -21,8 +21,8 @@ Attendance 页面 → Payroll 区块
 1. 选择模板（上一步创建的模板）
 2. Anchor Date 填写：`2026-02-02`
 3. 点击 **Create cycle**（生成单周期）
-
-> 多周期生成目前仅 API 支持（`/api/attendance/payroll-cycles/generate`）。
+4. API 批量生成：`POST /api/attendance/payroll-cycles/generate`
+   - 已修复重复周期导致的 500，重复区间会进入 skipped
 
 ## 3) 生成摘要 / 导出
 1. 选择某个 cycle 并点击 **Load summary**

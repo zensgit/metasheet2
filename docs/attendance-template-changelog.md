@@ -19,5 +19,9 @@
 ### Org: Late/Early Warning
 - 新增：迟到/早退异常提示规则（`calc.exceptionReason` 包含“迟到/早退”时提示确认审批）。
 
+### 验收（全量预览）
+- missing-card-warning：178
+- late-early-warning：113
+
 ## 影响
 - 组合验收中 `single-rest-trip-overtime` 命中从 29 降至 4（更符合“有出差/外出且有打卡”的规则定义）。
