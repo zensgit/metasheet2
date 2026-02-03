@@ -64,6 +64,7 @@ const DEFAULT_SETTINGS = {
     auto: {
       enabled: false,
       runAt: '02:00',
+      timezone: 'UTC',
     },
     lastRun: null,
   },
@@ -1552,6 +1553,17 @@ function parseHolidayDayIndex(name) {
   return null
 }
 
+function resolveTimeZone(timeZone, fallback) {
+  const zone = typeof timeZone === 'string' ? timeZone.trim() : ''
+  if (!zone) return fallback
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
+    return zone
+  } catch (error) {
+    return fallback
+  }
+}
+
 function resolveHolidayMeta(holiday) {
   if (!holiday || typeof holiday !== 'object') {
     return { name: null, dayIndex: null, isFirstDay: false }
@@ -1779,6 +1791,93 @@ async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
   }
 
   return applied
+}
+
+function getZonedParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const parts = formatter.formatToParts(date)
+  const values = {}
+  for (const part of parts) {
+    if (part.type !== 'literal') {
+      values[part.type] = part.value
+    }
+  }
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  }
+}
+
+function getTimeZoneOffset(date, timeZone) {
+  const parts = getZonedParts(date, timeZone)
+  const utcTime = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  )
+  return (utcTime - date.getTime()) / 60000
+}
+
+function zonedTimeToUtc(parts, timeZone) {
+  const utcGuess = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second ?? 0
+  )
+  const offset = getTimeZoneOffset(new Date(utcGuess), timeZone)
+  return utcGuess - offset * 60000
+}
+
+function computeNextRunTime({ now, timeZone, hour, minute }) {
+  const nowDate = now || new Date()
+  const nowParts = getZonedParts(nowDate, timeZone)
+  let targetUtc = zonedTimeToUtc(
+    {
+      year: nowParts.year,
+      month: nowParts.month,
+      day: nowParts.day,
+      hour,
+      minute,
+      second: 0,
+    },
+    timeZone
+  )
+  if (targetUtc <= nowDate.getTime()) {
+    const middayUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 12, 0, 0)
+    const nextDay = new Date(middayUtc + 24 * 60 * 60 * 1000)
+    const nextParts = getZonedParts(nextDay, timeZone)
+    targetUtc = zonedTimeToUtc(
+      {
+        year: nextParts.year,
+        month: nextParts.month,
+        day: nextParts.day,
+        hour,
+        minute,
+        second: 0,
+      },
+      timeZone
+    )
+  }
+  return targetUtc
 }
 
 async function performHolidaySync({ db, logger, orgId, settings, payload }) {
@@ -2140,6 +2239,10 @@ function normalizeSettings(raw) {
   const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
     ? holidaySyncAuto.runAt
     : DEFAULT_SETTINGS.holidaySync.auto.runAt
+  const holidaySyncAutoTimezone = resolveTimeZone(
+    holidaySyncAuto.timezone,
+    DEFAULT_SETTINGS.holidaySync.auto.timezone
+  )
   const holidaySyncLastRunNormalized = holidaySyncLastRun && typeof holidaySyncLastRun === 'object'
     ? {
         ranAt: typeof holidaySyncLastRun.ranAt === 'string' ? holidaySyncLastRun.ranAt : null,
@@ -2182,6 +2285,7 @@ function normalizeSettings(raw) {
       auto: {
         enabled: parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled),
         runAt: holidaySyncAutoRunAt,
+        timezone: holidaySyncAutoTimezone,
       },
       lastRun: holidaySyncLastRunNormalized,
     },
@@ -2966,13 +3070,15 @@ function scheduleHolidaySync({ db, logger, emit }) {
   const [hourStr, minuteStr] = String(auto.runAt || '').split(':')
   const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
   const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
+  const timeZone = resolveTimeZone(auto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
   const now = new Date()
-  const next = new Date(now)
-  next.setHours(hours, minutes, 0, 0)
-  if (next <= now) {
-    next.setDate(next.getDate() + 1)
-  }
-  const delay = next.getTime() - now.getTime()
+  const nextTimestamp = computeNextRunTime({
+    now,
+    timeZone,
+    hour: hours,
+    minute: minutes,
+  })
+  const delay = Math.max(0, nextTimestamp - now.getTime())
 
   const run = async () => {
     try {
@@ -3183,6 +3289,7 @@ module.exports = {
         auto: z.object({
           enabled: z.boolean().optional(),
           runAt: z.string().optional(),
+          timezone: z.string().optional(),
         }).optional(),
         lastRun: z.object({
           ranAt: z.string().optional(),

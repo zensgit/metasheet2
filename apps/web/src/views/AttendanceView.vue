@@ -514,6 +514,16 @@
                     type="time"
                   />
                 </label>
+                <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
+                  <span>Auto sync timezone</span>
+                  <input
+                    id="attendance-holiday-sync-auto-tz"
+                    name="holidaySyncAutoTimezone"
+                    v-model="settingsForm.holidaySyncAutoTimezone"
+                    type="text"
+                    placeholder="Asia/Shanghai"
+                  />
+                </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
                   <span>Append day index</span>
                   <input
@@ -2158,6 +2168,7 @@ interface AttendanceSettings {
     auto?: {
       enabled?: boolean
       runAt?: string
+      timezone?: string
     }
     lastRun?: {
       ranAt?: string | null
@@ -2603,6 +2614,7 @@ const settingsForm = reactive({
   holidaySyncOverwrite: false,
   holidaySyncAutoEnabled: false,
   holidaySyncAutoRunAt: '02:00',
+  holidaySyncAutoTimezone: 'UTC',
   ipAllowlist: '',
   geoFenceLat: '',
   geoFenceLng: '',
@@ -3331,6 +3343,7 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
   settingsForm.holidaySyncAutoEnabled = settings.holidaySync?.auto?.enabled ?? false
   settingsForm.holidaySyncAutoRunAt = settings.holidaySync?.auto?.runAt ?? '02:00'
+  settingsForm.holidaySyncAutoTimezone = settings.holidaySync?.auto?.timezone ?? 'UTC'
   holidaySyncLastRun.value = settings.holidaySync?.lastRun ?? null
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
@@ -3423,6 +3436,7 @@ async function saveSettings() {
         auto: {
           enabled: settingsForm.holidaySyncAutoEnabled,
           runAt: settingsForm.holidaySyncAutoRunAt || '02:00',
+          timezone: settingsForm.holidaySyncAutoTimezone?.trim() || undefined,
         },
       },
       ipAllowlist,
