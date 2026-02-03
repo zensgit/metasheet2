@@ -160,6 +160,42 @@ const SYSTEM_TEMPLATES = [
     ],
   },
   {
+    name: '节假日首日基准工时',
+    category: 'system',
+    editable: false,
+    params: [
+      {
+        key: 'holidayFirstDayHours',
+        label: 'Holiday first-day hours',
+        type: 'number',
+        default: 8,
+        paths: ['rules[0].then.actual_hours', 'rules[0].then.required_hours'],
+      },
+      {
+        key: 'holidayFirstDayWarning',
+        label: 'Warning text',
+        type: 'string',
+        default: '节假日首日按8小时',
+        paths: ['rules[0].then.warning'],
+      },
+    ],
+    rules: [
+      {
+        id: 'holiday-default-8h',
+        when: {
+          is_holiday: true,
+          holiday_first_day: true,
+          holiday_policy_enabled: false,
+        },
+        then: {
+          actual_hours: 8,
+          required_hours: 8,
+          warning: '节假日首日按8小时',
+        },
+      },
+    ],
+  },
+  {
     name: '角色规则',
     category: 'system',
     editable: false,

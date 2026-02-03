@@ -46,6 +46,28 @@ const DEFAULT_SETTINGS = {
     runAt: '00:15',
     lookbackDays: 1,
   },
+  holidayPolicy: {
+    firstDayEnabled: true,
+    firstDayBaseHours: 8,
+    overtimeAdds: true,
+    overtimeSource: 'approval',
+  },
+  holidaySync: {
+    source: 'holiday-cn',
+    baseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
+    years: [],
+    addDayIndex: true,
+    dayIndexHolidays: ['春节', '国庆'],
+    dayIndexMaxDays: 7,
+    dayIndexFormat: 'name-1',
+    overwrite: false,
+    auto: {
+      enabled: false,
+      runAt: '02:00',
+      timezone: 'UTC',
+    },
+    lastRun: null,
+  },
   ipAllowlist: [],
   geoFence: null,
   minPunchIntervalMinutes: 1,
@@ -56,6 +78,8 @@ let rbacDegraded = false
 let autoAbsenceTimeout = null
 let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
+let autoHolidaySyncTimeout = null
+let autoHolidaySyncInterval = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 
@@ -1509,6 +1533,397 @@ function augmentFieldValuesWithDates(fieldValues, workDate) {
   return fieldValues
 }
 
+function parseHolidayDayIndex(name) {
+  if (!name) return null
+  const trimmed = String(name).trim()
+  if (!trimmed) return null
+  const patterns = [
+    /第\s*([0-9]{1,2})\s*[天日]/u,
+    /[-_\s]([0-9]{1,2})\s*[天日]?$/u,
+    /\bDAY\s*([0-9]{1,2})\b/i,
+    /([0-9]{1,2})\s*[天日]$/u,
+  ]
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern)
+    if (match && match[1]) {
+      const num = Number(match[1])
+      if (Number.isFinite(num) && num > 0) return num
+    }
+  }
+  return null
+}
+
+function resolveTimeZone(timeZone, fallback) {
+  const zone = typeof timeZone === 'string' ? timeZone.trim() : ''
+  if (!zone) return fallback
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
+    return zone
+  } catch (error) {
+    return fallback
+  }
+}
+
+function resolveHolidayMeta(holiday) {
+  if (!holiday || typeof holiday !== 'object') {
+    return { name: null, dayIndex: null, isFirstDay: false }
+  }
+  const name = typeof holiday.name === 'string' ? holiday.name.trim() : ''
+  const dayIndex = parseHolidayDayIndex(name)
+  return {
+    name: name || null,
+    dayIndex,
+    isFirstDay: dayIndex === 1,
+  }
+}
+
+function hasOvertimeApproval(summary) {
+  if (!summary) return false
+  const text = Array.isArray(summary) ? summary.join(' ') : String(summary)
+  return /加班|overtime/i.test(text)
+}
+
+function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalSummary }) {
+  const policy = settings?.holidayPolicy ?? DEFAULT_SETTINGS.holidayPolicy
+  const meta = holidayMeta ?? resolveHolidayMeta(holiday)
+  const warnings = []
+  if (!holiday || holiday.isWorkingDay === true) {
+    return { metrics, warnings, holidayMeta: meta }
+  }
+  if (!policy?.firstDayEnabled || !meta.isFirstDay) {
+    return { metrics, warnings, holidayMeta: meta }
+  }
+  const baseHours = Number.isFinite(policy.firstDayBaseHours)
+    ? policy.firstDayBaseHours
+    : DEFAULT_SETTINGS.holidayPolicy.firstDayBaseHours
+  const baseMinutes = Math.round(baseHours * 60)
+  const nextMetrics = {
+    ...metrics,
+    workMinutes: baseMinutes,
+    status: 'adjusted',
+  }
+  warnings.push(`节假日首日按${baseHours}小时`)
+
+  const overtimeSource = policy.overtimeSource ?? DEFAULT_SETTINGS.holidayPolicy.overtimeSource
+  const overtimeByApproval = hasOvertimeApproval(approvalSummary)
+  const overtimeByClock = Number(metrics.overtimeMinutes ?? 0) > 0
+  const shouldAddOvertime = policy.overtimeAdds && (
+    overtimeSource === 'both'
+      ? (overtimeByApproval || overtimeByClock)
+      : overtimeSource === 'approval'
+        ? overtimeByApproval
+        : overtimeByClock
+  )
+
+  if (shouldAddOvertime && overtimeByClock) {
+    warnings.push('节假日首日加班单叠加工时')
+  } else if (shouldAddOvertime && !overtimeByClock) {
+    warnings.push('节假日首日存在加班单但未提供加班工时')
+  }
+
+  return { metrics: nextMetrics, warnings, holidayMeta: meta }
+}
+
+function resolvePolicySkipRules(settings) {
+  const skip = new Set()
+  if (settings?.holidayPolicy?.firstDayEnabled) {
+    skip.add('holiday-default-8h')
+  }
+  return skip
+}
+
+function parseHolidayCnDate(date) {
+  if (!date) return null
+  const trimmed = String(date).trim()
+  if (!trimmed) return null
+  const parts = trimmed.split('-')
+  if (parts.length !== 3) return trimmed
+  const year = parts[0].padStart(4, '0')
+  const month = parts[1].padStart(2, '0')
+  const day = parts[2].padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function formatHolidayDayIndex(name, index, format) {
+  if (!name) return name
+  switch (format) {
+    case 'name第1天':
+      return `${name}第${index}天`
+    case 'name DAY1':
+      return `${name} DAY${index}`
+    case 'name-1':
+    default:
+      return `${name}-${index}`
+  }
+}
+
+function normalizeHolidayCnDays(days, { addDayIndex, dayIndexHolidays, dayIndexMaxDays, dayIndexFormat }) {
+  const items = Array.isArray(days) ? days : []
+  const sorted = items
+    .map((item) => ({
+      date: parseHolidayCnDate(item?.date),
+      name: typeof item?.name === 'string' ? item.name.trim() : '',
+      isOffDay: Boolean(item?.isOffDay),
+    }))
+    .filter((item) => item.date)
+    .sort((a, b) => a.date.localeCompare(b.date))
+
+  let prevName = null
+  let prevIsOff = false
+  let prevDate = null
+  let dayIndex = 0
+
+  const output = []
+  for (const item of sorted) {
+    const { date, name, isOffDay } = item
+    const normalizedName = name || null
+    let labeledName = normalizedName
+
+    const shouldIndexHoliday = (() => {
+      if (!addDayIndex || !isOffDay || !normalizedName) return false
+      if (!dayIndexHolidays || dayIndexHolidays.length === 0) return true
+      return dayIndexHolidays.some((holiday) => normalizedName.includes(holiday))
+    })()
+
+    if (shouldIndexHoliday) {
+      const contiguous =
+        prevName === normalizedName &&
+        prevIsOff &&
+        prevDate &&
+        Math.round((new Date(`${date}T00:00:00Z`) - new Date(`${prevDate}T00:00:00Z`)) / 86400000) === 1
+      dayIndex = contiguous ? dayIndex + 1 : 1
+      if (!dayIndexMaxDays || dayIndex <= dayIndexMaxDays) {
+        labeledName = formatHolidayDayIndex(normalizedName, dayIndex, dayIndexFormat)
+      }
+    } else {
+      dayIndex = 0
+    }
+
+    output.push({
+      date,
+      name: labeledName,
+      isWorkingDay: !isOffDay,
+    })
+
+    prevName = normalizedName
+    prevIsOff = isOffDay
+    prevDate = date
+  }
+
+  return output
+}
+
+function resolveHolidaySyncYears(settings, payload) {
+  const payloadYears = Array.isArray(payload?.years) ? payload.years : null
+  const settingsYears = Array.isArray(settings?.holidaySync?.years) ? settings.holidaySync.years : null
+  if (payloadYears && payloadYears.length > 0) return payloadYears
+  if (settingsYears && settingsYears.length > 0) return settingsYears
+  const currentYear = new Date().getFullYear()
+  return [currentYear, currentYear + 1]
+}
+
+function resolveHolidaySyncConfig(settings, payload) {
+  const source = 'holiday-cn'
+  const baseUrl = typeof payload?.baseUrl === 'string' && payload.baseUrl.trim()
+    ? payload.baseUrl.trim()
+    : settings?.holidaySync?.baseUrl || DEFAULT_SETTINGS.holidaySync.baseUrl
+  const addDayIndex = typeof payload?.addDayIndex === 'boolean'
+    ? payload.addDayIndex
+    : (settings?.holidaySync?.addDayIndex ?? DEFAULT_SETTINGS.holidaySync.addDayIndex)
+  const dayIndexHolidays = Array.isArray(payload?.dayIndexHolidays) && payload.dayIndexHolidays.length
+    ? payload.dayIndexHolidays.map((name) => String(name).trim()).filter(Boolean)
+    : (settings?.holidaySync?.dayIndexHolidays ?? DEFAULT_SETTINGS.holidaySync.dayIndexHolidays)
+  const dayIndexMaxDays = Number.isFinite(payload?.dayIndexMaxDays)
+    ? Math.max(1, Number(payload.dayIndexMaxDays))
+    : (settings?.holidaySync?.dayIndexMaxDays ?? DEFAULT_SETTINGS.holidaySync.dayIndexMaxDays)
+  const dayIndexFormat = typeof payload?.dayIndexFormat === 'string' && payload.dayIndexFormat.trim()
+    ? payload.dayIndexFormat.trim()
+    : (settings?.holidaySync?.dayIndexFormat ?? DEFAULT_SETTINGS.holidaySync.dayIndexFormat)
+  const overwrite = typeof payload?.overwrite === 'boolean'
+    ? payload.overwrite
+    : (settings?.holidaySync?.overwrite ?? DEFAULT_SETTINGS.holidaySync.overwrite)
+  return { source, baseUrl, addDayIndex, dayIndexHolidays, dayIndexMaxDays, dayIndexFormat, overwrite }
+}
+
+async function fetchHolidayCnYear({ year, baseUrl }) {
+  const sanitizedBase = String(baseUrl || DEFAULT_SETTINGS.holidaySync.baseUrl).replace(/\/$/, '')
+  const url = `${sanitizedBase}/${year}.json`
+  const fetchImpl = typeof fetch === 'function' ? fetch : null
+  if (!fetchImpl) {
+    throw new Error('Global fetch is not available in this runtime')
+  }
+  const response = await fetchImpl(url, {
+    headers: { 'user-agent': 'metasheet-attendance/holiday-sync' },
+  })
+  if (!response.ok) {
+    throw new Error(`Failed to fetch holiday-cn data for ${year}`)
+  }
+  const data = await response.json()
+  const days = Array.isArray(data?.days) ? data.days : []
+  return { url, year, days }
+}
+
+async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
+  if (!rows.length) return 0
+  const chunkSize = 200
+  let applied = 0
+
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize)
+    const values = []
+    const params = []
+    chunk.forEach((row, index) => {
+      const baseIndex = index * 5
+      values.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5})`)
+      params.push(randomUUID(), orgId, row.date, row.name ?? null, row.isWorkingDay)
+    })
+    const conflictAction = overwrite
+      ? 'DO UPDATE SET name = EXCLUDED.name, is_working_day = EXCLUDED.is_working_day'
+      : 'DO NOTHING'
+    const rowsInserted = await db.query(
+      `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (org_id, holiday_date) ${conflictAction}
+       RETURNING holiday_date`,
+      params
+    )
+    applied += rowsInserted.length
+  }
+
+  return applied
+}
+
+function getZonedParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const parts = formatter.formatToParts(date)
+  const values = {}
+  for (const part of parts) {
+    if (part.type !== 'literal') {
+      values[part.type] = part.value
+    }
+  }
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  }
+}
+
+function getTimeZoneOffset(date, timeZone) {
+  const parts = getZonedParts(date, timeZone)
+  const utcTime = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  )
+  return (utcTime - date.getTime()) / 60000
+}
+
+function zonedTimeToUtc(parts, timeZone) {
+  const utcGuess = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second ?? 0
+  )
+  const offset = getTimeZoneOffset(new Date(utcGuess), timeZone)
+  return utcGuess - offset * 60000
+}
+
+function computeNextRunTime({ now, timeZone, hour, minute }) {
+  const nowDate = now || new Date()
+  const nowParts = getZonedParts(nowDate, timeZone)
+  let targetUtc = zonedTimeToUtc(
+    {
+      year: nowParts.year,
+      month: nowParts.month,
+      day: nowParts.day,
+      hour,
+      minute,
+      second: 0,
+    },
+    timeZone
+  )
+  if (targetUtc <= nowDate.getTime()) {
+    const middayUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 12, 0, 0)
+    const nextDay = new Date(middayUtc + 24 * 60 * 60 * 1000)
+    const nextParts = getZonedParts(nextDay, timeZone)
+    targetUtc = zonedTimeToUtc(
+      {
+        year: nextParts.year,
+        month: nextParts.month,
+        day: nextParts.day,
+        hour,
+        minute,
+        second: 0,
+      },
+      timeZone
+    )
+  }
+  return targetUtc
+}
+
+async function performHolidaySync({ db, logger, orgId, settings, payload }) {
+  const syncConfig = resolveHolidaySyncConfig(settings, payload)
+  const years = resolveHolidaySyncYears(settings, payload)
+  let totalFetched = 0
+  let totalApplied = 0
+  const results = []
+
+  for (const year of years) {
+    const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
+    totalFetched += days.length
+    const rows = normalizeHolidayCnDays(days, {
+      addDayIndex: syncConfig.addDayIndex,
+      dayIndexHolidays: syncConfig.dayIndexHolidays,
+      dayIndexMaxDays: syncConfig.dayIndexMaxDays,
+      dayIndexFormat: syncConfig.dayIndexFormat,
+    })
+    const applied = await upsertHolidayRows(db, {
+      orgId,
+      rows,
+      overwrite: syncConfig.overwrite,
+    })
+    totalApplied += applied
+    results.push({ year, url, fetched: days.length, applied })
+  }
+
+  const lastRun = {
+    ranAt: new Date().toISOString(),
+    success: true,
+    years,
+    totalFetched,
+    totalApplied,
+    error: null,
+  }
+  await saveSettings(db, {
+    ...settings,
+    holidaySync: {
+      ...(settings.holidaySync || {}),
+      lastRun,
+    },
+  })
+
+  return { syncConfig, years, totalFetched, totalApplied, results, lastRun }
+}
+
 function matchesNumberGte(actual, expected) {
   const actualNum = normalizeNumber(actual)
   const expectedNum = normalizeNumber(expected)
@@ -1648,19 +2063,27 @@ function matchPolicyRule(ruleWhen, facts, fieldValues, userGroups, metrics) {
   return true
 }
 
-function applyAttendancePolicies({ policies, facts, fieldValues, metrics }) {
+function applyAttendancePolicies({ policies, facts, fieldValues, metrics, options }) {
   const nextMetrics = { ...metrics }
   const warnings = []
   const appliedRules = []
+  const skipRules = options?.skipRules
   if (!policies || typeof policies !== 'object') {
     return { metrics: nextMetrics, warnings, appliedRules, userGroups: [] }
   }
   const userGroups = resolveUserGroups(policies.userGroups, facts, fieldValues)
   const rules = Array.isArray(policies.rules) ? policies.rules : []
+  const shouldSkip = (name) => {
+    if (!skipRules) return false
+    if (skipRules instanceof Set) return skipRules.has(name)
+    if (Array.isArray(skipRules)) return skipRules.includes(name)
+    return false
+  }
   rules.forEach((rule, index) => {
     if (!rule || typeof rule !== 'object') return
-    if (!matchPolicyRule(rule.when, facts, fieldValues, userGroups, nextMetrics)) return
     const ruleName = (typeof rule.name === 'string' && rule.name.trim()) ? rule.name.trim() : `rule-${index + 1}`
+    if (shouldSkip(ruleName)) return
+    if (!matchPolicyRule(rule.when, facts, fieldValues, userGroups, nextMetrics)) return
     appliedRules.push(ruleName)
     const actions = rule.then ?? {}
     if (Number.isFinite(actions.setWorkMinutes)) nextMetrics.workMinutes = actions.setWorkMinutes
@@ -1782,8 +2205,60 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
 function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
+  const holidayPolicy = raw.holidayPolicy ?? {}
+  const holidaySync = raw.holidaySync ?? {}
+  const holidaySyncAuto = holidaySync.auto ?? {}
+  const holidaySyncLastRun = holidaySync.lastRun ?? null
   const ipAllowlist = Array.isArray(raw.ipAllowlist) ? raw.ipAllowlist.filter(Boolean) : []
   const geoFence = raw.geoFence && typeof raw.geoFence === 'object' ? raw.geoFence : null
+  const overtimeSourceRaw = typeof holidayPolicy.overtimeSource === 'string'
+    ? holidayPolicy.overtimeSource.trim()
+    : ''
+  const overtimeSource = ['approval', 'clock', 'both'].includes(overtimeSourceRaw)
+    ? overtimeSourceRaw
+    : DEFAULT_SETTINGS.holidayPolicy.overtimeSource
+  const holidaySyncBaseUrl = typeof holidaySync.baseUrl === 'string' && holidaySync.baseUrl.trim()
+    ? holidaySync.baseUrl.trim()
+    : DEFAULT_SETTINGS.holidaySync.baseUrl
+  const holidaySyncYears = Array.isArray(holidaySync.years)
+    ? holidaySync.years.map((year) => parseNumber(year, null)).filter((year) => Number.isFinite(year))
+    : []
+  const holidaySyncDayIndexHolidays = Array.isArray(holidaySync.dayIndexHolidays)
+    ? holidaySync.dayIndexHolidays.map((name) => String(name).trim()).filter(Boolean)
+    : [...DEFAULT_SETTINGS.holidaySync.dayIndexHolidays]
+  const holidaySyncDayIndexMaxDays = Math.max(
+    1,
+    parseNumber(holidaySync.dayIndexMaxDays, DEFAULT_SETTINGS.holidaySync.dayIndexMaxDays)
+  )
+  const holidaySyncDayIndexFormatRaw = typeof holidaySync.dayIndexFormat === 'string'
+    ? holidaySync.dayIndexFormat.trim()
+    : ''
+  const holidaySyncDayIndexFormat = ['name-1', 'name第1天', 'name DAY1'].includes(holidaySyncDayIndexFormatRaw)
+    ? holidaySyncDayIndexFormatRaw
+    : DEFAULT_SETTINGS.holidaySync.dayIndexFormat
+  const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
+    ? holidaySyncAuto.runAt
+    : DEFAULT_SETTINGS.holidaySync.auto.runAt
+  const holidaySyncAutoTimezone = resolveTimeZone(
+    holidaySyncAuto.timezone,
+    DEFAULT_SETTINGS.holidaySync.auto.timezone
+  )
+  const holidaySyncLastRunNormalized = holidaySyncLastRun && typeof holidaySyncLastRun === 'object'
+    ? {
+        ranAt: typeof holidaySyncLastRun.ranAt === 'string' ? holidaySyncLastRun.ranAt : null,
+        success: typeof holidaySyncLastRun.success === 'boolean' ? holidaySyncLastRun.success : null,
+        years: Array.isArray(holidaySyncLastRun.years)
+          ? holidaySyncLastRun.years.map((year) => parseNumber(year, null)).filter((year) => Number.isFinite(year))
+          : null,
+        totalFetched: Number.isFinite(holidaySyncLastRun.totalFetched)
+          ? Number(holidaySyncLastRun.totalFetched)
+          : null,
+        totalApplied: Number.isFinite(holidaySyncLastRun.totalApplied)
+          ? Number(holidaySyncLastRun.totalApplied)
+          : null,
+        error: typeof holidaySyncLastRun.error === 'string' ? holidaySyncLastRun.error : null,
+      }
+    : null
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -1791,6 +2266,28 @@ function normalizeSettings(raw) {
         ? autoAbsence.runAt
         : DEFAULT_SETTINGS.autoAbsence.runAt,
       lookbackDays: Math.max(1, parseNumber(autoAbsence.lookbackDays, DEFAULT_SETTINGS.autoAbsence.lookbackDays)),
+    },
+    holidayPolicy: {
+      firstDayEnabled: parseBoolean(holidayPolicy.firstDayEnabled, DEFAULT_SETTINGS.holidayPolicy.firstDayEnabled),
+      firstDayBaseHours: Math.max(0, parseNumber(holidayPolicy.firstDayBaseHours, DEFAULT_SETTINGS.holidayPolicy.firstDayBaseHours)),
+      overtimeAdds: parseBoolean(holidayPolicy.overtimeAdds, DEFAULT_SETTINGS.holidayPolicy.overtimeAdds),
+      overtimeSource,
+    },
+    holidaySync: {
+      source: 'holiday-cn',
+      baseUrl: holidaySyncBaseUrl,
+      years: holidaySyncYears,
+      addDayIndex: parseBoolean(holidaySync.addDayIndex, DEFAULT_SETTINGS.holidaySync.addDayIndex),
+      dayIndexHolidays: holidaySyncDayIndexHolidays,
+      dayIndexMaxDays: holidaySyncDayIndexMaxDays,
+      dayIndexFormat: holidaySyncDayIndexFormat,
+      overwrite: parseBoolean(holidaySync.overwrite, DEFAULT_SETTINGS.holidaySync.overwrite),
+      auto: {
+        enabled: parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled),
+        runAt: holidaySyncAutoRunAt,
+        timezone: holidaySyncAutoTimezone,
+      },
+      lastRun: holidaySyncLastRunNormalized,
     },
     ipAllowlist,
     geoFence,
@@ -1805,6 +2302,14 @@ function mergeSettings(base, update) {
     autoAbsence: {
       ...(base?.autoAbsence || {}),
       ...(update?.autoAbsence || {}),
+    },
+    holidayPolicy: {
+      ...(base?.holidayPolicy || {}),
+      ...(update?.holidayPolicy || {}),
+    },
+    holidaySync: {
+      ...(base?.holidaySync || {}),
+      ...(update?.holidaySync || {}),
     },
   })
 }
@@ -2466,6 +2971,17 @@ function clearAutoAbsenceSchedule() {
   }
 }
 
+function clearHolidaySyncSchedule() {
+  if (autoHolidaySyncTimeout) {
+    clearTimeout(autoHolidaySyncTimeout)
+    autoHolidaySyncTimeout = null
+  }
+  if (autoHolidaySyncInterval) {
+    clearInterval(autoHolidaySyncInterval)
+    autoHolidaySyncInterval = null
+  }
+}
+
 function scheduleAutoAbsence({ db, logger, emit }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
@@ -2542,6 +3058,63 @@ function scheduleAutoAbsence({ db, logger, emit }) {
   autoAbsenceTimeout = setTimeout(async () => {
     await run()
     autoAbsenceInterval = setInterval(run, 24 * 60 * 60 * 1000)
+  }, delay)
+}
+
+function scheduleHolidaySync({ db, logger, emit }) {
+  clearHolidaySyncSchedule()
+  const settings = settingsCache.value
+  const auto = settings.holidaySync?.auto
+  if (!auto?.enabled) return
+
+  const [hourStr, minuteStr] = String(auto.runAt || '').split(':')
+  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
+  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
+  const timeZone = resolveTimeZone(auto.timezone, DEFAULT_SETTINGS.holidaySync.auto.timezone)
+  const now = new Date()
+  const nextTimestamp = computeNextRunTime({
+    now,
+    timeZone,
+    hour: hours,
+    minute: minutes,
+  })
+  const delay = Math.max(0, nextTimestamp - now.getTime())
+
+  const run = async () => {
+    try {
+      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
+      const orgIds = orgRows.length > 0
+        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
+        : [DEFAULT_ORG_ID]
+      for (const orgId of orgIds) {
+        const result = await performHolidaySync({
+          db,
+          logger,
+          orgId,
+          settings,
+          payload: {},
+        })
+        emit('attendance.holiday.sync', {
+          orgId,
+          years: result.years,
+          totalFetched: result.totalFetched,
+          totalApplied: result.totalApplied,
+        })
+        logger.info('Auto holiday sync completed', {
+          orgId,
+          years: result.years,
+          totalFetched: result.totalFetched,
+          totalApplied: result.totalApplied,
+        })
+      }
+    } catch (error) {
+      logger.error('Auto holiday sync failed', error)
+    }
+  }
+
+  autoHolidaySyncTimeout = setTimeout(async () => {
+    await run()
+    autoHolidaySyncInterval = setInterval(run, 24 * 60 * 60 * 1000)
   }, delay)
 }
 
@@ -2698,6 +3271,35 @@ module.exports = {
         runAt: z.string().optional(),
         lookbackDays: z.number().int().min(1).optional(),
       }).optional(),
+      holidayPolicy: z.object({
+        firstDayEnabled: z.boolean().optional(),
+        firstDayBaseHours: z.number().min(0).optional(),
+        overtimeAdds: z.boolean().optional(),
+        overtimeSource: z.enum(['approval', 'clock', 'both']).optional(),
+      }).optional(),
+      holidaySync: z.object({
+        source: z.enum(['holiday-cn']).optional(),
+        baseUrl: z.string().optional(),
+        years: z.array(z.number().int()).optional(),
+        addDayIndex: z.boolean().optional(),
+        dayIndexHolidays: z.array(z.string()).optional(),
+        dayIndexMaxDays: z.number().int().min(1).optional(),
+        dayIndexFormat: z.enum(['name-1', 'name第1天', 'name DAY1']).optional(),
+        overwrite: z.boolean().optional(),
+        auto: z.object({
+          enabled: z.boolean().optional(),
+          runAt: z.string().optional(),
+          timezone: z.string().optional(),
+        }).optional(),
+        lastRun: z.object({
+          ranAt: z.string().optional(),
+          success: z.boolean().optional(),
+          years: z.array(z.number().int()).optional(),
+          totalFetched: z.number().optional(),
+          totalApplied: z.number().optional(),
+          error: z.string().optional(),
+        }).optional(),
+      }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
       geoFence: z.object({
         lat: z.number(),
@@ -2747,6 +3349,16 @@ module.exports = {
       orgId: z.string().optional(),
     })
     const holidayUpdateSchema = holidayCreateSchema.partial()
+    const holidaySyncSchema = z.object({
+      source: z.enum(['holiday-cn']).optional(),
+      baseUrl: z.string().optional(),
+      years: z.array(z.number().int()).optional(),
+      addDayIndex: z.boolean().optional(),
+      dayIndexHolidays: z.array(z.string()).optional(),
+      dayIndexMaxDays: z.number().int().min(1).optional(),
+      dayIndexFormat: z.enum(['name-1', 'name第1天', 'name DAY1']).optional(),
+      overwrite: z.boolean().optional(),
+    })
 
     const leaveTypeCreateSchema = z.object({
       code: z.string().min(1),
@@ -5338,8 +5950,25 @@ module.exports = {
                 { sourceField: 'attendance_group', targetField: 'attendance_group', dataType: 'string' },
                 { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
                 { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+                { sourceField: '班次', targetField: 'shiftName', dataType: 'string' },
+                { sourceField: '出勤班次', targetField: 'shiftName', dataType: 'string' },
+                { sourceField: '部门', targetField: 'department', dataType: 'string' },
+                { sourceField: '职位', targetField: 'role', dataType: 'string' },
+                { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
+                { sourceField: '关联的审批单', targetField: 'attendance_approve', dataType: 'string' },
+                { sourceField: '关联的审批单', targetField: 'approvalSummary', dataType: 'string' },
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'datetime' },
+                { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'datetime' },
+                { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'datetime' },
+                { sourceField: '上班3打卡时间', targetField: 'clockIn3', dataType: 'datetime' },
+                { sourceField: '下班3打卡时间', targetField: 'clockOut3', dataType: 'datetime' },
                 { sourceField: 'department', targetField: 'department', dataType: 'string' },
                 { sourceField: 'role', targetField: 'role', dataType: 'string' },
+                { sourceField: '迟到分钟', targetField: 'lateMinutes', dataType: 'number' },
+                { sourceField: '早退分钟', targetField: 'earlyLeaveMinutes', dataType: 'number' },
+                { sourceField: '实出勤工时', targetField: 'workHours', dataType: 'number' },
+                { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'number' },
                 { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
                 { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
                 { sourceField: 'entryTime', targetField: 'entryTime', dataType: 'date' },
@@ -5403,11 +6032,6 @@ module.exports = {
                   name: 'holiday-resigned-zero',
                   when: { isHoliday: true, fieldEquals: { resign_on_or_before_work_date: true } },
                   then: { setWorkMinutes: 0, setStatus: 'off', addWarning: '离职日期早于/等于节假日，出勤设为0' },
-                },
-                {
-                  name: 'holiday-default-8h',
-                  when: { isHoliday: true, fieldEquals: { entry_on_or_before_work_date: true, resign_on_or_before_work_date: false } },
-                  then: { setWorkMinutes: 480, setStatus: 'adjusted', addWarning: '节假日默认8小时' },
                 },
                 {
                   name: 'single-rest-trip-overtime',
@@ -5935,6 +6559,7 @@ module.exports = {
           const ruleOverride = override
             ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
             : baseRule
+          const settings = await getSettings(db)
 
           const statusMap = parsed.data.statusMap ?? {}
           const preview = []
@@ -6035,6 +6660,27 @@ module.exports = {
 
             const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
             augmentFieldValuesWithDates(fieldValues, workDate)
+            const holidayMeta = resolveHolidayMeta(context.holiday)
+            if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+            if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+            fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+            const approvalSummary = valueFor('approvalSummary')
+              ?? valueFor('attendance_approve')
+              ?? valueFor('attendanceApprove')
+
+            const policyBaseMetrics = {
+              ...initialMetrics,
+              leaveMinutes: leaveMinutes ?? 0,
+              overtimeMinutes: overtimeMinutes ?? 0,
+            }
+            const holidayPolicyResult = applyHolidayPolicy({
+              settings,
+              holiday: context.holiday,
+              holidayMeta,
+              metrics: policyBaseMetrics,
+              approvalSummary,
+            })
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
               facts: {
@@ -6044,20 +6690,17 @@ module.exports = {
                 shiftName: context.rule?.name ?? null,
                 isHoliday: Boolean(context.holiday),
                 isWorkingDay: context.isWorkingDay,
+                holidayName: holidayMeta.name,
+                holidayDayIndex: holidayMeta.dayIndex,
+                holidayFirstDay: holidayMeta.isFirstDay,
               },
               fieldValues,
-              metrics: {
-                ...initialMetrics,
-                leaveMinutes: leaveMinutes ?? 0,
-                overtimeMinutes: overtimeMinutes ?? 0,
-              },
+              metrics: holidayPolicyResult.metrics,
+              options: { skipRules: resolvePolicySkipRules(settings) },
             })
             const effective = policyResult.metrics
             let engineResult = null
             if (engine) {
-              const approvalSummary = valueFor('approvalSummary')
-                ?? valueFor('attendance_approve')
-                ?? valueFor('attendanceApprove')
               const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
               const roleTags = Array.isArray(rawRoleTags)
                 ? rawRoleTags
@@ -6078,6 +6721,10 @@ module.exports = {
                     resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                     is_holiday: Boolean(context.holiday),
                     is_workday: context.isWorkingDay,
+                    holiday_name: holidayMeta.name ?? undefined,
+                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
+                    holiday_first_day: holidayMeta.isFirstDay,
+                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
                     actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
                   },
@@ -6116,7 +6763,7 @@ module.exports = {
               overtimeMinutes: finalMetrics.overtimeMinutes,
               status: finalMetrics.status,
               isWorkday: context.isWorkingDay,
-              warnings: [...policyResult.warnings, ...importWarnings],
+              warnings: [...holidayPolicyResult.warnings, ...policyResult.warnings, ...importWarnings],
               appliedPolicies: policyResult.appliedRules,
               userGroups: policyResult.userGroups,
               engine: engineResult
@@ -6239,6 +6886,7 @@ module.exports = {
           const ruleOverride = override
             ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
             : baseRule
+          const settings = await getSettings(db)
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
@@ -6354,6 +7002,27 @@ module.exports = {
 
               const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
               augmentFieldValuesWithDates(fieldValues, workDate)
+              const holidayMeta = resolveHolidayMeta(context.holiday)
+              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+              fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+              const approvalSummary = valueFor('approvalSummary')
+                ?? valueFor('attendance_approve')
+                ?? valueFor('attendanceApprove')
+
+              const policyBaseMetrics = {
+                ...initialMetrics,
+                leaveMinutes: leaveMinutes ?? 0,
+                overtimeMinutes: overtimeMinutes ?? 0,
+              }
+              const holidayPolicyResult = applyHolidayPolicy({
+                settings,
+                holiday: context.holiday,
+                holidayMeta,
+                metrics: policyBaseMetrics,
+                approvalSummary,
+              })
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
                 facts: {
@@ -6363,20 +7032,17 @@ module.exports = {
                   shiftName: context.rule?.name ?? null,
                   isHoliday: Boolean(context.holiday),
                   isWorkingDay: context.isWorkingDay,
+                  holidayName: holidayMeta.name,
+                  holidayDayIndex: holidayMeta.dayIndex,
+                  holidayFirstDay: holidayMeta.isFirstDay,
                 },
                 fieldValues,
-                metrics: {
-                  ...initialMetrics,
-                  leaveMinutes: leaveMinutes ?? 0,
-                  overtimeMinutes: overtimeMinutes ?? 0,
-                },
+                metrics: holidayPolicyResult.metrics,
+                options: { skipRules: resolvePolicySkipRules(settings) },
               })
               const effective = policyResult.metrics
               let engineResult = null
               if (engine) {
-                const approvalSummary = valueFor('approvalSummary')
-                  ?? valueFor('attendance_approve')
-                  ?? valueFor('attendanceApprove')
                 const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
                 const roleTags = Array.isArray(rawRoleTags)
                   ? rawRoleTags
@@ -6397,6 +7063,10 @@ module.exports = {
                     resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                     is_holiday: Boolean(context.holiday),
                     is_workday: context.isWorkingDay,
+                    holiday_name: holidayMeta.name ?? undefined,
+                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
+                    holiday_first_day: holidayMeta.isFirstDay,
+                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
                     actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
                   },
@@ -6429,11 +7099,12 @@ module.exports = {
                 ? finalMetrics.overtimeMinutes
                 : overtimeMinutes
 
+              const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
               let meta = null
-              if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+              if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
                 meta = {
                   policy: {
-                    warnings: policyResult.warnings,
+                    warnings: policyWarnings,
                     appliedRules: policyResult.appliedRules,
                     userGroups: policyResult.userGroups,
                   },
@@ -6642,6 +7313,7 @@ module.exports = {
           const ruleOverride = override
             ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
             : baseRule
+          const settings = await getSettings(db)
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
@@ -6733,6 +7405,27 @@ module.exports = {
 
               const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
               augmentFieldValuesWithDates(fieldValues, workDate)
+              const holidayMeta = resolveHolidayMeta(context.holiday)
+              if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+              if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+              fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+              const approvalSummary = valueFor('approvalSummary')
+                ?? valueFor('attendance_approve')
+                ?? valueFor('attendanceApprove')
+
+              const policyBaseMetrics = {
+                ...initialMetrics,
+                leaveMinutes: leaveMinutes ?? 0,
+                overtimeMinutes: overtimeMinutes ?? 0,
+              }
+              const holidayPolicyResult = applyHolidayPolicy({
+                settings,
+                holiday: context.holiday,
+                holidayMeta,
+                metrics: policyBaseMetrics,
+                approvalSummary,
+              })
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
                 facts: {
@@ -6742,20 +7435,17 @@ module.exports = {
                   shiftName: context.rule?.name ?? null,
                   isHoliday: Boolean(context.holiday),
                   isWorkingDay: context.isWorkingDay,
+                  holidayName: holidayMeta.name,
+                  holidayDayIndex: holidayMeta.dayIndex,
+                  holidayFirstDay: holidayMeta.isFirstDay,
                 },
                 fieldValues,
-                metrics: {
-                  ...initialMetrics,
-                  leaveMinutes: leaveMinutes ?? 0,
-                  overtimeMinutes: overtimeMinutes ?? 0,
-                },
+                metrics: holidayPolicyResult.metrics,
+                options: { skipRules: resolvePolicySkipRules(settings) },
               })
               const effective = policyResult.metrics
               let engineResult = null
               if (engine) {
-                const approvalSummary = valueFor('approvalSummary')
-                  ?? valueFor('attendance_approve')
-                  ?? valueFor('attendanceApprove')
                 const rawRoleTags = valueFor('roleTags') ?? valueFor('role_tags')
                 const roleTags = Array.isArray(rawRoleTags)
                   ? rawRoleTags
@@ -6776,6 +7466,10 @@ module.exports = {
                     resignTime: valueFor('resignTime') ?? valueFor('resign_time') ?? valueFor('离职时间'),
                     is_holiday: Boolean(context.holiday),
                     is_workday: context.isWorkingDay,
+                    holiday_name: holidayMeta.name ?? undefined,
+                    holiday_day_index: holidayMeta.dayIndex ?? undefined,
+                    holiday_first_day: holidayMeta.isFirstDay,
+                    holiday_policy_enabled: Boolean(settings?.holidayPolicy?.firstDayEnabled),
                     overtime_hours: Number.isFinite(effective.overtimeMinutes) ? effective.overtimeMinutes / 60 : undefined,
                     actual_hours: Number.isFinite(effective.workMinutes) ? effective.workMinutes / 60 : undefined,
                   },
@@ -6808,11 +7502,12 @@ module.exports = {
                 ? finalMetrics.overtimeMinutes
                 : overtimeMinutes
 
+              const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
               let meta = null
-              if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+              if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
                 meta = {
                   policy: {
-                    warnings: policyResult.warnings,
+                    warnings: policyWarnings,
                     appliedRules: policyResult.appliedRules,
                     userGroups: policyResult.userGroups,
                   },
@@ -7204,6 +7899,7 @@ module.exports = {
                 const ruleOverride = override
                   ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
                   : baseRule
+                const settings = await getSettings(db)
                 const statusMap = parsedImport.data.statusMap ?? {}
                 const results = []
                 const skippedRows = []
@@ -7315,6 +8011,27 @@ module.exports = {
 
                     const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
                     augmentFieldValuesWithDates(fieldValues, workDate)
+                    const holidayMeta = resolveHolidayMeta(context.holiday)
+                    if (holidayMeta.name) fieldValues.holiday_name = holidayMeta.name
+                    if (holidayMeta.dayIndex != null) fieldValues.holiday_day_index = holidayMeta.dayIndex
+                    fieldValues.holiday_first_day = holidayMeta.isFirstDay
+
+                    const approvalSummary = valueFor('approvalSummary')
+                      ?? valueFor('attendance_approve')
+                      ?? valueFor('attendanceApprove')
+
+                    const policyBaseMetrics = {
+                      ...initialMetrics,
+                      leaveMinutes: leaveMinutes ?? 0,
+                      overtimeMinutes: overtimeMinutes ?? 0,
+                    }
+                    const holidayPolicyResult = applyHolidayPolicy({
+                      settings,
+                      holiday: context.holiday,
+                      holidayMeta,
+                      metrics: policyBaseMetrics,
+                      approvalSummary,
+                    })
                     const policyResult = applyAttendancePolicies({
                       policies: ruleSetConfig?.policies,
                       facts: {
@@ -7324,13 +8041,13 @@ module.exports = {
                         shiftName: context.rule?.name ?? null,
                         isHoliday: Boolean(context.holiday),
                         isWorkingDay: context.isWorkingDay,
+                        holidayName: holidayMeta.name,
+                        holidayDayIndex: holidayMeta.dayIndex,
+                        holidayFirstDay: holidayMeta.isFirstDay,
                       },
                       fieldValues,
-                      metrics: {
-                        ...initialMetrics,
-                        leaveMinutes: leaveMinutes ?? 0,
-                        overtimeMinutes: overtimeMinutes ?? 0,
-                      },
+                      metrics: holidayPolicyResult.metrics,
+                      options: { skipRules: resolvePolicySkipRules(settings) },
                     })
                     const effective = policyResult.metrics
                     const baseMetrics = {
@@ -7346,11 +8063,12 @@ module.exports = {
                       ? finalMetrics.overtimeMinutes
                       : overtimeMinutes
 
+                    const policyWarnings = [...holidayPolicyResult.warnings, ...policyResult.warnings]
                     let meta = null
-                    if (policyResult.warnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
+                    if (policyWarnings.length || policyResult.appliedRules.length || policyResult.userGroups.length) {
                       meta = {
                         policy: {
-                          warnings: policyResult.warnings,
+                          warnings: policyWarnings,
                           appliedRules: policyResult.appliedRules,
                           userGroups: policyResult.userGroups,
                         },
@@ -8078,30 +8796,27 @@ module.exports = {
                 anchorDate: formatDateOnly(anchor),
                 index: i + 1,
               }
-              try {
-                const rows = await trx.query(
-                  `INSERT INTO attendance_payroll_cycles
-                   (id, org_id, template_id, name, start_date, end_date, status, metadata)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-                   RETURNING *`,
-                  [
-                    randomUUID(),
-                    orgId,
-                    resolvedTemplateId,
-                    name,
-                    window.startDate,
-                    window.endDate,
-                    status,
-                    JSON.stringify(metadata),
-                  ]
-                )
+              const rows = await trx.query(
+                `INSERT INTO attendance_payroll_cycles
+                 (id, org_id, template_id, name, start_date, end_date, status, metadata)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                 ON CONFLICT (org_id, start_date, end_date) DO NOTHING
+                 RETURNING *`,
+                [
+                  randomUUID(),
+                  orgId,
+                  resolvedTemplateId,
+                  name,
+                  window.startDate,
+                  window.endDate,
+                  status,
+                  JSON.stringify(metadata),
+                ]
+              )
+              if (rows.length) {
                 created.push(mapPayrollCycleRow(rows[0]))
-              } catch (error) {
-                if (error?.code === '23505') {
-                  skipped.push({ startDate: window.startDate, endDate: window.endDate })
-                  continue
-                }
-                throw error
+              } else {
+                skipped.push({ startDate: window.startDate, endDate: window.endDate })
               }
             }
           })
@@ -8934,6 +9649,71 @@ module.exports = {
 
     context.api.http.addRoute(
       'POST',
+      '/api/attendance/holidays/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = holidaySyncSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const settings = await getSettings(db)
+        const years = resolveHolidaySyncYears(settings, parsed.data)
+
+        try {
+          const { syncConfig, totalFetched, totalApplied, results, lastRun } = await performHolidaySync({
+            db,
+            logger,
+            orgId,
+            settings,
+            payload: parsed.data,
+          })
+
+          res.json({
+            ok: true,
+            data: {
+              source: syncConfig.source,
+              baseUrl: syncConfig.baseUrl,
+              years,
+              addDayIndex: syncConfig.addDayIndex,
+              dayIndexHolidays: syncConfig.dayIndexHolidays,
+              dayIndexMaxDays: syncConfig.dayIndexMaxDays,
+              dayIndexFormat: syncConfig.dayIndexFormat,
+              overwrite: syncConfig.overwrite,
+              totalFetched,
+              totalApplied,
+              results,
+              lastRun,
+            },
+          })
+        } catch (error) {
+          const lastRun = {
+            ranAt: new Date().toISOString(),
+            success: false,
+            years,
+            totalFetched: 0,
+            totalApplied: 0,
+            error: error instanceof Error ? error.message : 'Holiday sync failed',
+          }
+          try {
+            await saveSettings(db, {
+              ...settings,
+              holidaySync: {
+                ...(settings.holidaySync || {}),
+                lastRun,
+              },
+            })
+          } catch (persistError) {
+            logger.warn('Failed to persist holiday sync status', persistError)
+          }
+          logger.error('Attendance holiday sync failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to sync holidays' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
       '/api/attendance/holidays',
       withPermission('attendance:admin', async (req, res) => {
         const parsed = holidayCreateSchema.safeParse(req.body)
@@ -9110,6 +9890,7 @@ module.exports = {
           const merged = mergeSettings(current, parsed.data)
           const saved = await saveSettings(db, merged)
           scheduleAutoAbsence({ db, logger, emit: emitEvent })
+          scheduleHolidaySync({ db, logger, emit: emitEvent })
           emitEvent('attendance.settings.updated', {
             settings: saved,
           })
@@ -9222,6 +10003,7 @@ module.exports = {
     try {
       await getSettings(db)
       scheduleAutoAbsence({ db, logger, emit: emitEvent })
+      scheduleHolidaySync({ db, logger, emit: emitEvent })
     } catch (error) {
       logger.warn('Attendance settings preload failed', error)
     }
@@ -9231,5 +10013,6 @@ module.exports = {
 
   async deactivate() {
     clearAutoAbsenceSchedule()
+    clearHolidaySyncSchedule()
   }
 }

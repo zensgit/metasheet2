@@ -1,0 +1,63 @@
+# 考勤验收报告
+
+日期：2026-02-03
+
+## 环境
+- 服务：`metasheet-backend`（Docker）
+- 插件：`plugin-attendance`
+
+## 验收结果
+### 模板库快照
+- 已同步 `docs/attendance-template-library.snapshot.json`
+
+### 规则集 / 模板库
+- 默认 Rule Set 可读取并生效。
+- 组织模板库已写入，模板命中可在预览中看到。
+- 新增模板：缺卡提示、迟到/早退提示（Org 级）。
+
+### 计薪周期模板
+- 新建默认模板：CN Payroll 26-25（startDay 26 / endDay 25 / endMonthOffset 1）。
+- 生成接口 `POST /api/attendance/payroll-cycles/generate` 已修复：
+  - created：2026-02-26~2026-03-25、2026-03-26~2026-04-25
+  - skipped：2026-01-26~2026-02-25（已存在）
+
+### CSV 预览（全量）
+- Rows：11,966
+- 状态统计：off 3,474；early_leave 6,770；absent 1,262；late_early 20；normal 244；partial 146；adjusted 49；late 1。
+- Top rules：trip-under-8h 297；security-default-8h 248；missing-card-warning 178；late-early-warning 113；leave-but-punched 50；overtime-approval-no-punch 30；trip-overtime-conflict 30；driver-default-8h 22；single-rest-trip-overtime 4。
+- 新增异常提示命中：
+  - missing-card-warning 178
+  - late-early-warning 113
+
+### CSV 预览（司机）
+- Rows：31
+- 状态统计：off 9；early_leave 22
+- Top rules：driver-default-8h 22
+
+### CSV 预览（保安）
+- Rows：248
+- 状态统计：off 72；early_leave 170；absent 3；partial 2；normal 1
+- Top rules：security-default-8h 248
+
+### CSV 预览（司机 + 保安 + 单休车间）
+- Rows：6,789
+- 状态统计：off 1,971；early_leave 4,464；absent 349；partial 2；normal 1；late_early 2。
+- Top rules：security-default-8h 248；trip-under-8h 186；leave-but-punched 25；driver-default-8h 22；single-rest-trip-overtime 4。
+
+### 节假日首日策略（新增）
+- 配置项：首日基准工时 / 叠加加班 / 加班来源（审批/打卡/两者）。
+- 首日识别：节假日名称包含“春节-1 / 第1天 / DAY1”。
+- 状态：待节假日样本回归（未在本次 CSV 预览中验证）。
+
+### 节假日同步（新增）
+- 接口：`POST /api/attendance/holidays/sync`
+- 数据源：holiday-cn（官方节假日参考）
+- 状态：已执行（2026 年写入 39 条；2027 年暂无数据）。
+- 编号策略：支持按节日白名单/最大天数/格式配置。
+- 自动同步：支持每日定时同步（默认可配），用于跟进数据发布。
+- 同步结果：UI 可查看上次同步时间/结果（成功/失败）。
+- 时区：自动同步时间支持时区配置（例如 Asia/Shanghai）。
+
+## 结论
+- 司机/保安规则命中一致，未发现 warnings。
+- 预览统计稳定，规则改动后结果可回归确认。

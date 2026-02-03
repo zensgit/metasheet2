@@ -1,0 +1,25 @@
+{
+  "templates": [
+    {
+      "name": "节假日首日基准工时",
+      "description": "节假日首日基础工时模板（Holiday Policy 关闭时生效）",
+      "category": "system",
+      "editable": true,
+      "rules": [
+        {
+          "id": "holiday-default-8h",
+          "when": {
+            "is_holiday": true,
+            "holiday_first_day": true,
+            "holiday_policy_enabled": false
+          },
+          "then": {
+            "actual_hours": 8,
+            "required_hours": 8,
+            "warning": "节假日首日按8小时"
+          }
+        }
+      ]
+    }
+  ]
+}

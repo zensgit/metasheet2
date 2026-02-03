@@ -356,6 +356,47 @@
                     min="1"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
+                  <span>Holiday first-day base hours</span>
+                  <input
+                    id="attendance-holiday-first-day-enabled"
+                    name="holidayFirstDayEnabled"
+                    v-model="settingsForm.holidayFirstDayEnabled"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-first-day-hours">
+                  <span>First-day base hours</span>
+                  <input
+                    id="attendance-holiday-first-day-hours"
+                    name="holidayFirstDayBaseHours"
+                    v-model.number="settingsForm.holidayFirstDayBaseHours"
+                    type="number"
+                    min="0"
+                    step="0.5"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-overtime-adds">
+                  <span>Overtime adds on holiday</span>
+                  <input
+                    id="attendance-holiday-overtime-adds"
+                    name="holidayOvertimeAdds"
+                    v-model="settingsForm.holidayOvertimeAdds"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-overtime-source">
+                  <span>Overtime source</span>
+                  <select
+                    id="attendance-holiday-overtime-source"
+                    name="holidayOvertimeSource"
+                    v-model="settingsForm.holidayOvertimeSource"
+                  >
+                    <option value="approval">Approval</option>
+                    <option value="clock">Clock</option>
+                    <option value="both">Both</option>
+                  </select>
+                </label>
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>Min punch interval (min)</span>
                   <input
@@ -410,6 +451,145 @@
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? 'Saving...' : 'Save settings' }}
               </button>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Holiday Sync</h4>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
+                    {{ holidaySyncLoading ? 'Syncing...' : 'Sync now' }}
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    :disabled="holidaySyncLoading"
+                    @click="syncHolidaysForYears([new Date().getFullYear()])"
+                  >
+                    Sync current year
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    :disabled="holidaySyncLoading"
+                    @click="syncHolidaysForYears([new Date().getFullYear() + 1])"
+                  >
+                    Sync next year
+                  </button>
+                </div>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-base-url">
+                  <span>Holiday source URL</span>
+                  <input
+                    id="attendance-holiday-sync-base-url"
+                    name="holidaySyncBaseUrl"
+                    v-model="settingsForm.holidaySyncBaseUrl"
+                    type="text"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-years">
+                  <span>Years (comma separated)</span>
+                  <input
+                    id="attendance-holiday-sync-years"
+                    name="holidaySyncYears"
+                    v-model="settingsForm.holidaySyncYears"
+                    type="text"
+                    placeholder="2025,2026"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-auto">
+                  <span>Auto sync (daily)</span>
+                  <input
+                    id="attendance-holiday-sync-auto"
+                    name="holidaySyncAutoEnabled"
+                    v-model="settingsForm.holidaySyncAutoEnabled"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-auto-run">
+                  <span>Auto sync time</span>
+                  <input
+                    id="attendance-holiday-sync-auto-run"
+                    name="holidaySyncAutoRunAt"
+                    v-model="settingsForm.holidaySyncAutoRunAt"
+                    type="time"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
+                  <span>Auto sync timezone</span>
+                  <input
+                    id="attendance-holiday-sync-auto-tz"
+                    name="holidaySyncAutoTimezone"
+                    v-model="settingsForm.holidaySyncAutoTimezone"
+                    type="text"
+                    placeholder="Asia/Shanghai"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
+                  <span>Append day index</span>
+                  <input
+                    id="attendance-holiday-sync-index"
+                    name="holidaySyncAddDayIndex"
+                    v-model="settingsForm.holidaySyncAddDayIndex"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-index-holidays">
+                  <span>Index holidays</span>
+                  <input
+                    id="attendance-holiday-sync-index-holidays"
+                    name="holidaySyncDayIndexHolidays"
+                    v-model="settingsForm.holidaySyncDayIndexHolidays"
+                    type="text"
+                    placeholder="春节,国庆"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-index-max">
+                  <span>Max index days</span>
+                  <input
+                    id="attendance-holiday-sync-index-max"
+                    name="holidaySyncDayIndexMaxDays"
+                    v-model.number="settingsForm.holidaySyncDayIndexMaxDays"
+                    type="number"
+                    min="1"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-index-format">
+                  <span>Index format</span>
+                  <select
+                    id="attendance-holiday-sync-index-format"
+                    name="holidaySyncDayIndexFormat"
+                    v-model="settingsForm.holidaySyncDayIndexFormat"
+                  >
+                    <option value="name-1">name-1</option>
+                    <option value="name第1天">name第1天</option>
+                    <option value="name DAY1">name DAY1</option>
+                  </select>
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-overwrite">
+                  <span>Overwrite existing</span>
+                  <input
+                    id="attendance-holiday-sync-overwrite"
+                    name="holidaySyncOverwrite"
+                    v-model="settingsForm.holidaySyncOverwrite"
+                    type="checkbox"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-meta">
+                <strong>Last sync</strong>
+                <span v-if="holidaySyncLastRun?.ranAt">
+                  {{ new Date(holidaySyncLastRun.ranAt).toLocaleString() }}
+                  · {{ holidaySyncLastRun.success ? 'success' : 'failed' }}
+                  · {{ holidaySyncLastRun.totalApplied ?? 0 }} applied / {{ holidaySyncLastRun.totalFetched ?? 0 }} fetched
+                  <span v-if="holidaySyncLastRun.years && holidaySyncLastRun.years.length">
+                    · {{ holidaySyncLastRun.years.join(',') }}
+                  </span>
+                  <span v-if="holidaySyncLastRun.error">
+                    · {{ holidaySyncLastRun.error }}
+                  </span>
+                </span>
+                <span v-else>--</span>
+              </div>
             </div>
 
             <div class="attendance__admin-section">
@@ -559,246 +739,6 @@
                   />
                 </label>
               </div>
-              <div class="attendance__template-panel">
-                <div class="attendance__template-group">
-                  <div class="attendance__template-header">
-                    <span>System templates</span>
-                    <span class="attendance__tag attendance__tag--locked">Locked</span>
-                  </div>
-                  <div v-if="ruleSetSystemTemplates.length === 0" class="attendance__empty">
-                    No system templates detected.
-                  </div>
-                  <ul v-else class="attendance__template-list">
-                    <li
-                      v-for="tpl in ruleSetSystemTemplates"
-                      :key="tpl.name"
-                      class="attendance__template-item"
-                      :class="{ 'attendance__template-item--active': tpl.name === selectedSystemTemplateName }"
-                    >
-                      <div>
-                        <div class="attendance__template-name">{{ tpl.name }}</div>
-                        <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
-                      </div>
-                      <button class="attendance__btn attendance__btn--sm" type="button" @click="selectSystemTemplate(tpl)">
-                        Use
-                      </button>
-                    </li>
-                  </ul>
-                </div>
-                <div class="attendance__template-group">
-                  <div class="attendance__template-header">
-                    <span>Custom templates</span>
-                    <div class="attendance__template-header-actions">
-                      <span class="attendance__tag attendance__tag--editable">Editable</span>
-                      <button class="attendance__btn attendance__btn--sm" type="button" @click="createCustomTemplate">
-                        New
-                      </button>
-                    </div>
-                  </div>
-                  <div v-if="ruleSetCustomTemplates.length === 0" class="attendance__empty">
-                    No custom templates yet.
-                  </div>
-                  <ul v-else class="attendance__template-list">
-                    <li v-for="tpl in ruleSetCustomTemplates" :key="tpl.name" class="attendance__template-item">
-                      <div class="attendance__template-name">{{ tpl.name }}</div>
-                      <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
-                      <button class="attendance__btn attendance__btn--sm" type="button" @click="openCustomTemplateEditor(tpl)">
-                        Edit rules
-                      </button>
-                    </li>
-                  </ul>
-                </div>
-                <div class="attendance__template-group">
-                  <div class="attendance__template-header">
-                    <span>Template library</span>
-                    <div class="attendance__template-header-actions">
-                      <button class="attendance__btn attendance__btn--sm" type="button" @click="loadTemplateLibrary">
-                        {{ templateLibraryLoading ? 'Loading...' : 'Reload' }}
-                      </button>
-                    </div>
-                  </div>
-                  <div v-if="templateLibraryLoading" class="attendance__empty">Loading library...</div>
-                  <div v-else-if="libraryTemplates.length === 0" class="attendance__empty">
-                    No library templates yet.
-                  </div>
-                  <ul v-else class="attendance__template-list">
-                    <li v-for="tpl in libraryTemplates" :key="tpl.name" class="attendance__template-item">
-                      <div>
-                        <div class="attendance__template-name">{{ tpl.name }}</div>
-                        <div class="attendance__template-meta">Rules: {{ tpl.rules?.length ?? 0 }}</div>
-                      </div>
-                      <div class="attendance__template-actions">
-                        <button class="attendance__btn attendance__btn--sm" type="button" @click="applyLibraryTemplate(tpl)">
-                          Use
-                        </button>
-                        <button class="attendance__btn attendance__btn--danger attendance__btn--sm" type="button" @click="removeLibraryTemplate(tpl.name)">
-                          Delete
-                        </button>
-                      </div>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-              <div class="attendance__template-hint">
-                System templates are locked. Custom templates can be promoted into the shared library for reuse.
-              </div>
-              <div v-if="selectedSystemTemplate" class="attendance__template-params">
-                <div class="attendance__template-editor-header">
-                  <div>
-                    <div class="attendance__template-editor-title">Template parameters</div>
-                    <div class="attendance__template-editor-name">{{ selectedSystemTemplate.name }}</div>
-                  </div>
-                  <button class="attendance__btn attendance__btn--sm" type="button" @click="resetTemplateParams(selectedSystemTemplate)">
-                    Reset
-                  </button>
-                </div>
-                <input
-                  ref="templateParamFileInput"
-                  type="file"
-                  accept="application/json"
-                  class="attendance__file-input"
-                  @change="handleTemplateParamFile"
-                />
-                <div class="attendance__admin-grid">
-                  <div v-if="!selectedSystemTemplate.params || selectedSystemTemplate.params.length === 0" class="attendance__empty">
-                    No parameters for this template.
-                  </div>
-                  <template v-else>
-                    <label
-                      v-for="param in selectedSystemTemplate.params"
-                      :key="param.key"
-                      class="attendance__field"
-                      :for="`attendance-template-param-${param.key}`"
-                    >
-                      <span>{{ param.label }}</span>
-                      <input
-                        v-if="param.type === 'number'"
-                        :id="`attendance-template-param-${param.key}`"
-                        v-model.number="templateParamValues[param.key]"
-                        type="number"
-                      />
-                      <input
-                        v-else-if="param.type === 'boolean'"
-                        :id="`attendance-template-param-${param.key}`"
-                        v-model="templateParamValues[param.key]"
-                        type="checkbox"
-                      />
-                      <textarea
-                        v-else-if="param.type === 'stringArray'"
-                        :id="`attendance-template-param-${param.key}`"
-                        v-model="templateParamValues[param.key]"
-                        rows="2"
-                        placeholder="Comma or newline separated"
-                      />
-                      <input
-                        v-else
-                        :id="`attendance-template-param-${param.key}`"
-                        v-model="templateParamValues[param.key]"
-                        type="text"
-                      />
-                      <small v-if="param.description" class="attendance__field-hint">{{ param.description }}</small>
-                    </label>
-                  </template>
-                </div>
-                <label class="attendance__field attendance__field--full" for="attendance-template-param-json">
-                  <span>Params JSON</span>
-                  <textarea
-                    id="attendance-template-param-json"
-                    v-model="templateParamJson"
-                    rows="4"
-                    placeholder='{"template":"...","params":{"lateAfter":"09:10"}}'
-                  />
-                </label>
-                <div class="attendance__admin-actions">
-                  <button class="attendance__btn attendance__btn--primary" type="button" @click="applySystemTemplate">
-                    Create custom template
-                  </button>
-                  <button class="attendance__btn" type="button" @click="exportTemplateParams">
-                    Export params
-                  </button>
-                  <button class="attendance__btn" type="button" @click="exportTemplateParamsFile">
-                    Export file
-                  </button>
-                  <button class="attendance__btn" type="button" @click="importTemplateParams">
-                    Import params
-                  </button>
-                  <button class="attendance__btn" type="button" @click="triggerTemplateParamFile">
-                    Import file
-                  </button>
-                </div>
-              </div>
-              <div v-if="customTemplateEditingName" class="attendance__template-editor">
-                <div class="attendance__template-editor-header">
-                  <div>
-                    <div class="attendance__template-editor-title">Editing custom template</div>
-                    <div class="attendance__template-editor-name">{{ customTemplateEditingName }}</div>
-                  </div>
-                  <button class="attendance__btn attendance__btn--sm" type="button" @click="closeCustomTemplateEditor">
-                    Close
-                  </button>
-                </div>
-                <div class="attendance__admin-grid">
-                  <label class="attendance__field" for="attendance-custom-template-description">
-                    <span>Description</span>
-                    <input
-                      id="attendance-custom-template-description"
-                      v-model="customTemplateDraftDescription"
-                      type="text"
-                      placeholder="Optional description"
-                    />
-                  </label>
-                </div>
-                <div class="attendance__template-rules">
-                  <div v-if="customTemplateDraftRules.length === 0" class="attendance__empty">
-                    No rules yet. Add your first rule below.
-                  </div>
-                  <div v-for="(rule, index) in customTemplateDraftRules" :key="rule.key" class="attendance__template-rule">
-                    <label class="attendance__field" :for="`attendance-custom-rule-id-${rule.key}`">
-                      <span>Rule ID</span>
-                      <input :id="`attendance-custom-rule-id-${rule.key}`" v-model="rule.id" type="text" />
-                    </label>
-                    <label class="attendance__field attendance__field--full" :for="`attendance-custom-rule-when-${rule.key}`">
-                      <span>When (JSON)</span>
-                      <textarea
-                        :id="`attendance-custom-rule-when-${rule.key}`"
-                        v-model="rule.whenText"
-                        rows="4"
-                        placeholder='{\"clockIn1_exists\": true}'
-                      />
-                    </label>
-                    <label class="attendance__field attendance__field--full" :for="`attendance-custom-rule-then-${rule.key}`">
-                      <span>Then (JSON)</span>
-                      <textarea
-                        :id="`attendance-custom-rule-then-${rule.key}`"
-                        v-model="rule.thenText"
-                        rows="4"
-                        placeholder='{\"warning\": \"...\"}'
-                      />
-                    </label>
-                    <div class="attendance__template-rule-actions">
-                      <button
-                        class="attendance__btn attendance__btn--danger attendance__btn--sm"
-                        type="button"
-                        @click="removeCustomRule(index)"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div class="attendance__admin-actions">
-                  <button class="attendance__btn" type="button" @click="addCustomRule">Add rule</button>
-                  <button class="attendance__btn" type="button" @click="insertCustomRuleSamples">
-                    Insert examples
-                  </button>
-                  <button class="attendance__btn attendance__btn--primary" type="button" @click="saveCustomTemplate">
-                    Save template
-                  </button>
-                  <button class="attendance__btn" type="button" @click="saveCustomTemplateToLibrary">
-                    Save to library
-                  </button>
-                </div>
-              </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
                   {{ ruleSetSaving ? 'Saving...' : ruleSetEditingId ? 'Update rule set' : 'Create rule set' }}
@@ -843,133 +783,6 @@
                   </tbody>
                 </table>
               </div>
-            </div>
-
-            <div class="attendance__admin-section">
-              <div class="attendance__admin-section-header">
-                <h4>Rule Preview (Engine)</h4>
-                <button class="attendance__btn" :disabled="rulePreviewLoading" @click="runRulePreview">
-                  {{ rulePreviewLoading ? 'Running...' : 'Run preview' }}
-                </button>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-preview-rule-set">
-                  <span>Rule set</span>
-                  <select
-                    id="attendance-preview-rule-set"
-                    v-model="rulePreviewForm.ruleSetId"
-                    :disabled="ruleSets.length === 0"
-                  >
-                    <option value="">(Optional) Use default rule</option>
-                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
-                      {{ item.name }}
-                    </option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-preview-user">
-                  <span>User ID</span>
-                  <input
-                    id="attendance-preview-user"
-                    v-model="rulePreviewForm.userId"
-                    type="text"
-                    placeholder="Required"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-preview-work-date">
-                  <span>Work date</span>
-                  <input id="attendance-preview-work-date" v-model="rulePreviewForm.workDate" type="date" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-clock-in">
-                  <span>Clock in</span>
-                  <input id="attendance-preview-clock-in" v-model="rulePreviewForm.clockInAt" type="time" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-clock-out">
-                  <span>Clock out</span>
-                  <input id="attendance-preview-clock-out" v-model="rulePreviewForm.clockOutAt" type="time" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-shift">
-                  <span>Shift name</span>
-                  <input id="attendance-preview-shift" v-model="rulePreviewForm.shiftName" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-group">
-                  <span>Attendance group</span>
-                  <input id="attendance-preview-group" v-model="rulePreviewForm.attendanceGroup" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-role-tags">
-                  <span>Role tags</span>
-                  <input
-                    id="attendance-preview-role-tags"
-                    v-model="rulePreviewForm.roleTags"
-                    type="text"
-                    placeholder="security,driver"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-preview-dept">
-                  <span>Department</span>
-                  <input id="attendance-preview-dept" v-model="rulePreviewForm.department" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-exception">
-                  <span>Exception reason</span>
-                  <input id="attendance-preview-exception" v-model="rulePreviewForm.exceptionReason" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-work-hours">
-                  <span>Actual hours</span>
-                  <input id="attendance-preview-work-hours" v-model="rulePreviewForm.actualHours" type="number" min="0" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-overtime">
-                  <span>Overtime hours</span>
-                  <input id="attendance-preview-overtime" v-model="rulePreviewForm.overtimeHours" type="number" min="0" />
-                </label>
-                <label class="attendance__field" for="attendance-preview-leave">
-                  <span>Leave hours</span>
-                  <input id="attendance-preview-leave" v-model="rulePreviewForm.leaveHours" type="number" min="0" />
-                </label>
-                <label class="attendance__field attendance__field--checkbox">
-                  <span>Use current config</span>
-                  <input v-model="rulePreviewForm.useCurrentConfig" type="checkbox" />
-                </label>
-              </div>
-              <div v-if="rulePreviewResult" class="attendance__preview-card">
-                <div class="attendance__preview-grid">
-                  <div>
-                    <div class="attendance__preview-label">Status</div>
-                    <div>{{ formatStatus(rulePreviewResult.status) }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Work minutes</div>
-                    <div>{{ rulePreviewResult.workMinutes }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Late minutes</div>
-                    <div>{{ rulePreviewResult.lateMinutes }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Early leave</div>
-                    <div>{{ rulePreviewResult.earlyLeaveMinutes }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Leave minutes</div>
-                    <div>{{ rulePreviewResult.leaveMinutes ?? 0 }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Overtime minutes</div>
-                    <div>{{ rulePreviewResult.overtimeMinutes ?? 0 }}</div>
-                  </div>
-                </div>
-                <div v-if="rulePreviewResult.engine" class="attendance__preview-engine">
-                  <div class="attendance__preview-label">Applied rules</div>
-                  <div>{{ formatList(rulePreviewResult.engine.appliedRules) }}</div>
-                  <div class="attendance__preview-label">Warnings</div>
-                  <div>{{ formatList(rulePreviewResult.engine.warnings) }}</div>
-                  <div class="attendance__preview-label">Reasons</div>
-                  <div>{{ formatList(rulePreviewResult.engine.reasons) }}</div>
-                  <div class="attendance__preview-label">Overrides</div>
-                  <pre class="attendance__preview-json">{{ formatJson(rulePreviewResult.engine.overrides) }}</pre>
-                  <div class="attendance__preview-label">Base metrics</div>
-                  <pre class="attendance__preview-json">{{ formatJson(rulePreviewResult.engine.base) }}</pre>
-                </div>
-              </div>
-              <div v-else class="attendance__empty">No preview run yet.</div>
             </div>
 
             <div class="attendance__admin-section">
@@ -1071,9 +884,6 @@
                     rows="6"
                     placeholder='{\"source\":\"dingtalk\",\"userId\":\"...\",\"columns\":[],\"data\":{}}'
                   />
-                  <small class="attendance__field-hint">
-                    userMap profile fields supported: attendanceGroup, department, role, roleTags, entryTime, resignTime.
-                  </small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
@@ -1098,7 +908,6 @@
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>User</th>
                       <th>Work date</th>
                       <th>Work minutes</th>
                       <th>Late</th>
@@ -1109,8 +918,7 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in importPreview" :key="`${item.userId}::${item.workDate}`">
-                      <td>{{ formatShortId(item.userId) }}</td>
+                    <tr v-for="item in importPreview" :key="item.workDate">
                       <td>{{ item.workDate }}</td>
                       <td>{{ item.workMinutes }}</td>
                       <td>{{ item.lateMinutes }}</td>
@@ -1121,275 +929,6 @@
                     </tr>
                   </tbody>
                 </table>
-              </div>
-
-              <div class="attendance__requests-header">
-                <h4>Import Batches</h4>
-                <button class="attendance__btn" :disabled="importBatchesLoading" @click="loadImportBatches(importBatchesPage)">
-                  {{ importBatchesLoading ? 'Loading...' : 'Reload' }}
-                </button>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-import-batch-status">
-                  <span>Status</span>
-                  <select id="attendance-import-batch-status" v-model="importBatchStatusFilter">
-                    <option value="all">All</option>
-                    <option value="committed">committed</option>
-                    <option value="rolled_back">rolled_back</option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-import-batch-search">
-                  <span>Search</span>
-                  <input
-                    id="attendance-import-batch-search"
-                    v-model="importBatchSearch"
-                    type="text"
-                    placeholder="Batch ID / source / rule set"
-                  />
-                </label>
-              </div>
-              <div v-if="filteredImportBatches.length === 0" class="attendance__empty">No import batches.</div>
-              <div v-else class="attendance__table-wrapper">
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>Batch</th>
-                      <th>Status</th>
-                      <th>Rows</th>
-                      <th>Source</th>
-                      <th>Rule set</th>
-                      <th>Created</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="batch in filteredImportBatches" :key="batch.id">
-                      <td>{{ formatShortId(batch.id) }}</td>
-                      <td>
-                        <span class="attendance__status-chip" :class="`attendance__status-chip--${batch.status}`">
-                          {{ batch.status }}
-                        </span>
-                      </td>
-                      <td>{{ batch.rowCount }}</td>
-                      <td>{{ batch.source ?? '--' }}</td>
-                      <td>{{ formatShortId(batch.ruleSetId) }}</td>
-                      <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
-                      <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="toggleImportBatch(batch.id)">
-                          {{ selectedImportBatchId === batch.id ? 'Hide items' : 'View items' }}
-                        </button>
-                        <button
-                          class="attendance__btn attendance__btn--danger"
-                          :disabled="batch.status === 'rolled_back'"
-                          @click="rollbackImportBatch(batch.id)"
-                        >
-                          Rollback
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <div class="attendance__pagination" v-if="importBatchesTotalPages > 1">
-                <button class="attendance__btn" :disabled="importBatchesPage <= 1 || importBatchesLoading" @click="loadImportBatches(importBatchesPage - 1)">
-                  Prev
-                </button>
-                <span>Page {{ importBatchesPage }} / {{ importBatchesTotalPages }}</span>
-                <button
-                  class="attendance__btn"
-                  :disabled="importBatchesPage >= importBatchesTotalPages || importBatchesLoading"
-                  @click="loadImportBatches(importBatchesPage + 1)"
-                >
-                  Next
-                </button>
-              </div>
-
-              <div v-if="selectedImportBatchId" class="attendance__import-items">
-                <div class="attendance__requests-header">
-                  <h4>Batch Items</h4>
-                  <button
-                    class="attendance__btn"
-                    :disabled="importBatchItemsLoading"
-                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage)"
-                  >
-                    {{ importBatchItemsLoading ? 'Loading...' : 'Reload items' }}
-                  </button>
-                </div>
-                <div v-if="importBatchItems.length === 0" class="attendance__empty">No items for this batch.</div>
-                <div v-else class="attendance__table-wrapper">
-                  <table class="attendance__table">
-                    <thead>
-                      <tr>
-                        <th>User</th>
-                        <th>Work date</th>
-                        <th>Record</th>
-                        <th>Created</th>
-                        <th>Snapshot</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="item in importBatchItems" :key="item.id">
-                        <td>{{ formatShortId(item.userId) }}</td>
-                        <td>{{ item.workDate ?? '--' }}</td>
-                        <td>{{ formatShortId(item.recordId) }}</td>
-                        <td>{{ formatDateTime(item.createdAt ?? null) }}</td>
-                        <td class="attendance__table-actions">
-                          <button class="attendance__btn" @click="toggleImportItemSnapshot(item.id)">
-                            {{ selectedImportItemId === item.id ? 'Hide' : 'View' }}
-                          </button>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div class="attendance__pagination" v-if="importBatchItemsTotalPages > 1">
-                  <button
-                    class="attendance__btn"
-                    :disabled="importBatchItemsPage <= 1 || importBatchItemsLoading"
-                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage - 1)"
-                  >
-                    Prev
-                  </button>
-                  <span>Page {{ importBatchItemsPage }} / {{ importBatchItemsTotalPages }}</span>
-                  <button
-                    class="attendance__btn"
-                    :disabled="importBatchItemsPage >= importBatchItemsTotalPages || importBatchItemsLoading"
-                    @click="loadImportBatchItems(selectedImportBatchId, importBatchItemsPage + 1)"
-                  >
-                    Next
-                  </button>
-                </div>
-                <div v-if="selectedImportItemId" class="attendance__preview-engine">
-                  <div class="attendance__preview-label">Preview snapshot</div>
-                  <div class="attendance__admin-actions">
-                    <button class="attendance__btn" type="button" @click="copyImportItemSnapshot">Copy JSON</button>
-                    <button class="attendance__btn" type="button" @click="downloadImportItemSnapshot">Download JSON</button>
-                  </div>
-                  <pre class="attendance__preview-json">{{ formatJson(selectedImportItemSnapshot) }}</pre>
-                </div>
-              </div>
-            </div>
-
-            <div class="attendance__admin-section">
-              <div class="attendance__admin-section-header">
-                <h4>Import Reconcile</h4>
-                <button class="attendance__btn" :disabled="reconcileLoading" @click="runReconcile">
-                  {{ reconcileLoading ? 'Reconciling...' : 'Run reconcile' }}
-                </button>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-reconcile-rule-set">
-                  <span>Rule set</span>
-                  <select
-                    id="attendance-reconcile-rule-set"
-                    v-model="reconcileForm.ruleSetId"
-                    :disabled="ruleSets.length === 0"
-                  >
-                    <option value="">(Optional) Use default rule</option>
-                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
-                      {{ item.name }}
-                    </option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-reconcile-timezone">
-                  <span>Timezone</span>
-                  <input
-                    id="attendance-reconcile-timezone"
-                    v-model="reconcileForm.timezone"
-                    type="text"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-reconcile-config">
-                  <span>Use current rule set config</span>
-                  <input
-                    id="attendance-reconcile-config"
-                    v-model="reconcileForm.useCurrentConfig"
-                    type="checkbox"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--full" for="attendance-reconcile-entries">
-                  <span>Entries payload (JSON)</span>
-                  <textarea
-                    id="attendance-reconcile-entries"
-                    v-model="reconcileForm.entriesPayload"
-                    rows="6"
-                    placeholder='{"source":"dingtalk_csv","entries":[...]}'
-                  />
-                </label>
-                <label class="attendance__field attendance__field--full" for="attendance-reconcile-rows">
-                  <span>Rows payload (JSON)</span>
-                  <textarea
-                    id="attendance-reconcile-rows"
-                    v-model="reconcileForm.rowsPayload"
-                    rows="6"
-                    placeholder='{"source":"dingtalk_csv","rows":[...]}'
-                  />
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button class="attendance__btn" :disabled="reconcileLoading" @click="runReconcile">
-                  {{ reconcileLoading ? 'Reconciling...' : 'Reconcile' }}
-                </button>
-                <button class="attendance__btn" :disabled="reconcileLoading" @click="clearReconcile">
-                  Clear
-                </button>
-                <button class="attendance__btn" :disabled="!reconcileResult" @click="exportReconcileJson">
-                  Export JSON
-                </button>
-                <button class="attendance__btn" :disabled="!reconcileResult" @click="exportReconcileCsv">
-                  Export CSV
-                </button>
-              </div>
-              <div v-if="!reconcileResult" class="attendance__empty">No reconcile data.</div>
-              <div v-else class="attendance__preview-card">
-                <div class="attendance__preview-grid">
-                  <div>
-                    <div class="attendance__preview-label">Entries items</div>
-                    <div>{{ reconcileResult.entriesTotal }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Rows items</div>
-                    <div>{{ reconcileResult.rowsTotal }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Matched</div>
-                    <div>{{ reconcileResult.matched }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Mismatched</div>
-                    <div>{{ reconcileResult.mismatched }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Missing in entries</div>
-                    <div>{{ reconcileResult.missingInEntries }}</div>
-                  </div>
-                  <div>
-                    <div class="attendance__preview-label">Missing in rows</div>
-                    <div>{{ reconcileResult.missingInRows }}</div>
-                  </div>
-                </div>
-                <div class="attendance__preview-label">First 50 diffs</div>
-                <div v-if="reconcileResult.diffs.length === 0" class="attendance__empty">
-                  No differences found.
-                </div>
-                <div v-else class="attendance__table-wrapper">
-                  <table class="attendance__table">
-                    <thead>
-                      <tr>
-                        <th>User ID</th>
-                        <th>Work date</th>
-                        <th>Diffs</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="diff in reconcileResult.diffs.slice(0, 50)" :key="diff.key">
-                        <td>{{ diff.userId }}</td>
-                        <td>{{ diff.workDate }}</td>
-                        <td><pre class="attendance__preview-json">{{ formatJson(diff.differences) }}</pre></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
               </div>
             </div>
 
@@ -1625,69 +1164,6 @@
                   @click="resetPayrollCycleForm"
                 >
                   Cancel edit
-                </button>
-              </div>
-              <div class="attendance__admin-divider" />
-              <div class="attendance__admin-section-header attendance__admin-section-header--sub">
-                <h5>Generate cycles</h5>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-payroll-generate-template">
-                  <span>Template</span>
-                  <select
-                    id="attendance-payroll-generate-template"
-                    v-model="payrollGenerateForm.templateId"
-                    :disabled="payrollTemplates.length === 0"
-                  >
-                    <option value="">Default template</option>
-                    <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
-                      {{ item.name }}
-                    </option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-payroll-generate-anchor">
-                  <span>Anchor date</span>
-                  <input
-                    id="attendance-payroll-generate-anchor"
-                    v-model="payrollGenerateForm.anchorDate"
-                    type="date"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-payroll-generate-count">
-                  <span>Count (months)</span>
-                  <input
-                    id="attendance-payroll-generate-count"
-                    v-model.number="payrollGenerateForm.count"
-                    type="number"
-                    min="1"
-                    max="24"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-payroll-generate-status">
-                  <span>Status</span>
-                  <select id="attendance-payroll-generate-status" v-model="payrollGenerateForm.status">
-                    <option value="open">Open</option>
-                    <option value="closed">Closed</option>
-                    <option value="archived">Archived</option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-payroll-generate-prefix">
-                  <span>Name prefix</span>
-                  <input
-                    id="attendance-payroll-generate-prefix"
-                    v-model="payrollGenerateForm.namePrefix"
-                    type="text"
-                    placeholder="Optional"
-                  />
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button
-                  class="attendance__btn"
-                  :disabled="payrollGenerateLoading"
-                  @click="generatePayrollCycles"
-                >
-                  {{ payrollGenerateLoading ? 'Generating...' : 'Generate cycles' }}
                 </button>
               </div>
               <div v-if="payrollCycleSummary" class="attendance__summary">
@@ -2674,6 +2150,35 @@ interface AttendanceSettings {
     runAt?: string
     lookbackDays?: number
   }
+  holidayPolicy?: {
+    firstDayEnabled?: boolean
+    firstDayBaseHours?: number
+    overtimeAdds?: boolean
+    overtimeSource?: 'approval' | 'clock' | 'both'
+  }
+  holidaySync?: {
+    source?: 'holiday-cn'
+    baseUrl?: string
+    years?: number[]
+    addDayIndex?: boolean
+    dayIndexHolidays?: string[]
+    dayIndexMaxDays?: number
+    dayIndexFormat?: 'name-1' | 'name第1天' | 'name DAY1'
+    overwrite?: boolean
+    auto?: {
+      enabled?: boolean
+      runAt?: string
+      timezone?: string
+    }
+    lastRun?: {
+      ranAt?: string | null
+      success?: boolean | null
+      years?: number[] | null
+      totalFetched?: number | null
+      totalApplied?: number | null
+      error?: string | null
+    } | null
+  }
   ipAllowlist?: string[]
   geoFence?: {
     lat: number
@@ -2706,32 +2211,6 @@ interface AttendanceRuleSet {
   scope: string
   config?: Record<string, any>
   isDefault: boolean
-}
-
-interface AttendanceEngineTemplate {
-  name: string
-  category?: 'system' | 'custom'
-  editable?: boolean
-  description?: string
-  scope?: Record<string, any>
-  params?: AttendanceTemplateParam[]
-  rules?: Array<Record<string, any>>
-}
-
-interface AttendanceTemplateParam {
-  key: string
-  label: string
-  type?: 'string' | 'number' | 'boolean' | 'stringArray'
-  default?: any
-  description?: string
-  paths?: string[]
-}
-
-interface AttendanceRuleDraft {
-  key: string
-  id: string
-  whenText: string
-  thenText: string
 }
 
 interface AttendancePayrollTemplate {
@@ -2773,81 +2252,59 @@ interface AttendanceImportPreviewItem {
   userGroups?: string[]
 }
 
-interface AttendanceImportMappingProfile {
-  id: string
-  name: string
-  description?: string
-  source?: string
-  mapping?: {
-    columns?: Array<{
-      sourceField: string
-      targetField: string
-      dataType?: string
-    }>
-  }
-  userMapKeyField?: string
-  userMapSourceFields?: string[]
-  payloadExample?: Record<string, any>
-  requiredFields?: string[]
-}
-
-interface AttendanceRulePreviewItem {
-  userId: string
-  workDate: string
-  workMinutes: number
-  lateMinutes: number
-  earlyLeaveMinutes: number
-  status: string
-  leaveMinutes?: number
-  overtimeMinutes?: number
-  engine?: {
-    appliedRules?: string[]
-    warnings?: string[]
-    reasons?: string[]
-    overrides?: Record<string, any> | null
-    base?: Record<string, any> | null
-  } | null
-}
-
-interface AttendanceReconcileDiff {
-  key: string
-  userId: string
-  workDate: string
-  differences: Record<string, { entries: any; rows: any }>
-}
-
-interface AttendanceReconcileResult {
-  entriesTotal: number
-  rowsTotal: number
-  matched: number
-  mismatched: number
-  missingInEntries: number
-  missingInRows: number
-  diffs: AttendanceReconcileDiff[]
-}
-
 interface AttendanceImportBatch {
   id: string
   orgId?: string
   createdBy?: string | null
   source?: string | null
   ruleSetId?: string | null
+  mapping?: Record<string, any> | null
   rowCount: number
   status: string
   meta?: Record<string, any> | null
-  createdAt?: string | null
-  updatedAt?: string | null
+  createdAt?: string
+  updatedAt?: string
 }
 
 interface AttendanceImportItem {
   id: string
   batchId: string
   orgId?: string
-  userId?: string | null
-  workDate?: string | null
+  userId: string
+  workDate: string
   recordId?: string | null
   previewSnapshot?: Record<string, any> | null
-  createdAt?: string | null
+  createdAt?: string
+}
+
+interface AttendanceImportMappingProfile {
+  id: string
+  name: string
+  description?: string
+  source?: string
+  mapping?: Record<string, any>
+  requiredFields?: string[]
+  userMapKeyField?: string
+  userMapSourceFields?: string[]
+  payloadExample?: Record<string, any>
+}
+
+interface AttendanceReconcileResult {
+  summary?: Record<string, any>
+  warnings?: string[]
+}
+
+interface AttendanceRulePreviewItem {
+  userId: string
+  workDate: string
+  firstInAt?: string | null
+  lastOutAt?: string | null
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  status: string
+  isWorkingDay?: boolean
+  source?: string
 }
 
 interface AttendanceShift {
@@ -2969,6 +2426,8 @@ const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
+const holidaySyncLoading = ref(false)
+const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
 const shiftSaving = ref(false)
@@ -2993,12 +2452,7 @@ const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
-const payrollGenerateLoading = ref(false)
 const importLoading = ref(false)
-const importBatchesLoading = ref(false)
-const importBatchItemsLoading = ref(false)
-const reconcileLoading = ref(false)
-const rulePreviewLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
@@ -3014,8 +2468,6 @@ const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
-const templateLibrary = ref<AttendanceEngineTemplate[]>([])
-const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
@@ -3036,6 +2488,11 @@ const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
+const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
+const selectedImportProfile = computed(() => {
+  if (!importProfileId.value) return null
+  return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
+})
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvHeaderRow = ref('')
@@ -3063,40 +2520,6 @@ const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
-
-const importBatchesPage = ref(1)
-const importBatchesPageSize = 5
-const importBatchesTotal = ref(0)
-const importBatchesTotalPages = computed(() => Math.max(1, Math.ceil(importBatchesTotal.value / importBatchesPageSize)))
-const selectedImportBatchId = ref<string | null>(null)
-const importBatchItemsPage = ref(1)
-const importBatchItemsPageSize = 5
-const importBatchItemsTotal = ref(0)
-const importBatchItemsTotalPages = computed(() => Math.max(1, Math.ceil(importBatchItemsTotal.value / importBatchItemsPageSize)))
-const selectedImportItemId = ref<string | null>(null)
-const importBatchStatusFilter = ref('all')
-const importBatchSearch = ref('')
-const selectedImportItem = computed(() => {
-  if (!selectedImportItemId.value) return null
-  return importBatchItems.value.find(item => item.id === selectedImportItemId.value) ?? null
-})
-const selectedImportItemSnapshot = computed(() => selectedImportItem.value?.previewSnapshot ?? null)
-
-const filteredImportBatches = computed(() => {
-  const status = importBatchStatusFilter.value
-  const query = importBatchSearch.value.trim().toLowerCase()
-  return importBatches.value.filter((batch) => {
-    if (status !== 'all' && batch.status !== status) return false
-    if (!query) return true
-    const haystack = [
-      batch.id,
-      batch.source,
-      batch.ruleSetId,
-      batch.createdBy,
-    ].filter(Boolean).join(' ').toLowerCase()
-    return haystack.includes(query)
-  })
-})
 
 const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const calendarLabel = computed(() => {
@@ -3178,6 +2601,20 @@ const settingsForm = reactive({
   autoAbsenceEnabled: false,
   autoAbsenceRunAt: '00:15',
   autoAbsenceLookbackDays: 1,
+  holidayFirstDayEnabled: true,
+  holidayFirstDayBaseHours: 8,
+  holidayOvertimeAdds: true,
+  holidayOvertimeSource: 'approval',
+  holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
+  holidaySyncYears: '',
+  holidaySyncAddDayIndex: true,
+  holidaySyncDayIndexHolidays: '春节,国庆',
+  holidaySyncDayIndexMaxDays: 7,
+  holidaySyncDayIndexFormat: 'name-1',
+  holidaySyncOverwrite: false,
+  holidaySyncAutoEnabled: false,
+  holidaySyncAutoRunAt: '02:00',
+  holidaySyncAutoTimezone: 'UTC',
   ipAllowlist: '',
   geoFenceLat: '',
   geoFenceLng: '',
@@ -3270,124 +2707,6 @@ const ruleSetForm = reactive({
   config: '{}',
 })
 
-const SYSTEM_TEMPLATE_NAMES = [
-  '单休车间规则',
-  '通用提醒',
-  '标准上下班提醒',
-  '缺卡补卡核对',
-  '休息日加班',
-  '角色规则',
-  '部门提醒',
-  '加班单核对',
-]
-const CUSTOM_TEMPLATE_FALLBACK: AttendanceEngineTemplate = {
-  name: '用户自定义',
-  category: 'custom',
-  editable: true,
-  description: '为考勤管理员预留的自定义规则模板',
-  rules: [],
-}
-
-const ruleSetSystemTemplates = ref<AttendanceEngineTemplate[]>([])
-const ruleSetCustomTemplates = ref<AttendanceEngineTemplate[]>([])
-const templateLibraryLoading = ref(false)
-const templateLibrarySaving = ref(false)
-const selectedSystemTemplateName = ref<string | null>(null)
-const templateParamValues = reactive<Record<string, any>>({})
-const templateParamJson = ref('')
-const templateParamFileInput = ref<HTMLInputElement | null>(null)
-const customTemplateEditingName = ref<string | null>(null)
-const customTemplateDraftDescription = ref('')
-const customTemplateDraftRules = ref<AttendanceRuleDraft[]>([])
-
-const RULE_FIELD_WHITELIST = new Set([
-  'attendance_group',
-  'attendanceGroup',
-  'role',
-  'role_tags',
-  'department',
-  'shift',
-  'clockIn1',
-  'clockOut1',
-  'clockIn2',
-  'clockOut2',
-  'clockIn3',
-  'clockOut3',
-  'has_punch',
-  'leave_hours',
-  'exceptionReason',
-  'exception_reason',
-  'approval',
-  'approvals',
-  'approvalSummary',
-  'overtime_hours',
-  'required_hours',
-  'actual_hours',
-  'actualAttendanceHours',
-  'requiredAttendanceHours',
-])
-
-const RULE_FIELD_PATTERNS = [/^clock(In|Out)\d+$/]
-
-const RULE_OPERATORS = [
-  { suffix: '_contains_any', type: 'contains' },
-  { suffix: '_not_contains', type: 'contains' },
-  { suffix: '_contains', type: 'contains' },
-  { suffix: '_exists', type: 'exists' },
-  { suffix: '_before', type: 'time' },
-  { suffix: '_after', type: 'time' },
-  { suffix: '_gte', type: 'number' },
-  { suffix: '_lte', type: 'number' },
-  { suffix: '_gt', type: 'number' },
-  { suffix: '_lt', type: 'number' },
-  { suffix: '_eq', type: 'primitive' },
-  { suffix: '_ne', type: 'primitive' },
-]
-
-const RULE_ACTION_FIELDS: Record<string, 'number' | 'string' | 'stringArray'> = {
-  overtime_hours: 'number',
-  overtime_add: 'number',
-  required_hours: 'number',
-  actual_hours: 'number',
-  warning: 'string',
-  warnings: 'stringArray',
-  reason: 'string',
-  reasons: 'stringArray',
-}
-
-const CUSTOM_RULE_SAMPLES: Array<Record<string, any>> = [
-  {
-    id: 'role_short_hours',
-    when: { role_tags_contains: 'driver' },
-    then: { actual_hours: 6, warning: '司机短班', reason: 'Role-based adjustment' },
-  },
-  {
-    id: 'missing_checkout',
-    when: { clockIn1_exists: true, clockOut1_exists: false },
-    then: { warning: '缺少下班卡' },
-  },
-  {
-    id: 'trip_overtime_conflict',
-    when: { exceptionReason_contains: '出差', overtime_hours_gt: 0 },
-    then: { warning: '出差同时存在加班，请核对' },
-  },
-  {
-    id: 'rest_day_punch',
-    when: { shift_contains: '休息', has_punch: true },
-    then: { reason: '休息日打卡', overtime_hours: 8 },
-  },
-  {
-    id: 'leave_with_punch',
-    when: { leave_hours_gt: 0, has_punch: true },
-    then: { warning: '请假但仍有打卡记录' },
-  },
-  {
-    id: 'group_attention',
-    when: { attendance_group_contains: '单休' },
-    then: { warning: '单休考勤组请核对', reason: 'Attendance group reminder' },
-  },
-]
-
 const payrollTemplateForm = reactive({
   name: '',
   timezone: defaultTimezone,
@@ -3408,44 +2727,11 @@ const payrollCycleForm = reactive({
   status: 'open',
 })
 
-const payrollGenerateForm = reactive({
-  templateId: '',
-  anchorDate: '',
-  count: 1,
-  status: 'open',
-  namePrefix: '',
-})
-
 const importForm = reactive({
   ruleSetId: '',
   userId: '',
   timezone: defaultTimezone,
   payload: '{}',
-})
-
-const reconcileForm = reactive({
-  ruleSetId: '',
-  timezone: defaultTimezone,
-  entriesPayload: '',
-  rowsPayload: '',
-  useCurrentConfig: false,
-})
-
-const rulePreviewForm = reactive({
-  ruleSetId: '',
-  userId: '',
-  workDate: toDateInput(today),
-  clockInAt: '',
-  clockOutAt: '',
-  shiftName: '',
-  attendanceGroup: '',
-  roleTags: '',
-  department: '',
-  exceptionReason: '',
-  actualHours: '',
-  overtimeHours: '',
-  leaveHours: '',
-  useCurrentConfig: true,
 })
 
 function toDateInput(date: Date): string {
@@ -3466,12 +2752,6 @@ function formatDateTime(value: string | null): string {
   return date.toLocaleString()
 }
 
-function formatShortId(value?: string | null): string {
-  if (!value) return '--'
-  if (value.length <= 8) return value
-  return `${value.slice(0, 8)}…`
-}
-
 function formatStatus(value: string): string {
   const map: Record<string, string> = {
     normal: 'Normal',
@@ -3489,13 +2769,6 @@ function formatStatus(value: string): string {
 function formatList(items?: Array<string> | null): string {
   if (!items || items.length === 0) return '--'
   return items.map(item => String(item)).filter(Boolean).join(', ')
-}
-
-function formatJson(value?: Record<string, any> | null): string {
-  if (!value || typeof value !== 'object') return '--'
-  const keys = Object.keys(value)
-  if (keys.length === 0) return '--'
-  return JSON.stringify(value, null, 2)
 }
 
 function formatPolicyList(item: AttendanceImportPreviewItem): string {
@@ -3560,14 +2833,6 @@ function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null
   }
 }
 
-function parseNumberInput(value: string | number): number | null {
-  const trimmed = String(value).trim()
-  if (!trimmed) return null
-  const numberValue = Number(trimmed)
-  if (!Number.isFinite(numberValue)) return null
-  return numberValue
-}
-
 function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
   return JSON.stringify(steps ?? [], null, 2)
 }
@@ -3592,717 +2857,6 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   }
 }
 
-function normalizeTemplate(template: AttendanceEngineTemplate): AttendanceEngineTemplate {
-  const isSystem = template.category === 'system' || template.editable === false || SYSTEM_TEMPLATE_NAMES.includes(template.name)
-  return {
-    ...template,
-    category: isSystem ? 'system' : 'custom',
-    editable: isSystem ? false : true,
-  }
-}
-
-function splitTemplates(templates: AttendanceEngineTemplate[] = []) {
-  const normalized = templates.map((tpl) => normalizeTemplate(tpl))
-  const system = normalized.filter((tpl) => tpl.category === 'system')
-  const custom = normalized.filter((tpl) => tpl.category !== 'system')
-  return { system, custom, normalized }
-}
-
-const selectedSystemTemplate = computed(() => {
-  if (!selectedSystemTemplateName.value) return null
-  return ruleSetSystemTemplates.value.find((tpl) => tpl.name === selectedSystemTemplateName.value) ?? null
-})
-
-const libraryTemplates = computed(() => {
-  return templateLibrary.value.map((tpl) => normalizeTemplate(tpl)).filter((tpl) => tpl.category !== 'system')
-})
-
-const selectedImportProfile = computed(() => {
-  if (!importProfileId.value) return null
-  return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
-})
-
-function defaultParamValue(param: AttendanceTemplateParam): any {
-  if (param.default !== undefined) return param.default
-  if (param.type === 'number') return 0
-  if (param.type === 'boolean') return false
-  return ''
-}
-
-function resetTemplateParams(template: AttendanceEngineTemplate | null) {
-  Object.keys(templateParamValues).forEach((key) => delete templateParamValues[key])
-  templateParamJson.value = ''
-  if (!template || !Array.isArray(template.params)) return
-  template.params.forEach((param) => {
-    templateParamValues[param.key] = defaultParamValue(param)
-  })
-}
-
-function selectSystemTemplate(template: AttendanceEngineTemplate) {
-  selectedSystemTemplateName.value = template.name
-  resetTemplateParams(template)
-}
-
-function exportTemplateParams() {
-  const template = selectedSystemTemplate.value
-  if (!template) {
-    setStatus('Select a system template first.', 'error')
-    return
-  }
-  const payload = {
-    template: template.name,
-    params: buildTemplateParamMap(template),
-  }
-  templateParamJson.value = JSON.stringify(payload, null, 2)
-  setStatus('Template params exported.')
-}
-
-function exportTemplateParamsFile() {
-  const template = selectedSystemTemplate.value
-  if (!template) {
-    setStatus('Select a system template first.', 'error')
-    return
-  }
-  const payload = {
-    template: template.name,
-    params: buildTemplateParamMap(template),
-  }
-  const filename = `attendance-template-params-${template.name.replace(/\s+/g, '_')}-${Date.now()}.json`
-  downloadText(filename, JSON.stringify(payload, null, 2), 'application/json')
-  setStatus('Template params file exported.')
-}
-
-function importTemplateParams() {
-  const template = selectedSystemTemplate.value
-  if (!template) {
-    setStatus('Select a system template first.', 'error')
-    return
-  }
-  let text = templateParamJson.value.trim()
-  if (!text) {
-    text = window.prompt('Paste template params JSON') ?? ''
-  }
-  if (!text.trim()) return
-  try {
-    const parsed = JSON.parse(text)
-    const params = parsed?.params ?? parsed
-    if (!params || typeof params !== 'object') {
-      throw new Error('params missing')
-    }
-    const paramDefs = Array.isArray(template.params) ? template.params : []
-    paramDefs.forEach((param) => {
-      if (params[param.key] !== undefined) {
-        templateParamValues[param.key] = params[param.key]
-      }
-    })
-    templateParamJson.value = JSON.stringify({ template: template.name, params }, null, 2)
-    setStatus('Template params imported.')
-  } catch {
-    setStatus('Invalid template params JSON.', 'error')
-  }
-}
-
-function triggerTemplateParamFile() {
-  if (!selectedSystemTemplate.value) {
-    setStatus('Select a system template first.', 'error')
-    return
-  }
-  templateParamFileInput.value?.click()
-}
-
-async function handleTemplateParamFile(event: Event) {
-  const input = event.target as HTMLInputElement | null
-  const file = input?.files?.[0]
-  if (!file) return
-  try {
-    const text = await file.text()
-    templateParamJson.value = text
-    importTemplateParams()
-  } catch {
-    setStatus('Failed to read template params file.', 'error')
-  } finally {
-    if (input) input.value = ''
-  }
-}
-
-function syncRuleSetTemplates(config?: Record<string, any> | null) {
-  const templates = Array.isArray(config?.engine?.templates)
-    ? (config?.engine?.templates as AttendanceEngineTemplate[])
-    : []
-  const { system, custom } = splitTemplates(templates)
-  ruleSetSystemTemplates.value = system
-  ruleSetCustomTemplates.value = custom
-}
-
-async function loadTemplateLibrary() {
-  templateLibraryLoading.value = true
-  try {
-    const response = await apiFetch('/api/attendance/rule-templates')
-    if (response.status === 403) {
-      adminForbidden.value = true
-      return
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load template library')
-    }
-    adminForbidden.value = false
-    templateLibrary.value = Array.isArray(data.data?.library)
-      ? data.data.library
-      : (Array.isArray(data.data?.templates) ? data.data.templates : [])
-    setStatus('Template library loaded.')
-  } catch (error) {
-    setStatus((error as Error).message || 'Failed to load template library', 'error')
-  } finally {
-    templateLibraryLoading.value = false
-  }
-}
-
-async function persistTemplateLibrary(nextTemplates: AttendanceEngineTemplate[]) {
-  templateLibrarySaving.value = true
-  try {
-    const response = await apiFetch('/api/attendance/rule-templates', {
-      method: 'PUT',
-      body: JSON.stringify({ templates: nextTemplates }),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save template library')
-    }
-    adminForbidden.value = false
-    templateLibrary.value = data.data?.templates ?? nextTemplates
-    setStatus('Template library updated.')
-  } catch (error) {
-    setStatus((error as Error).message || 'Failed to save template library', 'error')
-  } finally {
-    templateLibrarySaving.value = false
-  }
-}
-
-function normalizeLibraryTemplate(template: AttendanceEngineTemplate): AttendanceEngineTemplate {
-  const normalized = normalizeTemplate(template)
-  return {
-    ...normalized,
-    category: 'custom',
-    editable: true,
-    rules: normalized.rules ?? [],
-  }
-}
-
-function upsertLibraryTemplate(template: AttendanceEngineTemplate) {
-  const normalized = normalizeLibraryTemplate(template)
-  const next = templateLibrary.value.filter((tpl) => tpl.name !== normalized.name)
-  next.push(normalized)
-  persistTemplateLibrary(next)
-}
-
-function removeLibraryTemplate(name: string) {
-  if (!window.confirm(`Remove template "${name}" from library?`)) return
-  const next = templateLibrary.value.filter((tpl) => tpl.name !== name)
-  persistTemplateLibrary(next)
-}
-
-function applyLibraryTemplate(template: AttendanceEngineTemplate) {
-  const config = parseJsonConfig(ruleSetForm.config)
-  if (!config) {
-    setStatus('Rule set config must be valid JSON before applying library templates.', 'error')
-    return
-  }
-  const normalized = normalizeLibraryTemplate(template)
-  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
-  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
-  const index = templates.findIndex((tpl) => tpl.name === normalized.name)
-  if (index >= 0) {
-    templates[index] = { ...templates[index], ...normalized }
-  } else {
-    templates.push(normalized)
-  }
-  engine.templates = templates
-  config.engine = engine
-  ruleSetForm.config = JSON.stringify(config, null, 2)
-  syncRuleSetTemplates(config)
-  openCustomTemplateEditor(normalized)
-  setStatus('Library template added to rule set.')
-}
-
-function saveCustomTemplateToLibrary() {
-  const name = customTemplateEditingName.value?.trim()
-  if (!name) {
-    setStatus('Select a custom template before saving to the library.', 'error')
-    return
-  }
-  const config = parseJsonConfig(ruleSetForm.config)
-  if (!config) {
-    setStatus('Rule set config must be valid JSON before saving to the library.', 'error')
-    return
-  }
-  const templates = Array.isArray(config.engine?.templates) ? (config.engine.templates as AttendanceEngineTemplate[]) : []
-  const template = templates.find((tpl) => tpl.name === name)
-  if (!template) {
-    setStatus('Template not found in rule set config.', 'error')
-    return
-  }
-  upsertLibraryTemplate(template)
-}
-
-function applyTemplateLock(config: Record<string, any>) {
-  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
-  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
-  const { custom } = splitTemplates(templates)
-
-  const lockedSystem = ruleSetSystemTemplates.value.length
-    ? ruleSetSystemTemplates.value.map(normalizeTemplate)
-    : splitTemplates(templates).system
-
-  const customTemplates = custom.map(normalizeTemplate)
-  if (!customTemplates.some((tpl) => tpl.name === CUSTOM_TEMPLATE_FALLBACK.name)) {
-    customTemplates.push({ ...CUSTOM_TEMPLATE_FALLBACK })
-  }
-
-  const merged = new Map<string, AttendanceEngineTemplate>()
-  lockedSystem.forEach((tpl) => merged.set(tpl.name, tpl))
-  customTemplates.forEach((tpl) => merged.set(tpl.name, tpl))
-
-  engine.templates = Array.from(merged.values())
-  return { ...config, engine }
-}
-
-function normalizeParamValue(param: AttendanceTemplateParam, raw: any): any {
-  if (param.type === 'number') {
-    const num = typeof raw === 'number' ? raw : Number(String(raw).trim())
-    if (Number.isFinite(num)) return num
-    return defaultParamValue(param)
-  }
-  if (param.type === 'boolean') {
-    return Boolean(raw)
-  }
-  if (param.type === 'stringArray') {
-    if (Array.isArray(raw)) return raw.filter(Boolean)
-    const text = String(raw ?? '').trim()
-    if (!text) return []
-    return text.split(/[\n,]/).map(item => item.trim()).filter(Boolean)
-  }
-  if (raw === null || raw === undefined) return defaultParamValue(param)
-  return String(raw)
-}
-
-function buildTemplateParamMap(template: AttendanceEngineTemplate): Record<string, any> {
-  const params = Array.isArray(template.params) ? template.params : []
-  const values: Record<string, any> = {}
-  params.forEach((param) => {
-    values[param.key] = normalizeParamValue(param, templateParamValues[param.key])
-  })
-  return values
-}
-
-function resolveTemplateValue(value: any, params: Record<string, any>): any {
-  if (typeof value === 'string') {
-    const exact = value.match(/^{{\s*([^}]+)\s*}}$/)
-    if (exact) {
-      const key = exact[1]
-      return params[key] ?? ''
-    }
-    return value.replace(/{{\s*([^}]+)\s*}}/g, (_match, key) => {
-      const replacement = params[key]
-      return replacement === undefined || replacement === null ? '' : String(replacement)
-    })
-  }
-  if (Array.isArray(value)) {
-    return value.map(item => resolveTemplateValue(item, params))
-  }
-  if (value && typeof value === 'object') {
-    const output: Record<string, any> = Array.isArray(value) ? [] : {}
-    Object.entries(value).forEach(([key, entry]) => {
-      output[key] = resolveTemplateValue(entry, params)
-    })
-    return output
-  }
-  return value
-}
-
-function setValueByPath(target: Record<string, any>, path: string, value: any) {
-  const normalized = path.replace(/\[(\d+)\]/g, '.$1')
-  const parts = normalized.split('.').filter(Boolean)
-  let current: any = target
-  for (let i = 0; i < parts.length - 1; i += 1) {
-    const key = parts[i]
-    if (current[key] == null) {
-      const nextKey = parts[i + 1]
-      current[key] = /^\d+$/.test(nextKey) ? [] : {}
-    }
-    current = current[key]
-  }
-  const finalKey = parts[parts.length - 1]
-  if (finalKey !== undefined) {
-    current[finalKey] = value
-  }
-}
-
-function applyParamPaths(template: AttendanceEngineTemplate, params: Record<string, any>): AttendanceEngineTemplate {
-  const cloned: AttendanceEngineTemplate = JSON.parse(JSON.stringify(template))
-  const paramDefs = Array.isArray(template.params) ? template.params : []
-  paramDefs.forEach((param) => {
-    const paths = Array.isArray(param.paths) ? param.paths : []
-    paths.forEach((path: string) => {
-      if (typeof path === 'string' && path.trim().length > 0) {
-        setValueByPath(cloned as Record<string, any>, path, params[param.key])
-      }
-    })
-  })
-  return cloned
-}
-
-function applySystemTemplate() {
-  const template = selectedSystemTemplate.value
-  if (!template) {
-    setStatus('Select a system template first.', 'error')
-    return
-  }
-  const config = parseJsonConfig(ruleSetForm.config)
-  if (!config) {
-    setStatus('Rule set config must be valid JSON before applying templates.', 'error')
-    return
-  }
-
-  const paramMap = buildTemplateParamMap(template)
-  const boundTemplate = applyParamPaths(template, paramMap)
-  const resolvedRules = resolveTemplateValue(boundTemplate.rules ?? [], paramMap)
-  const resolvedScope = resolveTemplateValue(boundTemplate.scope ?? {}, paramMap)
-  const proposedName = `${template.name} - Custom`
-  const nameInput = window.prompt('Custom template name', proposedName)
-  const name = nameInput?.trim()
-  if (!name) return
-  if (SYSTEM_TEMPLATE_NAMES.includes(name)) {
-    setStatus('Template name conflicts with a system template.', 'error')
-    return
-  }
-
-  const newTemplate: AttendanceEngineTemplate = {
-    name,
-    category: 'custom',
-    editable: true,
-    description: template.description,
-    scope: resolvedScope,
-    rules: resolvedRules,
-  }
-
-  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
-  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
-  const existingIndex = templates.findIndex((tpl) => tpl.name === name)
-  if (existingIndex >= 0) {
-    templates[existingIndex] = { ...templates[existingIndex], ...newTemplate }
-  } else {
-    templates.push(newTemplate)
-  }
-  engine.templates = templates
-  config.engine = engine
-  ruleSetForm.config = JSON.stringify(config, null, 2)
-  syncRuleSetTemplates(config)
-  openCustomTemplateEditor(newTemplate)
-  setStatus('Custom template created from system template.')
-}
-
-function buildRuleDrafts(rules: Array<Record<string, any>> = []): AttendanceRuleDraft[] {
-  return rules.map((rule, index) => ({
-    key: `${rule.id ?? 'rule'}-${index}-${Date.now()}`,
-    id: String(rule.id ?? `rule_${index + 1}`),
-    whenText: JSON.stringify(rule.when ?? {}, null, 2),
-    thenText: JSON.stringify(rule.then ?? {}, null, 2),
-  }))
-}
-
-function openCustomTemplateEditor(template: AttendanceEngineTemplate) {
-  customTemplateEditingName.value = template.name
-  customTemplateDraftDescription.value = template.description ?? ''
-  customTemplateDraftRules.value = buildRuleDrafts(template.rules ?? [])
-}
-
-function closeCustomTemplateEditor() {
-  customTemplateEditingName.value = null
-  customTemplateDraftDescription.value = ''
-  customTemplateDraftRules.value = []
-}
-
-function addCustomRule() {
-  customTemplateDraftRules.value.push({
-    key: `rule-${Date.now()}`,
-    id: `rule_${customTemplateDraftRules.value.length + 1}`,
-    whenText: '{\n}',
-    thenText: '{\n}',
-  })
-}
-
-function insertCustomRuleSamples() {
-  if (!customTemplateEditingName.value) {
-    setStatus('Open a custom template before inserting examples.', 'error')
-    return
-  }
-  const existingIds = new Set(customTemplateDraftRules.value.map(rule => rule.id.trim()))
-  let inserted = 0
-  let skipped = 0
-
-  CUSTOM_RULE_SAMPLES.forEach((sample, index) => {
-    const id = String(sample.id ?? `sample_${index + 1}`).trim()
-    if (!id || existingIds.has(id)) {
-      skipped += 1
-      return
-    }
-    existingIds.add(id)
-    customTemplateDraftRules.value.push({
-      key: `sample-${id}-${Date.now()}`,
-      id,
-      whenText: JSON.stringify(sample.when ?? {}, null, 2),
-      thenText: JSON.stringify(sample.then ?? {}, null, 2),
-    })
-    inserted += 1
-  })
-
-  if (inserted === 0) {
-    setStatus('All sample rules already exist.', 'error')
-    return
-  }
-  const message = skipped > 0
-    ? `Inserted ${inserted} sample rules (${skipped} skipped).`
-    : `Inserted ${inserted} sample rules.`
-  setStatus(message)
-}
-
-function removeCustomRule(index: number) {
-  customTemplateDraftRules.value.splice(index, 1)
-}
-
-function parseRuleJson(text: string, label: string) {
-  const trimmed = text.trim()
-  if (!trimmed) return {}
-  try {
-    const parsed = JSON.parse(trimmed)
-    if (parsed && typeof parsed === 'object') return parsed
-    throw new Error('JSON must be an object')
-  } catch (error: any) {
-    throw new Error(`${label} must be valid JSON object`)
-  }
-}
-
-function isWhitelistedField(field: string): boolean {
-  if (RULE_FIELD_WHITELIST.has(field)) return true
-  return RULE_FIELD_PATTERNS.some(pattern => pattern.test(field))
-}
-
-function resolveOperator(key: string) {
-  if (key === 'role') return { field: 'role', operator: 'role', type: 'string' as const }
-  for (const op of RULE_OPERATORS) {
-    if (key.endsWith(op.suffix)) {
-      const field = key.slice(0, -op.suffix.length)
-      return { field, operator: op.suffix, type: op.type }
-    }
-  }
-  return { field: key, operator: 'eq', type: 'primitive' as const }
-}
-
-function validateRuleValue(label: string, key: string, expected: any, type: string): string | null {
-  if (type === 'exists') {
-    if (typeof expected !== 'boolean') {
-      return `${label}: ${key} expects boolean (true/false)`
-    }
-    return null
-  }
-  if (type === 'time') {
-    if (typeof expected !== 'string' || !/^\d{1,2}:\d{2}(:\d{2})?$/.test(expected)) {
-      return `${label}: ${key} expects time string (HH:MM)`
-    }
-    return null
-  }
-  if (type === 'number') {
-    const num = typeof expected === 'number' ? expected : Number(expected)
-    if (!Number.isFinite(num)) {
-      return `${label}: ${key} expects number`
-    }
-    return null
-  }
-  if (type === 'contains') {
-    if (Array.isArray(expected)) {
-      if (expected.length === 0) {
-        return `${label}: ${key} expects non-empty array`
-      }
-      if (!expected.every(item => ['string', 'number'].includes(typeof item))) {
-        return `${label}: ${key} array values must be string or number`
-      }
-      return null
-    }
-    if (['string', 'number'].includes(typeof expected)) return null
-    return `${label}: ${key} expects string/number or array`
-  }
-  if (type === 'string') {
-    if (typeof expected !== 'string' || expected.trim().length === 0) {
-      return `${label}: ${key} expects non-empty string`
-    }
-    return null
-  }
-  if (Array.isArray(expected)) {
-    if (!expected.every(item => ['string', 'number', 'boolean'].includes(typeof item))) {
-      return `${label}: ${key} array values must be string/number/boolean`
-    }
-    return null
-  }
-  if (!['string', 'number', 'boolean'].includes(typeof expected)) {
-    return `${label}: ${key} expects string/number/boolean`
-  }
-  return null
-}
-
-function validateCustomTemplateRules(rules: Array<Record<string, any>>): string[] {
-  const errors: string[] = []
-  const seenIds = new Set<string>()
-  rules.forEach((rule, index) => {
-    const id = String(rule.id ?? '').trim()
-    const label = id ? `Rule ${id}` : `Rule #${index + 1}`
-    if (!id) {
-      errors.push(`${label}: rule id is required`)
-    } else if (seenIds.has(id)) {
-      errors.push(`${label}: duplicate rule id`)
-    }
-    if (id) seenIds.add(id)
-    const when = rule.when
-    if (!when || typeof when !== 'object' || Array.isArray(when)) {
-      errors.push(`${label}: when must be an object`)
-      return
-    }
-    Object.entries(when).forEach(([key, expected]) => {
-      const { field, type } = resolveOperator(key)
-      if (!field) {
-        errors.push(`${label}: invalid condition key "${key}"`)
-        return
-      }
-      if (!isWhitelistedField(field)) {
-        errors.push(`${label}: condition field "${field}" is not allowed`)
-      }
-      const valueError = validateRuleValue(label, key, expected, type)
-      if (valueError) errors.push(valueError)
-    })
-    const thenBlock = rule.then
-    if (!thenBlock || typeof thenBlock !== 'object' || Array.isArray(thenBlock)) {
-      errors.push(`${label}: then must be an object`)
-      return
-    }
-    Object.entries(thenBlock).forEach(([key, value]) => {
-      const expectedType = RULE_ACTION_FIELDS[key]
-      if (!expectedType) {
-        errors.push(`${label}: action field "${key}" is not allowed`)
-        return
-      }
-      if (expectedType === 'number') {
-        if (typeof value !== 'number' || !Number.isFinite(value)) {
-          errors.push(`${label}: action "${key}" expects number`)
-        }
-      } else if (expectedType === 'string') {
-        if (typeof value !== 'string' || value.trim().length === 0) {
-          errors.push(`${label}: action "${key}" expects non-empty string`)
-        }
-      } else if (expectedType === 'stringArray') {
-        if (!Array.isArray(value) || value.length === 0 || !value.every(item => typeof item === 'string')) {
-          errors.push(`${label}: action "${key}" expects string array`)
-        }
-      }
-    })
-  })
-  return errors
-}
-
-function saveCustomTemplate() {
-  const name = customTemplateEditingName.value?.trim()
-  if (!name) {
-    setStatus('Select a custom template to edit.', 'error')
-    return
-  }
-  const config = parseJsonConfig(ruleSetForm.config)
-  if (!config) {
-    setStatus('Rule set config must be valid JSON before editing templates.', 'error')
-    return
-  }
-  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
-  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
-  let rules: Array<Record<string, any>>
-  try {
-    rules = customTemplateDraftRules.value.map((draft, index) => ({
-      id: draft.id.trim() || `rule_${index + 1}`,
-      when: parseRuleJson(draft.whenText, `Rule ${index + 1} when`),
-      then: parseRuleJson(draft.thenText, `Rule ${index + 1} then`),
-    }))
-  } catch (error: any) {
-    setStatus(error?.message || 'Invalid rule JSON.', 'error')
-    return
-  }
-  const validationErrors = validateCustomTemplateRules(rules)
-  if (validationErrors.length > 0) {
-    setStatus(validationErrors[0], 'error')
-    return
-  }
-
-  const updatedTemplate: AttendanceEngineTemplate = {
-    name,
-    category: 'custom',
-    editable: true,
-    description: customTemplateDraftDescription.value.trim() || undefined,
-    rules,
-  }
-
-  const existingIndex = templates.findIndex((tpl) => tpl.name === name)
-  if (existingIndex >= 0) {
-    templates[existingIndex] = { ...templates[existingIndex], ...updatedTemplate }
-  } else {
-    templates.push(updatedTemplate)
-  }
-
-  engine.templates = templates
-  config.engine = engine
-  ruleSetForm.config = JSON.stringify(config, null, 2)
-  syncRuleSetTemplates(config)
-  setStatus('Custom template updated.')
-}
-
-function createCustomTemplate() {
-  const name = window.prompt('Custom template name')
-  const trimmed = name?.trim()
-  if (!trimmed) return
-  if (SYSTEM_TEMPLATE_NAMES.includes(trimmed)) {
-    setStatus('Template name conflicts with a system template.', 'error')
-    return
-  }
-
-  const config = parseJsonConfig(ruleSetForm.config)
-  if (!config) {
-    setStatus('Rule set config must be valid JSON before editing templates.', 'error')
-    return
-  }
-  const engine = typeof config.engine === 'object' && config.engine ? { ...config.engine } : {}
-  const templates = Array.isArray(engine.templates) ? (engine.templates as AttendanceEngineTemplate[]) : []
-  const existing = templates.find((tpl) => tpl.name === trimmed)
-  if (existing) {
-    openCustomTemplateEditor(existing)
-    setStatus('Custom template already exists. Opened for editing.')
-    return
-  }
-
-  const newTemplate: AttendanceEngineTemplate = {
-    name: trimmed,
-    category: 'custom',
-    editable: true,
-    description: '',
-    rules: [],
-  }
-  templates.push(newTemplate)
-  engine.templates = templates
-  config.engine = engine
-  ruleSetForm.config = JSON.stringify(config, null, 2)
-  syncRuleSetTemplates(config)
-  openCustomTemplateEditor(newTemplate)
-  setStatus('Custom template created.')
-}
-
 function buildImportPayload(): Record<string, any> | null {
   const parsed = parseJsonConfig(importForm.payload)
   if (!parsed) return null
@@ -4313,320 +2867,6 @@ function buildImportPayload(): Record<string, any> | null {
   if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
-  if (importProfileId.value && !payload.mappingProfileId) payload.mappingProfileId = importProfileId.value
-  return payload
-}
-
-function parsePayloadInput(value: string, label: string): Record<string, any> {
-  const trimmed = value.trim()
-  if (!trimmed) throw new Error(`${label} payload is required`)
-  try {
-    const parsed = JSON.parse(trimmed)
-    if (!parsed || typeof parsed !== 'object') {
-      throw new Error(`${label} payload must be a JSON object`)
-    }
-    return parsed as Record<string, any>
-  } catch {
-    throw new Error(`${label} payload must be valid JSON`)
-  }
-}
-
-function enrichReconcilePayload(payload: Record<string, any>): Record<string, any> {
-  const resolved = { ...payload }
-  const resolvedOrgId = normalizedOrgId()
-  const resolvedUserId = normalizedUserId()
-  if (resolvedOrgId && !resolved.orgId) resolved.orgId = resolvedOrgId
-  if (resolvedUserId && !resolved.userId) resolved.userId = resolvedUserId
-  if (reconcileForm.ruleSetId && !resolved.ruleSetId) resolved.ruleSetId = reconcileForm.ruleSetId
-  if (reconcileForm.timezone && !resolved.timezone) resolved.timezone = reconcileForm.timezone
-  if (reconcileForm.useCurrentConfig) {
-    const config = parseJsonConfig(ruleSetForm.config)
-    if (config?.engine) resolved.engine = config.engine
-  }
-  return resolved
-}
-
-async function previewPayload(payload: Record<string, any>): Promise<AttendanceImportPreviewItem[]> {
-  const response = await apiFetch('/api/attendance/import/preview', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-  const data = await response.json()
-  if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || 'Failed to preview payload')
-  }
-  return data.data?.items ?? []
-}
-
-function diffPreviewItems(
-  entriesItems: AttendanceImportPreviewItem[],
-  rowsItems: AttendanceImportPreviewItem[],
-): AttendanceReconcileResult {
-  const left = new Map<string, AttendanceImportPreviewItem>()
-  const right = new Map<string, AttendanceImportPreviewItem>()
-  const buildKey = (item: AttendanceImportPreviewItem) => `${item.userId}::${item.workDate}`
-
-  entriesItems.forEach((item) => left.set(buildKey(item), item))
-  rowsItems.forEach((item) => right.set(buildKey(item), item))
-
-  const allKeys = new Set<string>([...left.keys(), ...right.keys()])
-  const diffs: AttendanceReconcileDiff[] = []
-  let matched = 0
-  let mismatched = 0
-  let missingInEntries = 0
-  let missingInRows = 0
-
-  const fields: Array<keyof AttendanceImportPreviewItem> = [
-    'status',
-    'workMinutes',
-    'lateMinutes',
-    'earlyLeaveMinutes',
-    'leaveMinutes',
-    'overtimeMinutes',
-  ]
-
-  allKeys.forEach((key) => {
-    const leftItem = left.get(key)
-    const rightItem = right.get(key)
-    if (!leftItem) {
-      missingInEntries += 1
-      diffs.push({
-        key,
-        userId: rightItem?.userId ?? '',
-        workDate: rightItem?.workDate ?? '',
-        differences: { missing: { entries: null, rows: rightItem } },
-      })
-      return
-    }
-    if (!rightItem) {
-      missingInRows += 1
-      diffs.push({
-        key,
-        userId: leftItem.userId,
-        workDate: leftItem.workDate,
-        differences: { missing: { entries: leftItem, rows: null } },
-      })
-      return
-    }
-
-    const differences: Record<string, { entries: any; rows: any }> = {}
-    fields.forEach((field) => {
-      const leftValue = leftItem[field] ?? null
-      const rightValue = rightItem[field] ?? null
-      if (leftValue === rightValue) return
-      if (typeof leftValue === 'number' || typeof rightValue === 'number') {
-        const leftNum = Number(leftValue ?? 0)
-        const rightNum = Number(rightValue ?? 0)
-        if (Number.isFinite(leftNum) && Number.isFinite(rightNum) && leftNum === rightNum) return
-        differences[field] = { entries: leftValue, rows: rightValue }
-        return
-      }
-      differences[field] = { entries: leftValue, rows: rightValue }
-    })
-
-    if (Object.keys(differences).length === 0) {
-      matched += 1
-      return
-    }
-    mismatched += 1
-    diffs.push({
-      key,
-      userId: leftItem.userId,
-      workDate: leftItem.workDate,
-      differences,
-    })
-  })
-
-  return {
-    entriesTotal: entriesItems.length,
-    rowsTotal: rowsItems.length,
-    matched,
-    mismatched,
-    missingInEntries,
-    missingInRows,
-    diffs,
-  }
-}
-
-async function runReconcile() {
-  reconcileLoading.value = true
-  try {
-    const entriesPayload = enrichReconcilePayload(parsePayloadInput(reconcileForm.entriesPayload, 'Entries'))
-    const rowsPayload = enrichReconcilePayload(parsePayloadInput(reconcileForm.rowsPayload, 'Rows'))
-    const [entriesItems, rowsItems] = await Promise.all([
-      previewPayload(entriesPayload),
-      previewPayload(rowsPayload),
-    ])
-    reconcileResult.value = diffPreviewItems(entriesItems, rowsItems)
-    setStatus('Reconcile completed.')
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to reconcile payloads', 'error')
-  } finally {
-    reconcileLoading.value = false
-  }
-}
-
-function clearReconcile() {
-  reconcileForm.entriesPayload = ''
-  reconcileForm.rowsPayload = ''
-  reconcileResult.value = null
-}
-
-function escapeCsvValue(value: any): string {
-  if (value === null || value === undefined) return ''
-  const text = String(value)
-  if (text.includes(',') || text.includes('"') || text.includes('\n')) {
-    return `"${text.replace(/"/g, '""')}"`
-  }
-  return text
-}
-
-function downloadText(filename: string, content: string, mime = 'application/json') {
-  const blob = new Blob([content], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
-}
-
-async function copyToClipboard(text: string) {
-  if (!text) return false
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.style.position = 'fixed'
-    textarea.style.top = '0'
-    textarea.style.left = '0'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    try {
-      const success = document.execCommand('copy')
-      return success
-    } finally {
-      textarea.remove()
-    }
-  }
-}
-
-function exportReconcileJson() {
-  if (!reconcileResult.value) {
-    setStatus('No reconcile result to export.', 'error')
-    return
-  }
-  downloadText(
-    `attendance-reconcile-${Date.now()}.json`,
-    JSON.stringify(reconcileResult.value, null, 2),
-    'application/json'
-  )
-  setStatus('Reconcile JSON exported.')
-}
-
-function exportReconcileCsv() {
-  if (!reconcileResult.value) {
-    setStatus('No reconcile result to export.', 'error')
-    return
-  }
-  const lines = [
-    ['metric', 'value'],
-    ['entries_total', reconcileResult.value.entriesTotal],
-    ['rows_total', reconcileResult.value.rowsTotal],
-    ['matched', reconcileResult.value.matched],
-    ['mismatched', reconcileResult.value.mismatched],
-    ['missing_in_entries', reconcileResult.value.missingInEntries],
-    ['missing_in_rows', reconcileResult.value.missingInRows],
-    [],
-    ['user_id', 'work_date', 'field', 'entries', 'rows'],
-  ]
-  reconcileResult.value.diffs.forEach((diff) => {
-    Object.entries(diff.differences).forEach(([field, values]) => {
-      lines.push([
-        diff.userId,
-        diff.workDate,
-        field,
-        values.entries ?? '',
-        values.rows ?? '',
-      ])
-    })
-  })
-  const csv = lines.map((row) => row.map(escapeCsvValue).join(',')).join('\n')
-  downloadText(`attendance-reconcile-${Date.now()}.csv`, csv, 'text/csv')
-  setStatus('Reconcile CSV exported.')
-}
-
-function buildRulePreviewPayload(): Record<string, any> | null {
-  if (!rulePreviewForm.workDate) {
-    setStatus('Work date is required for rule preview.', 'error')
-    return null
-  }
-
-  const fields: Record<string, any> = {}
-  if (rulePreviewForm.clockInAt) fields.clockInAt = rulePreviewForm.clockInAt
-  if (rulePreviewForm.clockOutAt) fields.clockOutAt = rulePreviewForm.clockOutAt
-
-  const shiftName = rulePreviewForm.shiftName.trim()
-  if (shiftName) fields.shiftName = shiftName
-  const attendanceGroup = rulePreviewForm.attendanceGroup.trim()
-  if (attendanceGroup) fields.attendanceGroup = attendanceGroup
-  const roleTags = rulePreviewForm.roleTags.trim()
-  if (roleTags) fields.roleTags = roleTags
-  const department = rulePreviewForm.department.trim()
-  if (department) fields.department = department
-  const exceptionReason = rulePreviewForm.exceptionReason.trim()
-  if (exceptionReason) fields.exceptionReason = exceptionReason
-
-  const actualHours = parseNumberInput(rulePreviewForm.actualHours)
-  if (actualHours !== null) fields.actualHours = actualHours
-  const overtimeHours = parseNumberInput(rulePreviewForm.overtimeHours)
-  if (overtimeHours !== null) fields.overtimeHours = overtimeHours
-  const leaveHours = parseNumberInput(rulePreviewForm.leaveHours)
-  if (leaveHours !== null) fields.leaveHours = leaveHours
-
-  const payload: Record<string, any> = {
-    source: 'manual',
-    mapping: {
-      columns: [
-        { sourceField: 'clockInAt', targetField: 'firstInAt', dataType: 'time' },
-        { sourceField: 'clockOutAt', targetField: 'lastOutAt', dataType: 'time' },
-        { sourceField: 'actualHours', targetField: 'workHours', dataType: 'hours' },
-        { sourceField: 'overtimeHours', targetField: 'overtimeMinutes', dataType: 'hours' },
-        { sourceField: 'leaveHours', targetField: 'leaveMinutes', dataType: 'hours' },
-      ],
-    },
-    rows: [
-      {
-        workDate: rulePreviewForm.workDate,
-        fields,
-      },
-    ],
-  }
-
-  const resolvedOrgId = normalizedOrgId()
-  if (resolvedOrgId) payload.orgId = resolvedOrgId
-
-  const userId = rulePreviewForm.userId.trim() || normalizedUserId()
-  if (userId) payload.userId = userId
-
-  if (rulePreviewForm.ruleSetId) payload.ruleSetId = rulePreviewForm.ruleSetId
-  if (defaultTimezone) payload.timezone = defaultTimezone
-
-  if (rulePreviewForm.useCurrentConfig) {
-    const config = parseJsonConfig(ruleSetForm.config)
-    if (!config) {
-      setStatus('Rule set config must be valid JSON before previewing.', 'error')
-      return null
-    }
-    if (config.engine) payload.engine = config.engine
-  }
-
   return payload
 }
 
@@ -4644,19 +2884,8 @@ async function loadImportTemplate() {
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load import template')
     }
-    const payloadExample = data.data?.payloadExample ?? {}
-    importForm.payload = JSON.stringify(payloadExample, null, 2)
-    importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles)
-      ? data.data.mappingProfiles
-      : []
-    const payloadProfileId = typeof payloadExample?.mappingProfileId === 'string'
-      ? payloadExample.mappingProfileId
-      : ''
-    if (payloadProfileId && importMappingProfiles.value.some(profile => profile.id === payloadProfileId)) {
-      importProfileId.value = payloadProfileId
-    } else if (!importProfileId.value && importMappingProfiles.value.length > 0) {
-      importProfileId.value = importMappingProfiles.value[0].id
-    }
+    importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     setStatus('Import template loaded.')
   } catch (error) {
     setStatus((error as Error).message || 'Failed to load import template', 'error')
@@ -4741,15 +2970,10 @@ async function previewImport() {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to preview import')
     }
-    adminForbidden.value = false
     importPreview.value = data.data?.items ?? []
     importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
     setStatus(`Preview loaded (${importPreview.value.length} rows).`)
@@ -4757,150 +2981,6 @@ async function previewImport() {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
   } finally {
     importLoading.value = false
-  }
-}
-
-async function loadImportBatches(page = importBatchesPage.value) {
-  importBatchesLoading.value = true
-  try {
-    const query = buildQuery({
-      page: String(page),
-      pageSize: String(importBatchesPageSize),
-      orgId: normalizedOrgId(),
-    })
-    const response = await apiFetch(`/api/attendance/import/batches?${query.toString()}`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import batches')
-    }
-    adminForbidden.value = false
-    importBatches.value = data.data?.items ?? []
-    importBatchesTotal.value = data.data?.total ?? 0
-    importBatchesPage.value = data.data?.page ?? page
-
-    if (selectedImportBatchId.value) {
-      const stillVisible = importBatches.value.some((batch) => batch.id === selectedImportBatchId.value)
-      if (!stillVisible) {
-        selectedImportBatchId.value = null
-        importBatchItems.value = []
-        importBatchItemsTotal.value = 0
-      }
-    }
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to load import batches', 'error')
-  } finally {
-    importBatchesLoading.value = false
-  }
-}
-
-async function loadImportBatchItems(batchId: string, page = 1) {
-  importBatchItemsLoading.value = true
-  try {
-    const query = buildQuery({
-      page: String(page),
-      pageSize: String(importBatchItemsPageSize),
-      orgId: normalizedOrgId(),
-    })
-    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${query.toString()}`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import items')
-    }
-    adminForbidden.value = false
-    importBatchItems.value = data.data?.items ?? []
-    importBatchItemsTotal.value = data.data?.total ?? 0
-    importBatchItemsPage.value = data.data?.page ?? page
-    if (selectedImportItemId.value) {
-      const stillVisible = importBatchItems.value.some((item) => item.id === selectedImportItemId.value)
-      if (!stillVisible) selectedImportItemId.value = null
-    }
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to load import items', 'error')
-  } finally {
-    importBatchItemsLoading.value = false
-  }
-}
-
-async function toggleImportBatch(batchId: string) {
-  if (selectedImportBatchId.value === batchId) {
-    selectedImportBatchId.value = null
-    importBatchItems.value = []
-    importBatchItemsTotal.value = 0
-    selectedImportItemId.value = null
-    return
-  }
-  selectedImportBatchId.value = batchId
-  selectedImportItemId.value = null
-  await loadImportBatchItems(batchId, 1)
-}
-
-function toggleImportItemSnapshot(itemId: string) {
-  selectedImportItemId.value = selectedImportItemId.value === itemId ? null : itemId
-}
-
-async function rollbackImportBatch(batchId: string) {
-  const confirmed = window.confirm('Rollback this import batch? This will delete imported records.')
-  if (!confirmed) return
-  importBatchItemsLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, {
-      method: 'POST',
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to rollback import batch')
-    }
-    adminForbidden.value = false
-    setStatus('Import batch rolled back.')
-    await loadImportBatches(importBatchesPage.value)
-    if (selectedImportBatchId.value === batchId) {
-      await loadImportBatchItems(batchId, importBatchItemsPage.value)
-    }
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to rollback import batch', 'error')
-  } finally {
-    importBatchItemsLoading.value = false
-  }
-}
-
-async function runRulePreview() {
-  const payload = buildRulePreviewPayload()
-  if (!payload) return
-
-  rulePreviewLoading.value = true
-  try {
-    const response = await apiFetch('/api/attendance/import/preview', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to run rule preview')
-    }
-    adminForbidden.value = false
-    const items = data.data?.items ?? []
-    rulePreviewResult.value = items.length > 0 ? items[0] : null
-    setStatus('Rule preview completed.')
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to run rule preview', 'error')
-  } finally {
-    rulePreviewLoading.value = false
   }
 }
 
@@ -4912,24 +2992,10 @@ async function runImport() {
   }
   importLoading.value = true
   try {
-    const prepareResponse = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
-    if (prepareResponse.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const prepareData = await prepareResponse.json()
-    if (!prepareResponse.ok || !prepareData.ok) {
-      throw new Error(prepareData?.error?.message || 'Failed to prepare import')
-    }
-    payload.commitToken = prepareData.data?.commitToken
-    const response = await apiFetch('/api/attendance/import/commit', {
+    const response = await apiFetch('/api/attendance/import', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to import attendance')
@@ -4937,35 +3003,13 @@ async function runImport() {
     adminForbidden.value = false
     importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
     const count = data.data?.imported ?? 0
-    const batchId = data.data?.batchId
-    setStatus(batchId ? `Imported ${count} rows (batch ${formatShortId(batchId)}).` : `Imported ${count} rows.`)
-    await Promise.all([loadRecords(), loadImportBatches()])
+    setStatus(`Imported ${count} rows.`)
+    await loadRecords()
   } catch (error) {
     setStatus((error as Error).message || 'Failed to import attendance', 'error')
   } finally {
     importLoading.value = false
   }
-}
-
-async function copyImportItemSnapshot() {
-  if (!selectedImportItemSnapshot.value) {
-    setStatus('No snapshot to copy.', 'error')
-    return
-  }
-  const text = JSON.stringify(selectedImportItemSnapshot.value, null, 2)
-  const ok = await copyToClipboard(text)
-  setStatus(ok ? 'Snapshot copied.' : 'Copy failed.', ok ? 'info' : 'error')
-}
-
-function downloadImportItemSnapshot() {
-  if (!selectedImportItemSnapshot.value || !selectedImportItemId.value) {
-    setStatus('No snapshot to download.', 'error')
-    return
-  }
-  const text = JSON.stringify(selectedImportItemSnapshot.value, null, 2)
-  const filename = `attendance-import-snapshot-${selectedImportItemId.value}.json`
-  downloadText(filename, text, 'application/json')
-  setStatus('Snapshot downloaded.')
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {
@@ -5281,6 +3325,26 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.autoAbsenceEnabled = Boolean(settings.autoAbsence?.enabled)
   settingsForm.autoAbsenceRunAt = settings.autoAbsence?.runAt || '00:15'
   settingsForm.autoAbsenceLookbackDays = settings.autoAbsence?.lookbackDays || 1
+  settingsForm.holidayFirstDayEnabled = settings.holidayPolicy?.firstDayEnabled ?? true
+  settingsForm.holidayFirstDayBaseHours = settings.holidayPolicy?.firstDayBaseHours ?? 8
+  settingsForm.holidayOvertimeAdds = settings.holidayPolicy?.overtimeAdds ?? true
+  settingsForm.holidayOvertimeSource = settings.holidayPolicy?.overtimeSource ?? 'approval'
+  settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
+    || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
+  settingsForm.holidaySyncYears = Array.isArray(settings.holidaySync?.years)
+    ? settings.holidaySync?.years?.join(',')
+    : ''
+  settingsForm.holidaySyncAddDayIndex = settings.holidaySync?.addDayIndex ?? true
+  settingsForm.holidaySyncDayIndexHolidays = Array.isArray(settings.holidaySync?.dayIndexHolidays)
+    ? settings.holidaySync?.dayIndexHolidays?.join(',')
+    : '春节,国庆'
+  settingsForm.holidaySyncDayIndexMaxDays = settings.holidaySync?.dayIndexMaxDays ?? 7
+  settingsForm.holidaySyncDayIndexFormat = settings.holidaySync?.dayIndexFormat ?? 'name-1'
+  settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
+  settingsForm.holidaySyncAutoEnabled = settings.holidaySync?.auto?.enabled ?? false
+  settingsForm.holidaySyncAutoRunAt = settings.holidaySync?.auto?.runAt ?? '02:00'
+  settingsForm.holidaySyncAutoTimezone = settings.holidaySync?.auto?.timezone ?? 'UTC'
+  holidaySyncLastRun.value = settings.holidaySync?.lastRun ?? null
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
@@ -5327,11 +3391,53 @@ async function saveSettings() {
       ? { lat, lng, radiusMeters: radius }
       : null
 
+    const overtimeSourceValue = settingsForm.holidayOvertimeSource
+    const overtimeSource = overtimeSourceValue === 'approval' || overtimeSourceValue === 'clock' || overtimeSourceValue === 'both'
+      ? overtimeSourceValue
+      : 'approval'
+    const dayIndexFormatValue = settingsForm.holidaySyncDayIndexFormat
+    const dayIndexFormat = dayIndexFormatValue === 'name-1'
+      || dayIndexFormatValue === 'name第1天'
+      || dayIndexFormatValue === 'name DAY1'
+      ? dayIndexFormatValue
+      : 'name-1'
+
     const payload: AttendanceSettings = {
       autoAbsence: {
         enabled: settingsForm.autoAbsenceEnabled,
         runAt: settingsForm.autoAbsenceRunAt || '00:15',
         lookbackDays: Number(settingsForm.autoAbsenceLookbackDays) || 1,
+      },
+      holidayPolicy: {
+        firstDayEnabled: settingsForm.holidayFirstDayEnabled,
+        firstDayBaseHours: Number(settingsForm.holidayFirstDayBaseHours) || 0,
+        overtimeAdds: settingsForm.holidayOvertimeAdds,
+        overtimeSource,
+      },
+      holidaySync: {
+        source: 'holiday-cn',
+        baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
+        years: settingsForm.holidaySyncYears
+          ? settingsForm.holidaySyncYears
+              .split(/[\s,]+/)
+              .map(item => Number(item))
+              .filter(item => Number.isFinite(item))
+          : undefined,
+        addDayIndex: settingsForm.holidaySyncAddDayIndex,
+        dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
+          ? settingsForm.holidaySyncDayIndexHolidays
+              .split(/[\s,]+/)
+              .map(item => item.trim())
+              .filter(Boolean)
+          : undefined,
+        dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
+        dayIndexFormat,
+        overwrite: settingsForm.holidaySyncOverwrite,
+        auto: {
+          enabled: settingsForm.holidaySyncAutoEnabled,
+          runAt: settingsForm.holidaySyncAutoRunAt || '02:00',
+          timezone: settingsForm.holidaySyncAutoTimezone?.trim() || undefined,
+        },
       },
       ipAllowlist,
       geoFence,
@@ -5357,6 +3463,90 @@ async function saveSettings() {
     setStatus(error?.message || 'Failed to save settings', 'error')
   } finally {
     settingsLoading.value = false
+  }
+}
+
+async function syncHolidays() {
+  holidaySyncLoading.value = true
+  try {
+    const payload = {
+      source: 'holiday-cn',
+      ...buildHolidaySyncPayload(),
+    }
+    const response = await apiFetch('/api/attendance/holidays/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Holiday sync failed')
+    }
+    if (data?.data?.lastRun) {
+      holidaySyncLastRun.value = data.data.lastRun
+    }
+    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Holiday sync failed', 'error')
+  } finally {
+    holidaySyncLoading.value = false
+  }
+}
+
+function buildHolidaySyncPayload(overrides?: { years?: number[] }) {
+  const years = overrides?.years ?? (settingsForm.holidaySyncYears
+    ? settingsForm.holidaySyncYears
+        .split(/[\s,]+/)
+        .map(item => Number(item))
+        .filter(item => Number.isFinite(item))
+    : undefined)
+
+  return {
+    baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
+    years,
+    addDayIndex: settingsForm.holidaySyncAddDayIndex,
+    dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
+      ? settingsForm.holidaySyncDayIndexHolidays
+          .split(/[\s,]+/)
+          .map(item => item.trim())
+          .filter(Boolean)
+      : undefined,
+    dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
+    dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
+    overwrite: settingsForm.holidaySyncOverwrite,
+  }
+}
+
+async function syncHolidaysForYears(years: number[]) {
+  settingsForm.holidaySyncYears = years.join(',')
+  holidaySyncLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/holidays/sync', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: 'holiday-cn',
+        ...buildHolidaySyncPayload({ years }),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Holiday sync failed')
+    }
+    if (data?.data?.lastRun) {
+      holidaySyncLastRun.value = data.data.lastRun
+    }
+    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Holiday sync failed', 'error')
+  } finally {
+    holidaySyncLoading.value = false
   }
 }
 
@@ -6273,11 +4463,6 @@ function resetRuleSetForm() {
   ruleSetForm.scope = 'org'
   ruleSetForm.isDefault = false
   ruleSetForm.config = '{}'
-  ruleSetSystemTemplates.value = []
-  ruleSetCustomTemplates.value = []
-  selectedSystemTemplateName.value = null
-  resetTemplateParams(null)
-  closeCustomTemplateEditor()
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
@@ -6288,10 +4473,6 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.scope = item.scope ?? 'org'
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
-  syncRuleSetTemplates(item.config ?? {})
-  selectedSystemTemplateName.value = null
-  resetTemplateParams(null)
-  closeCustomTemplateEditor()
 }
 
 async function loadRuleSets() {
@@ -6319,11 +4500,10 @@ async function loadRuleSets() {
 async function saveRuleSet() {
   ruleSetSaving.value = true
   try {
-    let config = parseJsonConfig(ruleSetForm.config)
+    const config = parseJsonConfig(ruleSetForm.config)
     if (!config) {
       throw new Error('Rule set config must be valid JSON')
     }
-    config = applyTemplateLock(config)
 
     const payload = {
       name: ruleSetForm.name.trim(),
@@ -6393,13 +4573,6 @@ async function loadRuleSetTemplate() {
       throw new Error(data?.error?.message || 'Failed to load rule set template')
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
-    syncRuleSetTemplates(data.data ?? {})
-    if (Array.isArray(data.data?.templateLibrary)) {
-      templateLibrary.value = data.data.templateLibrary
-    }
-    selectedSystemTemplateName.value = null
-    resetTemplateParams(null)
-    closeCustomTemplateEditor()
     setStatus('Rule set template loaded.')
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load rule set template', 'error')
@@ -6445,10 +4618,6 @@ async function loadPayrollTemplates() {
     }
     adminForbidden.value = false
     payrollTemplates.value = data.data?.items ?? []
-    if (!payrollGenerateForm.templateId && payrollTemplates.value.length > 0) {
-      const preferred = payrollTemplates.value.find((tpl) => tpl.isDefault) ?? payrollTemplates.value[0]
-      payrollGenerateForm.templateId = preferred?.id ?? ''
-    }
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load payroll templates', 'error')
   } finally {
@@ -6609,45 +4778,6 @@ async function savePayrollCycle() {
   }
 }
 
-async function generatePayrollCycles() {
-  if (!payrollGenerateForm.anchorDate) {
-    setStatus('Anchor date is required to generate cycles.', 'error')
-    return
-  }
-  payrollGenerateLoading.value = true
-  try {
-    const payload: Record<string, any> = {
-      templateId: payrollGenerateForm.templateId || undefined,
-      anchorDate: payrollGenerateForm.anchorDate,
-      count: Number(payrollGenerateForm.count) || 1,
-      status: payrollGenerateForm.status,
-      namePrefix: payrollGenerateForm.namePrefix.trim() || undefined,
-      orgId: normalizedOrgId(),
-    }
-    const response = await apiFetch('/api/attendance/payroll-cycles/generate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error('Admin permissions required')
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to generate payroll cycles')
-    }
-    adminForbidden.value = false
-    const created = data.data?.created?.length ?? 0
-    const skipped = data.data?.skipped?.length ?? 0
-    await loadPayrollCycles()
-    setStatus(`Generated ${created} cycles (skipped ${skipped}).`)
-  } catch (error: any) {
-    setStatus(error?.message || 'Failed to generate payroll cycles', 'error')
-  } finally {
-    payrollGenerateLoading.value = false
-  }
-}
-
 async function deletePayrollCycle(id: string) {
   if (!window.confirm('Delete this payroll cycle?')) return
   try {
@@ -6726,7 +4856,6 @@ async function loadAdminData() {
     loadSettings(),
     loadRule(),
     loadRuleSets(),
-    loadTemplateLibrary(),
     loadPayrollTemplates(),
     loadPayrollCycles(),
     loadLeaveTypes(),
@@ -6737,8 +4866,6 @@ async function loadAdminData() {
     loadAssignments(),
     loadRotationAssignments(),
     loadHolidays(),
-    loadImportTemplate(),
-    loadImportBatches(),
   ])
 }
 
@@ -6755,15 +4882,6 @@ onMounted(() => {
       pluginsLoaded.value = true
     })
 })
-
-watch(
-  () => ruleSetForm.config,
-  (value) => {
-    const parsed = parseJsonConfig(value)
-    if (parsed) syncRuleSetTemplates(parsed)
-  },
-  { immediate: true }
-)
 
 watch(orgId, () => {
   if (attendancePluginActive.value) {
@@ -6848,11 +4966,6 @@ watch(orgId, () => {
   border: 1px solid #d0d0d0;
   background: #fff;
   cursor: pointer;
-}
-
-.attendance__btn--sm {
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 .attendance__btn--primary {
@@ -7055,10 +5168,6 @@ watch(orgId, () => {
   gap: 8px;
 }
 
-.attendance__import-items {
-  margin-top: 16px;
-}
-
 .attendance__requests-header {
   display: flex;
   justify-content: space-between;
@@ -7121,16 +5230,6 @@ watch(orgId, () => {
 .attendance__status-chip--cancelled {
   background: #eceff1;
   color: #546e7a;
-}
-
-.attendance__status-chip--committed {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-
-.attendance__status-chip--rolled_back {
-  background: #fff3e0;
-  color: #e65100;
 }
 
 .attendance__table {
@@ -7203,6 +5302,15 @@ watch(orgId, () => {
   flex-wrap: wrap;
 }
 
+.attendance__admin-meta {
+  font-size: 12px;
+  color: #6b7280;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .attendance__admin-section-header {
   display: flex;
   justify-content: space-between;
@@ -7210,228 +5318,10 @@ watch(orgId, () => {
   gap: 12px;
 }
 
-.attendance__admin-section-header--sub {
-  margin-top: 4px;
-}
-
-.attendance__admin-section-header--sub h5 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.attendance__admin-divider {
-  height: 1px;
-  width: 100%;
-  background: #eee;
-  margin: 4px 0;
-}
-
 .attendance__admin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
-}
-
-.attendance__template-panel {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.attendance__template-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.attendance__preview-card {
-  border: 1px solid #e6e6e6;
-  border-radius: 12px;
-  padding: 12px;
-  background: #fafafa;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.attendance__preview-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px 16px;
-}
-
-.attendance__preview-label {
-  font-size: 12px;
-  color: #777;
-  margin-bottom: 4px;
-}
-
-.attendance__preview-engine {
-  display: grid;
-  gap: 6px;
-  font-size: 13px;
-}
-
-.attendance__preview-json {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid #e3e3e3;
-  background: #fff;
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.attendance__template-group {
-  border: 1px solid #e6e6e6;
-  border-radius: 12px;
-  padding: 12px;
-  background: #fafafa;
-}
-
-.attendance__template-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: #333;
-}
-
-.attendance__template-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.attendance__template-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.attendance__template-item {
-  background: #fff;
-  border: 1px solid #e8e8e8;
-  border-radius: 10px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-
-.attendance__template-item--active {
-  border-color: #2f5ea5;
-  box-shadow: 0 0 0 1px rgba(47, 94, 165, 0.2);
-}
-
-.attendance__template-editor {
-  border: 1px solid #e0e0e0;
-  border-radius: 12px;
-  padding: 12px;
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.attendance__template-editor-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.attendance__template-editor-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #333;
-}
-
-.attendance__template-editor-name {
-  font-size: 12px;
-  color: #666;
-}
-
-.attendance__template-rules {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.attendance__template-rule {
-  border: 1px dashed #d6d6d6;
-  border-radius: 10px;
-  padding: 12px;
-  display: grid;
-  gap: 8px;
-}
-
-.attendance__template-rule-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.attendance__template-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: #222;
-}
-
-.attendance__template-meta {
-  font-size: 12px;
-  color: #666;
-}
-
-.attendance__template-params {
-  border: 1px dashed #d0d0d0;
-  border-radius: 12px;
-  padding: 12px;
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.attendance__file-input {
-  display: none;
-}
-
-.attendance__template-hint {
-  font-size: 12px;
-  color: #666;
-}
-
-.attendance__field-hint {
-  font-size: 11px;
-  color: #888;
-  margin-top: 4px;
-  display: inline-block;
-}
-
-.attendance__tag {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #e9eef7;
-  color: #2f5ea5;
-}
-
-.attendance__tag--locked {
-  background: #f0f0f0;
-  color: #666;
-}
-
-.attendance__tag--editable {
-  background: #e6f4ea;
-  color: #2e7d32;
 }
 
 @media (max-width: 768px) {
