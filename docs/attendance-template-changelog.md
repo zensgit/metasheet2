@@ -24,7 +24,8 @@
 - late-early-warning：113
 
 ### 默认规则集策略调整
-- 移除 `holiday-default-8h` 规则，节假日首日基准工时改由 Settings 配置控制（避免写死）。
+- `holiday-default-8h` 规则不再作为默认规则集内置，节假日首日基准工时改由 Settings 配置控制（避免写死）。
+- 新增模板 **Holiday First Day Base Hours (CN)**：规则名 `holiday-default-8h`，仅在用户启用该模板时生效；当 Holiday Policy 启用时会自动跳过该规则。
 
 ## 影响
 - 组合验收中 `single-rest-trip-overtime` 命中从 29 降至 4（更符合“有出差/外出且有打卡”的规则定义）。

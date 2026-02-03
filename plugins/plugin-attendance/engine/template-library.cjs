@@ -77,6 +77,27 @@ const DEFAULT_TEMPLATES = [
     ],
   },
   {
+    name: 'Holiday First Day Base Hours (CN)',
+    description: 'Holiday first day base hours (overtime handled by Holiday Policy settings).',
+    category: 'system',
+    editable: false,
+    rules: [
+      {
+        name: 'holiday-default-8h',
+        when: {
+          all: [
+            { field: 'record.is_holiday', op: 'eq', value: true },
+            { field: 'record.holiday_first_day', op: 'eq', value: true },
+          ],
+        },
+        then: {
+          set: { actual_hours: 8, required_hours: 8 },
+          warn: '节假日首日按8小时（可在 Holiday Policy 配置）',
+        },
+      },
+    ],
+  },
+  {
     name: 'Driver Rest Overtime (CN)',
     description: 'Drivers punching on rest shifts count as overtime.',
     category: 'system',
