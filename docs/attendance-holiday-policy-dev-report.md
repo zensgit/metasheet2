@@ -6,6 +6,7 @@
 - 合并 `feat/attendance-framework-20260128` 到 `main`。
 - 增加节假日首日基准工时模板规则，避免硬编码到业务规则里。
 - 引擎上下文补充 `holiday_policy_enabled`，支持“全局节假日策略”与“规则模板”互斥生效。
+- 调整班次时间优先级：当班次名称包含时间段时，优先使用班次时间而非 `shiftMappings`。
 - 文档更新：规则模板库与变更记录。
 
 ## 关键改动
@@ -14,6 +15,9 @@
   - 动作：将应出勤/实出勤置为可配置小时数（默认 8 小时）
 - 规则引擎上下文：新增 `holiday_policy_enabled` 字段
   - 用于在规则层判断是否应跳过模板
+- 班次时间优先级：
+  - 当 `shiftName` 中包含时间段（如 `08:00-12:00`）时，优先使用该时间段计算工时
+  - 仅在班次名称不包含时间段时，才应用 `policies.shiftMappings`
 - 文档更新：
   - `docs/attendance-rule-template-holiday-first-day.json`
   - `docs/attendance-holiday-sync-update-development.md`
