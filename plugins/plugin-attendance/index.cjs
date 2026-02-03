@@ -8095,30 +8095,27 @@ module.exports = {
                 anchorDate: formatDateOnly(anchor),
                 index: i + 1,
               }
-              try {
-                const rows = await trx.query(
-                  `INSERT INTO attendance_payroll_cycles
-                   (id, org_id, template_id, name, start_date, end_date, status, metadata)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-                   RETURNING *`,
-                  [
-                    randomUUID(),
-                    orgId,
-                    resolvedTemplateId,
-                    name,
-                    window.startDate,
-                    window.endDate,
-                    status,
-                    JSON.stringify(metadata),
-                  ]
-                )
+              const rows = await trx.query(
+                `INSERT INTO attendance_payroll_cycles
+                 (id, org_id, template_id, name, start_date, end_date, status, metadata)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                 ON CONFLICT (org_id, start_date, end_date) DO NOTHING
+                 RETURNING *`,
+                [
+                  randomUUID(),
+                  orgId,
+                  resolvedTemplateId,
+                  name,
+                  window.startDate,
+                  window.endDate,
+                  status,
+                  JSON.stringify(metadata),
+                ]
+              )
+              if (rows.length) {
                 created.push(mapPayrollCycleRow(rows[0]))
-              } catch (error) {
-                if (error?.code === '23505') {
-                  skipped.push({ startDate: window.startDate, endDate: window.endDate })
-                  continue
-                }
-                throw error
+              } else {
+                skipped.push({ startDate: window.startDate, endDate: window.endDate })
               }
             }
           })
