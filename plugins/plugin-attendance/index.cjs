@@ -3584,6 +3584,38 @@ module.exports = {
             }).optional(),
           }).catchall(z.unknown())
         ).optional(),
+        shiftMappings: z.array(
+          z.object({
+            name: z.string().optional(),
+            when: z.object({
+              userIds: z.array(z.string().min(1)).optional(),
+              userGroup: z.string().optional(),
+              shiftNames: z.array(z.string()).optional(),
+              isHoliday: z.boolean().optional(),
+              isWorkingDay: z.boolean().optional(),
+              fieldEquals: z.record(z.unknown()).optional(),
+              fieldIn: z.record(z.array(z.unknown())).optional(),
+              fieldContains: z.record(z.string()).optional(),
+              fieldExists: z.array(z.string()).optional(),
+              fieldNumberGte: z.record(z.number()).optional(),
+              fieldNumberLte: z.record(z.number()).optional(),
+            }).optional(),
+            then: z.object({
+              workStartTime: z.string().optional(),
+              workEndTime: z.string().optional(),
+              work_start_time: z.string().optional(),
+              work_end_time: z.string().optional(),
+              timezone: z.string().optional(),
+            }).optional(),
+            shift: z.object({
+              workStartTime: z.string().optional(),
+              workEndTime: z.string().optional(),
+              work_start_time: z.string().optional(),
+              work_end_time: z.string().optional(),
+              timezone: z.string().optional(),
+            }).optional(),
+          }).catchall(z.unknown())
+        ).optional(),
       }).optional(),
     }).catchall(z.unknown())
 
