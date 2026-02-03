@@ -3311,6 +3311,17 @@ async function saveSettings() {
       ? { lat, lng, radiusMeters: radius }
       : null
 
+    const overtimeSourceValue = settingsForm.holidayOvertimeSource
+    const overtimeSource = overtimeSourceValue === 'approval' || overtimeSourceValue === 'clock' || overtimeSourceValue === 'both'
+      ? overtimeSourceValue
+      : 'approval'
+    const dayIndexFormatValue = settingsForm.holidaySyncDayIndexFormat
+    const dayIndexFormat = dayIndexFormatValue === 'name-1'
+      || dayIndexFormatValue === 'name第1天'
+      || dayIndexFormatValue === 'name DAY1'
+      ? dayIndexFormatValue
+      : 'name-1'
+
     const payload: AttendanceSettings = {
       autoAbsence: {
         enabled: settingsForm.autoAbsenceEnabled,
@@ -3321,9 +3332,7 @@ async function saveSettings() {
         firstDayEnabled: settingsForm.holidayFirstDayEnabled,
         firstDayBaseHours: Number(settingsForm.holidayFirstDayBaseHours) || 0,
         overtimeAdds: settingsForm.holidayOvertimeAdds,
-        overtimeSource: (['approval', 'clock', 'both'] as const).includes(settingsForm.holidayOvertimeSource)
-          ? settingsForm.holidayOvertimeSource
-          : 'approval',
+        overtimeSource,
       },
       holidaySync: {
         source: 'holiday-cn',
@@ -3342,9 +3351,7 @@ async function saveSettings() {
               .filter(Boolean)
           : undefined,
         dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
-        dayIndexFormat: (['name-1', 'name第1天', 'name DAY1'] as const).includes(settingsForm.holidaySyncDayIndexFormat)
-          ? settingsForm.holidaySyncDayIndexFormat
-          : 'name-1',
+        dayIndexFormat,
         overwrite: settingsForm.holidaySyncOverwrite,
       },
       ipAllowlist,
