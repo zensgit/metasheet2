@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS = {
       enabled: false,
       runAt: '02:00',
     },
+    lastRun: null,
   },
   ipAllowlist: [],
   geoFence: null,
@@ -1805,7 +1806,23 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
     results.push({ year, url, fetched: days.length, applied })
   }
 
-  return { syncConfig, years, totalFetched, totalApplied, results }
+  const lastRun = {
+    ranAt: new Date().toISOString(),
+    success: true,
+    years,
+    totalFetched,
+    totalApplied,
+    error: null,
+  }
+  await saveSettings(db, {
+    ...settings,
+    holidaySync: {
+      ...(settings.holidaySync || {}),
+      lastRun,
+    },
+  })
+
+  return { syncConfig, years, totalFetched, totalApplied, results, lastRun }
 }
 
 function matchesNumberGte(actual, expected) {
@@ -2092,6 +2109,7 @@ function normalizeSettings(raw) {
   const holidayPolicy = raw.holidayPolicy ?? {}
   const holidaySync = raw.holidaySync ?? {}
   const holidaySyncAuto = holidaySync.auto ?? {}
+  const holidaySyncLastRun = holidaySync.lastRun ?? null
   const ipAllowlist = Array.isArray(raw.ipAllowlist) ? raw.ipAllowlist.filter(Boolean) : []
   const geoFence = raw.geoFence && typeof raw.geoFence === 'object' ? raw.geoFence : null
   const overtimeSourceRaw = typeof holidayPolicy.overtimeSource === 'string'
@@ -2122,6 +2140,22 @@ function normalizeSettings(raw) {
   const holidaySyncAutoRunAt = typeof holidaySyncAuto.runAt === 'string' && holidaySyncAuto.runAt.trim().length > 0
     ? holidaySyncAuto.runAt
     : DEFAULT_SETTINGS.holidaySync.auto.runAt
+  const holidaySyncLastRunNormalized = holidaySyncLastRun && typeof holidaySyncLastRun === 'object'
+    ? {
+        ranAt: typeof holidaySyncLastRun.ranAt === 'string' ? holidaySyncLastRun.ranAt : null,
+        success: typeof holidaySyncLastRun.success === 'boolean' ? holidaySyncLastRun.success : null,
+        years: Array.isArray(holidaySyncLastRun.years)
+          ? holidaySyncLastRun.years.map((year) => parseNumber(year, null)).filter((year) => Number.isFinite(year))
+          : null,
+        totalFetched: Number.isFinite(holidaySyncLastRun.totalFetched)
+          ? Number(holidaySyncLastRun.totalFetched)
+          : null,
+        totalApplied: Number.isFinite(holidaySyncLastRun.totalApplied)
+          ? Number(holidaySyncLastRun.totalApplied)
+          : null,
+        error: typeof holidaySyncLastRun.error === 'string' ? holidaySyncLastRun.error : null,
+      }
+    : null
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -2149,6 +2183,7 @@ function normalizeSettings(raw) {
         enabled: parseBoolean(holidaySyncAuto.enabled, DEFAULT_SETTINGS.holidaySync.auto.enabled),
         runAt: holidaySyncAutoRunAt,
       },
+      lastRun: holidaySyncLastRunNormalized,
     },
     ipAllowlist,
     geoFence,
@@ -3148,6 +3183,14 @@ module.exports = {
         auto: z.object({
           enabled: z.boolean().optional(),
           runAt: z.string().optional(),
+        }).optional(),
+        lastRun: z.object({
+          ranAt: z.string().optional(),
+          success: z.boolean().optional(),
+          years: z.array(z.number().int()).optional(),
+          totalFetched: z.number().optional(),
+          totalApplied: z.number().optional(),
+          error: z.string().optional(),
         }).optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
@@ -9505,9 +9548,10 @@ module.exports = {
         }
         const orgId = getOrgId(req)
         const settings = await getSettings(db)
+        const years = resolveHolidaySyncYears(settings, parsed.data)
 
         try {
-          const { syncConfig, years, totalFetched, totalApplied, results } = await performHolidaySync({
+          const { syncConfig, totalFetched, totalApplied, results, lastRun } = await performHolidaySync({
             db,
             logger,
             orgId,
@@ -9529,9 +9573,29 @@ module.exports = {
               totalFetched,
               totalApplied,
               results,
+              lastRun,
             },
           })
         } catch (error) {
+          const lastRun = {
+            ranAt: new Date().toISOString(),
+            success: false,
+            years,
+            totalFetched: 0,
+            totalApplied: 0,
+            error: error instanceof Error ? error.message : 'Holiday sync failed',
+          }
+          try {
+            await saveSettings(db, {
+              ...settings,
+              holidaySync: {
+                ...(settings.holidaySync || {}),
+                lastRun,
+              },
+            })
+          } catch (persistError) {
+            logger.warn('Failed to persist holiday sync status', persistError)
+          }
           logger.error('Attendance holiday sync failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to sync holidays' } })
         }

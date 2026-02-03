@@ -456,9 +456,25 @@
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
                 <h4>Holiday Sync</h4>
-                <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
-                  {{ holidaySyncLoading ? 'Syncing...' : 'Sync now' }}
-                </button>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
+                    {{ holidaySyncLoading ? 'Syncing...' : 'Sync now' }}
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    :disabled="holidaySyncLoading"
+                    @click="syncHolidaysForYears([new Date().getFullYear()])"
+                  >
+                    Sync current year
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    :disabled="holidaySyncLoading"
+                    @click="syncHolidaysForYears([new Date().getFullYear() + 1])"
+                  >
+                    Sync next year
+                  </button>
+                </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-base-url">
@@ -548,6 +564,21 @@
                     type="checkbox"
                   />
                 </label>
+              </div>
+              <div class="attendance__admin-meta">
+                <strong>Last sync</strong>
+                <span v-if="holidaySyncLastRun?.ranAt">
+                  {{ new Date(holidaySyncLastRun.ranAt).toLocaleString() }}
+                  · {{ holidaySyncLastRun.success ? 'success' : 'failed' }}
+                  · {{ holidaySyncLastRun.totalApplied ?? 0 }} applied / {{ holidaySyncLastRun.totalFetched ?? 0 }} fetched
+                  <span v-if="holidaySyncLastRun.years && holidaySyncLastRun.years.length">
+                    · {{ holidaySyncLastRun.years.join(',') }}
+                  </span>
+                  <span v-if="holidaySyncLastRun.error">
+                    · {{ holidaySyncLastRun.error }}
+                  </span>
+                </span>
+                <span v-else>--</span>
               </div>
             </div>
 
@@ -2128,6 +2159,14 @@ interface AttendanceSettings {
       enabled?: boolean
       runAt?: string
     }
+    lastRun?: {
+      ranAt?: string | null
+      success?: boolean | null
+      years?: number[] | null
+      totalFetched?: number | null
+      totalApplied?: number | null
+      error?: string | null
+    } | null
   }
   ipAllowlist?: string[]
   geoFence?: {
@@ -2377,6 +2416,7 @@ const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
 const holidaySyncLoading = ref(false)
+const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
 const shiftSaving = ref(false)
@@ -3291,6 +3331,7 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
   settingsForm.holidaySyncAutoEnabled = settings.holidaySync?.auto?.enabled ?? false
   settingsForm.holidaySyncAutoRunAt = settings.holidaySync?.auto?.runAt ?? '02:00'
+  holidaySyncLastRun.value = settings.holidaySync?.lastRun ?? null
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
@@ -3414,26 +3455,9 @@ async function saveSettings() {
 async function syncHolidays() {
   holidaySyncLoading.value = true
   try {
-    const years = settingsForm.holidaySyncYears
-      ? settingsForm.holidaySyncYears
-          .split(/[\s,]+/)
-          .map(item => Number(item))
-          .filter(item => Number.isFinite(item))
-      : undefined
     const payload = {
       source: 'holiday-cn',
-      baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
-      years,
-      addDayIndex: settingsForm.holidaySyncAddDayIndex,
-      dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
-        ? settingsForm.holidaySyncDayIndexHolidays
-            .split(/[\s,]+/)
-            .map(item => item.trim())
-            .filter(Boolean)
-        : undefined,
-      dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
-      dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
-      overwrite: settingsForm.holidaySyncOverwrite,
+      ...buildHolidaySyncPayload(),
     }
     const response = await apiFetch('/api/attendance/holidays/sync', {
       method: 'POST',
@@ -3446,6 +3470,63 @@ async function syncHolidays() {
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Holiday sync failed')
+    }
+    if (data?.data?.lastRun) {
+      holidaySyncLastRun.value = data.data.lastRun
+    }
+    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Holiday sync failed', 'error')
+  } finally {
+    holidaySyncLoading.value = false
+  }
+}
+
+function buildHolidaySyncPayload(overrides?: { years?: number[] }) {
+  const years = overrides?.years ?? (settingsForm.holidaySyncYears
+    ? settingsForm.holidaySyncYears
+        .split(/[\s,]+/)
+        .map(item => Number(item))
+        .filter(item => Number.isFinite(item))
+    : undefined)
+
+  return {
+    baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
+    years,
+    addDayIndex: settingsForm.holidaySyncAddDayIndex,
+    dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
+      ? settingsForm.holidaySyncDayIndexHolidays
+          .split(/[\s,]+/)
+          .map(item => item.trim())
+          .filter(Boolean)
+      : undefined,
+    dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
+    dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
+    overwrite: settingsForm.holidaySyncOverwrite,
+  }
+}
+
+async function syncHolidaysForYears(years: number[]) {
+  settingsForm.holidaySyncYears = years.join(',')
+  holidaySyncLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/holidays/sync', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: 'holiday-cn',
+        ...buildHolidaySyncPayload({ years }),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Holiday sync failed')
+    }
+    if (data?.data?.lastRun) {
+      holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
   } catch (error: any) {
@@ -5205,6 +5286,15 @@ watch(orgId, () => {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.attendance__admin-meta {
+  font-size: 12px;
+  color: #6b7280;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .attendance__admin-section-header {
