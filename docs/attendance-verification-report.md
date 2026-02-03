@@ -1,6 +1,6 @@
 # 考勤验收报告
 
-日期：2026-02-02
+日期：2026-02-03
 
 ## 环境
 - 服务：`metasheet-backend`（Docker）
@@ -43,6 +43,11 @@
 - Rows：6,789
 - 状态统计：off 1,971；early_leave 4,464；absent 349；partial 2；normal 1；late_early 2。
 - Top rules：security-default-8h 248；trip-under-8h 186；leave-but-punched 25；driver-default-8h 22；single-rest-trip-overtime 4。
+
+### 节假日首日策略（新增）
+- 配置项：首日基准工时 / 叠加加班 / 加班来源（审批/打卡/两者）。
+- 首日识别：节假日名称包含“春节-1 / 第1天 / DAY1”。
+- 状态：待节假日样本回归（未在本次 CSV 预览中验证）。
 
 ## 结论
 - 司机/保安规则命中一致，未发现 warnings。

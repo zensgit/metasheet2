@@ -356,6 +356,47 @@
                     min="1"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
+                  <span>Holiday first-day base hours</span>
+                  <input
+                    id="attendance-holiday-first-day-enabled"
+                    name="holidayFirstDayEnabled"
+                    v-model="settingsForm.holidayFirstDayEnabled"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-first-day-hours">
+                  <span>First-day base hours</span>
+                  <input
+                    id="attendance-holiday-first-day-hours"
+                    name="holidayFirstDayBaseHours"
+                    v-model.number="settingsForm.holidayFirstDayBaseHours"
+                    type="number"
+                    min="0"
+                    step="0.5"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-overtime-adds">
+                  <span>Overtime adds on holiday</span>
+                  <input
+                    id="attendance-holiday-overtime-adds"
+                    name="holidayOvertimeAdds"
+                    v-model="settingsForm.holidayOvertimeAdds"
+                    type="checkbox"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-overtime-source">
+                  <span>Overtime source</span>
+                  <select
+                    id="attendance-holiday-overtime-source"
+                    name="holidayOvertimeSource"
+                    v-model="settingsForm.holidayOvertimeSource"
+                  >
+                    <option value="approval">Approval</option>
+                    <option value="clock">Clock</option>
+                    <option value="both">Both</option>
+                  </select>
+                </label>
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>Min punch interval (min)</span>
                   <input
@@ -1970,6 +2011,12 @@ interface AttendanceSettings {
     runAt?: string
     lookbackDays?: number
   }
+  holidayPolicy?: {
+    firstDayEnabled?: boolean
+    firstDayBaseHours?: number
+    overtimeAdds?: boolean
+    overtimeSource?: 'approval' | 'clock' | 'both'
+  }
   ipAllowlist?: string[]
   geoFence?: {
     lat: number
@@ -2390,6 +2437,10 @@ const settingsForm = reactive({
   autoAbsenceEnabled: false,
   autoAbsenceRunAt: '00:15',
   autoAbsenceLookbackDays: 1,
+  holidayFirstDayEnabled: true,
+  holidayFirstDayBaseHours: 8,
+  holidayOvertimeAdds: true,
+  holidayOvertimeSource: 'approval',
   ipAllowlist: '',
   geoFenceLat: '',
   geoFenceLng: '',
@@ -3100,6 +3151,10 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.autoAbsenceEnabled = Boolean(settings.autoAbsence?.enabled)
   settingsForm.autoAbsenceRunAt = settings.autoAbsence?.runAt || '00:15'
   settingsForm.autoAbsenceLookbackDays = settings.autoAbsence?.lookbackDays || 1
+  settingsForm.holidayFirstDayEnabled = settings.holidayPolicy?.firstDayEnabled ?? true
+  settingsForm.holidayFirstDayBaseHours = settings.holidayPolicy?.firstDayBaseHours ?? 8
+  settingsForm.holidayOvertimeAdds = settings.holidayPolicy?.overtimeAdds ?? true
+  settingsForm.holidayOvertimeSource = settings.holidayPolicy?.overtimeSource ?? 'approval'
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
@@ -3151,6 +3206,12 @@ async function saveSettings() {
         enabled: settingsForm.autoAbsenceEnabled,
         runAt: settingsForm.autoAbsenceRunAt || '00:15',
         lookbackDays: Number(settingsForm.autoAbsenceLookbackDays) || 1,
+      },
+      holidayPolicy: {
+        firstDayEnabled: settingsForm.holidayFirstDayEnabled,
+        firstDayBaseHours: Number(settingsForm.holidayFirstDayBaseHours) || 0,
+        overtimeAdds: settingsForm.holidayOvertimeAdds,
+        overtimeSource: settingsForm.holidayOvertimeSource || 'approval',
       },
       ipAllowlist,
       geoFence,
