@@ -489,6 +489,38 @@
                     type="checkbox"
                   />
                 </label>
+                <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-index-holidays">
+                  <span>Index holidays</span>
+                  <input
+                    id="attendance-holiday-sync-index-holidays"
+                    name="holidaySyncDayIndexHolidays"
+                    v-model="settingsForm.holidaySyncDayIndexHolidays"
+                    type="text"
+                    placeholder="春节,国庆"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-index-max">
+                  <span>Max index days</span>
+                  <input
+                    id="attendance-holiday-sync-index-max"
+                    name="holidaySyncDayIndexMaxDays"
+                    v-model.number="settingsForm.holidaySyncDayIndexMaxDays"
+                    type="number"
+                    min="1"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-holiday-sync-index-format">
+                  <span>Index format</span>
+                  <select
+                    id="attendance-holiday-sync-index-format"
+                    name="holidaySyncDayIndexFormat"
+                    v-model="settingsForm.holidaySyncDayIndexFormat"
+                  >
+                    <option value="name-1">name-1</option>
+                    <option value="name第1天">name第1天</option>
+                    <option value="name DAY1">name DAY1</option>
+                  </select>
+                </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-overwrite">
                   <span>Overwrite existing</span>
                   <input
@@ -2070,6 +2102,9 @@ interface AttendanceSettings {
     baseUrl?: string
     years?: number[]
     addDayIndex?: boolean
+    dayIndexHolidays?: string[]
+    dayIndexMaxDays?: number
+    dayIndexFormat?: 'name-1' | 'name第1天' | 'name DAY1'
     overwrite?: boolean
   }
   ipAllowlist?: string[]
@@ -2500,6 +2535,9 @@ const settingsForm = reactive({
   holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
   holidaySyncYears: '',
   holidaySyncAddDayIndex: true,
+  holidaySyncDayIndexHolidays: '春节,国庆',
+  holidaySyncDayIndexMaxDays: 7,
+  holidaySyncDayIndexFormat: 'name-1',
   holidaySyncOverwrite: false,
   ipAllowlist: '',
   geoFenceLat: '',
@@ -3221,6 +3259,11 @@ function applySettingsToForm(settings: AttendanceSettings) {
     ? settings.holidaySync?.years?.join(',')
     : ''
   settingsForm.holidaySyncAddDayIndex = settings.holidaySync?.addDayIndex ?? true
+  settingsForm.holidaySyncDayIndexHolidays = Array.isArray(settings.holidaySync?.dayIndexHolidays)
+    ? settings.holidaySync?.dayIndexHolidays?.join(',')
+    : '春节,国庆'
+  settingsForm.holidaySyncDayIndexMaxDays = settings.holidaySync?.dayIndexMaxDays ?? 7
+  settingsForm.holidaySyncDayIndexFormat = settings.holidaySync?.dayIndexFormat ?? 'name-1'
   settingsForm.holidaySyncOverwrite = settings.holidaySync?.overwrite ?? false
   settingsForm.ipAllowlist = (settings.ipAllowlist || []).join('\n')
   settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
@@ -3290,6 +3333,14 @@ async function saveSettings() {
               .filter(item => Number.isFinite(item))
           : undefined,
         addDayIndex: settingsForm.holidaySyncAddDayIndex,
+        dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
+          ? settingsForm.holidaySyncDayIndexHolidays
+              .split(/[\s,]+/)
+              .map(item => item.trim())
+              .filter(Boolean)
+          : undefined,
+        dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
+        dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
         overwrite: settingsForm.holidaySyncOverwrite,
       },
       ipAllowlist,
@@ -3333,6 +3384,14 @@ async function syncHolidays() {
       baseUrl: settingsForm.holidaySyncBaseUrl?.trim() || undefined,
       years,
       addDayIndex: settingsForm.holidaySyncAddDayIndex,
+      dayIndexHolidays: settingsForm.holidaySyncDayIndexHolidays
+        ? settingsForm.holidaySyncDayIndexHolidays
+            .split(/[\s,]+/)
+            .map(item => item.trim())
+            .filter(Boolean)
+        : undefined,
+      dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
+      dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
       overwrite: settingsForm.holidaySyncOverwrite,
     }
     const response = await apiFetch('/api/attendance/holidays/sync', {

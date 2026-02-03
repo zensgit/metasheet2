@@ -57,6 +57,9 @@ const DEFAULT_SETTINGS = {
     baseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
     years: [],
     addDayIndex: true,
+    dayIndexHolidays: ['春节', '国庆'],
+    dayIndexMaxDays: 7,
+    dayIndexFormat: 'name-1',
     overwrite: false,
   },
   ipAllowlist: [],
@@ -1622,7 +1625,20 @@ function parseHolidayCnDate(date) {
   return `${year}-${month}-${day}`
 }
 
-function normalizeHolidayCnDays(days, { addDayIndex }) {
+function formatHolidayDayIndex(name, index, format) {
+  if (!name) return name
+  switch (format) {
+    case 'name第1天':
+      return `${name}第${index}天`
+    case 'name DAY1':
+      return `${name} DAY${index}`
+    case 'name-1':
+    default:
+      return `${name}-${index}`
+  }
+}
+
+function normalizeHolidayCnDays(days, { addDayIndex, dayIndexHolidays, dayIndexMaxDays, dayIndexFormat }) {
   const items = Array.isArray(days) ? days : []
   const sorted = items
     .map((item) => ({
@@ -1644,14 +1660,22 @@ function normalizeHolidayCnDays(days, { addDayIndex }) {
     const normalizedName = name || null
     let labeledName = normalizedName
 
-    if (addDayIndex && isOffDay && normalizedName) {
+    const shouldIndexHoliday = (() => {
+      if (!addDayIndex || !isOffDay || !normalizedName) return false
+      if (!dayIndexHolidays || dayIndexHolidays.length === 0) return true
+      return dayIndexHolidays.some((holiday) => normalizedName.includes(holiday))
+    })()
+
+    if (shouldIndexHoliday) {
       const contiguous =
         prevName === normalizedName &&
         prevIsOff &&
         prevDate &&
         Math.round((new Date(`${date}T00:00:00Z`) - new Date(`${prevDate}T00:00:00Z`)) / 86400000) === 1
       dayIndex = contiguous ? dayIndex + 1 : 1
-      labeledName = `${normalizedName}-${dayIndex}`
+      if (!dayIndexMaxDays || dayIndex <= dayIndexMaxDays) {
+        labeledName = formatHolidayDayIndex(normalizedName, dayIndex, dayIndexFormat)
+      }
     } else {
       dayIndex = 0
     }
@@ -1687,10 +1711,19 @@ function resolveHolidaySyncConfig(settings, payload) {
   const addDayIndex = typeof payload?.addDayIndex === 'boolean'
     ? payload.addDayIndex
     : (settings?.holidaySync?.addDayIndex ?? DEFAULT_SETTINGS.holidaySync.addDayIndex)
+  const dayIndexHolidays = Array.isArray(payload?.dayIndexHolidays) && payload.dayIndexHolidays.length
+    ? payload.dayIndexHolidays.map((name) => String(name).trim()).filter(Boolean)
+    : (settings?.holidaySync?.dayIndexHolidays ?? DEFAULT_SETTINGS.holidaySync.dayIndexHolidays)
+  const dayIndexMaxDays = Number.isFinite(payload?.dayIndexMaxDays)
+    ? Math.max(1, Number(payload.dayIndexMaxDays))
+    : (settings?.holidaySync?.dayIndexMaxDays ?? DEFAULT_SETTINGS.holidaySync.dayIndexMaxDays)
+  const dayIndexFormat = typeof payload?.dayIndexFormat === 'string' && payload.dayIndexFormat.trim()
+    ? payload.dayIndexFormat.trim()
+    : (settings?.holidaySync?.dayIndexFormat ?? DEFAULT_SETTINGS.holidaySync.dayIndexFormat)
   const overwrite = typeof payload?.overwrite === 'boolean'
     ? payload.overwrite
     : (settings?.holidaySync?.overwrite ?? DEFAULT_SETTINGS.holidaySync.overwrite)
-  return { source, baseUrl, addDayIndex, overwrite }
+  return { source, baseUrl, addDayIndex, dayIndexHolidays, dayIndexMaxDays, dayIndexFormat, overwrite }
 }
 
 async function fetchHolidayCnYear({ year, baseUrl }) {
@@ -2038,6 +2071,19 @@ function normalizeSettings(raw) {
   const holidaySyncYears = Array.isArray(holidaySync.years)
     ? holidaySync.years.map((year) => parseNumber(year, null)).filter((year) => Number.isFinite(year))
     : []
+  const holidaySyncDayIndexHolidays = Array.isArray(holidaySync.dayIndexHolidays)
+    ? holidaySync.dayIndexHolidays.map((name) => String(name).trim()).filter(Boolean)
+    : [...DEFAULT_SETTINGS.holidaySync.dayIndexHolidays]
+  const holidaySyncDayIndexMaxDays = Math.max(
+    1,
+    parseNumber(holidaySync.dayIndexMaxDays, DEFAULT_SETTINGS.holidaySync.dayIndexMaxDays)
+  )
+  const holidaySyncDayIndexFormatRaw = typeof holidaySync.dayIndexFormat === 'string'
+    ? holidaySync.dayIndexFormat.trim()
+    : ''
+  const holidaySyncDayIndexFormat = ['name-1', 'name第1天', 'name DAY1'].includes(holidaySyncDayIndexFormatRaw)
+    ? holidaySyncDayIndexFormatRaw
+    : DEFAULT_SETTINGS.holidaySync.dayIndexFormat
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -2057,6 +2103,9 @@ function normalizeSettings(raw) {
       baseUrl: holidaySyncBaseUrl,
       years: holidaySyncYears,
       addDayIndex: parseBoolean(holidaySync.addDayIndex, DEFAULT_SETTINGS.holidaySync.addDayIndex),
+      dayIndexHolidays: holidaySyncDayIndexHolidays,
+      dayIndexMaxDays: holidaySyncDayIndexMaxDays,
+      dayIndexFormat: holidaySyncDayIndexFormat,
       overwrite: parseBoolean(holidaySync.overwrite, DEFAULT_SETTINGS.holidaySync.overwrite),
     },
     ipAllowlist,
@@ -2984,6 +3033,9 @@ module.exports = {
         baseUrl: z.string().optional(),
         years: z.array(z.number().int()).optional(),
         addDayIndex: z.boolean().optional(),
+        dayIndexHolidays: z.array(z.string()).optional(),
+        dayIndexMaxDays: z.number().int().min(1).optional(),
+        dayIndexFormat: z.enum(['name-1', 'name第1天', 'name DAY1']).optional(),
         overwrite: z.boolean().optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
@@ -9349,7 +9401,12 @@ module.exports = {
           for (const year of years) {
             const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
             totalFetched += days.length
-            const rows = normalizeHolidayCnDays(days, { addDayIndex: syncConfig.addDayIndex })
+            const rows = normalizeHolidayCnDays(days, {
+              addDayIndex: syncConfig.addDayIndex,
+              dayIndexHolidays: syncConfig.dayIndexHolidays,
+              dayIndexMaxDays: syncConfig.dayIndexMaxDays,
+              dayIndexFormat: syncConfig.dayIndexFormat,
+            })
             const applied = await upsertHolidayRows(db, {
               orgId,
               rows,
@@ -9366,6 +9423,9 @@ module.exports = {
               baseUrl: syncConfig.baseUrl,
               years,
               addDayIndex: syncConfig.addDayIndex,
+              dayIndexHolidays: syncConfig.dayIndexHolidays,
+              dayIndexMaxDays: syncConfig.dayIndexMaxDays,
+              dayIndexFormat: syncConfig.dayIndexFormat,
               overwrite: syncConfig.overwrite,
               totalFetched,
               totalApplied,
