@@ -3321,7 +3321,9 @@ async function saveSettings() {
         firstDayEnabled: settingsForm.holidayFirstDayEnabled,
         firstDayBaseHours: Number(settingsForm.holidayFirstDayBaseHours) || 0,
         overtimeAdds: settingsForm.holidayOvertimeAdds,
-        overtimeSource: settingsForm.holidayOvertimeSource || 'approval',
+        overtimeSource: (['approval', 'clock', 'both'] as const).includes(settingsForm.holidayOvertimeSource)
+          ? settingsForm.holidayOvertimeSource
+          : 'approval',
       },
       holidaySync: {
         source: 'holiday-cn',
@@ -3340,7 +3342,9 @@ async function saveSettings() {
               .filter(Boolean)
           : undefined,
         dayIndexMaxDays: Number(settingsForm.holidaySyncDayIndexMaxDays) || undefined,
-        dayIndexFormat: settingsForm.holidaySyncDayIndexFormat || 'name-1',
+        dayIndexFormat: (['name-1', 'name第1天', 'name DAY1'] as const).includes(settingsForm.holidaySyncDayIndexFormat)
+          ? settingsForm.holidaySyncDayIndexFormat
+          : 'name-1',
         overwrite: settingsForm.holidaySyncOverwrite,
       },
       ipAllowlist,
