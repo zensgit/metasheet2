@@ -182,6 +182,38 @@ const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
 const requireImportCommitToken = process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'
 const importCommitTokens = new Map()
 
+async function ensureImportTokenTable(db) {
+  if (!db) return
+  try {
+    await db.query(
+      `CREATE TABLE IF NOT EXISTS attendance_import_tokens (
+        token text PRIMARY KEY,
+        org_id text NOT NULL,
+        user_id text NOT NULL,
+        expires_at timestamptz NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )`
+    )
+    await db.query(
+      'CREATE INDEX IF NOT EXISTS attendance_import_tokens_org_idx ON attendance_import_tokens(org_id)'
+    )
+    await db.query(
+      'CREATE INDEX IF NOT EXISTS attendance_import_tokens_expires_idx ON attendance_import_tokens(expires_at)'
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return
+  }
+}
+
+async function pruneImportCommitTokensDb(db) {
+  if (!db) return
+  try {
+    await db.query('DELETE FROM attendance_import_tokens WHERE expires_at <= now()')
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return
+  }
+}
+
 function pruneImportCommitTokens() {
   const now = Date.now()
   for (const [token, entry] of importCommitTokens.entries()) {
@@ -191,26 +223,72 @@ function pruneImportCommitTokens() {
   }
 }
 
-function createImportCommitToken({ orgId, userId }) {
+async function createImportCommitToken({ db, orgId, userId }) {
   pruneImportCommitTokens()
   const token = randomUUID()
   const expiresAt = Date.now() + IMPORT_COMMIT_TOKEN_TTL_MS
   importCommitTokens.set(token, { orgId, userId, expiresAt })
+  if (db) {
+    await pruneImportCommitTokensDb(db)
+    try {
+      await db.query(
+        `INSERT INTO attendance_import_tokens
+         (token, org_id, user_id, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [token, orgId, userId, new Date(expiresAt)]
+      )
+    } catch (error) {
+      if (!isDatabaseSchemaError(error)) {
+        throw error
+      }
+    }
+  }
   return { token, expiresAt }
 }
 
-function consumeImportCommitToken(token, { orgId, userId }) {
+async function consumeImportCommitToken(token, { db, orgId, userId }) {
   pruneImportCommitTokens()
   const entry = importCommitTokens.get(token)
-  if (!entry) return false
-  if (entry.orgId !== orgId) return false
-  if (entry.userId !== userId) return false
-  if (entry.expiresAt <= Date.now()) {
+  if (entry) {
+    if (entry.orgId !== orgId) return false
+    if (entry.userId !== userId) return false
+    if (entry.expiresAt <= Date.now()) {
+      importCommitTokens.delete(token)
+      return false
+    }
     importCommitTokens.delete(token)
-    return false
+    if (db) {
+      try {
+        await db.query('DELETE FROM attendance_import_tokens WHERE token = $1', [token])
+      } catch (error) {
+        if (!isDatabaseSchemaError(error)) {
+          throw error
+        }
+      }
+    }
+    return true
   }
-  importCommitTokens.delete(token)
-  return true
+
+  if (!db) return false
+  await pruneImportCommitTokensDb(db)
+  try {
+    const rows = await db.query(
+      'SELECT token, org_id, user_id, expires_at FROM attendance_import_tokens WHERE token = $1',
+      [token]
+    )
+    if (!rows.length) return false
+    const row = rows[0]
+    if (row.org_id !== orgId || row.user_id !== userId) return false
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      await db.query('DELETE FROM attendance_import_tokens WHERE token = $1', [token])
+      return false
+    }
+    await db.query('DELETE FROM attendance_import_tokens WHERE token = $1', [token])
+    return true
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return false
+    throw error
+  }
 }
 
 function ensureStringArray(value) {
@@ -3738,6 +3816,8 @@ module.exports = {
       }
     }
 
+    await ensureImportTokenTable(db)
+
     const settingsSchema = z.object({
       autoAbsence: z.object({
         enabled: z.boolean().optional(),
@@ -6984,7 +7064,7 @@ module.exports = {
           return
         }
 
-        const { token, expiresAt } = createImportCommitToken({ orgId, userId: requesterId })
+        const { token, expiresAt } = await createImportCommitToken({ db, orgId, userId: requesterId })
         res.json({
           ok: true,
           data: {
@@ -7018,7 +7098,7 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
             return
           }
-          const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId })
+          const tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId })
           if (!tokenOk) {
             res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
             return
@@ -7418,7 +7498,7 @@ module.exports = {
             res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
             return
           }
-          const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId: requesterId })
+          const tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
           if (!tokenOk) {
             res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
             return
