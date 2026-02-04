@@ -6678,7 +6678,6 @@ module.exports = {
             ?? []
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
-          const punchRequiredFields = profile?.punchRequiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -7038,6 +7037,7 @@ module.exports = {
             ?? ruleSetConfig?.mappings?.fields
             ?? []
           const requiredFields = profile?.requiredFields ?? []
+          const punchRequiredFields = profile?.punchRequiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -7497,6 +7497,7 @@ module.exports = {
             ?? ruleSetConfig?.mappings?.fields
             ?? []
           const requiredFields = profile?.requiredFields ?? []
+          const punchRequiredFields = profile?.punchRequiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -8151,6 +8152,7 @@ module.exports = {
                   ?? ruleSetConfig?.mappings?.fields
                   ?? []
                 const requiredFields = profile?.requiredFields ?? []
+                const punchRequiredFields = profile?.punchRequiredFields ?? []
                 const baseRule = await loadDefaultRule(db, orgId)
                 const override = normalizeRuleOverride(ruleSetConfig?.rule)
                 const ruleOverride = override
