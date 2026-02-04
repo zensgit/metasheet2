@@ -7102,6 +7102,7 @@ module.exports = {
               return undefined
             }
             const dataTypeFor = (key) => mapped[key]?.dataType
+            const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
 
             const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
             const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
