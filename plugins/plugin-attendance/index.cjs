@@ -139,6 +139,9 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: '姓名', targetField: 'userName', dataType: 'string' },
 ]
 
+const DEFAULT_REQUIRED_FIELDS = ['日期']
+const DEFAULT_PUNCH_REQUIRED_FIELDS = ['上班1打卡时间', '下班1打卡时间']
+
 const IMPORT_MAPPING_PROFILES = [
   {
     id: 'dingtalk_csv_daily_summary',
@@ -148,7 +151,8 @@ const IMPORT_MAPPING_PROFILES = [
     mapping: { columns: IMPORT_MAPPING_COLUMNS },
     userMapKeyField: '工号',
     userMapSourceFields: ['empNo', '工号', '姓名'],
-    requiredFields: ['日期', '上班1打卡时间', '下班1打卡时间'],
+    requiredFields: DEFAULT_REQUIRED_FIELDS,
+    punchRequiredFields: DEFAULT_PUNCH_REQUIRED_FIELDS,
   },
   {
     id: 'dingtalk_api_columns',
@@ -6673,6 +6677,7 @@ module.exports = {
             ?? ruleSetConfig?.mappings?.fields
             ?? []
           const requiredFields = profile?.requiredFields ?? []
+          const punchRequiredFields = profile?.punchRequiredFields ?? []
 
           let engine = null
           const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
@@ -6737,13 +6742,22 @@ module.exports = {
             const importWarnings = []
             if (!rowUserId) importWarnings.push('Missing userId')
             if (!workDate) importWarnings.push('Missing workDate')
-            if (requiredFields.length && !isRestShiftRow(row)) {
+            if (requiredFields.length) {
               const missingRequired = requiredFields.filter((field) => {
                 const value = resolveRequiredFieldValue(row, field)
                 return value === undefined || value === null || value === ''
               })
               if (missingRequired.length) {
                 importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+              }
+            }
+            if (punchRequiredFields.length && !isRestShiftRow(row)) {
+              const missingPunch = punchRequiredFields.filter((field) => {
+                const value = resolveRequiredFieldValue(row, field)
+                return value === undefined || value === null || value === ''
+              })
+              if (missingPunch.length) {
+                importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
               }
             }
             if (importWarnings.length) {
@@ -7112,13 +7126,22 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
-            if (requiredFields.length && !isRestShiftRow(row)) {
-              const missingRequired = requiredFields.filter((field) => {
-                const value = resolveRequiredFieldValue(row, field)
-                return value === undefined || value === null || value === ''
-              })
+              if (requiredFields.length) {
+                const missingRequired = requiredFields.filter((field) => {
+                  const value = resolveRequiredFieldValue(row, field)
+                  return value === undefined || value === null || value === ''
+                })
                 if (missingRequired.length) {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                }
+              }
+              if (punchRequiredFields.length && !isRestShiftRow(row)) {
+                const missingPunch = punchRequiredFields.filter((field) => {
+                  const value = resolveRequiredFieldValue(row, field)
+                  return value === undefined || value === null || value === ''
+                })
+                if (missingPunch.length) {
+                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
                 }
               }
               if (importWarnings.length) {
@@ -7539,13 +7562,22 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length && !isRestShiftRow(row)) {
+              if (requiredFields.length) {
                 const missingRequired = requiredFields.filter((field) => {
                   const value = resolveRequiredFieldValue(row, field)
                   return value === undefined || value === null || value === ''
                 })
                 if (missingRequired.length) {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                }
+              }
+              if (punchRequiredFields.length && !isRestShiftRow(row)) {
+                const missingPunch = punchRequiredFields.filter((field) => {
+                  const value = resolveRequiredFieldValue(row, field)
+                  return value === undefined || value === null || value === ''
+                })
+                if (missingPunch.length) {
+                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
                 }
               }
               if (importWarnings.length) {
@@ -8171,13 +8203,22 @@ module.exports = {
                     const importWarnings = []
                     if (!rowUserId) importWarnings.push('Missing userId')
                     if (!workDate) importWarnings.push('Missing workDate')
-                    if (requiredFields.length && !isRestShiftRow(row)) {
+                    if (requiredFields.length) {
                       const missingRequired = requiredFields.filter((field) => {
                         const value = resolveRequiredFieldValue(row, field)
                         return value === undefined || value === null || value === ''
                       })
                       if (missingRequired.length) {
                         importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
+                      }
+                    }
+                    if (punchRequiredFields.length && !isRestShiftRow(row)) {
+                      const missingPunch = punchRequiredFields.filter((field) => {
+                        const value = resolveRequiredFieldValue(row, field)
+                        return value === undefined || value === null || value === ''
+                      })
+                      if (missingPunch.length) {
+                        importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
                       }
                     }
                     if (importWarnings.length) {
