@@ -13,6 +13,7 @@
 4. 规则映射验证：使用 `ruleSetId=考勤规则-正式` 预览 `shiftName=自由工时` 的数据，确认不再早退。
 5. 规则映射验证：`shiftName=办公职员/车间员工` 预览 `earlyLeaveMinutes=0`。
 6. 回滚旧批次（未绑定规则集）。
+7. 休息班次验证：`班次=休息` 且缺少打卡时间不再触发 requiredFields。
 
 ## 结果
 - 导入预览：总行数 `11966`，映射正确 ✅
@@ -21,6 +22,7 @@
 - 班次映射：`自由工时` 预览 `earlyLeaveMinutes=0`、`status=normal` ✅
 - 班次映射：`办公职员/车间员工` 预览 `earlyLeaveMinutes=0` ✅
 - 旧批次：`ff82c0d3-1a7b-4e4c-9de1-9d52f6a9c1b7` 已回滚 ✅
+- 休息班次：缺卡不再报 requiredFields ✅
 
 ## 备注
 - 导入提交过程中可能出现 504（网关超时），但批次记录显示后台已完成写入。
