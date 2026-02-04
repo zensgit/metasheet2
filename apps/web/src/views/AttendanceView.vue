@@ -2686,7 +2686,7 @@ const settingsForm = reactive({
   holidayFirstDayEnabled: true,
   holidayFirstDayBaseHours: 8,
   holidayOvertimeAdds: true,
-  holidayOvertimeSource: 'approval',
+  holidayOvertimeSource: 'approval' as 'approval' | 'clock' | 'both',
   holidayOverrides: [] as HolidayPolicyOverride[],
   holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
   holidaySyncYears: '',
@@ -3413,14 +3413,21 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidayOvertimeAdds = settings.holidayPolicy?.overtimeAdds ?? true
   settingsForm.holidayOvertimeSource = settings.holidayPolicy?.overtimeSource ?? 'approval'
   settingsForm.holidayOverrides = Array.isArray(settings.holidayPolicy?.overrides)
-    ? settings.holidayPolicy?.overrides.map((override) => ({
-        name: override.name || '',
-        match: override.match ?? 'contains',
-        firstDayEnabled: override.firstDayEnabled ?? settingsForm.holidayFirstDayEnabled,
-        firstDayBaseHours: override.firstDayBaseHours ?? settingsForm.holidayFirstDayBaseHours,
-        overtimeAdds: override.overtimeAdds ?? settingsForm.holidayOvertimeAdds,
-        overtimeSource: override.overtimeSource ?? settingsForm.holidayOvertimeSource,
-      }))
+    ? settings.holidayPolicy?.overrides.map((override) => {
+        const overrideSource = override.overtimeSource === 'approval'
+          || override.overtimeSource === 'clock'
+          || override.overtimeSource === 'both'
+          ? override.overtimeSource
+          : settingsForm.holidayOvertimeSource
+        return {
+          name: override.name || '',
+          match: override.match ?? 'contains',
+          firstDayEnabled: override.firstDayEnabled ?? settingsForm.holidayFirstDayEnabled,
+          firstDayBaseHours: override.firstDayBaseHours ?? settingsForm.holidayFirstDayBaseHours,
+          overtimeAdds: override.overtimeAdds ?? settingsForm.holidayOvertimeAdds,
+          overtimeSource: overrideSource,
+        }
+      })
     : []
   settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
     || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
@@ -3530,7 +3537,11 @@ async function saveSettings() {
               ? Number(override.firstDayBaseHours)
               : undefined,
             overtimeAdds: override.overtimeAdds,
-            overtimeSource: override.overtimeSource,
+            overtimeSource: override.overtimeSource === 'approval'
+              || override.overtimeSource === 'clock'
+              || override.overtimeSource === 'both'
+              ? override.overtimeSource
+              : undefined,
           }))
           .filter((override) => override.name.length > 0),
       },
