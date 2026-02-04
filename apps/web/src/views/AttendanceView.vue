@@ -471,6 +471,9 @@
                                   <label class="attendance__override-field">
                                     <span>Attendance groups</span>
                                     <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
+                                      Known groups: {{ attendanceGroupOptions.join(', ') }}
+                                    </small>
                                   </label>
                                   <label class="attendance__override-field">
                                     <span>Roles</span>
@@ -896,6 +899,86 @@
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editRuleSet(item)">Edit</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteRuleSet(item.id)">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Attendance groups</h4>
+                <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
+                  {{ attendanceGroupLoading ? 'Loading...' : 'Reload groups' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-group-name">
+                  <span>Name</span>
+                  <input id="attendance-group-name" v-model="attendanceGroupForm.name" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-group-code">
+                  <span>Code</span>
+                  <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" placeholder="optional" />
+                </label>
+                <label class="attendance__field" for="attendance-group-timezone">
+                  <span>Timezone</span>
+                  <input id="attendance-group-timezone" v-model="attendanceGroupForm.timezone" type="text" />
+                </label>
+                <label class="attendance__field" for="attendance-group-rule-set">
+                  <span>Rule set</span>
+                  <select
+                    id="attendance-group-rule-set"
+                    v-model="attendanceGroupForm.ruleSetId"
+                    :disabled="ruleSets.length === 0"
+                  >
+                    <option value="">(Optional) Use default rule</option>
+                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-group-description">
+                  <span>Description</span>
+                  <input id="attendance-group-description" v-model="attendanceGroupForm.description" type="text" />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="attendanceGroupSaving"
+                  @click="saveAttendanceGroup"
+                >
+                  {{ attendanceGroupSaving ? 'Saving...' : attendanceGroupEditingId ? 'Update group' : 'Create group' }}
+                </button>
+                <button class="attendance__btn" :disabled="attendanceGroupSaving" @click="resetAttendanceGroupForm">
+                  Reset
+                </button>
+              </div>
+              <div v-if="attendanceGroups.length === 0" class="attendance__empty">No attendance groups.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Code</th>
+                      <th>Timezone</th>
+                      <th>Rule set</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in attendanceGroups" :key="item.id">
+                      <td>{{ item.name }}</td>
+                      <td>{{ item.code || '-' }}</td>
+                      <td>{{ item.timezone }}</td>
+                      <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="editAttendanceGroup(item)">Edit</button>
+                        <button class="attendance__btn attendance__btn--danger" @click="deleteAttendanceGroup(item.id)">
                           Delete
                         </button>
                       </td>
@@ -2376,6 +2459,18 @@ interface AttendanceRuleSet {
   isDefault: boolean
 }
 
+interface AttendanceGroup {
+  id: string
+  orgId?: string
+  name: string
+  code?: string | null
+  timezone: string
+  ruleSetId?: string | null
+  description?: string | null
+  createdAt?: string
+  updatedAt?: string
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -2611,6 +2706,8 @@ const rotationAssignmentLoading = ref(false)
 const rotationAssignmentSaving = ref(false)
 const ruleSetLoading = ref(false)
 const ruleSetSaving = ref(false)
+const attendanceGroupLoading = ref(false)
+const attendanceGroupSaving = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
@@ -2629,6 +2726,7 @@ const approvalFlows = ref<AttendanceApprovalFlow[]>([])
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
+const attendanceGroups = ref<AttendanceGroup[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
@@ -2647,6 +2745,7 @@ const approvalFlowEditingId = ref<string | null>(null)
 const rotationRuleEditingId = ref<string | null>(null)
 const rotationAssignmentEditingId = ref<string | null>(null)
 const ruleSetEditingId = ref<string | null>(null)
+const attendanceGroupEditingId = ref<string | null>(null)
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -2656,6 +2755,9 @@ const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
   return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
 })
+const attendanceGroupOptions = computed(() =>
+  attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
+)
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvHeaderRow = ref('')
@@ -2869,6 +2971,14 @@ const ruleSetForm = reactive({
   scope: 'org',
   isDefault: false,
   config: '{}',
+})
+
+const attendanceGroupForm = reactive({
+  name: '',
+  code: '',
+  timezone: defaultTimezone,
+  ruleSetId: '',
+  description: '',
 })
 
 const payrollTemplateForm = reactive({
@@ -4829,6 +4939,113 @@ async function deleteRuleSet(id: string) {
   }
 }
 
+function resetAttendanceGroupForm() {
+  attendanceGroupEditingId.value = null
+  attendanceGroupForm.name = ''
+  attendanceGroupForm.code = ''
+  attendanceGroupForm.timezone = defaultTimezone
+  attendanceGroupForm.ruleSetId = ''
+  attendanceGroupForm.description = ''
+}
+
+function editAttendanceGroup(item: AttendanceGroup) {
+  attendanceGroupEditingId.value = item.id
+  attendanceGroupForm.name = item.name
+  attendanceGroupForm.code = item.code ?? ''
+  attendanceGroupForm.timezone = item.timezone ?? defaultTimezone
+  attendanceGroupForm.ruleSetId = item.ruleSetId ?? ''
+  attendanceGroupForm.description = item.description ?? ''
+}
+
+function resolveRuleSetName(ruleSetId?: string | null): string {
+  if (!ruleSetId) return 'Default'
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? 'Default'
+}
+
+async function loadAttendanceGroups() {
+  attendanceGroupLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load attendance groups')
+    }
+    adminForbidden.value = false
+    attendanceGroups.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load attendance groups', 'error')
+  } finally {
+    attendanceGroupLoading.value = false
+  }
+}
+
+async function saveAttendanceGroup() {
+  attendanceGroupSaving.value = true
+  try {
+    const payload = {
+      name: attendanceGroupForm.name.trim(),
+      code: attendanceGroupForm.code.trim() || null,
+      timezone: attendanceGroupForm.timezone.trim() || defaultTimezone,
+      ruleSetId: attendanceGroupForm.ruleSetId || null,
+      description: attendanceGroupForm.description.trim() || null,
+      orgId: normalizedOrgId(),
+    }
+    if (!payload.name) {
+      throw new Error('Attendance group name is required')
+    }
+    const response = await apiFetch(
+      attendanceGroupEditingId.value
+        ? `/api/attendance/groups/${attendanceGroupEditingId.value}`
+        : '/api/attendance/groups',
+      {
+        method: attendanceGroupEditingId.value ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      }
+    )
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save attendance group')
+    }
+    adminForbidden.value = false
+    resetAttendanceGroupForm()
+    await loadAttendanceGroups()
+    setStatus('Attendance group saved.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save attendance group', 'error')
+  } finally {
+    attendanceGroupSaving.value = false
+  }
+}
+
+async function deleteAttendanceGroup(id: string) {
+  if (!window.confirm('Delete this attendance group?')) return
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to delete attendance group')
+    }
+    adminForbidden.value = false
+    await loadAttendanceGroups()
+    setStatus('Attendance group deleted.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to delete attendance group', 'error')
+  }
+}
+
 async function loadRuleSetTemplate() {
   try {
     const response = await apiFetch('/api/attendance/rule-sets/template')
@@ -5124,6 +5341,7 @@ async function loadAdminData() {
     loadSettings(),
     loadRule(),
     loadRuleSets(),
+    loadAttendanceGroups(),
     loadPayrollTemplates(),
     loadPayrollCycles(),
     loadLeaveTypes(),

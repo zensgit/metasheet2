@@ -1202,6 +1202,20 @@ function mapShiftRow(row) {
   }
 }
 
+function mapAttendanceGroupRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    code: row.code ?? '',
+    timezone: row.timezone ?? DEFAULT_RULE.timezone,
+    ruleSetId: row.rule_set_id ?? null,
+    description: row.description ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+  }
+}
+
 function mapAssignmentRow(row) {
   return {
     id: row.id,
@@ -9717,6 +9731,187 @@ module.exports = {
           }
           logger.error('Attendance payroll cycle summary export failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export payroll summary' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT * FROM attendance_groups
+             WHERE org_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceGroupRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance groups fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          name: z.string().min(1),
+          code: z.string().optional().nullable(),
+          timezone: z.string().optional().nullable(),
+          ruleSetId: z.string().uuid().optional().nullable(),
+          description: z.string().optional().nullable(),
+        })
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const name = parsed.data.name.trim()
+        const code = parsed.data.code?.trim() || null
+        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
+        const ruleSetId = parsed.data.ruleSetId ?? null
+        const description = parsed.data.description?.trim() || null
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+             RETURNING *`,
+            [orgId, name, code, timezone, ruleSetId, description]
+          )
+          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          name: z.string().min(1),
+          code: z.string().optional().nullable(),
+          timezone: z.string().optional().nullable(),
+          ruleSetId: z.string().uuid().optional().nullable(),
+          description: z.string().optional().nullable(),
+        })
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+        const name = parsed.data.name.trim()
+        const code = parsed.data.code?.trim() || null
+        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
+        const ruleSetId = parsed.data.ruleSetId ?? null
+        const description = parsed.data.description?.trim() || null
+
+        try {
+          const rows = await db.query(
+            `UPDATE attendance_groups
+             SET name = $3,
+                 code = $4,
+                 timezone = $5,
+                 rule_set_id = $6,
+                 description = $7,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [groupId, orgId, name, code, timezone, ruleSetId, description]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_groups WHERE id = $1 AND org_id = $2 RETURNING id',
+            [groupId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: groupId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete group' } })
         }
       })
     )
