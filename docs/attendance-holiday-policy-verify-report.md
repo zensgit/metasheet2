@@ -24,7 +24,8 @@
 ## 覆盖项验证记录
 - `PUT /api/attendance/settings` 设置覆盖项：
   - `name=春节` / `match=contains` / `firstDayBaseHours=6`
-  - `roles=[司机]` / `dayIndexList=[1,2]`
+  - `attendanceGroups=[单休办公]` / `roles=[司机]` / `userNames=[蒋永波]`
+  - `dayIndexList=[1,2]`
   - `GET /api/attendance/settings` 回读：覆盖项存在且值一致 ✅
 
 ## 备注
