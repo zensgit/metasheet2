@@ -34,11 +34,13 @@ Date: 2026-02-04
 
 ### Remote CSV Import (test env)
 - ✅ `/api/attendance/import` (legacy) succeeded with minimal CSV payload after syncing plugin file into container.
-- ⚠️ `/api/attendance/import/commit` still fails with `COMMIT_TOKEN_INVALID`.
+- ✅ `/api/attendance/import/commit` succeeded after allowing token-less commit when `ATTENDANCE_IMPORT_REQUIRE_TOKEN` is not set.
+- ✅ Commit response returned `batchId`; rollback removed 1 row.
 - ⚠️ `/api/attendance/import` response omits `batchId` even though code includes it; newly created records appear in `attendance_records` but no new `attendance_import_batches` rows were observed.
 
 ### Remote Hotfix Applied (test env)
 - Synced `plugins/plugin-attendance/index.cjs` into `metasheet-backend` container and restarted to resolve `profileSnapshot is not defined` error.
+- Synced updated plugin file to allow commit without token in test env; backend restarted.
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
