@@ -1,10 +1,11 @@
 # 考勤节假日策略与规则引擎 - 开发报告
 
-日期：2026-02-03
+日期：2026-02-04
 
 ## 范围
 - 合并 `feat/attendance-framework-20260128` 到 `main`。
 - 增加节假日首日基准工时模板规则，避免硬编码到业务规则里。
+- 支持节假日策略「按节日名称覆盖」：为指定节日配置首日基准工时与加班叠加策略。
 - 引擎上下文补充 `holiday_policy_enabled`，支持“全局节假日策略”与“规则模板”互斥生效。
 - 调整班次时间优先级：当班次名称包含时间段时，优先使用班次时间而非 `shiftMappings`。
 - 文档更新：规则模板库与变更记录。
@@ -29,6 +30,7 @@
   - `firstDayBaseHours = 8`
   - `overtimeAdds = true`
   - `overtimeSource = approval`
+  - `overrides = []`（可选：例如 `{ name: 春节, match: contains, firstDayBaseHours: 8 }`）
 - 节假日同步：
   - 来源 `holiday-cn`
   - `dayIndexHolidays = [春节, 国庆]`

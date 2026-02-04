@@ -51,6 +51,7 @@ const DEFAULT_SETTINGS = {
     firstDayBaseHours: 8,
     overtimeAdds: true,
     overtimeSource: 'approval',
+    overrides: [],
   },
   holidaySync: {
     source: 'holiday-cn',
@@ -1715,9 +1716,36 @@ function hasOvertimeApproval(summary) {
   return /加班|overtime/i.test(text)
 }
 
+function matchHolidayOverride(name, override) {
+  if (!name || !override) return false
+  const matchType = override.match || 'contains'
+  const pattern = String(override.name || '').trim()
+  if (!pattern) return false
+  if (matchType === 'equals') return name === pattern
+  if (matchType === 'regex') {
+    try {
+      return new RegExp(pattern, 'i').test(name)
+    } catch (_error) {
+      return false
+    }
+  }
+  return name.includes(pattern)
+}
+
+function resolveHolidayPolicyOverride(policy, holidayMeta) {
+  if (!policy || !holidayMeta?.name) return null
+  const overrides = Array.isArray(policy.overrides) ? policy.overrides : []
+  if (!overrides.length) return null
+  return overrides.find((override) => matchHolidayOverride(holidayMeta.name, override)) ?? null
+}
+
 function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalSummary }) {
-  const policy = settings?.holidayPolicy ?? DEFAULT_SETTINGS.holidayPolicy
+  const basePolicy = settings?.holidayPolicy ?? DEFAULT_SETTINGS.holidayPolicy
   const meta = holidayMeta ?? resolveHolidayMeta(holiday)
+  const override = resolveHolidayPolicyOverride(basePolicy, meta)
+  const policy = override
+    ? { ...basePolicy, ...override }
+    : basePolicy
   const warnings = []
   if (!holiday || holiday.isWorkingDay === true) {
     return { metrics, warnings, holidayMeta: meta }
@@ -2407,6 +2435,34 @@ async function loadAttendanceSummary(db, orgId, userId, from, to) {
   }
 }
 
+function normalizeHolidayPolicyOverrides(rawOverrides) {
+  if (!Array.isArray(rawOverrides)) return []
+  return rawOverrides
+    .map((override) => {
+      if (!override || typeof override !== 'object') return null
+      const name = String(override.name ?? override.pattern ?? override.keyword ?? '').trim()
+      if (!name) return null
+      const matchRaw = typeof override.match === 'string'
+        ? override.match.trim()
+        : typeof override.matchType === 'string'
+          ? override.matchType.trim()
+          : 'contains'
+      const match = ['contains', 'regex', 'equals'].includes(matchRaw) ? matchRaw : 'contains'
+      const baseHours = parseNumber(override.firstDayBaseHours, null)
+      const overtimeSourceRaw = typeof override.overtimeSource === 'string' ? override.overtimeSource.trim() : ''
+      const overtimeSource = ['approval', 'clock', 'both'].includes(overtimeSourceRaw) ? overtimeSourceRaw : null
+      return {
+        name,
+        match,
+        firstDayEnabled: typeof override.firstDayEnabled === 'boolean' ? override.firstDayEnabled : undefined,
+        firstDayBaseHours: Number.isFinite(baseHours) ? Math.max(0, baseHours) : undefined,
+        overtimeAdds: typeof override.overtimeAdds === 'boolean' ? override.overtimeAdds : undefined,
+        overtimeSource: overtimeSource ?? undefined,
+      }
+    })
+    .filter(Boolean)
+}
+
 function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
@@ -2464,6 +2520,7 @@ function normalizeSettings(raw) {
         error: typeof holidaySyncLastRun.error === 'string' ? holidaySyncLastRun.error : null,
       }
     : null
+  const holidayPolicyOverrides = normalizeHolidayPolicyOverrides(holidayPolicy.overrides)
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -2477,6 +2534,7 @@ function normalizeSettings(raw) {
       firstDayBaseHours: Math.max(0, parseNumber(holidayPolicy.firstDayBaseHours, DEFAULT_SETTINGS.holidayPolicy.firstDayBaseHours)),
       overtimeAdds: parseBoolean(holidayPolicy.overtimeAdds, DEFAULT_SETTINGS.holidayPolicy.overtimeAdds),
       overtimeSource,
+      overrides: holidayPolicyOverrides,
     },
     holidaySync: {
       source: 'holiday-cn',
@@ -3481,6 +3539,16 @@ module.exports = {
         firstDayBaseHours: z.number().min(0).optional(),
         overtimeAdds: z.boolean().optional(),
         overtimeSource: z.enum(['approval', 'clock', 'both']).optional(),
+        overrides: z.array(
+          z.object({
+            name: z.string().min(1),
+            match: z.enum(['contains', 'regex', 'equals']).optional(),
+            firstDayEnabled: z.boolean().optional(),
+            firstDayBaseHours: z.number().min(0).optional(),
+            overtimeAdds: z.boolean().optional(),
+            overtimeSource: z.enum(['approval', 'clock', 'both']).optional(),
+          })
+        ).optional(),
       }).optional(),
       holidaySync: z.object({
         source: z.enum(['holiday-cn']).optional(),

@@ -397,6 +397,78 @@
                     <option value="both">Both</option>
                   </select>
                 </label>
+                <div class="attendance__field attendance__field--full">
+                  <div class="attendance__admin-subsection">
+                    <div class="attendance__admin-subsection-header">
+                      <h5>Holiday overrides</h5>
+                      <button class="attendance__btn" type="button" @click="addHolidayOverride">
+                        Add override
+                      </button>
+                    </div>
+                    <div v-if="settingsForm.holidayOverrides.length === 0" class="attendance__empty">
+                      No overrides configured.
+                    </div>
+                    <div v-else class="attendance__table-wrapper">
+                      <table class="attendance__table">
+                        <thead>
+                          <tr>
+                            <th>Holiday name</th>
+                            <th>Match</th>
+                            <th>First-day hours</th>
+                            <th>Enable</th>
+                            <th>Overtime adds</th>
+                            <th>Overtime source</th>
+                            <th></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(override, index) in settingsForm.holidayOverrides" :key="`holiday-override-${index}`">
+                            <td>
+                              <input
+                                v-model="override.name"
+                                type="text"
+                                placeholder="春节"
+                              />
+                            </td>
+                            <td>
+                              <select v-model="override.match">
+                                <option value="contains">Contains</option>
+                                <option value="equals">Equals</option>
+                                <option value="regex">Regex</option>
+                              </select>
+                            </td>
+                            <td>
+                              <input
+                                v-model.number="override.firstDayBaseHours"
+                                type="number"
+                                min="0"
+                                step="0.5"
+                              />
+                            </td>
+                            <td>
+                              <input v-model="override.firstDayEnabled" type="checkbox" />
+                            </td>
+                            <td>
+                              <input v-model="override.overtimeAdds" type="checkbox" />
+                            </td>
+                            <td>
+                              <select v-model="override.overtimeSource">
+                                <option value="approval">Approval</option>
+                                <option value="clock">Clock</option>
+                                <option value="both">Both</option>
+                              </select>
+                            </td>
+                            <td>
+                              <button class="attendance__btn attendance__btn--danger" type="button" @click="removeHolidayOverride(index)">
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>Min punch interval (min)</span>
                   <input
@@ -2155,6 +2227,7 @@ interface AttendanceSettings {
     firstDayBaseHours?: number
     overtimeAdds?: boolean
     overtimeSource?: 'approval' | 'clock' | 'both'
+    overrides?: HolidayPolicyOverride[]
   }
   holidaySync?: {
     source?: 'holiday-cn'
@@ -2186,6 +2259,15 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+}
+
+interface HolidayPolicyOverride {
+  name: string
+  match?: 'contains' | 'regex' | 'equals'
+  firstDayEnabled?: boolean
+  firstDayBaseHours?: number
+  overtimeAdds?: boolean
+  overtimeSource?: 'approval' | 'clock' | 'both'
 }
 
 interface AttendanceRule {
@@ -2605,6 +2687,7 @@ const settingsForm = reactive({
   holidayFirstDayBaseHours: 8,
   holidayOvertimeAdds: true,
   holidayOvertimeSource: 'approval',
+  holidayOverrides: [] as HolidayPolicyOverride[],
   holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
   holidaySyncYears: '',
   holidaySyncAddDayIndex: true,
@@ -3329,6 +3412,16 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.holidayFirstDayBaseHours = settings.holidayPolicy?.firstDayBaseHours ?? 8
   settingsForm.holidayOvertimeAdds = settings.holidayPolicy?.overtimeAdds ?? true
   settingsForm.holidayOvertimeSource = settings.holidayPolicy?.overtimeSource ?? 'approval'
+  settingsForm.holidayOverrides = Array.isArray(settings.holidayPolicy?.overrides)
+    ? settings.holidayPolicy?.overrides.map((override) => ({
+        name: override.name || '',
+        match: override.match ?? 'contains',
+        firstDayEnabled: override.firstDayEnabled ?? settingsForm.holidayFirstDayEnabled,
+        firstDayBaseHours: override.firstDayBaseHours ?? settingsForm.holidayFirstDayBaseHours,
+        overtimeAdds: override.overtimeAdds ?? settingsForm.holidayOvertimeAdds,
+        overtimeSource: override.overtimeSource ?? settingsForm.holidayOvertimeSource,
+      }))
+    : []
   settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
     || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
   settingsForm.holidaySyncYears = Array.isArray(settings.holidaySync?.years)
@@ -3350,6 +3443,21 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
   settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
   settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
+}
+
+function addHolidayOverride() {
+  settingsForm.holidayOverrides.push({
+    name: '',
+    match: 'contains',
+    firstDayEnabled: settingsForm.holidayFirstDayEnabled,
+    firstDayBaseHours: settingsForm.holidayFirstDayBaseHours,
+    overtimeAdds: settingsForm.holidayOvertimeAdds,
+    overtimeSource: settingsForm.holidayOvertimeSource,
+  })
+}
+
+function removeHolidayOverride(index: number) {
+  settingsForm.holidayOverrides.splice(index, 1)
 }
 
 async function loadSettings() {
@@ -3413,6 +3521,18 @@ async function saveSettings() {
         firstDayBaseHours: Number(settingsForm.holidayFirstDayBaseHours) || 0,
         overtimeAdds: settingsForm.holidayOvertimeAdds,
         overtimeSource,
+        overrides: settingsForm.holidayOverrides
+          .map((override) => ({
+            name: override.name?.trim() || '',
+            match: override.match || 'contains',
+            firstDayEnabled: override.firstDayEnabled,
+            firstDayBaseHours: Number.isFinite(Number(override.firstDayBaseHours))
+              ? Number(override.firstDayBaseHours)
+              : undefined,
+            overtimeAdds: override.overtimeAdds,
+            overtimeSource: override.overtimeSource,
+          }))
+          .filter((override) => override.name.length > 0),
       },
       holidaySync: {
         source: 'holiday-cn',
@@ -5312,6 +5432,19 @@ watch(orgId, () => {
 }
 
 .attendance__admin-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.attendance__admin-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__admin-subsection-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
