@@ -28,6 +28,14 @@ Date: 2026-02-04
 - ✅ `GET /api/attendance/import/template`
 - ✅ `POST /api/attendance/import/preview` (sample payload)
 
+### Remote UI (MCP)
+- ✅ Attendance page loaded with admin sections visible.
+- Screenshot: `artifacts/attendance-remote-ui-20260204.png`
+
+### Remote CSV Import (test env)
+- ⚠️ `/api/attendance/import/commit` failed with `COMMIT_TOKEN_INVALID` (likely multi-instance token cache).
+- ⚠️ `/api/attendance/import` returned `INTERNAL_ERROR` for both full CSV and minimal sample payload.
+
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
 - The DingTalk CSV contains report metadata in the first two lines, so the header row index must be `2` (0-based).
