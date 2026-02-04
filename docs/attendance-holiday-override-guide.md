@@ -85,3 +85,8 @@
 - **补贴天数**：调整 `dayIndexEnd`（比如 6 天）
 - **补贴小时数**：调整 `firstDayBaseHours`（例如 8 或 6）
 - **按实际出勤**：设置 `firstDayEnabled=false`
+
+## 与用户自定义规则的配合
+- 节假日补贴建议统一放在 `holidayPolicy.overrides`
+- 其余业务提醒类规则放在自定义模板中维护  
+  参考：`docs/attendance-rule-template-custom.json`

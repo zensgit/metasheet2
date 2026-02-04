@@ -1,0 +1,36 @@
+[
+  {
+    "name": "考勤组自定义（示例）",
+    "category": "custom",
+    "editable": true,
+    "description": "按考勤组配置的自定义规则示例，可按需调整",
+    "params": [
+      { "key": "groupName", "label": "Attendance group", "type": "string", "default": "单休车间", "paths": ["scope.attendance_group[0]"] },
+      { "key": "lateAfter", "label": "Late after (HH:MM)", "type": "string", "default": "09:10", "paths": ["rules[0].when.clockIn1_after"] },
+      { "key": "earlyBefore", "label": "Leave before (HH:MM)", "type": "string", "default": "17:50", "paths": ["rules[1].when.clockOut1_before"] }
+    ],
+    "scope": { "attendance_group": ["单休车间"] },
+    "rules": [
+      {
+        "id": "group_late_warning",
+        "when": { "clockIn1_after": "09:10" },
+        "then": { "warning": "迟到，请核对" }
+      },
+      {
+        "id": "group_early_leave_warning",
+        "when": { "clockOut1_before": "17:50" },
+        "then": { "warning": "早退，请核对" }
+      },
+      {
+        "id": "leave_with_punch_warning",
+        "when": { "leave_hours_gt": 0, "has_punch": true },
+        "then": { "warning": "请假但仍有正常打卡，请核对" }
+      },
+      {
+        "id": "leave_and_overtime_warning",
+        "when": { "leave_hours_gt": 0, "overtime_hours_gt": 0 },
+        "then": { "warning": "请假且存在加班工时，请核对" }
+      }
+    ]
+  }
+]
