@@ -27,10 +27,15 @@ Date: 2026-02-04
 - ✅ `GET /api/attendance/groups`
 - ✅ `GET /api/attendance/import/template`
 - ✅ `POST /api/attendance/import/preview` (sample payload)
+- ✅ `POST /api/attendance/import/prepare` (commit token returned)
 
 ### Remote UI (MCP)
 - ✅ Attendance page loaded with admin sections visible.
 - Screenshot: `artifacts/attendance-remote-ui-20260204.png`
+
+### Remote Web Deploy
+- ✅ Pulled latest `ghcr.io/zensgit/metasheet2-web:latest` (digest: `sha256:6cac38c6d956098150407d2bba76b35cbb5b5179fbd6e6c006fcf63c393fb82a`).
+- ✅ Restarted `metasheet-web` container and confirmed UI availability.
 
 ### Remote CSV Import (test env)
 - ✅ `/api/attendance/import` (legacy) succeeded with minimal CSV payload after syncing plugin file into container.
@@ -41,6 +46,12 @@ Date: 2026-02-04
 ### Remote Hotfix Applied (test env)
 - Synced `plugins/plugin-attendance/index.cjs` into `metasheet-backend` container and restarted to resolve `profileSnapshot is not defined` error.
 - Synced updated plugin file to allow commit without token in test env; backend restarted.
+- ✅ Verified `attendance_import_tokens` table exists.
+- ✅ Commit token persistence validated across backend restart:
+  - `prepare` returned a token.
+  - DB check before restart: token count = 1.
+  - DB check after restart: token count = 1.
+  - Token cleaned after validation.
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
