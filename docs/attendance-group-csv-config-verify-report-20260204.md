@@ -23,4 +23,7 @@ Date: 2026-02-04
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
-- Import preview/commit was tested with a real CSV sample (first 5 lines) from the DingTalk daily summary file. \n  The sample CSV appears to be tab-delimited, so preview reported missing required fields when parsed with default delimiter. \n  Commit succeeded with 0 imported rows and rollback completed successfully. Adjust `csvOptions.delimiter` (e.g., `\\t`) for full import.
+- The DingTalk CSV contains report metadata in the first two lines, so the header row index must be `2` (0-based).
+- Full import verification using the real CSV file succeeded with `csvOptions.delimiter: ','` and `headerRowIndex: 2`:
+  - Commit: `imported=11769`, `skipped=197`
+  - Rollback: `deleted=11769`, status `rolled_back`
