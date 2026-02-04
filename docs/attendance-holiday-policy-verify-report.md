@@ -20,6 +20,7 @@
 - API：`holidayPolicy.overrides` 可读且可写（含过滤字段） ✅
 - 规则引擎：`holiday_policy_enabled` 可用于跳过模板 ✅
 - 导入预览：班次时间优先级生效，半日班次不再被 `shiftMappings` 误判早退 ✅
+- 导入预览：覆盖项命中 `春节-2` 时工时调整为 6 小时，含提示 `节假日第2天按6小时` ✅
 
 ## 覆盖项验证记录
 - `PUT /api/attendance/settings` 设置覆盖项：
