@@ -6864,6 +6864,7 @@ module.exports = {
             payloadExample: {
               source: 'dingtalk_csv',
               ruleSetId: '<ruleSetId>',
+              mode: 'override',
               userMapKeyField: 'empNo',
               userMap: {
                 A0054: {

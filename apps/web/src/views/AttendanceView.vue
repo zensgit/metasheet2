@@ -1004,6 +1004,10 @@
                     rows="6"
                     placeholder='{\"source\":\"dingtalk\",\"userId\":\"...\",\"columns\":[],\"data\":{}}'
                   />
+                  <small class="attendance__field-hint">
+                    Default import mode is <strong>override</strong> (same user/date will be overwritten). Use
+                    <code>mode: \"merge\"</code> in payload if needed.
+                  </small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
@@ -3027,6 +3031,7 @@ function buildImportPayload(): Record<string, any> | null {
   if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
+  if (!payload.mode) payload.mode = 'override'
   return payload
 }
 
