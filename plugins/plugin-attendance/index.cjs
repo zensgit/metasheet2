@@ -734,6 +734,26 @@ function normalizeCsvWorkDate(value) {
   return null
 }
 
+function isRestShiftRow(row) {
+  const fields = row?.fields || {}
+  const candidates = [
+    fields.shiftName,
+    fields.plan_detail,
+    fields.attendanceClass,
+    fields.attendance_class,
+    fields['班次'],
+    fields['出勤班次'],
+    fields.status,
+    fields.attend_result,
+    fields['考勤结果'],
+    fields['当天考勤情况'],
+  ]
+  return candidates.some((value) => {
+    if (value === undefined || value === null) return false
+    return String(value).includes('休息')
+  })
+}
+
 function buildRowsFromCsv({ csvText, csvOptions }) {
   const delimiter = csvOptions?.delimiter || ','
   const parsedRows = parseCsvText(csvText, delimiter)
@@ -6717,7 +6737,7 @@ module.exports = {
             const importWarnings = []
             if (!rowUserId) importWarnings.push('Missing userId')
             if (!workDate) importWarnings.push('Missing workDate')
-            if (requiredFields.length) {
+            if (requiredFields.length && !isRestShiftRow(row)) {
               const missingRequired = requiredFields.filter((field) => {
                 const value = resolveRequiredFieldValue(row, field)
                 return value === undefined || value === null || value === ''
@@ -7092,11 +7112,11 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length) {
-                const missingRequired = requiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
+            if (requiredFields.length && !isRestShiftRow(row)) {
+              const missingRequired = requiredFields.filter((field) => {
+                const value = resolveRequiredFieldValue(row, field)
+                return value === undefined || value === null || value === ''
+              })
                 if (missingRequired.length) {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
                 }
@@ -7519,7 +7539,7 @@ module.exports = {
               const importWarnings = []
               if (!rowUserId) importWarnings.push('Missing userId')
               if (!workDate) importWarnings.push('Missing workDate')
-              if (requiredFields.length) {
+              if (requiredFields.length && !isRestShiftRow(row)) {
                 const missingRequired = requiredFields.filter((field) => {
                   const value = resolveRequiredFieldValue(row, field)
                   return value === undefined || value === null || value === ''
@@ -8151,7 +8171,7 @@ module.exports = {
                     const importWarnings = []
                     if (!rowUserId) importWarnings.push('Missing userId')
                     if (!workDate) importWarnings.push('Missing workDate')
-                    if (requiredFields.length) {
+                    if (requiredFields.length && !isRestShiftRow(row)) {
                       const missingRequired = requiredFields.filter((field) => {
                         const value = resolveRequiredFieldValue(row, field)
                         return value === undefined || value === null || value === ''
