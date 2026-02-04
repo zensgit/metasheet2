@@ -37,3 +37,9 @@
 - 本次验收未运行自动化测试，仅进行 UI 与 API 级别核验。
 - 已补充导入预览验证（`/api/attendance/import/preview`）。
 - 如需回归验证：建议补充 import 提交与批处理规则验证。
+
+## 验收产物
+- UI 截图：`artifacts/ui/attendance-holiday-overrides.png`
+- 覆盖区截图：`artifacts/ui/attendance-holiday-overrides-section.png`
+- API settings：`artifacts/api/attendance-settings.json`
+- API preview：`artifacts/api/attendance-preview.json`
