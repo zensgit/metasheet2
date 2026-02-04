@@ -1819,6 +1819,15 @@ function matchHolidayOverrideFilters(override, holidayMeta, policyContext) {
   return true
 }
 
+function omitUndefinedFields(source) {
+  if (!source || typeof source !== 'object') return {}
+  const cleaned = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined) cleaned[key] = value
+  }
+  return cleaned
+}
+
 function matchHolidayOverride(name, override) {
   if (!name || !override) return false
   const matchType = override.match || 'contains'
@@ -1851,8 +1860,9 @@ function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalS
   const basePolicy = settings?.holidayPolicy ?? DEFAULT_SETTINGS.holidayPolicy
   const meta = holidayMeta ?? resolveHolidayMeta(holiday)
   const override = resolveHolidayPolicyOverride(basePolicy, meta, policyContext)
-  const policy = override
-    ? { ...basePolicy, ...override }
+  const overrideConfig = override ? omitUndefinedFields(override) : null
+  const policy = overrideConfig
+    ? { ...basePolicy, ...overrideConfig }
     : basePolicy
   const warnings = []
   if (!holiday || holiday.isWorkingDay === true) {
