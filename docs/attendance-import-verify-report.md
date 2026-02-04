@@ -30,6 +30,13 @@
 - 提交导入：`POST /api/attendance/import/commit` 成功返回 `batchId` ✅
 - 回滚批次：`POST /api/attendance/import/rollback/:batchId` 已回滚 ✅
 
+## 全量 CSV 验证（2026-02-04）
+- 预览导入：`rows=11966`，首行仅提示缺少打卡字段（符合预期）✅
+- 提交导入批次：`ee57096c-1fe7-4ae1-97d9-06decc22b1f2` ✅
+  - 导入成功：`1648`
+  - 跳过：`10318`（主要为缺少上/下班打卡时间）
+- 回滚批次：`deleted=1648`，状态 `rolled_back` ✅
+
 ## 备注
 - 导入提交过程中可能出现 504（网关超时），但批次记录显示后台已完成写入。
 - 若需降低跳过率：可放宽 `requiredFields` 或补齐缺失打卡时间字段。
