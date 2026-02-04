@@ -3479,6 +3479,15 @@ async function runImport() {
     if (tokenOk && importCommitToken.value) {
       payload.commitToken = importCommitToken.value
     }
+    const runLegacyImport = async () => {
+      const legacyResponse = await apiFetch('/api/attendance/import', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      const legacyData = await legacyResponse.json().catch(() => ({}))
+      return { response: legacyResponse, data: legacyData }
+    }
+
     let response = await apiFetch('/api/attendance/import/commit', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -3487,11 +3496,9 @@ async function runImport() {
     if (!response.ok || !data.ok) {
       const errorCode = data?.error?.code
       if (response.status === 404 || errorCode === 'NOT_FOUND') {
-        response = await apiFetch('/api/attendance/import', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        })
-        data = await response.json()
+        const legacy = await runLegacyImport()
+        response = legacy.response
+        data = legacy.data
       } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
@@ -3502,7 +3509,12 @@ async function runImport() {
             method: 'POST',
             body: JSON.stringify(payload),
           })
-          data = await response.json()
+          data = await response.json().catch(() => ({}))
+        }
+        if (!response.ok || !data.ok) {
+          const legacy = await runLegacyImport()
+          response = legacy.response
+          data = legacy.data
         }
       }
     }

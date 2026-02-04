@@ -7413,14 +7413,16 @@ module.exports = {
         }
 
         const commitToken = parsed.data.commitToken
-        if (!commitToken) {
-          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
-          return
-        }
-        const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId: requesterId })
-        if (!tokenOk) {
-          res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
-          return
+        if (requireImportCommitToken) {
+          if (!commitToken) {
+            res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+            return
+          }
+          const tokenOk = consumeImportCommitToken(commitToken, { orgId, userId: requesterId })
+          if (!tokenOk) {
+            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+            return
+          }
         }
 
         try {
