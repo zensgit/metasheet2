@@ -53,6 +53,34 @@
 }
 ```
 
+## 自定义模板验证（CSV/考勤组）
+1. 写入模板库：`PUT /api/attendance/rule-templates`（模板来自 `docs/attendance-rule-template-custom.json`）
+2. 使用导入预览接口，传入 `engine.templates`（仅自定义模板）
+3. 校验规则命中与 warning 输出
+
+### 结果摘要
+- 命中规则：`group_late_warning` / `group_early_leave_warning` / `leave_with_punch_warning` / `leave_and_overtime_warning`
+- warnings 输出正常 ✅
+
+```json
+{
+  "engine": {
+    "appliedRules": [
+      "group_late_warning",
+      "group_early_leave_warning",
+      "leave_with_punch_warning",
+      "leave_and_overtime_warning"
+    ],
+    "warnings": [
+      "迟到，请核对",
+      "早退，请核对",
+      "请假但仍有正常打卡，请核对",
+      "请假且存在加班工时，请核对"
+    ]
+  }
+}
+```
+
 ## 备注
 - 本次验收未运行自动化测试，仅进行 UI 与 API 级别核验。
 - 已补充导入预览验证（`/api/attendance/import/preview`）。
@@ -63,6 +91,8 @@
 - 覆盖区截图：`artifacts/ui/attendance-holiday-overrides-section.png`
 - API settings：`artifacts/api/attendance-settings.json`
 - API preview：`artifacts/api/attendance-preview.json`
+- API templates：`artifacts/api/attendance-rule-templates.json`
+- API custom preview：`artifacts/api/attendance-custom-template-preview.json`
 
 ### UI 截图说明
 ! 详见 `artifacts/ui/attendance-holiday-overrides.png` 与 `artifacts/ui/attendance-holiday-overrides-section.png`
