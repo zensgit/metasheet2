@@ -1,6 +1,6 @@
 # 考勤 CSV 导入与班次映射 - 验证报告
 
-日期：2026-02-03
+日期：2026-02-04
 
 ## 环境
 - Web：`http://142.171.239.56:8081`
@@ -23,6 +23,12 @@
 - 班次映射：`办公职员/车间员工` 预览 `earlyLeaveMinutes=0` ✅
 - 旧批次：`ff82c0d3-1a7b-4e4c-9de1-9d52f6a9c1b7` 已回滚 ✅
 - 休息班次：缺卡不再报 requiredFields ✅
+
+## 补充验证（2026-02-04）
+- 获取 `commitToken`：`POST /api/attendance/import/prepare` ✅
+- 预览导入：`mappingProfileId=dingtalk_csv_daily_summary` + 单行 payload ✅
+- 提交导入：`POST /api/attendance/import/commit` 成功返回 `batchId` ✅
+- 回滚批次：`POST /api/attendance/import/rollback/:batchId` 已回滚 ✅
 
 ## 备注
 - 导入提交过程中可能出现 504（网关超时），但批次记录显示后台已完成写入。
