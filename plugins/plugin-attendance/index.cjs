@@ -222,6 +222,22 @@ function ensureStringArray(value) {
   return []
 }
 
+function ensureNumberArray(value) {
+  if (!value) return []
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => parseNumber(item, null))
+      .filter((item) => Number.isFinite(item))
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\s,]+/)
+      .map((item) => parseNumber(item, null))
+      .filter((item) => Number.isFinite(item))
+  }
+  return []
+}
+
 function normalizeIntegrationConfig(config) {
   if (!config || typeof config !== 'object') return {}
   return {
@@ -1011,6 +1027,33 @@ function buildProfileSnapshot({ valueFor, userProfile }) {
   return Object.keys(cleaned).length ? cleaned : null
 }
 
+function buildHolidayPolicyContext({ rowUserId, valueFor, userProfile, profileSnapshot }) {
+  if (!valueFor) return null
+  const snapshot = profileSnapshot ?? buildProfileSnapshot({ valueFor, userProfile }) ?? {}
+  const rawRoleTags = snapshot.roleTags ?? valueFor('roleTags') ?? valueFor('role_tags')
+  const roleTags = Array.isArray(rawRoleTags)
+    ? rawRoleTags.map((tag) => String(tag).trim()).filter(Boolean)
+    : typeof rawRoleTags === 'string'
+      ? rawRoleTags.split(',').map((tag) => tag.trim()).filter(Boolean)
+      : []
+  const context = {
+    userId: rowUserId ?? valueFor('userId') ?? valueFor('user_id'),
+    userName: snapshot.userName ?? valueFor('userName') ?? valueFor('name') ?? valueFor('姓名'),
+    attendanceGroup: snapshot.attendanceGroup ?? valueFor('attendanceGroup') ?? valueFor('attendance_group'),
+    role: snapshot.role ?? valueFor('role') ?? valueFor('职位'),
+    roleTags,
+  }
+  const cleaned = {}
+  for (const [key, value] of Object.entries(context)) {
+    if (value === undefined || value === null || value === '') continue
+    cleaned[key] = value
+  }
+  if (!cleaned.roleTags || cleaned.roleTags.length === 0) {
+    delete cleaned.roleTags
+  }
+  return Object.keys(cleaned).length ? cleaned : null
+}
+
 function applyFieldMappings(fields, mappings) {
   const normalized = {}
   if (!Array.isArray(mappings)) return normalized
@@ -1716,6 +1759,66 @@ function hasOvertimeApproval(summary) {
   return /加班|overtime/i.test(text)
 }
 
+function normalizeMatchValue(value) {
+  if (value === null || value === undefined) return ''
+  return String(value).trim()
+}
+
+function normalizeMatchKey(value) {
+  return normalizeMatchValue(value).toLowerCase()
+}
+
+function matchListValue(value, list) {
+  if (!list || list.length === 0) return true
+  const normalized = normalizeMatchKey(value)
+  if (!normalized) return false
+  return list.some((item) => normalizeMatchKey(item) === normalized)
+}
+
+function matchAnyTag(values, list) {
+  if (!list || list.length === 0) return true
+  if (!values || values.length === 0) return false
+  const normalizedList = list.map((item) => normalizeMatchKey(item)).filter(Boolean)
+  if (normalizedList.length === 0) return false
+  return values.some((value) => normalizedList.includes(normalizeMatchKey(value)))
+}
+
+function matchHolidayOverrideFilters(override, holidayMeta, policyContext) {
+  if (!override) return true
+  const dayIndex = holidayMeta?.dayIndex
+  if (override.dayIndexStart != null || override.dayIndexEnd != null || (override.dayIndexList && override.dayIndexList.length)) {
+    if (!dayIndex) return false
+    if (Array.isArray(override.dayIndexList) && override.dayIndexList.length && !override.dayIndexList.includes(dayIndex)) {
+      return false
+    }
+    if (Number.isFinite(override.dayIndexStart) && dayIndex < override.dayIndexStart) return false
+    if (Number.isFinite(override.dayIndexEnd) && dayIndex > override.dayIndexEnd) return false
+  }
+  const context = policyContext ?? {}
+  if (Array.isArray(override.userIds) && override.userIds.length && !matchListValue(context.userId, override.userIds)) {
+    return false
+  }
+  if (Array.isArray(override.userNames) && override.userNames.length && !matchListValue(context.userName, override.userNames)) {
+    return false
+  }
+  if (Array.isArray(override.excludeUserIds) && override.excludeUserIds.length && matchListValue(context.userId, override.excludeUserIds)) {
+    return false
+  }
+  if (Array.isArray(override.excludeUserNames) && override.excludeUserNames.length && matchListValue(context.userName, override.excludeUserNames)) {
+    return false
+  }
+  if (Array.isArray(override.attendanceGroups) && override.attendanceGroups.length && !matchListValue(context.attendanceGroup, override.attendanceGroups)) {
+    return false
+  }
+  if (Array.isArray(override.roles) && override.roles.length && !matchListValue(context.role, override.roles)) {
+    return false
+  }
+  if (Array.isArray(override.roleTags) && override.roleTags.length && !matchAnyTag(context.roleTags, override.roleTags)) {
+    return false
+  }
+  return true
+}
+
 function matchHolidayOverride(name, override) {
   if (!name || !override) return false
   const matchType = override.match || 'contains'
@@ -1732,17 +1835,22 @@ function matchHolidayOverride(name, override) {
   return name.includes(pattern)
 }
 
-function resolveHolidayPolicyOverride(policy, holidayMeta) {
+function resolveHolidayPolicyOverride(policy, holidayMeta, policyContext) {
   if (!policy || !holidayMeta?.name) return null
   const overrides = Array.isArray(policy.overrides) ? policy.overrides : []
   if (!overrides.length) return null
-  return overrides.find((override) => matchHolidayOverride(holidayMeta.name, override)) ?? null
+  for (const override of overrides) {
+    if (!matchHolidayOverride(holidayMeta.name, override)) continue
+    if (!matchHolidayOverrideFilters(override, holidayMeta, policyContext)) continue
+    return override
+  }
+  return null
 }
 
-function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalSummary }) {
+function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalSummary, policyContext }) {
   const basePolicy = settings?.holidayPolicy ?? DEFAULT_SETTINGS.holidayPolicy
   const meta = holidayMeta ?? resolveHolidayMeta(holiday)
-  const override = resolveHolidayPolicyOverride(basePolicy, meta)
+  const override = resolveHolidayPolicyOverride(basePolicy, meta, policyContext)
   const policy = override
     ? { ...basePolicy, ...override }
     : basePolicy
@@ -1750,7 +1858,13 @@ function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalS
   if (!holiday || holiday.isWorkingDay === true) {
     return { metrics, warnings, holidayMeta: meta }
   }
-  if (!policy?.firstDayEnabled || !meta.isFirstDay) {
+  const overrideHasDayIndex = Boolean(override && (
+    override.dayIndexStart != null
+    || override.dayIndexEnd != null
+    || (Array.isArray(override.dayIndexList) && override.dayIndexList.length > 0)
+  ))
+  const shouldApplyBaseHours = overrideHasDayIndex ? true : meta.isFirstDay
+  if (!policy?.firstDayEnabled || !shouldApplyBaseHours) {
     return { metrics, warnings, holidayMeta: meta }
   }
   const baseHours = Number.isFinite(policy.firstDayBaseHours)
@@ -1762,7 +1876,11 @@ function applyHolidayPolicy({ settings, holiday, holidayMeta, metrics, approvalS
     workMinutes: baseMinutes,
     status: 'adjusted',
   }
-  warnings.push(`节假日首日按${baseHours}小时`)
+  if (overrideHasDayIndex && meta.dayIndex != null) {
+    warnings.push(`节假日第${meta.dayIndex}天按${baseHours}小时`)
+  } else {
+    warnings.push(`节假日首日按${baseHours}小时`)
+  }
 
   const overtimeSource = policy.overtimeSource ?? DEFAULT_SETTINGS.holidayPolicy.overtimeSource
   const overtimeByApproval = hasOvertimeApproval(approvalSummary)
@@ -2448,12 +2566,34 @@ function normalizeHolidayPolicyOverrides(rawOverrides) {
           ? override.matchType.trim()
           : 'contains'
       const match = ['contains', 'regex', 'equals'].includes(matchRaw) ? matchRaw : 'contains'
+      const attendanceGroups = ensureStringArray(
+        override.attendanceGroups ?? override.attendance_group ?? override.attendanceGroup
+      )
+      const roles = ensureStringArray(override.roles ?? override.role ?? override.position ?? override.jobTitle)
+      const roleTags = ensureStringArray(override.roleTags ?? override.role_tags ?? override.tags)
+      const userIds = ensureStringArray(override.userIds ?? override.userId ?? override.user_id)
+      const userNames = ensureStringArray(override.userNames ?? override.userName ?? override.user_name ?? override.names)
+      const excludeUserIds = ensureStringArray(override.excludeUserIds ?? override.excludeUserId ?? override.exclude_user_ids)
+      const excludeUserNames = ensureStringArray(override.excludeUserNames ?? override.excludeUserName ?? override.exclude_user_names)
+      const dayIndexStart = parseNumber(override.dayIndexStart ?? override.day_index_start, null)
+      const dayIndexEnd = parseNumber(override.dayIndexEnd ?? override.day_index_end, null)
+      const dayIndexList = ensureNumberArray(override.dayIndexList ?? override.day_index_list ?? override.dayIndexRange)
       const baseHours = parseNumber(override.firstDayBaseHours, null)
       const overtimeSourceRaw = typeof override.overtimeSource === 'string' ? override.overtimeSource.trim() : ''
       const overtimeSource = ['approval', 'clock', 'both'].includes(overtimeSourceRaw) ? overtimeSourceRaw : null
       return {
         name,
         match,
+        attendanceGroups: attendanceGroups.length ? attendanceGroups : undefined,
+        roles: roles.length ? roles : undefined,
+        roleTags: roleTags.length ? roleTags : undefined,
+        userIds: userIds.length ? userIds : undefined,
+        userNames: userNames.length ? userNames : undefined,
+        excludeUserIds: excludeUserIds.length ? excludeUserIds : undefined,
+        excludeUserNames: excludeUserNames.length ? excludeUserNames : undefined,
+        dayIndexStart: Number.isFinite(dayIndexStart) ? Math.max(1, dayIndexStart) : undefined,
+        dayIndexEnd: Number.isFinite(dayIndexEnd) ? Math.max(1, dayIndexEnd) : undefined,
+        dayIndexList: dayIndexList.length ? dayIndexList.map((item) => Math.max(1, item)) : undefined,
         firstDayEnabled: typeof override.firstDayEnabled === 'boolean' ? override.firstDayEnabled : undefined,
         firstDayBaseHours: Number.isFinite(baseHours) ? Math.max(0, baseHours) : undefined,
         overtimeAdds: typeof override.overtimeAdds === 'boolean' ? override.overtimeAdds : undefined,
@@ -3543,6 +3683,16 @@ module.exports = {
           z.object({
             name: z.string().min(1),
             match: z.enum(['contains', 'regex', 'equals']).optional(),
+            attendanceGroups: z.array(z.string()).optional(),
+            roles: z.array(z.string()).optional(),
+            roleTags: z.array(z.string()).optional(),
+            userIds: z.array(z.string()).optional(),
+            userNames: z.array(z.string()).optional(),
+            excludeUserIds: z.array(z.string()).optional(),
+            excludeUserNames: z.array(z.string()).optional(),
+            dayIndexStart: z.number().int().min(1).optional(),
+            dayIndexEnd: z.number().int().min(1).optional(),
+            dayIndexList: z.array(z.number().int().min(1)).optional(),
             firstDayEnabled: z.boolean().optional(),
             firstDayBaseHours: z.number().min(0).optional(),
             overtimeAdds: z.boolean().optional(),
@@ -7012,12 +7162,14 @@ module.exports = {
               leaveMinutes: leaveMinutes ?? 0,
               overtimeMinutes: overtimeMinutes ?? 0,
             }
+            const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
             const holidayPolicyResult = applyHolidayPolicy({
               settings,
               holiday: context.holiday,
               holidayMeta,
               metrics: policyBaseMetrics,
               approvalSummary,
+              policyContext: holidayPolicyContext,
             })
             const policyResult = applyAttendancePolicies({
               policies: ruleSetConfig?.policies,
@@ -7387,12 +7539,14 @@ module.exports = {
                 leaveMinutes: leaveMinutes ?? 0,
                 overtimeMinutes: overtimeMinutes ?? 0,
               }
+              const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
               const holidayPolicyResult = applyHolidayPolicy({
                 settings,
                 holiday: context.holiday,
                 holidayMeta,
                 metrics: policyBaseMetrics,
                 approvalSummary,
+                policyContext: holidayPolicyContext,
               })
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
@@ -7823,12 +7977,14 @@ module.exports = {
                 leaveMinutes: leaveMinutes ?? 0,
                 overtimeMinutes: overtimeMinutes ?? 0,
               }
+              const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
               const holidayPolicyResult = applyHolidayPolicy({
                 settings,
                 holiday: context.holiday,
                 holidayMeta,
                 metrics: policyBaseMetrics,
                 approvalSummary,
+                policyContext: holidayPolicyContext,
               })
               const policyResult = applyAttendancePolicies({
                 policies: ruleSetConfig?.policies,
@@ -8462,12 +8618,14 @@ module.exports = {
                       leaveMinutes: leaveMinutes ?? 0,
                       overtimeMinutes: overtimeMinutes ?? 0,
                     }
+                    const holidayPolicyContext = buildHolidayPolicyContext({ rowUserId, valueFor, userProfile })
                     const holidayPolicyResult = applyHolidayPolicy({
                       settings,
                       holiday: context.holiday,
                       holidayMeta,
                       metrics: policyBaseMetrics,
                       approvalSummary,
+                      policyContext: holidayPolicyContext,
                     })
                     const policyResult = applyAttendancePolicies({
                       policies: ruleSetConfig?.policies,

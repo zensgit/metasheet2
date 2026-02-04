@@ -422,48 +422,96 @@
                           </tr>
                         </thead>
                         <tbody>
-                          <tr v-for="(override, index) in settingsForm.holidayOverrides" :key="`holiday-override-${index}`">
-                            <td>
-                              <input
-                                v-model="override.name"
-                                type="text"
-                                placeholder="春节"
-                              />
-                            </td>
-                            <td>
-                              <select v-model="override.match">
-                                <option value="contains">Contains</option>
-                                <option value="equals">Equals</option>
-                                <option value="regex">Regex</option>
-                              </select>
-                            </td>
-                            <td>
-                              <input
-                                v-model.number="override.firstDayBaseHours"
-                                type="number"
-                                min="0"
-                                step="0.5"
-                              />
-                            </td>
-                            <td>
-                              <input v-model="override.firstDayEnabled" type="checkbox" />
-                            </td>
-                            <td>
-                              <input v-model="override.overtimeAdds" type="checkbox" />
-                            </td>
-                            <td>
-                              <select v-model="override.overtimeSource">
-                                <option value="approval">Approval</option>
-                                <option value="clock">Clock</option>
-                                <option value="both">Both</option>
-                              </select>
-                            </td>
-                            <td>
-                              <button class="attendance__btn attendance__btn--danger" type="button" @click="removeHolidayOverride(index)">
-                                Remove
-                              </button>
-                            </td>
-                          </tr>
+                          <template v-for="(override, index) in settingsForm.holidayOverrides" :key="`holiday-override-${index}`">
+                            <tr>
+                              <td>
+                                <input
+                                  v-model="override.name"
+                                  type="text"
+                                  placeholder="春节"
+                                />
+                              </td>
+                              <td>
+                                <select v-model="override.match">
+                                  <option value="contains">Contains</option>
+                                  <option value="equals">Equals</option>
+                                  <option value="regex">Regex</option>
+                                </select>
+                              </td>
+                              <td>
+                                <input
+                                  v-model.number="override.firstDayBaseHours"
+                                  type="number"
+                                  min="0"
+                                  step="0.5"
+                                />
+                              </td>
+                              <td>
+                                <input v-model="override.firstDayEnabled" type="checkbox" />
+                              </td>
+                              <td>
+                                <input v-model="override.overtimeAdds" type="checkbox" />
+                              </td>
+                              <td>
+                                <select v-model="override.overtimeSource">
+                                  <option value="approval">Approval</option>
+                                  <option value="clock">Clock</option>
+                                  <option value="both">Both</option>
+                                </select>
+                              </td>
+                              <td>
+                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeHolidayOverride(index)">
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                            <tr class="attendance__table-row--meta">
+                              <td colspan="7">
+                                <div class="attendance__override-filters">
+                                  <label class="attendance__override-field">
+                                    <span>Attendance groups</span>
+                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Roles</span>
+                                    <input v-model="override.roles" type="text" placeholder="司机,工段长" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Role tags</span>
+                                    <input v-model="override.roleTags" type="text" placeholder="车间,仓储" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>User IDs</span>
+                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>User names</span>
+                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Exclude user IDs</span>
+                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Exclude user names</span>
+                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Day index start</span>
+                                    <input v-model.number="override.dayIndexStart" type="number" min="1" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Day index end</span>
+                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>Day index list</span>
+                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
+                                  </label>
+                                </div>
+                              </td>
+                            </tr>
+                          </template>
                         </tbody>
                       </table>
                     </div>
@@ -2264,6 +2312,35 @@ interface AttendanceSettings {
 interface HolidayPolicyOverride {
   name: string
   match?: 'contains' | 'regex' | 'equals'
+  attendanceGroups?: string[]
+  roles?: string[]
+  roleTags?: string[]
+  userIds?: string[]
+  userNames?: string[]
+  excludeUserIds?: string[]
+  excludeUserNames?: string[]
+  dayIndexStart?: number
+  dayIndexEnd?: number
+  dayIndexList?: number[]
+  firstDayEnabled?: boolean
+  firstDayBaseHours?: number
+  overtimeAdds?: boolean
+  overtimeSource?: 'approval' | 'clock' | 'both'
+}
+
+interface HolidayPolicyOverrideForm {
+  name: string
+  match: 'contains' | 'regex' | 'equals'
+  attendanceGroups?: string
+  roles?: string
+  roleTags?: string
+  userIds?: string
+  userNames?: string
+  excludeUserIds?: string
+  excludeUserNames?: string
+  dayIndexStart?: number | null
+  dayIndexEnd?: number | null
+  dayIndexList?: string
   firstDayEnabled?: boolean
   firstDayBaseHours?: number
   overtimeAdds?: boolean
@@ -2687,7 +2764,7 @@ const settingsForm = reactive({
   holidayFirstDayBaseHours: 8,
   holidayOvertimeAdds: true,
   holidayOvertimeSource: 'approval' as 'approval' | 'clock' | 'both',
-  holidayOverrides: [] as HolidayPolicyOverride[],
+  holidayOverrides: [] as HolidayPolicyOverrideForm[],
   holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
   holidaySyncYears: '',
   holidaySyncAddDayIndex: true,
@@ -3404,6 +3481,31 @@ async function exportCsv() {
   }
 }
 
+function listToText(list?: Array<string | number>): string {
+  return Array.isArray(list) ? list.join(',') : ''
+}
+
+function splitListText(value?: string): string[] {
+  if (!value) return []
+  return value
+    .split(/[\n,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function splitNumberList(value?: string): number[] {
+  if (!value) return []
+  return value
+    .split(/[\n,\s]+/)
+    .map(item => Number(item))
+    .filter(item => Number.isFinite(item))
+}
+
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  const num = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(num) ? num : undefined
+}
+
 function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.autoAbsenceEnabled = Boolean(settings.autoAbsence?.enabled)
   settingsForm.autoAbsenceRunAt = settings.autoAbsence?.runAt || '00:15'
@@ -3422,6 +3524,16 @@ function applySettingsToForm(settings: AttendanceSettings) {
         return {
           name: override.name || '',
           match: override.match ?? 'contains',
+          attendanceGroups: listToText(override.attendanceGroups),
+          roles: listToText(override.roles),
+          roleTags: listToText(override.roleTags),
+          userIds: listToText(override.userIds),
+          userNames: listToText(override.userNames),
+          excludeUserIds: listToText(override.excludeUserIds),
+          excludeUserNames: listToText(override.excludeUserNames),
+          dayIndexStart: override.dayIndexStart ?? null,
+          dayIndexEnd: override.dayIndexEnd ?? null,
+          dayIndexList: listToText(override.dayIndexList),
           firstDayEnabled: override.firstDayEnabled ?? settingsForm.holidayFirstDayEnabled,
           firstDayBaseHours: override.firstDayBaseHours ?? settingsForm.holidayFirstDayBaseHours,
           overtimeAdds: override.overtimeAdds ?? settingsForm.holidayOvertimeAdds,
@@ -3456,6 +3568,16 @@ function addHolidayOverride() {
   settingsForm.holidayOverrides.push({
     name: '',
     match: 'contains',
+    attendanceGroups: '',
+    roles: '',
+    roleTags: '',
+    userIds: '',
+    userNames: '',
+    excludeUserIds: '',
+    excludeUserNames: '',
+    dayIndexStart: null,
+    dayIndexEnd: null,
+    dayIndexList: '',
     firstDayEnabled: settingsForm.holidayFirstDayEnabled,
     firstDayBaseHours: settingsForm.holidayFirstDayBaseHours,
     overtimeAdds: settingsForm.holidayOvertimeAdds,
@@ -3532,6 +3654,16 @@ async function saveSettings() {
           .map((override) => ({
             name: override.name?.trim() || '',
             match: override.match || 'contains',
+            attendanceGroups: splitListText(override.attendanceGroups),
+            roles: splitListText(override.roles),
+            roleTags: splitListText(override.roleTags),
+            userIds: splitListText(override.userIds),
+            userNames: splitListText(override.userNames),
+            excludeUserIds: splitListText(override.excludeUserIds),
+            excludeUserNames: splitListText(override.excludeUserNames),
+            dayIndexStart: normalizeOptionalNumber(override.dayIndexStart),
+            dayIndexEnd: normalizeOptionalNumber(override.dayIndexEnd),
+            dayIndexList: splitNumberList(override.dayIndexList),
             firstDayEnabled: override.firstDayEnabled,
             firstDayBaseHours: Number.isFinite(Number(override.firstDayBaseHours))
               ? Number(override.firstDayBaseHours)
@@ -5386,6 +5518,23 @@ watch(orgId, () => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__table-row--meta td {
+  background: #fafafa;
+}
+
+.attendance__override-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.attendance__override-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
 }
 
 .attendance__records-header {

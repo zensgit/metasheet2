@@ -6,6 +6,7 @@
 - 合并 `feat/attendance-framework-20260128` 到 `main`。
 - 增加节假日首日基准工时模板规则，避免硬编码到业务规则里。
 - 支持节假日策略「按节日名称覆盖」：为指定节日配置首日基准工时与加班叠加策略。
+- 扩展节假日覆盖项：支持按考勤组 / 角色 / 角色标签 / 用户 / 节日天数范围定制策略。
 - 引擎上下文补充 `holiday_policy_enabled`，支持“全局节假日策略”与“规则模板”互斥生效。
 - 调整班次时间优先级：当班次名称包含时间段时，优先使用班次时间而非 `shiftMappings`。
 - 文档更新：规则模板库与变更记录。
@@ -14,6 +15,10 @@
 - 新增模板规则：`节假日首日基准工时`（规则 ID：`holiday-default-8h`）
   - 条件：节假日首日 + 全局节假日策略未启用
   - 动作：将应出勤/实出勤置为可配置小时数（默认 8 小时）
+- 节假日覆盖项新增过滤器：
+  - 支持按 `attendanceGroups`、`roles`、`roleTags`、`userIds`、`userNames`、排除用户清单进行命中
+  - 支持 `dayIndexStart` / `dayIndexEnd` / `dayIndexList` 以节日天数定向生效
+  - 覆盖项命中时可对指定“节日天数”应用基准工时与加班叠加策略
 - 规则引擎上下文：新增 `holiday_policy_enabled` 字段
   - 用于在规则层判断是否应跳过模板
 - 班次时间优先级：
@@ -30,7 +35,7 @@
   - `firstDayBaseHours = 8`
   - `overtimeAdds = true`
   - `overtimeSource = approval`
-  - `overrides = []`（可选：例如 `{ name: 春节, match: contains, firstDayBaseHours: 8 }`）
+  - `overrides = []`（可选：例如 `{ name: 春节, match: contains, firstDayBaseHours: 8, roles: [司机], dayIndexList: [1,2,3] }`）
 - 节假日同步：
   - 来源 `holiday-cn`
   - `dayIndexHolidays = [春节, 国庆]`
