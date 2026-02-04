@@ -758,6 +758,84 @@ function isRestShiftRow(row) {
   })
 }
 
+const NON_PUNCH_STATUS_KEYWORDS = [
+  '休息',
+  '请假',
+  '调休',
+  '出差',
+  '外出',
+  '外勤',
+  '补卡',
+  '旷工',
+  '事假',
+  '病假',
+  '工伤',
+  '产假',
+  '陪产',
+  '婚假',
+  '丧假',
+  '年假',
+  '哺乳',
+]
+
+const PUNCH_OVERRIDE_FIELDS = [
+  'actual_work_hours',
+  'attendance_work_time',
+  'actual_work_hours_test',
+  'total_work_hours',
+  'leave_hours',
+  'comp_time_hours',
+  'overtime_duration',
+  'attendance_days',
+  'attendance_rest_days',
+  'missing_card_times',
+  'absenteeism_hours',
+]
+
+function extractStatusText(row) {
+  const fields = row?.fields || {}
+  const candidates = [
+    fields.status,
+    fields.attend_result,
+    fields['考勤结果'],
+    fields['当天考勤情况'],
+    fields.daily_attendance_status,
+    fields['异常原因'],
+    fields.exceptionReason,
+  ]
+  return candidates
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map((value) => String(value))
+    .join(' ')
+}
+
+function parseNumberValue(value) {
+  if (value === undefined || value === null) return null
+  const raw = String(value).replace(/[^0-9.+-]/g, '')
+  if (!raw) return null
+  const num = Number(raw)
+  return Number.isFinite(num) ? num : null
+}
+
+function hasPositiveFieldValue(row, keys) {
+  for (const key of keys) {
+    const value = resolveRequiredFieldValue(row, key)
+    const num = parseNumberValue(value)
+    if (num && num > 0) return true
+  }
+  return false
+}
+
+function shouldEnforcePunchRequired(row) {
+  if (isRestShiftRow(row)) return false
+  const statusText = extractStatusText(row)
+  if (statusText && NON_PUNCH_STATUS_KEYWORDS.some((keyword) => statusText.includes(keyword))) {
+    return false
+  }
+  if (hasPositiveFieldValue(row, PUNCH_OVERRIDE_FIELDS)) return false
+  return true
+}
+
 function buildRowsFromCsv({ csvText, csvOptions }) {
   const delimiter = csvOptions?.delimiter || ','
   const parsedRows = parseCsvText(csvText, delimiter)
@@ -6751,7 +6829,7 @@ module.exports = {
                 importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
               }
             }
-            if (punchRequiredFields.length && !isRestShiftRow(row)) {
+            if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
               const missingPunch = punchRequiredFields.filter((field) => {
                 const value = resolveRequiredFieldValue(row, field)
                 return value === undefined || value === null || value === ''
@@ -7136,7 +7214,7 @@ module.exports = {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
                 }
               }
-              if (punchRequiredFields.length && !isRestShiftRow(row)) {
+              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
                 const missingPunch = punchRequiredFields.filter((field) => {
                   const value = resolveRequiredFieldValue(row, field)
                   return value === undefined || value === null || value === ''
@@ -7573,7 +7651,7 @@ module.exports = {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
                 }
               }
-              if (punchRequiredFields.length && !isRestShiftRow(row)) {
+              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
                 const missingPunch = punchRequiredFields.filter((field) => {
                   const value = resolveRequiredFieldValue(row, field)
                   return value === undefined || value === null || value === ''
@@ -8215,7 +8293,7 @@ module.exports = {
                         importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
                       }
                     }
-                    if (punchRequiredFields.length && !isRestShiftRow(row)) {
+                    if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
                       const missingPunch = punchRequiredFields.filter((field) => {
                         const value = resolveRequiredFieldValue(row, field)
                         return value === undefined || value === null || value === ''
