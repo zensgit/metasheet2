@@ -6,6 +6,7 @@ Date: 2026-02-04
 - Local dev backend: `http://localhost:8900`
 - Local dev web: `http://localhost:8899`
 - DB: `metasheet-dev-postgres` attached to `metasheet2_default` with alias `postgres`
+- Remote (test): `http://142.171.239.56:8081`
 
 ## Verification Summary
 ### API (dev-token + admin role)
@@ -20,6 +21,12 @@ Date: 2026-02-04
 ### UI
 - ✅ Attendance page renders at `/p/plugin-attendance/attendance`.
 - ✅ Admin sections load (groups / members / import / batches visible).
+
+### Remote API (admin token)
+- ✅ `GET /api/auth/me`
+- ✅ `GET /api/attendance/groups`
+- ✅ `GET /api/attendance/import/template`
+- ✅ `POST /api/attendance/import/preview` (sample payload)
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
