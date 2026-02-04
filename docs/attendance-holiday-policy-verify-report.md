@@ -33,6 +33,26 @@
 - `2026-02-16 (春节-2)` + `单休办公 / 工段长` ⇒ `workMinutes=480`、`warnings=[节假日第2天按8小时]`
 - `2026-02-16 (春节-2)` + `单休车间 / 仓库员 / 李四` ⇒ `workMinutes=0`、`warnings=[]`
 
+### API Preview 摘要
+```json
+{
+  "items": [
+    {
+      "workDate": "2026-02-16",
+      "workMinutes": 480,
+      "status": "adjusted",
+      "warnings": ["节假日第2天按8小时"]
+    },
+    {
+      "workDate": "2026-02-16",
+      "workMinutes": 0,
+      "status": "off",
+      "warnings": []
+    }
+  ]
+}
+```
+
 ## 备注
 - 本次验收未运行自动化测试，仅进行 UI 与 API 级别核验。
 - 已补充导入预览验证（`/api/attendance/import/preview`）。
@@ -43,3 +63,6 @@
 - 覆盖区截图：`artifacts/ui/attendance-holiday-overrides-section.png`
 - API settings：`artifacts/api/attendance-settings.json`
 - API preview：`artifacts/api/attendance-preview.json`
+
+### UI 截图说明
+! 详见 `artifacts/ui/attendance-holiday-overrides.png` 与 `artifacts/ui/attendance-holiday-overrides-section.png`
