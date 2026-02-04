@@ -4,7 +4,8 @@
 
 ## 环境
 - Web：`http://142.171.239.56:8081`
-- API：`http://142.171.239.56:8081/api`
+- API（外部）：`http://142.171.239.56:8081/api`
+- API（服务器内测）：`http://127.0.0.1:8900/api`
 
 ## 验证步骤
 1. UI 进入 `Attendance` 页面，刷新规则集列表。
@@ -81,10 +82,23 @@
 }
 ```
 
+## CSV 导入提交与回滚验证
+1. 通过 `POST /api/attendance/import/prepare` 获取 `commitToken`
+2. `POST /api/attendance/import/preview` 预览 5 条样例记录
+3. `POST /api/attendance/import/commit` 执行导入（返回 `batchId`）
+4. `POST /api/attendance/import/rollback/:batchId` 回滚批次
+
+### 结果摘要
+- 预览：成功（5 条）
+- 提交：成功（`imported=5`，`batchId=6ddeee72-807c-4926-8eb0-3db00fc19bcb`）
+- 回滚：成功 ✅
+- 汇总统计未变化（样例用户不在默认汇总范围内）
+
 ## 备注
 - 本次验收未运行自动化测试，仅进行 UI 与 API 级别核验。
 - 已补充导入预览验证（`/api/attendance/import/preview`）。
-- 如需回归验证：建议补充 import 提交与批处理规则验证。
+- import 提交与回滚验证已完成（详见下方产物）。
+- 当前 `8081/api` 未对外暴露导入提交接口，导入提交与回滚验证使用服务器内测 API（`127.0.0.1:8900`）。
 
 ## 验收产物
 - UI 截图：`artifacts/ui/attendance-holiday-overrides.png`
@@ -93,6 +107,7 @@
 - API preview：`artifacts/api/attendance-preview.json`
 - API templates：`artifacts/api/attendance-rule-templates.json`
 - API custom preview：`artifacts/api/attendance-custom-template-preview.json`
+- API import sample：`artifacts/api/attendance-import-sample.json`
 
 ### UI 截图说明
 ! 详见 `artifacts/ui/attendance-holiday-overrides.png` 与 `artifacts/ui/attendance-holiday-overrides-section.png`
