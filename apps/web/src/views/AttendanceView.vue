@@ -990,6 +990,80 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Group members</h4>
+                <button
+                  class="attendance__btn"
+                  :disabled="attendanceGroupMemberLoading"
+                  @click="loadAttendanceGroupMembers"
+                >
+                  {{ attendanceGroupMemberLoading ? 'Loading...' : 'Reload members' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field" for="attendance-group-member-group">
+                  <span>Group</span>
+                  <select
+                    id="attendance-group-member-group"
+                    v-model="attendanceGroupMemberGroupId"
+                    :disabled="attendanceGroups.length === 0"
+                  >
+                    <option value="">Select a group</option>
+                    <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
+                      {{ group.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-group-member-user-ids">
+                  <span>User IDs</span>
+                  <input
+                    id="attendance-group-member-user-ids"
+                    v-model="attendanceGroupMemberUserIds"
+                    type="text"
+                    placeholder="userId1, userId2"
+                  />
+                  <small class="attendance__field-hint">Separate multiple IDs with commas or spaces.</small>
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="attendanceGroupMemberSaving"
+                  @click="addAttendanceGroupMembers"
+                >
+                  {{ attendanceGroupMemberSaving ? 'Saving...' : 'Add members' }}
+                </button>
+              </div>
+              <div v-if="attendanceGroupMembers.length === 0" class="attendance__empty">No group members yet.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>User ID</th>
+                      <th>Joined</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="member in attendanceGroupMembers" :key="member.id">
+                      <td>{{ member.userId }}</td>
+                      <td>{{ formatDateTime(member.createdAt ?? null) }}</td>
+                      <td class="attendance__table-actions">
+                        <button
+                          class="attendance__btn attendance__btn--danger"
+                          :disabled="attendanceGroupMemberSaving"
+                          @click="removeAttendanceGroupMember(member.userId)"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Import (DingTalk / Manual)</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
                   {{ importLoading ? 'Loading...' : 'Load template' }}
@@ -1136,6 +1210,76 @@
                     </tr>
                   </tbody>
                 </table>
+              </div>
+
+              <div class="attendance__admin-section-header">
+                <h4>Import batches</h4>
+                <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
+                  {{ importLoading ? 'Loading...' : 'Reload batches' }}
+                </button>
+              </div>
+              <div v-if="importBatches.length === 0" class="attendance__empty">No import batches.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Batch</th>
+                      <th>Status</th>
+                      <th>Rows</th>
+                      <th>Source</th>
+                      <th>Rule set</th>
+                      <th>Created</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="batch in importBatches" :key="batch.id">
+                      <td>{{ batch.id.slice(0, 8) }}</td>
+                      <td>{{ batch.status }}</td>
+                      <td>{{ batch.rowCount }}</td>
+                      <td>{{ batch.source || '--' }}</td>
+                      <td>{{ resolveRuleSetName(batch.ruleSetId) }}</td>
+                      <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">View items</button>
+                        <button
+                          class="attendance__btn attendance__btn--danger"
+                          :disabled="importLoading"
+                          @click="rollbackImportBatch(batch.id)"
+                        >
+                          Rollback
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
+                <h5 class="attendance__subheading">Batch items</h5>
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Work date</th>
+                      <th>User ID</th>
+                      <th>Record</th>
+                      <th>Snapshot</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in importBatchItems" :key="item.id">
+                      <td>{{ item.workDate }}</td>
+                      <td>{{ item.userId }}</td>
+                      <td>{{ item.recordId || '--' }}</td>
+                      <td>
+                        <button class="attendance__btn" @click="toggleImportBatchSnapshot(item)">
+                          {{ importBatchSnapshot === item.previewSnapshot ? 'Hide' : 'View' }}
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <pre v-if="importBatchSnapshot" class="attendance__code">{{ formatJson(importBatchSnapshot) }}</pre>
               </div>
             </div>
 
@@ -2471,6 +2615,13 @@ interface AttendanceGroup {
   updatedAt?: string
 }
 
+interface AttendanceGroupMember {
+  id: string
+  groupId: string
+  userId: string
+  createdAt?: string
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -2708,6 +2859,8 @@ const ruleSetLoading = ref(false)
 const ruleSetSaving = ref(false)
 const attendanceGroupLoading = ref(false)
 const attendanceGroupSaving = ref(false)
+const attendanceGroupMemberLoading = ref(false)
+const attendanceGroupMemberSaving = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
@@ -2727,11 +2880,14 @@ const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const attendanceGroups = ref<AttendanceGroup[]>([])
+const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
+const importBatchSelectedId = ref('')
+const importBatchSnapshot = ref<Record<string, any> | null>(null)
 const importCsvWarnings = ref<string[]>([])
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
@@ -2746,6 +2902,8 @@ const rotationRuleEditingId = ref<string | null>(null)
 const rotationAssignmentEditingId = ref<string | null>(null)
 const ruleSetEditingId = ref<string | null>(null)
 const attendanceGroupEditingId = ref<string | null>(null)
+const attendanceGroupMemberGroupId = ref('')
+const attendanceGroupMemberUserIds = ref('')
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -2762,6 +2920,8 @@ const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvHeaderRow = ref('')
 const importCsvDelimiter = ref(',')
+const importCommitToken = ref('')
+const importCommitTokenExpiresAt = ref('')
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -3045,6 +3205,15 @@ function formatList(items?: Array<string> | null): string {
   return items.map(item => String(item)).filter(Boolean).join(', ')
 }
 
+function formatJson(value: unknown): string {
+  if (!value) return '--'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 function formatPolicyList(item: AttendanceImportPreviewItem): string {
   const applied = Array.isArray(item.appliedPolicies) ? item.appliedPolicies : []
   const groups = Array.isArray(item.userGroups) ? item.userGroups : []
@@ -3107,6 +3276,16 @@ function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null
   }
 }
 
+function parseUserIdList(value: string): string[] {
+  if (!value) return []
+  return Array.from(new Set(
+    value
+      .split(/[\n,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  ))
+}
+
 function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
   return JSON.stringify(steps ?? [], null, 2)
 }
@@ -3142,6 +3321,7 @@ function buildImportPayload(): Record<string, any> | null {
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
   if (!payload.mode) payload.mode = 'override'
+  if (payload.mappingProfileId === '') delete payload.mappingProfileId
   return payload
 }
 
@@ -3233,6 +3413,30 @@ async function applyImportCsvFile() {
   }
 }
 
+function isImportCommitTokenValid(): boolean {
+  if (!importCommitToken.value) return false
+  if (!importCommitTokenExpiresAt.value) return true
+  const expiresAt = new Date(importCommitTokenExpiresAt.value).getTime()
+  return Number.isFinite(expiresAt) && expiresAt - Date.now() > 60 * 1000
+}
+
+async function ensureImportCommitToken(): Promise<boolean> {
+  if (isImportCommitTokenValid()) return true
+  try {
+    const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to prepare import token')
+    }
+    importCommitToken.value = data.data?.commitToken ?? ''
+    importCommitTokenExpiresAt.value = data.data?.expiresAt ?? ''
+    return Boolean(importCommitToken.value)
+  } catch (error) {
+    setStatus((error as Error).message || 'Failed to prepare import token', 'error')
+    return false
+  }
+}
+
 async function previewImport() {
   const payload = buildImportPayload()
   if (!payload) {
@@ -3241,6 +3445,10 @@ async function previewImport() {
   }
   importLoading.value = true
   try {
+    const tokenOk = await ensureImportCommitToken()
+    if (tokenOk && importCommitToken.value) {
+      payload.commitToken = importCommitToken.value
+    }
     const response = await apiFetch('/api/attendance/import/preview', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -3267,11 +3475,37 @@ async function runImport() {
   }
   importLoading.value = true
   try {
-    const response = await apiFetch('/api/attendance/import', {
+    const tokenOk = await ensureImportCommitToken()
+    if (tokenOk && importCommitToken.value) {
+      payload.commitToken = importCommitToken.value
+    }
+    let response = await apiFetch('/api/attendance/import/commit', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    const data = await response.json()
+    let data = await response.json().catch(() => ({}))
+    if (!response.ok || !data.ok) {
+      const errorCode = data?.error?.code
+      if (response.status === 404 || errorCode === 'NOT_FOUND') {
+        response = await apiFetch('/api/attendance/import', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+        data = await response.json()
+      } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
+        importCommitToken.value = ''
+        importCommitTokenExpiresAt.value = ''
+        const refreshed = await ensureImportCommitToken()
+        if (refreshed && importCommitToken.value) {
+          payload.commitToken = importCommitToken.value
+          response = await apiFetch('/api/attendance/import/commit', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          })
+          data = await response.json()
+        }
+      }
+    }
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to import attendance')
     }
@@ -3280,8 +3514,92 @@ async function runImport() {
     const count = data.data?.imported ?? 0
     setStatus(`Imported ${count} rows.`)
     await loadRecords()
+    await loadImportBatches()
   } catch (error) {
     setStatus((error as Error).message || 'Failed to import attendance', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
+async function loadImportBatches() {
+  importLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/import/batches?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import batches')
+    }
+    importBatches.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load import batches', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
+async function loadImportBatchItems(batchId: string) {
+  if (!batchId) return
+  importLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import batch items')
+    }
+    importBatchSelectedId.value = batchId
+    importBatchItems.value = data.data?.items ?? []
+    importBatchSnapshot.value = null
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load import batch items', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
+function toggleImportBatchSnapshot(item: AttendanceImportItem) {
+  if (!item.previewSnapshot) {
+    importBatchSnapshot.value = null
+    return
+  }
+  if (importBatchSnapshot.value === item.previewSnapshot) {
+    importBatchSnapshot.value = null
+  } else {
+    importBatchSnapshot.value = item.previewSnapshot
+  }
+}
+
+async function rollbackImportBatch(batchId: string) {
+  if (!batchId || !window.confirm('Rollback this import batch?')) return
+  importLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, { method: 'POST' })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to rollback import batch')
+    }
+    await loadImportBatches()
+    if (importBatchSelectedId.value === batchId) {
+      importBatchItems.value = []
+      importBatchSnapshot.value = null
+      importBatchSelectedId.value = ''
+    }
+    setStatus('Import batch rolled back.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to rollback import batch', 'error')
   } finally {
     importLoading.value = false
   }
@@ -4977,6 +5295,9 @@ async function loadAttendanceGroups() {
     }
     adminForbidden.value = false
     attendanceGroups.value = data.data?.items ?? []
+    if (!attendanceGroupMemberGroupId.value && attendanceGroups.value.length > 0) {
+      attendanceGroupMemberGroupId.value = attendanceGroups.value[0].id
+    }
   } catch (error: any) {
     setStatus(error?.message || 'Failed to load attendance groups', 'error')
   } finally {
@@ -5023,6 +5344,94 @@ async function saveAttendanceGroup() {
     setStatus(error?.message || 'Failed to save attendance group', 'error')
   } finally {
     attendanceGroupSaving.value = false
+  }
+}
+
+async function loadAttendanceGroupMembers() {
+  const groupId = attendanceGroupMemberGroupId.value
+  if (!groupId) {
+    attendanceGroupMembers.value = []
+    return
+  }
+  attendanceGroupMemberLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/members`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load group members')
+    }
+    adminForbidden.value = false
+    attendanceGroupMembers.value = data.data?.items ?? []
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load group members', 'error')
+  } finally {
+    attendanceGroupMemberLoading.value = false
+  }
+}
+
+async function addAttendanceGroupMembers() {
+  const groupId = attendanceGroupMemberGroupId.value
+  const userIds = parseUserIdList(attendanceGroupMemberUserIds.value)
+  if (!groupId) {
+    setStatus('Select an attendance group first.', 'error')
+    return
+  }
+  if (userIds.length === 0) {
+    setStatus('Enter at least one user ID.', 'error')
+    return
+  }
+  attendanceGroupMemberSaving.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to add group members')
+    }
+    adminForbidden.value = false
+    attendanceGroupMemberUserIds.value = ''
+    await loadAttendanceGroupMembers()
+    setStatus('Group members added.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to add group members', 'error')
+  } finally {
+    attendanceGroupMemberSaving.value = false
+  }
+}
+
+async function removeAttendanceGroupMember(userId: string) {
+  const groupId = attendanceGroupMemberGroupId.value
+  if (!groupId || !userId) return
+  attendanceGroupMemberSaving.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/members/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to remove group member')
+    }
+    adminForbidden.value = false
+    await loadAttendanceGroupMembers()
+    setStatus('Group member removed.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to remove group member', 'error')
+  } finally {
+    attendanceGroupMemberSaving.value = false
   }
 }
 
@@ -5342,6 +5751,7 @@ async function loadAdminData() {
     loadRule(),
     loadRuleSets(),
     loadAttendanceGroups(),
+    loadImportBatches(),
     loadPayrollTemplates(),
     loadPayrollCycles(),
     loadLeaveTypes(),
@@ -5373,6 +5783,12 @@ watch(orgId, () => {
   if (attendancePluginActive.value) {
     refreshAll()
     loadAdminData()
+  }
+})
+
+watch(attendanceGroupMemberGroupId, () => {
+  if (attendancePluginActive.value) {
+    loadAttendanceGroupMembers()
   }
 })
 </script>
@@ -5741,6 +6157,22 @@ watch(orgId, () => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__subheading {
+  margin: 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.attendance__code {
+  margin-top: 8px;
+  padding: 12px;
+  background: #f5f6f8;
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: #333;
 }
 
 .attendance__table-row--meta td {

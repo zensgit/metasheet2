@@ -1216,6 +1216,52 @@ function mapAttendanceGroupRow(row) {
   }
 }
 
+function mapAttendanceGroupMemberRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    groupId: row.group_id,
+    userId: row.user_id,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+  }
+}
+
+function resolveAttendanceGroupKey(row) {
+  const raw = row?.fields?.attendance_group ?? row?.fields?.attendanceGroup ?? row?.fields?.['考勤组']
+  if (raw === undefined || raw === null) return null
+  const text = String(raw).trim()
+  return text.length ? text.toLowerCase() : null
+}
+
+async function loadRuleSetConfigById(db, orgId, ruleSetId) {
+  if (!ruleSetId) return null
+  const rows = await db.query(
+    'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+    [ruleSetId, orgId]
+  )
+  if (!rows.length) return null
+  return normalizeMetadata(rows[0].config)
+}
+
+async function loadAttendanceGroupRuleSetMap(db, orgId) {
+  const rows = await db.query(
+    'SELECT name, code, rule_set_id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL',
+    [orgId]
+  )
+  const map = new Map()
+  rows.forEach((row) => {
+    const ruleSetId = row.rule_set_id
+    if (!ruleSetId) return
+    if (typeof row.name === 'string' && row.name.trim()) {
+      map.set(row.name.trim().toLowerCase(), ruleSetId)
+    }
+    if (typeof row.code === 'string' && row.code.trim()) {
+      map.set(row.code.trim().toLowerCase(), ruleSetId)
+    }
+  })
+  return map
+}
+
 function mapAssignmentRow(row) {
   return {
     id: row.id,
@@ -7000,16 +7046,6 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let engine = null
-          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
-          if (engineConfig) {
-            try {
-              engine = createRuleEngine({ config: engineConfig, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (preview)', error)
-            }
-          }
-
           let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
@@ -7036,11 +7072,21 @@ module.exports = {
           }
 
           const baseRule = await loadDefaultRule(db, orgId)
-          const override = normalizeRuleOverride(ruleSetConfig?.rule)
-          const ruleOverride = override
-            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-            : baseRule
           const settings = await getSettings(db)
+          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const ruleSetConfigCache = new Map()
+          if (parsed.data.ruleSetId && ruleSetConfig) {
+            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
+          }
+          const engineCache = new Map()
+          let payloadEngine = null
+          if (parsed.data.engine) {
+            try {
+              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (preview payload)', error)
+            }
+          }
 
           const statusMap = parsed.data.statusMap ?? {}
           const preview = []
@@ -7100,6 +7146,41 @@ module.exports = {
               })
               continue
             }
+            let activeRuleSetId = parsed.data.ruleSetId ?? null
+            let activeRuleSetConfig = ruleSetConfig
+            if (!activeRuleSetId && groupRuleSetMap.size) {
+              const groupKey = resolveAttendanceGroupKey(row)
+              if (groupKey && groupRuleSetMap.has(groupKey)) {
+                activeRuleSetId = groupRuleSetMap.get(groupKey)
+              }
+            }
+            if (!activeRuleSetConfig && activeRuleSetId) {
+              if (ruleSetConfigCache.has(activeRuleSetId)) {
+                activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
+              } else {
+                activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
+                ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
+              }
+            }
+
+            const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
+            const ruleOverride = override
+              ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+              : baseRule
+
+            let engine = payloadEngine
+            if (!engine && activeRuleSetConfig?.engine) {
+              if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
+                engine = engineCache.get(activeRuleSetId)
+              } else {
+                try {
+                  engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
+                  if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
+                } catch (error) {
+                  logger.warn('Attendance rule engine config invalid (rule set)', error)
+                }
+              }
+            }
             const context = await resolveWorkContext({
               db,
               orgId,
@@ -7134,9 +7215,9 @@ module.exports = {
               isHoliday: Boolean(context.holiday),
               isWorkingDay: context.isWorkingDay,
             }
-            const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+            const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
             const shiftOverride = resolveShiftOverrideFromMappings(
-              ruleSetConfig?.policies?.shiftMappings,
+              activeRuleSetConfig?.policies?.shiftMappings,
               baseFacts,
               fieldValues,
               baseUserGroups
@@ -7198,15 +7279,15 @@ module.exports = {
               policyContext: holidayPolicyContext,
             })
             const policyResult = applyAttendancePolicies({
-              policies: ruleSetConfig?.policies,
-                facts: {
-                  userId: rowUserId,
-                  orgId,
-                  workDate,
-                  shiftName: shiftNameRaw ?? context.rule?.name ?? null,
-                  isHoliday: Boolean(context.holiday),
-                  isWorkingDay: context.isWorkingDay,
-                  holidayName: holidayMeta.name,
+              policies: activeRuleSetConfig?.policies,
+              facts: {
+                userId: rowUserId,
+                orgId,
+                workDate,
+                shiftName: shiftNameRaw ?? context.rule?.name ?? null,
+                isHoliday: Boolean(context.holiday),
+                isWorkingDay: context.isWorkingDay,
+                holidayName: holidayMeta.name,
                 holidayDayIndex: holidayMeta.dayIndex,
                 holidayFirstDay: holidayMeta.isFirstDay,
               },
@@ -7363,16 +7444,6 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let engine = null
-          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
-          if (engineConfig) {
-            try {
-              engine = createRuleEngine({ config: engineConfig, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (commit)', error)
-            }
-          }
-
           let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
@@ -7399,11 +7470,21 @@ module.exports = {
           }
 
           const baseRule = await loadDefaultRule(db, orgId)
-          const override = normalizeRuleOverride(ruleSetConfig?.rule)
-          const ruleOverride = override
-            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-            : baseRule
           const settings = await getSettings(db)
+          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const ruleSetConfigCache = new Map()
+          if (parsed.data.ruleSetId && ruleSetConfig) {
+            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
+          }
+          const engineCache = new Map()
+          let payloadEngine = null
+          if (parsed.data.engine) {
+            try {
+              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (commit payload)', error)
+            }
+          }
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
@@ -7477,6 +7558,41 @@ module.exports = {
                 })
                 continue
               }
+              let activeRuleSetId = parsed.data.ruleSetId ?? null
+              let activeRuleSetConfig = ruleSetConfig
+              if (!activeRuleSetId && groupRuleSetMap.size) {
+                const groupKey = resolveAttendanceGroupKey(row)
+                if (groupKey && groupRuleSetMap.has(groupKey)) {
+                  activeRuleSetId = groupRuleSetMap.get(groupKey)
+                }
+              }
+              if (!activeRuleSetConfig && activeRuleSetId) {
+                if (ruleSetConfigCache.has(activeRuleSetId)) {
+                  activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
+                } else {
+                  activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
+                  ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
+                }
+              }
+
+              const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
+              const ruleOverride = override
+                ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+                : baseRule
+
+              let engine = payloadEngine
+              if (!engine && activeRuleSetConfig?.engine) {
+                if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
+                  engine = engineCache.get(activeRuleSetId)
+                } else {
+                  try {
+                    engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
+                    if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
+                  } catch (error) {
+                    logger.warn('Attendance rule engine config invalid (rule set)', error)
+                  }
+                }
+              }
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -7511,9 +7627,9 @@ module.exports = {
                 isHoliday: Boolean(context.holiday),
                 isWorkingDay: context.isWorkingDay,
               }
-              const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+              const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
               const shiftOverride = resolveShiftOverrideFromMappings(
-                ruleSetConfig?.policies?.shiftMappings,
+                activeRuleSetConfig?.policies?.shiftMappings,
                 baseFacts,
                 fieldValues,
                 baseUserGroups
@@ -7575,7 +7691,7 @@ module.exports = {
                 policyContext: holidayPolicyContext,
               })
               const policyResult = applyAttendancePolicies({
-                policies: ruleSetConfig?.policies,
+                policies: activeRuleSetConfig?.policies,
                 facts: {
                   userId: rowUserId,
                   orgId,
@@ -7825,16 +7941,6 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let engine = null
-          const engineConfig = parsed.data.engine ?? ruleSetConfig?.engine
-          if (engineConfig) {
-            try {
-              engine = createRuleEngine({ config: engineConfig, logger })
-            } catch (error) {
-              logger.warn('Attendance rule engine config invalid (import)', error)
-            }
-          }
-
           let csvWarnings = []
           const rows = Array.isArray(parsed.data.rows)
             ? parsed.data.rows
@@ -7861,11 +7967,22 @@ module.exports = {
           }
 
           const baseRule = await loadDefaultRule(db, orgId)
-          const override = normalizeRuleOverride(ruleSetConfig?.rule)
-          const ruleOverride = override
-            ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
-            : baseRule
           const settings = await getSettings(db)
+          const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const ruleSetConfigCache = new Map()
+          if (parsed.data.ruleSetId && ruleSetConfig) {
+            ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
+          }
+
+          const engineCache = new Map()
+          let payloadEngine = null
+          if (parsed.data.engine) {
+            try {
+              payloadEngine = createRuleEngine({ config: parsed.data.engine, logger })
+            } catch (error) {
+              logger.warn('Attendance rule engine config invalid (import payload)', error)
+            }
+          }
 
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
@@ -7916,6 +8033,41 @@ module.exports = {
                 })
                 continue
               }
+              let activeRuleSetId = parsed.data.ruleSetId ?? null
+              let activeRuleSetConfig = ruleSetConfig
+              if (!activeRuleSetId && groupRuleSetMap.size) {
+                const groupKey = resolveAttendanceGroupKey(row)
+                if (groupKey && groupRuleSetMap.has(groupKey)) {
+                  activeRuleSetId = groupRuleSetMap.get(groupKey)
+                }
+              }
+              if (!activeRuleSetConfig && activeRuleSetId) {
+                if (ruleSetConfigCache.has(activeRuleSetId)) {
+                  activeRuleSetConfig = ruleSetConfigCache.get(activeRuleSetId)
+                } else {
+                  activeRuleSetConfig = await loadRuleSetConfigById(db, orgId, activeRuleSetId)
+                  ruleSetConfigCache.set(activeRuleSetId, activeRuleSetConfig)
+                }
+              }
+
+              const override = normalizeRuleOverride(activeRuleSetConfig?.rule)
+              const ruleOverride = override
+                ? { ...baseRule, ...override, workingDays: override.workingDays ?? baseRule.workingDays }
+                : baseRule
+
+              let engine = payloadEngine
+              if (!engine && activeRuleSetConfig?.engine) {
+                if (activeRuleSetId && engineCache.has(activeRuleSetId)) {
+                  engine = engineCache.get(activeRuleSetId)
+                } else {
+                  try {
+                    engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
+                    if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
+                  } catch (error) {
+                    logger.warn('Attendance rule engine config invalid (rule set)', error)
+                  }
+                }
+              }
               const context = await resolveWorkContext({
                 db: trx,
                 orgId,
@@ -7932,6 +8084,7 @@ module.exports = {
                 return undefined
               }
               const dataTypeFor = (key) => mapped[key]?.dataType
+              const profileSnapshot = buildProfileSnapshot({ valueFor, userProfile })
 
               const shiftNameRaw = valueFor('shiftName') ?? valueFor('plan_detail') ?? valueFor('attendanceClass')
               const fieldValues = buildFieldValueMap(row.fields ?? {}, mapped, userProfile)
@@ -7949,9 +8102,9 @@ module.exports = {
                 isHoliday: Boolean(context.holiday),
                 isWorkingDay: context.isWorkingDay,
               }
-              const baseUserGroups = resolveUserGroups(ruleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
+              const baseUserGroups = resolveUserGroups(activeRuleSetConfig?.policies?.userGroups, baseFacts, fieldValues)
               const shiftOverride = resolveShiftOverrideFromMappings(
-                ruleSetConfig?.policies?.shiftMappings,
+                activeRuleSetConfig?.policies?.shiftMappings,
                 baseFacts,
                 fieldValues,
                 baseUserGroups
@@ -8013,7 +8166,7 @@ module.exports = {
                 policyContext: holidayPolicyContext,
               })
               const policyResult = applyAttendancePolicies({
-                policies: ruleSetConfig?.policies,
+                policies: activeRuleSetConfig?.policies,
                 facts: {
                   userId: rowUserId,
                   orgId,
@@ -9912,6 +10065,129 @@ module.exports = {
           }
           logger.error('Attendance group delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:id/members',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_group_members WHERE org_id = $1 AND group_id = $2',
+            [orgId, groupId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT * FROM attendance_group_members
+             WHERE org_id = $1 AND group_id = $2
+             ORDER BY created_at DESC
+             LIMIT $3 OFFSET $4`,
+            [orgId, groupId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceGroupMemberRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group members fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group members' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/members',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          userIds: z.array(z.string()).optional(),
+        })
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+        const list = Array.isArray(parsed.data.userIds) ? parsed.data.userIds : []
+        const userIds = [
+          ...list,
+          parsed.data.userId ? parsed.data.userId : null,
+        ].filter(Boolean).map((value) => String(value).trim()).filter(Boolean)
+
+        if (!userIds.length) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+          return
+        }
+
+        try {
+          const created = []
+          await db.transaction(async (trx) => {
+            for (const userId of new Set(userIds)) {
+              const rows = await trx.query(
+                `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+                 VALUES ($1, $2, $3, now(), now())
+                 ON CONFLICT (org_id, group_id, user_id) DO NOTHING
+                 RETURNING *`,
+                [orgId, groupId, userId]
+              )
+              if (rows.length) created.push(mapAttendanceGroupMemberRow(rows[0]))
+            }
+          })
+          res.json({ ok: true, data: { items: created } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group member create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to add group members' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/groups/:id/members/:userId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+        const userId = req.params.userId
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 AND user_id = $3 RETURNING id',
+            [orgId, groupId, userId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Member not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: rows[0].id } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group member delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group member' } })
         }
       })
     )
