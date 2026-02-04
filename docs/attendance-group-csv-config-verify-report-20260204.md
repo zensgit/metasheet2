@@ -15,6 +15,7 @@ Date: 2026-02-04
 - ✅ Import preview: `POST /api/attendance/import/preview`
 - ✅ Import commit: `POST /api/attendance/import/commit`
 - ✅ Import batches: `GET /api/attendance/import/batches`
+- ✅ Import rollback: `POST /api/attendance/import/rollback/:id`
 
 ### UI
 - ✅ Attendance page renders at `/p/plugin-attendance/attendance`.
@@ -22,4 +23,4 @@ Date: 2026-02-04
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
-- Import preview/commit was tested with a minimal payload and `attendance_group` value.
+- Import preview/commit was tested with a real CSV sample (first 5 lines) from the DingTalk daily summary file. \n  The sample CSV appears to be tab-delimited, so preview reported missing required fields when parsed with default delimiter. \n  Commit succeeded with 0 imported rows and rollback completed successfully. Adjust `csvOptions.delimiter` (e.g., `\\t`) for full import.

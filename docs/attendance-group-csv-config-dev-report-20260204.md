@@ -30,3 +30,4 @@ Date: 2026-02-04
 
 ## Notes
 - Dev backend container expects DB hostname `postgres`. Ensure the postgres container is on the same network with alias `postgres`.
+- Local validation used the dev-token route (`/api/auth/dev-token`) plus a `user_roles` row for `admin-dev` to satisfy RBAC checks.
