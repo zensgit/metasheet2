@@ -67,20 +67,21 @@ jobs:
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<EOF
-            set -euo pipefail
-            DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-            DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
-            cd "${DEPLOY_PATH}"
-            docker compose -f "${DEPLOY_COMPOSE_FILE}" pull backend web
-            docker compose -f "${DEPLOY_COMPOSE_FILE}" up -d --no-deps --force-recreate backend web
-            # Post-deploy smoke checks
-            for i in {1..10}; do
-              if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then
-                break
-              fi
-              sleep 3
-            done
-            curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null
-            curl -fsS http://127.0.0.1:8081 >/dev/null
-EOF
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
+            "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
+            "cd \"${DEPLOY_PATH}\""
+            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
+            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
+            "# Post-deploy smoke checks"
+            "for i in {1..10}; do"
+            "  if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then"
+            "    break"
+            "  fi"
+            "  sleep 3"
+            "done"
+            "curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null"
+            "curl -fsS http://127.0.0.1:8081 >/dev/null"
+          )
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s
