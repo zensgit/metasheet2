@@ -82,7 +82,8 @@ jobs:
             "  sleep 3"
             "done"
             "curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null"
+            "curl -fsS http://127.0.0.1:8900/health >/dev/null"
             "curl -fsS http://127.0.0.1:8081 >/dev/null"
-            "echo \"Smoke: api/plugins=ok web=ok\""
+            "echo \"Smoke: api/plugins=ok health=ok web=ok\""
           )
           printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s
