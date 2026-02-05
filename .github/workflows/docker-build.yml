@@ -87,3 +87,11 @@ jobs:
             "echo \"Smoke: api/plugins=ok health=ok web=ok\""
           )
           printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Deploy smoke"
+              echo "- api/plugins: ok"
+              echo "- health: ok"
+              echo "- web: ok"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

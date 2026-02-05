@@ -5,6 +5,7 @@ Automate deployment of backend + web containers after the `Build and Push Docker
 
 ## Workflow Change
 `/.github/workflows/docker-build.yml` now includes a `deploy` job that runs after `build` and SSHs to the server to pull and recreate the backend and web containers.
+The deploy step writes a smoke summary to `GITHUB_STEP_SUMMARY`.
 
 ## Deploy Steps (Remote)
 1. `docker compose -f <compose-file> pull backend web`
