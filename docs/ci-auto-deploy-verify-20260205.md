@@ -28,14 +28,34 @@ Result:
 ```
 
 ## Runtime Validation
-Not executed in CI yet. To validate end-to-end:
-1. Add the required GitHub secrets (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`; optional `DEPLOY_PATH`, `DEPLOY_COMPOSE_FILE`).
-2. Trigger **Build and Push Docker Images** on `main`.
-3. Confirm `deploy` job runs and completes.
-4. On server, verify:
-   - `docker compose -f docker-compose.app.yml ps` shows updated `backend` and `web`.
-   - Web UI loads and `/api/health` responds.
+Executed end-to-end on 2026-02-05.
+
+### 1) CI run
+Workflow: **Build and Push Docker Images**  
+Run ID: `21709320843`  
+Status: ✅ Success (build + deploy)
+
+### 2) Server containers
+Command:
+```
+ssh mainuser@142.171.239.56 'cd metasheet2 && docker compose -f docker-compose.app.yml ps'
+```
+Result (abridged):
+```
+metasheet-backend  ghcr.io/zensgit/metasheet2-backend:latest  Up
+metasheet-web      ghcr.io/zensgit/metasheet2-web:latest      Up
+```
+
+### 3) API check
+Command:
+```
+ssh mainuser@142.171.239.56 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8900/api/plugins'
+```
+Result:
+```
+200
+```
 
 ## Status
 ✅ Static checks complete  
-⏳ Runtime deploy awaiting secrets/configuration
+✅ Runtime deploy verified
