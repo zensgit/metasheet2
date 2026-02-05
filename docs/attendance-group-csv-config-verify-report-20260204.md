@@ -1,6 +1,7 @@
 # Attendance: Groups + CSV + Config (Verification Report)
 
 Date: 2026-02-04
+Updated: 2026-02-05
 
 ## Environment
 - Local dev backend: `http://localhost:8900`
@@ -9,6 +10,10 @@ Date: 2026-02-04
 - Remote (test): `http://142.171.239.56:8081`
 
 ## Verification Summary
+### CI / Image Build
+- ✅ Triggered `Build and Push Docker Images` (run `21698106163`) on `main`.
+- ✅ Backend + frontend images built and pushed successfully.
+
 ### API (dev-token + admin role)
 - ✅ List groups: `GET /api/attendance/groups`
 - ✅ Group members: add/list/remove via `/api/attendance/groups/:id/members`
@@ -42,6 +47,7 @@ Date: 2026-02-04
 - ✅ Pulled latest `ghcr.io/zensgit/metasheet2-web:latest` (digest: `sha256:6cac38c6d956098150407d2bba76b35cbb5b5179fbd6e6c006fcf63c393fb82a`).
 - ✅ Restarted `metasheet-web` container and confirmed UI availability.
 - ✅ Deployed updated web assets (`apps/web/dist`) into `metasheet-web` container for UI token flow verification.
+- ✅ Pulled new GHCR images and recreated containers via `docker-compose.app.yml`.
 
 ### Remote CSV Import (test env)
 - ✅ `/api/attendance/import` (legacy) succeeded with minimal CSV payload after syncing plugin file into container.
