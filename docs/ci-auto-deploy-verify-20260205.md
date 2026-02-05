@@ -59,7 +59,7 @@ Result:
 ## UI Smoke (Attendance)
 Page: `http://142.171.239.56:8081/p/plugin-attendance/attendance`  
 Result: ✅ Loaded and rendered summary/admin console sections.  
-Screenshot: `artifacts/attendance-ui-regression-20260205-3.png`
+Screenshot: `artifacts/attendance-ui-regression-20260205-4.png`
 
 ## Deploy Key Rotation
 - Generated dedicated key: `~/.ssh/metasheet2_deploy`
@@ -88,6 +88,12 @@ failed to set up container networking ... iptables: No chain/target/match by tha
 - Ran `sudo systemctl restart docker`
 - Re-ran `docker compose up -d --no-deps --force-recreate backend web`
 - Verified `/api/plugins` returns 200
+ - Installed `docker-iptables-ensure.service` to pre-create DOCKER chain on boot
+
+### CI run after iptables fix
+Workflow: **Build and Push Docker Images**  
+Run ID: `21713500901`  
+Status: ✅ Success (build + deploy + smoke checks)
 
 ### Legacy key removed
 `authorized_keys` now contains only `metasheet2-deploy`.
@@ -101,4 +107,6 @@ Validation:
 ✅ UI smoke verified  
 ✅ Deploy key rotation verified  
 ✅ Deploy key restored and CI deploy recovered  
-✅ Legacy key removed
+✅ Legacy key removed  
+✅ Docker iptables guard added  
+✅ CI deploy stable after fix
