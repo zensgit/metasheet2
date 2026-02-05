@@ -59,7 +59,7 @@ Result:
 ## UI Smoke (Attendance)
 Page: `http://142.171.239.56:8081/p/plugin-attendance/attendance`  
 Result: ✅ Loaded and rendered summary/admin console sections.  
-Screenshot: `artifacts/attendance-ui-regression-20260205-2.png`
+Screenshot: `artifacts/attendance-ui-regression-20260205-3.png`
 
 ## Deploy Key Rotation
 - Generated dedicated key: `~/.ssh/metasheet2_deploy`
@@ -75,6 +75,19 @@ Initial cleanup attempts left the deploy key missing from `authorized_keys`, whi
 Workflow: **Build and Push Docker Images**  
 Run ID: `21712168768`  
 Status: ✅ Success (build + deploy + smoke checks)
+
+### CI run after legacy key removal
+Workflow: **Build and Push Docker Images**  
+Run ID: `21712897235`  
+Status: ❌ Deploy failed due to Docker iptables error on server:
+```
+failed to set up container networking ... iptables: No chain/target/match by that name
+```
+
+### Manual recovery
+- Ran `sudo systemctl restart docker`
+- Re-ran `docker compose up -d --no-deps --force-recreate backend web`
+- Verified `/api/plugins` returns 200
 
 ### Legacy key removed
 `authorized_keys` now contains only `metasheet2-deploy`.
