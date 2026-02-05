@@ -76,9 +76,16 @@ Workflow: **Build and Push Docker Images**
 Run ID: `21712168768`  
 Status: ✅ Success (build + deploy + smoke checks)
 
+### Legacy key removed
+`authorized_keys` now contains only `metasheet2-deploy`.
+Validation:
+- ✅ `ssh -i ~/.ssh/metasheet2_deploy mainuser@142.171.239.56 true`
+- ✅ legacy key rejected (`id_ed25519`): Permission denied
+
 ## Status
 ✅ Static checks complete  
 ✅ Runtime deploy verified
 ✅ UI smoke verified  
 ✅ Deploy key rotation verified  
-✅ Deploy key restored and CI deploy recovered
+✅ Deploy key restored and CI deploy recovered  
+✅ Legacy key removed
