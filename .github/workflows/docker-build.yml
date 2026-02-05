@@ -53,16 +53,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy backend + web containers
-        uses: appleboy/ssh-action@v1.0.3
         env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: DEPLOY_PATH,DEPLOY_COMPOSE_FILE
-          script: |
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<EOF
             set -euo pipefail
             DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
             DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
@@ -78,3 +83,4 @@ jobs:
             done
             curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null
             curl -fsS http://127.0.0.1:8081 >/dev/null
+EOF
