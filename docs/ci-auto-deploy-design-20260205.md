@@ -13,7 +13,7 @@ Automate deployment of backend + web containers after the `Build and Push Docker
 ## Required Secrets
 - `DEPLOY_HOST`: SSH host or IP.
 - `DEPLOY_USER`: SSH username.
-- `DEPLOY_SSH_KEY`: SSH private key for the deploy user.
+- `DEPLOY_SSH_KEY_B64`: Base64-encoded SSH private key for the deploy user.
 
 ## Optional Secrets
 - `DEPLOY_PATH`: Working directory on the server. Defaults to `metasheet2` (home-relative).
