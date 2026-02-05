@@ -95,6 +95,12 @@ Workflow: **Build and Push Docker Images**
 Run ID: `21713500901`  
 Status: ✅ Success (build + deploy + smoke checks)
 
+### CI run with deploy smoke echo
+Workflow: **Build and Push Docker Images**  
+Run ID: `21713755609`  
+Status: ✅ Success (build + deploy + smoke checks)  
+Log: `Smoke: api/plugins=ok web=ok`
+
 ### Legacy key removed
 `authorized_keys` now contains only `metasheet2-deploy`.
 Validation:
