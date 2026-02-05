@@ -21,6 +21,9 @@ Indexes:
 - `attendance_import_tokens_org_idx` on `org_id`
 - `attendance_import_tokens_expires_idx` on `expires_at`
 
+## Migration
+- Added `packages/core-backend/migrations/055_create_attendance_import_tokens.sql` to formalize table creation.
+
 ## Lifecycle
 1. **Prepare**
    - Generate UUID token

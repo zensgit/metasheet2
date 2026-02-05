@@ -42,6 +42,10 @@ Date: 2026-02-04
 - ✅ `/api/attendance/import/commit` succeeded after allowing token-less commit when `ATTENDANCE_IMPORT_REQUIRE_TOKEN` is not set.
 - ✅ Commit response returned `batchId`; rollback removed 1 row.
 - ⚠️ `/api/attendance/import` response omits `batchId` even though code includes it; newly created records appear in `attendance_records` but no new `attendance_import_batches` rows were observed.
+- ✅ Full CSV (real data) preview/commit/rollback via internal API (`127.0.0.1:8900`) to avoid gateway timeouts:
+  - Preview: `total=11966`, `invalid=197`, `warnings=197`
+  - Commit: `imported=11769`, `skipped=197`, `batchId=c4609455-930e-4a0a-ac0f-7b93bf865a68`
+  - Rollback: `deleted=11769`, status `rolled_back`
 
 ### Remote Hotfix Applied (test env)
 - Synced `plugins/plugin-attendance/index.cjs` into `metasheet-backend` container and restarted to resolve `profileSnapshot is not defined` error.
@@ -53,9 +57,15 @@ Date: 2026-02-04
   - DB check after restart: token count = 1.
   - Token cleaned after validation.
 
+### Commit Token Enforcement (test env)
+- ✅ Enabled `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` via `docker/app.env`, recreated backend container.
+- ✅ Commit without token returns `COMMIT_TOKEN_REQUIRED`.
+- ✅ Commit with token succeeds; rollback deletes imported row.
+
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
 - The DingTalk CSV contains report metadata in the first two lines, so the header row index must be `2` (0-based).
+- Large CSV preview/commit can hit gateway timeouts via `:8081`; use internal API (`127.0.0.1:8900`) for full imports in test env.
 - Full import verification using the real CSV file succeeded with `csvOptions.delimiter: ','` and `headerRowIndex: 2`:
   - Commit: `imported=11769`, `skipped=197`
   - Rollback: `deleted=11769`, status `rolled_back`
