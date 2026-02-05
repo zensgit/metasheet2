@@ -108,6 +108,13 @@ Run ID: `21714194104`
 Status: ✅ Success (build + deploy + smoke checks)  
 Log: `Smoke: api/plugins=ok health=ok web=ok`
 
+### CI run with smoke summary (manual trigger)
+Workflow: **Build and Push Docker Images**  
+Run ID: `21714622170`  
+Status: ✅ Success (build + deploy + smoke checks)  
+Log: `Smoke: api/plugins=ok health=ok web=ok`  
+Note: one transient `curl: (56) Recv failure: Connection reset by peer` occurred before retries succeeded.
+
 ### CI step summary
 Deploy job now appends a smoke summary to `GITHUB_STEP_SUMMARY`:
 - api/plugins: ok
