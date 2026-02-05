@@ -21,6 +21,11 @@ Date: 2026-02-04
 ### UI
 - ✅ Attendance page renders at `/p/plugin-attendance/attendance`.
 - ✅ Admin sections load (groups / members / import / batches visible).
+- ✅ UI import flow (with token enforcement on) works end-to-end:
+  - Preview triggers `/api/attendance/import/prepare` then `/preview`.
+  - Commit re-requests token after preview consumes it, then `/commit` succeeds.
+  - Batch created: `19b85d71-d6bc-4d9b-8af5-b7d32f4929a2`; rollback deleted 1 row.
+- Screenshot: `artifacts/attendance-ui-import-20260205.png`
 
 ### Remote API (admin token)
 - ✅ `GET /api/auth/me`
@@ -36,6 +41,7 @@ Date: 2026-02-04
 ### Remote Web Deploy
 - ✅ Pulled latest `ghcr.io/zensgit/metasheet2-web:latest` (digest: `sha256:6cac38c6d956098150407d2bba76b35cbb5b5179fbd6e6c006fcf63c393fb82a`).
 - ✅ Restarted `metasheet-web` container and confirmed UI availability.
+- ✅ Deployed updated web assets (`apps/web/dist`) into `metasheet-web` container for UI token flow verification.
 
 ### Remote CSV Import (test env)
 - ✅ `/api/attendance/import` (legacy) succeeded with minimal CSV payload after syncing plugin file into container.
@@ -56,11 +62,15 @@ Date: 2026-02-04
   - DB check before restart: token count = 1.
   - DB check after restart: token count = 1.
   - Token cleaned after validation.
+ 
+### Remote DB Migration (test env)
+- ✅ Applied `attendance_import_tokens` schema (idempotent create) on remote DB.
 
 ### Commit Token Enforcement (test env)
 - ✅ Enabled `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` via `docker/app.env`, recreated backend container.
 - ✅ Commit without token returns `COMMIT_TOKEN_REQUIRED`.
 - ✅ Commit with token succeeds; rollback deletes imported row.
+- ✅ UI preview/commit flow re-fetches tokens as needed and completes commit/rollback.
 
 ## Notes / Caveats
 - UI actions require auth token; without login, admin data is not loaded.
