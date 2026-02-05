@@ -8,12 +8,12 @@
 ### 1) Workflow wiring
 Command:
 ```
-rg -n "appleboy/ssh-action|Deploy backend" .github/workflows/docker-build.yml
+rg -n "Deploy backend|DEPLOY_SSH_KEY_B64" .github/workflows/docker-build.yml
 ```
 Result:
 ```
 55:      - name: Deploy backend + web containers
-56:        uses: appleboy/ssh-action@v1.0.3
+58:          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
 ```
 
 ### 2) Env template updates
@@ -59,7 +59,7 @@ Result:
 ## UI Smoke (Attendance)
 Page: `http://142.171.239.56:8081/p/plugin-attendance/attendance`  
 Result: ✅ Loaded and rendered summary/admin console sections.  
-Screenshot: `artifacts/attendance-ui-regression-20260205.png`
+Screenshot: `artifacts/attendance-ui-regression-20260205-2.png`
 
 ## Deploy Key Rotation
 - Generated dedicated key: `~/.ssh/metasheet2_deploy`
@@ -69,11 +69,16 @@ Screenshot: `artifacts/attendance-ui-regression-20260205.png`
   `ssh -i ~/.ssh/metasheet2_deploy mainuser@142.171.239.56 true`
 
 ### Follow-up: legacy key cleanup
-Attempted to remove the legacy key from `~/.ssh/authorized_keys`. Subsequent SSH attempts were rejected (`Connection closed`), indicating the file likely ended up empty or missing the deploy key. This requires manual console recovery to restore the deploy key (and optionally re-add the legacy key).
+Initial cleanup attempts left the deploy key missing from `authorized_keys`, which caused CI SSH authentication to fail. The file was restored to include both the legacy key and the deploy key.
+
+### CI retry after recovery
+Workflow: **Build and Push Docker Images**  
+Run ID: `21712168768`  
+Status: ✅ Success (build + deploy + smoke checks)
 
 ## Status
 ✅ Static checks complete  
 ✅ Runtime deploy verified
 ✅ UI smoke verified  
 ✅ Deploy key rotation verified  
-⚠️ Legacy key cleanup requires manual recovery
+✅ Deploy key restored and CI deploy recovered
