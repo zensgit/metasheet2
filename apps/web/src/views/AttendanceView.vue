@@ -1133,6 +1133,75 @@
                     placeholder=","
                   />
                 </label>
+                <label class="attendance__field" for="attendance-import-user-map">
+                  <span>User map JSON (optional)</span>
+                  <input
+                    id="attendance-import-user-map"
+                    type="file"
+                    accept=".json,application/json"
+                    @change="handleImportUserMapChange"
+                  />
+                  <small v-if="importUserMapFileName" class="attendance__field-hint">
+                    Selected: {{ importUserMapFileName }} · {{ importUserMapCount }} entries
+                  </small>
+                  <small v-if="importUserMapError" class="attendance__field-hint attendance__field-hint--error">
+                    {{ importUserMapError }}
+                  </small>
+                </label>
+                <label class="attendance__field" for="attendance-import-user-map-key">
+                  <span>User map key field</span>
+                  <input
+                    id="attendance-import-user-map-key"
+                    v-model="importUserMapKeyField"
+                    type="text"
+                    placeholder="工号"
+                  />
+                  <small v-if="selectedImportProfile?.userMapKeyField" class="attendance__field-hint">
+                    Default: {{ selectedImportProfile.userMapKeyField }}
+                  </small>
+                </label>
+                <label class="attendance__field" for="attendance-import-user-map-source">
+                  <span>User map source fields</span>
+                  <input
+                    id="attendance-import-user-map-source"
+                    v-model="importUserMapSourceFields"
+                    type="text"
+                    placeholder="empNo,工号,姓名"
+                  />
+                  <small v-if="selectedImportProfile?.userMapSourceFields?.length" class="attendance__field-hint">
+                    Default: {{ selectedImportProfile.userMapSourceFields.join(', ') }}
+                  </small>
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-import-group-create">
+                  <span>Auto-create groups</span>
+                  <input id="attendance-import-group-create" v-model="importGroupAutoCreate" type="checkbox" />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-import-group-assign">
+                  <span>Auto-assign group members</span>
+                  <input id="attendance-import-group-assign" v-model="importGroupAutoAssign" type="checkbox" />
+                </label>
+                <label class="attendance__field" for="attendance-import-group-rule-set">
+                  <span>Group rule set</span>
+                  <select
+                    id="attendance-import-group-rule-set"
+                    v-model="importGroupRuleSetId"
+                    :disabled="ruleSets.length === 0"
+                  >
+                    <option value="">(Optional) Use import rule set</option>
+                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-import-group-timezone">
+                  <span>Group timezone (optional)</span>
+                  <input
+                    id="attendance-import-group-timezone"
+                    v-model="importGroupTimezone"
+                    type="text"
+                    placeholder="Asia/Shanghai"
+                  />
+                </label>
                 <label class="attendance__field" for="attendance-import-user">
                   <span>User ID</span>
                   <input
@@ -2920,8 +2989,24 @@ const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
 const importCsvHeaderRow = ref('')
 const importCsvDelimiter = ref(',')
+const importUserMapFile = ref<File | null>(null)
+const importUserMapFileName = ref('')
+const importUserMap = ref<Record<string, any> | null>(null)
+const importUserMapError = ref('')
+const importUserMapKeyField = ref('')
+const importUserMapSourceFields = ref('')
+const importGroupAutoCreate = ref(false)
+const importGroupAutoAssign = ref(false)
+const importGroupRuleSetId = ref('')
+const importGroupTimezone = ref('')
 const importCommitToken = ref('')
 const importCommitTokenExpiresAt = ref('')
+
+const importUserMapCount = computed(() => {
+  if (!importUserMap.value) return 0
+  if (Array.isArray(importUserMap.value)) return importUserMap.value.length
+  return Object.keys(importUserMap.value).length
+})
 
 const orgId = ref('')
 const targetUserId = ref('')
@@ -3320,6 +3405,19 @@ function buildImportPayload(): Record<string, any> | null {
   if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
   if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
+  const userMapKeyField = resolveImportUserMapKeyField()
+  const userMapSourceFields = resolveImportUserMapSourceFields()
+  if (importUserMap.value) payload.userMap = importUserMap.value
+  if (userMapKeyField) payload.userMapKeyField = userMapKeyField
+  if (userMapSourceFields.length) payload.userMapSourceFields = userMapSourceFields
+  if (!payload.groupSync && (importGroupAutoCreate.value || importGroupAutoAssign.value)) {
+    payload.groupSync = {
+      autoCreate: importGroupAutoCreate.value,
+      autoAssignMembers: importGroupAutoAssign.value,
+      ruleSetId: importGroupRuleSetId.value || undefined,
+      timezone: importGroupTimezone.value || undefined,
+    }
+  }
   if (!payload.mode) payload.mode = 'override'
   if (payload.mappingProfileId === '') delete payload.mappingProfileId
   return payload
@@ -3374,11 +3472,79 @@ function applyImportProfile() {
   setStatus(`Applied mapping profile: ${profile.name}`)
 }
 
+function splitListInput(value: string): string[] {
+  return value
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function resolveImportUserMapKeyField(): string {
+  return importUserMapKeyField.value.trim()
+    || selectedImportProfile.value?.userMapKeyField
+    || ''
+}
+
+function resolveImportUserMapSourceFields(): string[] {
+  if (importUserMapSourceFields.value.trim()) {
+    return splitListInput(importUserMapSourceFields.value)
+  }
+  return selectedImportProfile.value?.userMapSourceFields ?? []
+}
+
+function normalizeUserMapPayload(payload: any, keyField: string): Record<string, any> | null {
+  if (!payload) return null
+  if (payload.mapping && typeof payload.mapping === 'object' && !Array.isArray(payload.mapping)) {
+    return payload.mapping as Record<string, any>
+  }
+  if (Array.isArray(payload)) {
+    if (!keyField) return null
+    const map: Record<string, any> = {}
+    payload.forEach((entry) => {
+      const key = entry?.[keyField]
+      if (key !== undefined && key !== null) {
+        const textKey = String(key).trim()
+        if (textKey) map[textKey] = entry
+      }
+    })
+    return Object.keys(map).length ? map : null
+  }
+  if (typeof payload === 'object') return payload as Record<string, any>
+  return null
+}
+
 function handleImportCsvChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target?.files?.[0] ?? null
   importCsvFile.value = file
   importCsvFileName.value = file?.name ?? ''
+}
+
+async function handleImportUserMapChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const file = target?.files?.[0] ?? null
+  importUserMapFile.value = file
+  importUserMapFileName.value = file?.name ?? ''
+  importUserMapError.value = ''
+  if (!file) {
+    importUserMap.value = null
+    return
+  }
+  try {
+    const text = await file.text()
+    const parsed = JSON.parse(text)
+    const keyField = resolveImportUserMapKeyField()
+    const normalized = normalizeUserMapPayload(parsed, keyField)
+    if (!normalized) {
+      throw new Error('User map JSON format not recognized. Provide mapping object or array with key field.')
+    }
+    importUserMap.value = normalized
+    setStatus(`User map loaded (${Object.keys(normalized).length} entries).`)
+  } catch (error) {
+    importUserMap.value = null
+    importUserMapError.value = (error as Error).message || 'Failed to parse user map JSON'
+    setStatus(importUserMapError.value, 'error')
+  }
 }
 
 async function applyImportCsvFile() {
@@ -3458,7 +3624,11 @@ async function previewImport() {
       throw new Error(data?.error?.message || 'Failed to preview import')
     }
     importPreview.value = data.data?.items ?? []
-    importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
+    const previewWarnings = [
+      ...(Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []),
+      ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
+    ]
+    importCsvWarnings.value = Array.from(new Set(previewWarnings))
     setStatus(`Preview loaded (${importPreview.value.length} rows).`)
   } catch (error) {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
@@ -3522,9 +3692,19 @@ async function runImport() {
       throw new Error(data?.error?.message || 'Failed to import attendance')
     }
     adminForbidden.value = false
-    importCsvWarnings.value = Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []
+    const importWarnings = [
+      ...(Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []),
+      ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
+    ]
+    importCsvWarnings.value = Array.from(new Set(importWarnings))
     const count = data.data?.imported ?? 0
-    setStatus(`Imported ${count} rows.`)
+    const groupCreated = data.data?.meta?.groupCreated ?? 0
+    const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
+    if (groupCreated || groupMembersAdded) {
+      setStatus(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`)
+    } else {
+      setStatus(`Imported ${count} rows.`)
+    }
     await loadRecords()
     await loadImportBatches()
   } catch (error) {
@@ -5803,6 +5983,17 @@ watch(attendanceGroupMemberGroupId, () => {
     loadAttendanceGroupMembers()
   }
 })
+
+watch(importProfileId, () => {
+  const profile = selectedImportProfile.value
+  if (!profile) return
+  if (!importUserMapKeyField.value && profile.userMapKeyField) {
+    importUserMapKeyField.value = profile.userMapKeyField
+  }
+  if (!importUserMapSourceFields.value && profile.userMapSourceFields?.length) {
+    importUserMapSourceFields.value = profile.userMapSourceFields.join(', ')
+  }
+})
 </script>
 
 <style scoped>
@@ -5872,6 +6063,15 @@ watch(attendanceGroupMemberGroupId, () => {
 .attendance__field--checkbox input {
   width: auto;
   min-width: auto;
+}
+
+.attendance__field-hint {
+  color: #777;
+  font-size: 11px;
+}
+
+.attendance__field-hint--error {
+  color: #c0392b;
 }
 
 .attendance__btn {

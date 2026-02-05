@@ -1304,11 +1304,92 @@ function mapAttendanceGroupMemberRow(row) {
   }
 }
 
-function resolveAttendanceGroupKey(row) {
+function normalizeAttendanceGroupValue(value) {
+  if (value === undefined || value === null) return null
+  const text = String(value).trim()
+  return text.length ? text.toLowerCase() : null
+}
+
+function resolveAttendanceGroupName(row) {
   const raw = row?.fields?.attendance_group ?? row?.fields?.attendanceGroup ?? row?.fields?.['考勤组']
   if (raw === undefined || raw === null) return null
   const text = String(raw).trim()
-  return text.length ? text.toLowerCase() : null
+  return text.length ? text : null
+}
+
+function resolveAttendanceGroupKey(row) {
+  return normalizeAttendanceGroupValue(resolveAttendanceGroupName(row))
+}
+
+async function loadAttendanceGroupIdMap(db, orgId) {
+  const rows = await db.query(
+    'SELECT id, name, code, rule_set_id FROM attendance_groups WHERE org_id = $1',
+    [orgId]
+  )
+  const map = new Map()
+  rows.forEach((row) => {
+    if (typeof row.name === 'string' && row.name.trim()) {
+      const key = normalizeAttendanceGroupValue(row.name)
+      if (key) map.set(key, { id: row.id, name: row.name, ruleSetId: row.rule_set_id })
+    }
+    if (typeof row.code === 'string' && row.code.trim()) {
+      const key = normalizeAttendanceGroupValue(row.code)
+      if (key && !map.has(key)) map.set(key, { id: row.id, name: row.name, ruleSetId: row.rule_set_id })
+    }
+  })
+  return map
+}
+
+async function ensureAttendanceGroups(db, orgId, groupNames, options) {
+  const map = await loadAttendanceGroupIdMap(db, orgId)
+  let created = 0
+  if (!groupNames || groupNames.size === 0) return { map, created }
+  const ruleSetId = options?.ruleSetId ?? null
+  const timezone = options?.timezone ?? null
+  for (const [key, name] of groupNames.entries()) {
+    if (!key || map.has(key)) continue
+    const rows = await db.query(
+      `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NULL, now(), now())
+       ON CONFLICT (org_id, name) DO UPDATE SET
+         timezone = COALESCE(attendance_groups.timezone, EXCLUDED.timezone),
+         rule_set_id = COALESCE(attendance_groups.rule_set_id, EXCLUDED.rule_set_id),
+         updated_at = now()
+       RETURNING id, name, rule_set_id`,
+      [orgId, name, null, timezone, ruleSetId]
+    )
+    if (rows.length) {
+      const row = rows[0]
+      map.set(key, { id: row.id, name: row.name ?? name, ruleSetId: row.rule_set_id })
+      created += 1
+    }
+  }
+  return { map, created }
+}
+
+async function insertAttendanceGroupMembers(db, orgId, members) {
+  if (!members.length) return 0
+  const chunkSize = 200
+  let inserted = 0
+  for (let i = 0; i < members.length; i += chunkSize) {
+    const chunk = members.slice(i, i + chunkSize)
+    const values = []
+    const params = []
+    chunk.forEach((member, index) => {
+      const baseIndex = index * 3
+      values.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, now(), now())`)
+      params.push(orgId, member.groupId, member.userId)
+    })
+    const rows = await db.query(
+      `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+       VALUES ${values.join(', ')}
+       ON CONFLICT (org_id, group_id, user_id) DO NOTHING
+       RETURNING id`,
+      params
+    )
+    inserted += rows.length
+  }
+  return inserted
 }
 
 async function loadRuleSetConfigById(db, orgId, ruleSetId) {
@@ -1338,6 +1419,37 @@ async function loadAttendanceGroupRuleSetMap(db, orgId) {
     }
   })
   return map
+}
+
+function collectAttendanceGroupNames(rows) {
+  const names = new Map()
+  if (!Array.isArray(rows)) return names
+  for (const row of rows) {
+    const name = resolveAttendanceGroupName(row)
+    const key = normalizeAttendanceGroupValue(name)
+    if (!key || !name) continue
+    if (!names.has(key)) names.set(key, name)
+  }
+  return names
+}
+
+function normalizeGroupSyncOptions(groupSync, fallbackRuleSetId, fallbackTimezone) {
+  if (!groupSync || typeof groupSync !== 'object') return null
+  const autoCreate = groupSync.autoCreate === true
+  const autoAssignMembers = groupSync.autoAssignMembers === true
+  if (!autoCreate && !autoAssignMembers) return null
+  const ruleSetId = typeof groupSync.ruleSetId === 'string' && groupSync.ruleSetId.trim().length > 0
+    ? groupSync.ruleSetId.trim()
+    : (typeof fallbackRuleSetId === 'string' && fallbackRuleSetId.trim().length > 0 ? fallbackRuleSetId.trim() : null)
+  const timezone = typeof groupSync.timezone === 'string' && groupSync.timezone.trim().length > 0
+    ? groupSync.timezone.trim()
+    : (typeof fallbackTimezone === 'string' && fallbackTimezone.trim().length > 0 ? fallbackTimezone.trim() : null)
+  return {
+    autoCreate,
+    autoAssignMembers,
+    ruleSetId,
+    timezone,
+  }
 }
 
 function mapAssignmentRow(row) {
@@ -4131,6 +4243,12 @@ module.exports = {
           targetField: z.string().min(1),
           dataType: z.string().optional(),
         })).optional(),
+      }).optional(),
+      groupSync: z.object({
+        autoCreate: z.boolean().optional(),
+        autoAssignMembers: z.boolean().optional(),
+        ruleSetId: z.string().uuid().optional(),
+        timezone: z.string().optional(),
       }).optional(),
       commitToken: z.string().optional(),
       batchMeta: z.record(z.unknown()).optional(),
@@ -7154,6 +7272,24 @@ module.exports = {
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
           const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const groupSync = normalizeGroupSyncOptions(
+            parsed.data.groupSync,
+            parsed.data.ruleSetId,
+            parsed.data.timezone
+          )
+          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
+          const groupWarnings = []
+          if (groupNames.size && !groupSync?.autoCreate) {
+            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+            for (const [key, name] of groupNames.entries()) {
+              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+            }
+          }
+          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
+            for (const key of groupNames.keys()) {
+              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
+            }
+          }
           const ruleSetConfigCache = new Map()
           if (parsed.data.ruleSetId && ruleSetConfig) {
             ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
@@ -7455,13 +7591,15 @@ module.exports = {
             })
           }
 
+          const combinedWarnings = [...csvWarnings, ...groupWarnings]
           res.json({
             ok: true,
             data: {
               items: preview,
               total: preview.length,
               mappingUsed: mapping,
-              csvWarnings,
+              csvWarnings: combinedWarnings,
+              groupWarnings,
             },
           })
         } catch (error) {
@@ -7557,6 +7695,24 @@ module.exports = {
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
           const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const groupSync = normalizeGroupSyncOptions(
+            parsed.data.groupSync,
+            parsed.data.ruleSetId,
+            parsed.data.timezone
+          )
+          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
+          const groupWarnings = []
+          if (groupNames.size && !groupSync?.autoCreate) {
+            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+            for (const [key, name] of groupNames.entries()) {
+              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+            }
+          }
+          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
+            for (const key of groupNames.keys()) {
+              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
+            }
+          }
           const ruleSetConfigCache = new Map()
           if (parsed.data.ruleSetId && ruleSetConfig) {
             ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
@@ -7575,12 +7731,36 @@ module.exports = {
           const results = []
           const skipped = []
           const batchId = randomUUID()
-          const batchMeta = {
-            ...(parsed.data.batchMeta ?? {}),
-            mappingProfileId: parsed.data.mappingProfileId ?? null,
-          }
+          let batchMeta = null
 
           await db.transaction(async (trx) => {
+            let groupIdMap = null
+            let groupCreated = 0
+            if (groupSync) {
+              groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
+              if (groupSync.autoCreate && groupNames.size) {
+                const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
+                  ruleSetId: groupSync.ruleSetId,
+                  timezone: groupSync.timezone,
+                })
+                groupIdMap = ensured.map
+                groupCreated = ensured.created
+              }
+            }
+            const groupMembersToInsert = new Map()
+            batchMeta = {
+              ...(parsed.data.batchMeta ?? {}),
+              mappingProfileId: parsed.data.mappingProfileId ?? null,
+              groupSync: groupSync
+                ? {
+                    autoCreate: groupSync.autoCreate,
+                    autoAssignMembers: groupSync.autoAssignMembers,
+                    ruleSetId: groupSync.ruleSetId,
+                    timezone: groupSync.timezone,
+                  }
+                : undefined,
+              groupCreated,
+            }
             await trx.query(
               `INSERT INTO attendance_import_batches
                (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
@@ -7600,6 +7780,7 @@ module.exports = {
 
             for (const row of rows) {
               const workDate = row.workDate
+              const groupKey = resolveAttendanceGroupKey(row)
               const rowUserId = resolveRowUserId({
                 row,
                 fallbackUserId: requesterId,
@@ -7643,10 +7824,15 @@ module.exports = {
                 })
                 continue
               }
+              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
+                const groupEntry = groupIdMap.get(groupKey)
+                if (groupEntry?.id) {
+                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+                }
+              }
               let activeRuleSetId = parsed.data.ruleSetId ?? null
               let activeRuleSetConfig = ruleSetConfig
               if (!activeRuleSetId && groupRuleSetMap.size) {
-                const groupKey = resolveAttendanceGroupKey(row)
                 if (groupKey && groupRuleSetMap.has(groupKey)) {
                   activeRuleSetId = groupRuleSetMap.get(groupKey)
                 }
@@ -7954,6 +8140,20 @@ module.exports = {
               })
             }
 
+            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
+              const groupMembersAdded = await insertAttendanceGroupMembers(
+                trx,
+                orgId,
+                Array.from(groupMembersToInsert.values())
+              )
+              if (batchMeta) {
+                batchMeta.groupMembersAdded = groupMembersAdded
+                await trx.query(
+                  'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+                  [batchId, orgId, JSON.stringify(batchMeta)]
+                )
+              }
+            }
             if (skipped.length) {
               const updatedMeta = {
                 ...(batchMeta ?? {}),
@@ -7964,6 +8164,7 @@ module.exports = {
                 'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
                 [batchId, orgId, JSON.stringify(updatedMeta)]
               )
+              batchMeta = updatedMeta
             }
           })
 
@@ -7974,7 +8175,9 @@ module.exports = {
               imported: results.length,
               items: results,
               skipped,
-              csvWarnings,
+              csvWarnings: [...csvWarnings, ...groupWarnings],
+              groupWarnings,
+              meta: batchMeta,
             },
           })
         } catch (error) {
@@ -8072,9 +8275,25 @@ module.exports = {
           const statusMap = parsed.data.statusMap ?? {}
           const results = []
           const skipped = []
+          let groupCreated = 0
+          let groupMembersAdded = 0
           await db.transaction(async (trx) => {
+            let groupIdMap = null
+            if (groupSync) {
+              groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
+              if (groupSync.autoCreate && groupNames.size) {
+                const ensured = await ensureAttendanceGroups(trx, orgId, groupNames, {
+                  ruleSetId: groupSync.ruleSetId,
+                  timezone: groupSync.timezone,
+                })
+                groupIdMap = ensured.map
+                groupCreated = ensured.created
+              }
+            }
+            const groupMembersToInsert = new Map()
             for (const row of rows) {
               const workDate = row.workDate
+              const groupKey = resolveAttendanceGroupKey(row)
               const rowUserId = resolveRowUserId({
                 row,
                 fallbackUserId: userId,
@@ -8118,10 +8337,15 @@ module.exports = {
                 })
                 continue
               }
+              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
+                const groupEntry = groupIdMap.get(groupKey)
+                if (groupEntry?.id) {
+                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+                }
+              }
               let activeRuleSetId = parsed.data.ruleSetId ?? null
               let activeRuleSetConfig = ruleSetConfig
               if (!activeRuleSetId && groupRuleSetMap.size) {
-                const groupKey = resolveAttendanceGroupKey(row)
                 if (groupKey && groupRuleSetMap.has(groupKey)) {
                   activeRuleSetId = groupRuleSetMap.get(groupKey)
                 }
@@ -8398,6 +8622,13 @@ module.exports = {
                   : null,
               })
             }
+            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
+              groupMembersAdded = await insertAttendanceGroupMembers(
+                trx,
+                orgId,
+                Array.from(groupMembersToInsert.values())
+              )
+            }
           })
 
           res.json({
@@ -8406,7 +8637,20 @@ module.exports = {
               imported: results.length,
               items: results,
               skipped,
-              csvWarnings,
+              csvWarnings: [...csvWarnings, ...groupWarnings],
+              groupWarnings,
+              meta: groupSync
+                ? {
+                    groupCreated,
+                    groupMembersAdded,
+                    groupSync: {
+                      autoCreate: groupSync.autoCreate,
+                      autoAssignMembers: groupSync.autoAssignMembers,
+                      ruleSetId: groupSync.ruleSetId,
+                      timezone: groupSync.timezone,
+                    },
+                  }
+                : null,
             },
           })
         } catch (error) {
