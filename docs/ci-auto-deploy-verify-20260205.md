@@ -68,8 +68,12 @@ Screenshot: `artifacts/attendance-ui-regression-20260205.png`
 - Verified SSH with:  
   `ssh -i ~/.ssh/metasheet2_deploy mainuser@142.171.239.56 true`
 
+### Follow-up: legacy key cleanup
+Attempted to remove the legacy key from `~/.ssh/authorized_keys`. Subsequent SSH attempts were rejected (`Connection closed`), indicating the file likely ended up empty or missing the deploy key. This requires manual console recovery to restore the deploy key (and optionally re-add the legacy key).
+
 ## Status
 ✅ Static checks complete  
 ✅ Runtime deploy verified
 ✅ UI smoke verified  
-✅ Deploy key rotation verified
+✅ Deploy key rotation verified  
+⚠️ Legacy key cleanup requires manual recovery

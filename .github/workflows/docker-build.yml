@@ -69,3 +69,12 @@ jobs:
             cd "${DEPLOY_PATH}"
             docker compose -f "${DEPLOY_COMPOSE_FILE}" pull backend web
             docker compose -f "${DEPLOY_COMPOSE_FILE}" up -d --no-deps --force-recreate backend web
+            # Post-deploy smoke checks
+            for i in {1..10}; do
+              if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then
+                break
+              fi
+              sleep 3
+            done
+            curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null
+            curl -fsS http://127.0.0.1:8081 >/dev/null
