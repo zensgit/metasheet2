@@ -1346,7 +1346,7 @@ async function ensureAttendanceGroups(db, orgId, groupNames, options) {
   let created = 0
   if (!groupNames || groupNames.size === 0) return { map, created }
   const ruleSetId = options?.ruleSetId ?? null
-  const timezone = options?.timezone ?? null
+  const timezone = options?.timezone ?? DEFAULT_RULE.timezone
   for (const [key, name] of groupNames.entries()) {
     if (!key || map.has(key)) continue
     const rows = await db.query(
