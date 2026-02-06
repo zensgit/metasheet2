@@ -3551,7 +3551,17 @@ function buildImportPayload(): Record<string, any> | null {
   const resolvedUserId = importForm.userId.trim() || normalizedUserId()
   if (resolvedOrgId && !payload.orgId) payload.orgId = resolvedOrgId
   if (resolvedUserId && !payload.userId) payload.userId = resolvedUserId
-  if (importForm.ruleSetId && !payload.ruleSetId) payload.ruleSetId = importForm.ruleSetId
+  const uuidLike = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  if (importForm.ruleSetId) {
+    // Always honor the explicit selection (override template placeholders).
+    payload.ruleSetId = importForm.ruleSetId
+  } else if (typeof payload.ruleSetId === 'string') {
+    // The backend template payload example may contain placeholders like "<ruleSetId>",
+    // but the API validates ruleSetId as a UUID. If the user didn't pick a rule set,
+    // treat invalid strings as "unset" so the default rule set can be used.
+    const trimmed = payload.ruleSetId.trim()
+    if (trimmed && !uuidLike(trimmed)) delete payload.ruleSetId
+  }
   if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
   const userMapKeyField = resolveImportUserMapKeyField()
   const userMapSourceFields = resolveImportUserMapSourceFields()

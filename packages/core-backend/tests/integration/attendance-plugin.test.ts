@@ -441,6 +441,9 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(importTemplateRes.status).toBe(200)
+    const importTemplateData = (importTemplateRes.body as { data?: any } | undefined)?.data
+    // Template payload must be valid out-of-the-box (no placeholder UUIDs that break preview/commit).
+    expect(importTemplateData?.payloadExample?.ruleSetId).toBeUndefined()
 
     const importPayload = {
       userId: 'attendance-test',

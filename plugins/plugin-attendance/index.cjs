@@ -7265,50 +7265,12 @@ module.exports = {
             mappingProfiles: IMPORT_MAPPING_PROFILES,
             payloadExample: {
               source: 'dingtalk_csv',
-              ruleSetId: '<ruleSetId>',
               mode: 'override',
-              userMapKeyField: 'empNo',
-              userMap: {
-                A0054: {
-                  userId: 'tmp_9cf257fde42ac517bc769838',
-                  name: '秦夫林',
-                  empNo: 'A0054',
-                  profile: {
-                    attendanceGroup: '单休办公',
-                    department: '亚光科技-人力行政部-后勤',
-                    role: '司机',
-                    roleTags: ['driver'],
-                  },
-                },
-              },
-              entries: [
-                {
-                  userId: 'tmp_9cf257fde42ac517bc769838',
-                  occurredAt: '2026-01-20T07:51:00',
-                  eventType: 'check_in',
-                  timezone: 'Asia/Shanghai',
-                  meta: {
-                    workDate: '2026-01-20',
-                    column: '上班1打卡时间',
-                    rawTime: '07:51',
-                    sourceUserKey: 'A0054',
-                    sourceUserName: '秦夫林',
-                  },
-                },
-                {
-                  userId: 'tmp_9cf257fde42ac517bc769838',
-                  occurredAt: '2026-01-20T17:05:00',
-                  eventType: 'check_out',
-                  timezone: 'Asia/Shanghai',
-                  meta: {
-                    workDate: '2026-01-20',
-                    column: '下班1打卡时间',
-                    rawTime: '17:05',
-                    sourceUserKey: 'A0054',
-                    sourceUserName: '秦夫林',
-                  },
-                },
-              ],
+              // Keep the template payload valid out-of-the-box: ruleSetId is optional.
+              userMapKeyField: '工号',
+              userMapSourceFields: ['empNo', '工号', '姓名'],
+              userMap: {},
+              entries: [],
             },
           },
         })
