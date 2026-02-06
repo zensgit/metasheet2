@@ -1,4 +1,6 @@
 import { chromium } from '@playwright/test'
+import fs from 'fs/promises'
+import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/attendance'
 const token = process.env.AUTH_TOKEN || ''
@@ -8,6 +10,7 @@ const fromDate = process.env.FROM_DATE || ''
 const toDate = process.env.TO_DATE || ''
 const userIds = (process.env.USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean)
 const debug = process.env.UI_DEBUG === 'true'
+const screenshotPath = process.env.UI_SCREENSHOT_PATH || ''
 
 function logInfo(message) {
   console.log(`[attendance-import-ui] ${message}`)
@@ -73,6 +76,12 @@ async function run() {
     await refreshRecords(page)
     await assertHasRecords(page)
     logInfo(`Records verified for ${userId}`)
+  }
+
+  if (screenshotPath) {
+    await fs.mkdir(path.dirname(screenshotPath), { recursive: true })
+    await page.screenshot({ path: screenshotPath, fullPage: true })
+    logInfo(`Saved screenshot: ${screenshotPath}`)
   }
 
   await browser.close()

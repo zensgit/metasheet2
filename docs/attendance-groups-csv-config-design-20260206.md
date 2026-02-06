@@ -41,3 +41,22 @@ This aligns behavior with table constraints and expected default semantics.
 - Ensures the three core features are covered by automated integration checks, not only manual UI steps.
 - Reduces regressions when rule-template and import logic evolve.
 
+## Remote Runtime Gap Identified
+
+During remote acceptance against `http://142.171.239.56:8081`:
+
+- `groupSync.autoCreate=true` without timezone still returns `500` on `/api/attendance/import`.
+- The same payload passes when adding `groupSync.timezone = "Asia/Shanghai"`.
+
+This indicates deployed runtime has not fully aligned with the local fix:
+
+- expected: fallback to `DEFAULT_RULE.timezone`
+- observed: still requires explicit timezone to avoid insert failure
+
+## Verification Utility Improvement
+
+To support reproducible UI acceptance evidence, `scripts/verify-attendance-import-ui.mjs` now supports:
+
+- `UI_SCREENSHOT_PATH` (optional)
+
+When provided, the script saves a full-page screenshot after record verification, enabling script-level proof for release checks.
