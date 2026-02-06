@@ -35,6 +35,24 @@ Fixed to:
 
 This aligns behavior with table constraints and expected default semantics.
 
+### 3) Import template + UI hardening (ruleSetId placeholder)
+
+During UI acceptance, `POST /api/attendance/import/preview` could fail with a validation error when the template payload contained:
+
+- `ruleSetId: "<ruleSetId>"`
+
+Because the API validates `ruleSetId` as a UUID, the placeholder must never be sent as-is.
+
+Fixes:
+
+- Backend (`plugins/plugin-attendance/index.cjs`): template `payloadExample` is now valid out-of-the-box:
+  - `ruleSetId` removed (optional; set via UI when needed)
+  - `entries: []` and `userMap: {}` to avoid accidentally importing demo rows
+- Frontend (`apps/web/src/views/AttendanceView.vue`): `buildImportPayload()` now:
+  - always honors the rule-set selector (overrides any existing `payload.ruleSetId`)
+  - deletes invalid `payload.ruleSetId` strings when no rule set is selected
+- Integration (`packages/core-backend/tests/integration/attendance-plugin.test.ts`): asserts template payload does not ship invalid placeholder UUIDs.
+
 ## Why This Matters
 
 - Prevents hidden runtime 500s in common CSV import cases.

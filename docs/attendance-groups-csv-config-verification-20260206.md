@@ -31,6 +31,29 @@ pnpm --filter @metasheet/core-backend test:integration:attendance
 - Fix: fallback to `DEFAULT_RULE.timezone` when timezone not provided.
 - File: `plugins/plugin-attendance/index.cjs`
 
+## Local UI Acceptance (2026-02-06)
+
+Goal: validate the end-to-end admin UI flow for CSV import + preview + commit.
+
+Environment:
+
+- Web (Vite): `http://127.0.0.1:8901/p/plugin-attendance/attendance`
+- API (Docker backend): `http://127.0.0.1:8900/api`
+
+Flow (Playwright CLI):
+
+1. Load import template
+2. Select mapping profile: `dingtalk_csv_daily_summary`
+3. Upload CSV + user-map JSON
+4. Preview -> shows 2 rows (2025-12-01 / 2025-12-02, 480 min)
+5. Import -> creates a committed batch with 2 items
+6. View items -> confirms rows imported for `driver-user-001`
+
+Artifacts:
+
+- Playwright CLI workspace: `output/playwright/attendance-ui/.playwright-cli/`
+- Viewport screenshot: `output/playwright/attendance-ui/.playwright-cli/page-2026-02-06T12-34-15-995Z.png`
+
 ## Conclusion
 
 The agreed 1/2/3 capability chain is now covered by integration tests and the import-time group auto-create path is fixed for production-safe default behavior.
