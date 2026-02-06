@@ -1,0 +1,1951 @@
+{
+  "generatedAt": "2026-02-06T13:11:05.959Z",
+  "apiBase": "http://142.171.239.56:8081/api",
+  "checks": {
+    "auth_me": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "success": true,
+        "data": {
+          "user": {
+            "id": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+            "email": "admin@metasheet.app",
+            "name": "Administrator",
+            "role": "admin",
+            "permissions": [
+              "attendance:admin",
+              "attendance:approve",
+              "attendance:read",
+              "attendance:write",
+              "spreadsheet:read",
+              "spreadsheet:write",
+              "spreadsheets:read",
+              "spreadsheets:write"
+            ],
+            "created_at": "2026-01-21T15:01:52.301Z",
+            "updated_at": "2026-02-06T13:08:30.789Z"
+          }
+        }
+      },
+      "passed": true
+    },
+    "group_create": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "id": "3b9694b5-56eb-40ca-8b08-e0590d41eda5",
+          "orgId": "default",
+          "name": "Remote QA Group 20260206-131105",
+          "code": "",
+          "timezone": "UTC",
+          "ruleSetId": null,
+          "description": "remote-acceptance",
+          "createdAt": "2026-02-06T13:11:07.068Z",
+          "updatedAt": "2026-02-06T13:11:07.068Z"
+        }
+      },
+      "passed": true
+    },
+    "group_add_member": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "items": [
+            {
+              "id": "7f297251-ac41-42b6-b856-f1c113ea7602",
+              "orgId": "default",
+              "groupId": "3b9694b5-56eb-40ca-8b08-e0590d41eda5",
+              "userId": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+              "createdAt": "2026-02-06T13:11:07.239Z"
+            }
+          ]
+        }
+      },
+      "passed": true
+    },
+    "group_list_member": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "items": [
+            {
+              "id": "7f297251-ac41-42b6-b856-f1c113ea7602",
+              "orgId": "default",
+              "groupId": "3b9694b5-56eb-40ca-8b08-e0590d41eda5",
+              "userId": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+              "createdAt": "2026-02-06T13:11:07.239Z"
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "pageSize": 200
+        }
+      },
+      "passed": true
+    },
+    "csv_import_without_timezone": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "imported": 1,
+          "items": [
+            {
+              "id": "e5b0d0e6-ab2a-4748-aa24-770d66ae3bf4",
+              "userId": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+              "workDate": "2026-02-06",
+              "engine": null
+            }
+          ],
+          "skipped": [],
+          "csvWarnings": [],
+          "groupWarnings": [],
+          "meta": {
+            "groupCreated": 1,
+            "groupMembersAdded": 1,
+            "groupSync": {
+              "autoCreate": true,
+              "autoAssignMembers": true,
+              "ruleSetId": null,
+              "timezone": null
+            }
+          }
+        }
+      },
+      "passed": true
+    },
+    "csv_import_with_timezone": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "imported": 1,
+          "items": [
+            {
+              "id": "e5b0d0e6-ab2a-4748-aa24-770d66ae3bf4",
+              "userId": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+              "workDate": "2026-02-06",
+              "engine": null
+            }
+          ],
+          "skipped": [],
+          "csvWarnings": [],
+          "groupWarnings": [],
+          "meta": {
+            "groupCreated": 0,
+            "groupMembersAdded": 0,
+            "groupSync": {
+              "autoCreate": true,
+              "autoAssignMembers": true,
+              "ruleSetId": null,
+              "timezone": "Asia/Shanghai"
+            }
+          }
+        }
+      },
+      "passed": true
+    },
+    "groups_list": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "items": [
+            {
+              "id": "552c03af-a008-44ef-872c-9ae1f6a8cf82",
+              "orgId": "default",
+              "name": "Remote CSV Group 20260206-131105",
+              "code": "",
+              "timezone": "UTC",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T13:11:07.604Z",
+              "updatedAt": "2026-02-06T13:11:07.604Z"
+            },
+            {
+              "id": "3b9694b5-56eb-40ca-8b08-e0590d41eda5",
+              "orgId": "default",
+              "name": "Remote QA Group 20260206-131105",
+              "code": "",
+              "timezone": "UTC",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T13:11:07.068Z",
+              "updatedAt": "2026-02-06T13:11:07.068Z"
+            },
+            {
+              "id": "43944b7f-880d-4526-a1e8-37b2d190da54",
+              "orgId": "default",
+              "name": "Remote CSV Group 20260206-120217",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T12:02:19.334Z",
+              "updatedAt": "2026-02-06T12:02:19.334Z"
+            },
+            {
+              "id": "e949860e-5e7b-4b06-af7b-8b5db6e1cbbc",
+              "orgId": "default",
+              "name": "Remote QA Group 20260206-120217",
+              "code": "",
+              "timezone": "UTC",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T12:02:18.608Z",
+              "updatedAt": "2026-02-06T12:02:18.608Z"
+            },
+            {
+              "id": "fedadbcf-e511-4ebb-ae5a-0c4881d29e94",
+              "orgId": "default",
+              "name": "CSV Remote Group 1770379054",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T11:57:37.792Z",
+              "updatedAt": "2026-02-06T11:57:37.792Z"
+            },
+            {
+              "id": "b351c57e-ec68-4a54-82f5-bee3becbf108",
+              "orgId": "default",
+              "name": "QA Remote Group 1770379054",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T11:57:36.106Z",
+              "updatedAt": "2026-02-06T11:57:36.106Z"
+            },
+            {
+              "id": "8a9c065d-b432-405f-b82e-3a6de5943cd4",
+              "orgId": "default",
+              "name": "CSV Remote Group 1770379019",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T11:57:01.753Z",
+              "updatedAt": "2026-02-06T11:57:01.753Z"
+            },
+            {
+              "id": "ba613acb-3eb6-40dc-98cc-3fb8b2a5e0ba",
+              "orgId": "default",
+              "name": "QA Remote Group 1770379019",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T11:57:00.169Z",
+              "updatedAt": "2026-02-06T11:57:00.169Z"
+            },
+            {
+              "id": "1ff95a55-898a-4110-8dec-ea5e6718aee9",
+              "orgId": "default",
+              "name": "CSV Remote Group TZ 1770378976",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T11:56:17.459Z",
+              "updatedAt": "2026-02-06T11:56:17.459Z"
+            },
+            {
+              "id": "73e7be24-7a41-433a-b1af-bf694b167cb9",
+              "orgId": "default",
+              "name": "QA Remote Group 1770378948",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T11:55:49.278Z",
+              "updatedAt": "2026-02-06T11:55:49.278Z"
+            },
+            {
+              "id": "e71be1e9-26ca-4d22-bf0b-1858f5a9f3b0",
+              "orgId": "default",
+              "name": "QA Remote Group 1770378923",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": "remote-acceptance",
+              "createdAt": "2026-02-06T11:55:23.799Z",
+              "updatedAt": "2026-02-06T11:55:23.799Z"
+            },
+            {
+              "id": "1ec881b6-54b0-495e-bc05-fa8696bd2e3f",
+              "orgId": "default",
+              "name": "单双休",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T03:35:10.014Z",
+              "updatedAt": "2026-02-06T03:35:10.014Z"
+            },
+            {
+              "id": "524557ce-c231-4e84-8471-2574d1025d61",
+              "orgId": "default",
+              "name": "单休车间",
+              "code": "",
+              "timezone": "Asia/Shanghai",
+              "ruleSetId": null,
+              "description": null,
+              "createdAt": "2026-02-06T03:35:10.014Z",
+              "updatedAt": "2026-02-06T03:35:10.014Z"
+            }
+          ],
+          "total": 13,
+          "page": 1,
+          "pageSize": 200
+        }
+      },
+      "passed": true
+    },
+    "csv_group_members": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "items": [
+            {
+              "id": "fe4238ea-316d-4b43-ac9e-e1214545b350",
+              "orgId": "default",
+              "groupId": "552c03af-a008-44ef-872c-9ae1f6a8cf82",
+              "userId": "26979f88-e7cc-4b40-a975-a0353d19aec0",
+              "createdAt": "2026-02-06T13:11:07.604Z"
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "pageSize": 200
+        }
+      },
+      "passed": true
+    },
+    "template_get": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "system": [
+            {
+              "name": "单休车间规则",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "groupName",
+                  "label": "Attendance group",
+                  "type": "string",
+                  "default": "单休车间",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ]
+                },
+                {
+                  "key": "restTripOvertimeHours",
+                  "label": "Rest day trip overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "lateWarningAfter",
+                  "label": "Late checkout warning after",
+                  "type": "string",
+                  "default": "19:00",
+                  "paths": [
+                    "rules[1].when.clockOut2_after"
+                  ]
+                }
+              ],
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "rest_trip_default_overtime",
+                  "when": {
+                    "shift": "休息",
+                    "approval_contains": "出差"
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "单休车间休息日出差默认8小时"
+                  }
+                },
+                {
+                  "id": "after7_no_overtime_warning",
+                  "when": {
+                    "clockOut2_after": "19:00",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "下班晚但无加班单"
+                  }
+                },
+                {
+                  "id": "rest_punch_no_overtime_warning",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "休息日打卡但无加班单"
+                  }
+                },
+                {
+                  "id": "rest_punch_missing_checkout_warning",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "clockIn1_exists": true,
+                    "clockOut1_exists": false
+                  },
+                  "then": {
+                    "warning": "休息日打卡但缺少下班卡"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "通用提醒",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "tripMinHours",
+                  "label": "Trip minimum hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[2].when.actual_hours_lt"
+                  ]
+                },
+                {
+                  "key": "leaveMinHours",
+                  "label": "Leave minimum hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[3].when.actual_hours_lt"
+                  ]
+                },
+                {
+                  "key": "deptExemptions",
+                  "label": "Dept exemptions",
+                  "type": "stringArray",
+                  "default": [
+                    "国内销售",
+                    "服务测试部-调试"
+                  ],
+                  "paths": [
+                    "rules[2].when.department_not_contains",
+                    "rules[3].when.department_not_contains"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "overtime_approval_no_punch_warning",
+                  "when": {
+                    "approval_contains": "加班",
+                    "has_punch": false
+                  },
+                  "then": {
+                    "warning": "有加班单但未打卡"
+                  }
+                },
+                {
+                  "id": "trip_and_overtime_warning",
+                  "when": {
+                    "exceptionReason_contains": "出差",
+                    "overtime_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "出差同时存在加班工时，请核对"
+                  }
+                },
+                {
+                  "id": "trip_low_hours_warning",
+                  "when": {
+                    "exceptionReason_contains": "出差",
+                    "shift_not_contains": "休息",
+                    "actual_hours_lt": 8,
+                    "department_not_contains": [
+                      "国内销售",
+                      "服务测试部-调试"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差当天实际工时不足8小时，请核对"
+                  }
+                },
+                {
+                  "id": "leave_low_hours_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "事假",
+                      "病假",
+                      "工伤假"
+                    ],
+                    "shift_not_contains": "休息",
+                    "actual_hours_lt": 8,
+                    "department_not_contains": [
+                      "国内销售",
+                      "服务测试部-调试"
+                    ]
+                  },
+                  "then": {
+                    "warning": "请假当天实际工时不足8小时，请核对"
+                  }
+                },
+                {
+                  "id": "leave_makeup_missing_punch_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "缺卡",
+                      "补卡"
+                    ],
+                    "clockIn2_exists": false
+                  },
+                  "then": {
+                    "warning": "缺卡且补卡，但未找到上班2打卡，请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_leave_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "事假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+事假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_sick_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "病假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+病假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_injury_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "工伤假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+工伤假请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "标准上下班提醒",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "lateAfter",
+                  "label": "Late after (HH:MM)",
+                  "type": "string",
+                  "default": "09:10",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ]
+                },
+                {
+                  "key": "earlyBefore",
+                  "label": "Leave before (HH:MM)",
+                  "type": "string",
+                  "default": "17:50",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ]
+                },
+                {
+                  "key": "lateWarning",
+                  "label": "Late warning text",
+                  "type": "string",
+                  "default": "迟到，请核对",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                },
+                {
+                  "key": "earlyWarning",
+                  "label": "Early leave warning text",
+                  "type": "string",
+                  "default": "早退，请核对",
+                  "paths": [
+                    "rules[1].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "late_after_warning",
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  },
+                  "then": {
+                    "warning": "迟到，请核对"
+                  }
+                },
+                {
+                  "id": "early_leave_warning",
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  },
+                  "then": {
+                    "warning": "早退，请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "缺卡补卡核对",
+              "category": "system",
+              "editable": false,
+              "rules": [
+                {
+                  "id": "missing_checkout_warning",
+                  "when": {
+                    "clockIn1_exists": true,
+                    "clockOut1_exists": false
+                  },
+                  "then": {
+                    "warning": "缺少下班卡"
+                  }
+                },
+                {
+                  "id": "missing_checkin_warning",
+                  "when": {
+                    "clockIn1_exists": false,
+                    "clockOut1_exists": true
+                  },
+                  "then": {
+                    "warning": "缺少上班卡"
+                  }
+                },
+                {
+                  "id": "makeup_missing_second_in",
+                  "when": {
+                    "exceptionReason_contains_any": [
+                      "补卡",
+                      "缺卡"
+                    ],
+                    "clockIn2_exists": false
+                  },
+                  "then": {
+                    "warning": "缺卡/补卡但未找到上班2打卡"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "休息日加班",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "restOvertimeHours",
+                  "label": "Rest day overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "restReason",
+                  "label": "Reason text",
+                  "type": "string",
+                  "default": "休息日打卡算加班",
+                  "paths": [
+                    "rules[0].then.reason"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "rest_day_punch_overtime",
+                  "when": {
+                    "shift_contains": "休息",
+                    "has_punch": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "休息日打卡算加班"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "节假日首日基准工时",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "holidayFirstDayHours",
+                  "label": "Holiday first-day hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.actual_hours",
+                    "rules[0].then.required_hours"
+                  ]
+                },
+                {
+                  "key": "holidayFirstDayWarning",
+                  "label": "Warning text",
+                  "type": "string",
+                  "default": "节假日首日按8小时",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "holiday-default-8h",
+                  "when": {
+                    "is_holiday": true,
+                    "holiday_first_day": true,
+                    "holiday_policy_enabled": false
+                  },
+                  "then": {
+                    "actual_hours": 8,
+                    "required_hours": 8,
+                    "warning": "节假日首日按8小时"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "角色规则",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "securityBaseHours",
+                  "label": "Security base hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.required_hours"
+                  ]
+                },
+                {
+                  "key": "securityHolidayOvertime",
+                  "label": "Security holiday overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[1].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "driverRestOvertime",
+                  "label": "Driver rest overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[2].then.overtime_hours"
+                  ]
+                }
+              ],
+              "scope": {
+                "role_tags": [
+                  "security",
+                  "driver"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "security_base_hours",
+                  "when": {
+                    "role": "security"
+                  },
+                  "then": {
+                    "required_hours": 8
+                  }
+                },
+                {
+                  "id": "security_holiday_overtime",
+                  "when": {
+                    "role": "security",
+                    "is_holiday": true,
+                    "has_punch": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "保安节假日算加班"
+                  }
+                },
+                {
+                  "id": "driver_rest_punch_overtime",
+                  "when": {
+                    "role": "driver",
+                    "shift": "休息",
+                    "clockIn1_exists": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "司机休息日打卡算加班"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "部门提醒",
+              "category": "system",
+              "editable": false,
+              "scope": {
+                "department": [
+                  "国内销售",
+                  "服务测试部-调试"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "trip_and_leave_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "事假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+事假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_sick_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "病假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+病假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_injury_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "工伤假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+工伤假请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "加班单核对",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "lateCheckoutAfter",
+                  "label": "Late checkout after",
+                  "type": "string",
+                  "default": "19:00",
+                  "paths": [
+                    "rules[0].when.clockOut2_after"
+                  ]
+                },
+                {
+                  "key": "lateCheckoutWarning",
+                  "label": "Warning text",
+                  "type": "string",
+                  "default": "下班晚但无加班单",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                },
+                {
+                  "key": "restPunchWarning",
+                  "label": "Rest punch warning",
+                  "type": "string",
+                  "default": "休息日打卡但无加班单",
+                  "paths": [
+                    "rules[2].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "late_checkout_without_overtime",
+                  "when": {
+                    "clockOut2_after": "19:00",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "下班晚但无加班单"
+                  }
+                },
+                {
+                  "id": "overtime_without_punch",
+                  "when": {
+                    "overtime_hours_gt": 0,
+                    "has_punch": false
+                  },
+                  "then": {
+                    "warning": "有加班单但未打卡"
+                  }
+                },
+                {
+                  "id": "rest_punch_without_overtime",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "休息日打卡但无加班单"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "用户自定义",
+              "category": "custom",
+              "editable": true,
+              "description": "为考勤管理员预留的自定义规则模板",
+              "rules": []
+            }
+          ],
+          "library": [
+            {
+              "name": "考勤组自定义（示例）",
+              "rules": [
+                {
+                  "id": "group_late_warning",
+                  "then": {
+                    "warning": "迟到，请核对"
+                  },
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  }
+                },
+                {
+                  "id": "group_early_leave_warning",
+                  "then": {
+                    "warning": "早退，请核对"
+                  },
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  }
+                },
+                {
+                  "id": "leave_with_punch_warning",
+                  "then": {
+                    "warning": "请假但仍有正常打卡，请核对"
+                  },
+                  "when": {
+                    "has_punch": true,
+                    "leave_hours_gt": 0
+                  }
+                },
+                {
+                  "id": "leave_and_overtime_warning",
+                  "then": {
+                    "warning": "请假且存在加班工时，请核对"
+                  },
+                  "when": {
+                    "leave_hours_gt": 0,
+                    "overtime_hours_gt": 0
+                  }
+                }
+              ],
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "params": [
+                {
+                  "key": "groupName",
+                  "type": "string",
+                  "label": "Attendance group",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ],
+                  "default": "单休车间"
+                },
+                {
+                  "key": "lateAfter",
+                  "type": "string",
+                  "label": "Late after (HH:MM)",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ],
+                  "default": "09:10"
+                },
+                {
+                  "key": "earlyBefore",
+                  "type": "string",
+                  "label": "Leave before (HH:MM)",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ],
+                  "default": "17:50"
+                }
+              ],
+              "category": "custom",
+              "editable": true,
+              "description": "按考勤组配置的自定义规则示例，可按需调整"
+            }
+          ],
+          "versions": []
+        }
+      },
+      "passed": true
+    },
+    "template_save_A": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "templates": [
+            {
+              "name": "RemoteTemplate-20260206-131105-A",
+              "category": "custom",
+              "editable": true,
+              "description": "按考勤组配置的自定义规则示例，可按需调整",
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "params": [
+                {
+                  "key": "groupName",
+                  "label": "Attendance group",
+                  "type": "string",
+                  "default": "单休车间",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ]
+                },
+                {
+                  "key": "lateAfter",
+                  "label": "Late after (HH:MM)",
+                  "type": "string",
+                  "default": "09:10",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ]
+                },
+                {
+                  "key": "earlyBefore",
+                  "label": "Leave before (HH:MM)",
+                  "type": "string",
+                  "default": "17:50",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "group_late_warning",
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  },
+                  "then": {
+                    "warning": "迟到，请核对"
+                  }
+                },
+                {
+                  "id": "group_early_leave_warning",
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  },
+                  "then": {
+                    "warning": "早退，请核对"
+                  }
+                },
+                {
+                  "id": "leave_with_punch_warning",
+                  "when": {
+                    "has_punch": true,
+                    "leave_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假但仍有正常打卡，请核对"
+                  }
+                },
+                {
+                  "id": "leave_and_overtime_warning",
+                  "when": {
+                    "leave_hours_gt": 0,
+                    "overtime_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假且存在加班工时，请核对"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "passed": true
+    },
+    "template_after_A": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "system": [
+            {
+              "name": "单休车间规则",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "groupName",
+                  "label": "Attendance group",
+                  "type": "string",
+                  "default": "单休车间",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ]
+                },
+                {
+                  "key": "restTripOvertimeHours",
+                  "label": "Rest day trip overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "lateWarningAfter",
+                  "label": "Late checkout warning after",
+                  "type": "string",
+                  "default": "19:00",
+                  "paths": [
+                    "rules[1].when.clockOut2_after"
+                  ]
+                }
+              ],
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "rest_trip_default_overtime",
+                  "when": {
+                    "shift": "休息",
+                    "approval_contains": "出差"
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "单休车间休息日出差默认8小时"
+                  }
+                },
+                {
+                  "id": "after7_no_overtime_warning",
+                  "when": {
+                    "clockOut2_after": "19:00",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "下班晚但无加班单"
+                  }
+                },
+                {
+                  "id": "rest_punch_no_overtime_warning",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "休息日打卡但无加班单"
+                  }
+                },
+                {
+                  "id": "rest_punch_missing_checkout_warning",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "clockIn1_exists": true,
+                    "clockOut1_exists": false
+                  },
+                  "then": {
+                    "warning": "休息日打卡但缺少下班卡"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "通用提醒",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "tripMinHours",
+                  "label": "Trip minimum hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[2].when.actual_hours_lt"
+                  ]
+                },
+                {
+                  "key": "leaveMinHours",
+                  "label": "Leave minimum hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[3].when.actual_hours_lt"
+                  ]
+                },
+                {
+                  "key": "deptExemptions",
+                  "label": "Dept exemptions",
+                  "type": "stringArray",
+                  "default": [
+                    "国内销售",
+                    "服务测试部-调试"
+                  ],
+                  "paths": [
+                    "rules[2].when.department_not_contains",
+                    "rules[3].when.department_not_contains"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "overtime_approval_no_punch_warning",
+                  "when": {
+                    "approval_contains": "加班",
+                    "has_punch": false
+                  },
+                  "then": {
+                    "warning": "有加班单但未打卡"
+                  }
+                },
+                {
+                  "id": "trip_and_overtime_warning",
+                  "when": {
+                    "exceptionReason_contains": "出差",
+                    "overtime_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "出差同时存在加班工时，请核对"
+                  }
+                },
+                {
+                  "id": "trip_low_hours_warning",
+                  "when": {
+                    "exceptionReason_contains": "出差",
+                    "shift_not_contains": "休息",
+                    "actual_hours_lt": 8,
+                    "department_not_contains": [
+                      "国内销售",
+                      "服务测试部-调试"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差当天实际工时不足8小时，请核对"
+                  }
+                },
+                {
+                  "id": "leave_low_hours_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "事假",
+                      "病假",
+                      "工伤假"
+                    ],
+                    "shift_not_contains": "休息",
+                    "actual_hours_lt": 8,
+                    "department_not_contains": [
+                      "国内销售",
+                      "服务测试部-调试"
+                    ]
+                  },
+                  "then": {
+                    "warning": "请假当天实际工时不足8小时，请核对"
+                  }
+                },
+                {
+                  "id": "leave_makeup_missing_punch_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "缺卡",
+                      "补卡"
+                    ],
+                    "clockIn2_exists": false
+                  },
+                  "then": {
+                    "warning": "缺卡且补卡，但未找到上班2打卡，请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_leave_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "事假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+事假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_sick_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "病假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+病假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_injury_conflict_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "工伤假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+工伤假请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "标准上下班提醒",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "lateAfter",
+                  "label": "Late after (HH:MM)",
+                  "type": "string",
+                  "default": "09:10",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ]
+                },
+                {
+                  "key": "earlyBefore",
+                  "label": "Leave before (HH:MM)",
+                  "type": "string",
+                  "default": "17:50",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ]
+                },
+                {
+                  "key": "lateWarning",
+                  "label": "Late warning text",
+                  "type": "string",
+                  "default": "迟到，请核对",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                },
+                {
+                  "key": "earlyWarning",
+                  "label": "Early leave warning text",
+                  "type": "string",
+                  "default": "早退，请核对",
+                  "paths": [
+                    "rules[1].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "late_after_warning",
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  },
+                  "then": {
+                    "warning": "迟到，请核对"
+                  }
+                },
+                {
+                  "id": "early_leave_warning",
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  },
+                  "then": {
+                    "warning": "早退，请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "缺卡补卡核对",
+              "category": "system",
+              "editable": false,
+              "rules": [
+                {
+                  "id": "missing_checkout_warning",
+                  "when": {
+                    "clockIn1_exists": true,
+                    "clockOut1_exists": false
+                  },
+                  "then": {
+                    "warning": "缺少下班卡"
+                  }
+                },
+                {
+                  "id": "missing_checkin_warning",
+                  "when": {
+                    "clockIn1_exists": false,
+                    "clockOut1_exists": true
+                  },
+                  "then": {
+                    "warning": "缺少上班卡"
+                  }
+                },
+                {
+                  "id": "makeup_missing_second_in",
+                  "when": {
+                    "exceptionReason_contains_any": [
+                      "补卡",
+                      "缺卡"
+                    ],
+                    "clockIn2_exists": false
+                  },
+                  "then": {
+                    "warning": "缺卡/补卡但未找到上班2打卡"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "休息日加班",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "restOvertimeHours",
+                  "label": "Rest day overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "restReason",
+                  "label": "Reason text",
+                  "type": "string",
+                  "default": "休息日打卡算加班",
+                  "paths": [
+                    "rules[0].then.reason"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "rest_day_punch_overtime",
+                  "when": {
+                    "shift_contains": "休息",
+                    "has_punch": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "休息日打卡算加班"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "节假日首日基准工时",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "holidayFirstDayHours",
+                  "label": "Holiday first-day hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.actual_hours",
+                    "rules[0].then.required_hours"
+                  ]
+                },
+                {
+                  "key": "holidayFirstDayWarning",
+                  "label": "Warning text",
+                  "type": "string",
+                  "default": "节假日首日按8小时",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "holiday-default-8h",
+                  "when": {
+                    "is_holiday": true,
+                    "holiday_first_day": true,
+                    "holiday_policy_enabled": false
+                  },
+                  "then": {
+                    "actual_hours": 8,
+                    "required_hours": 8,
+                    "warning": "节假日首日按8小时"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "角色规则",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "securityBaseHours",
+                  "label": "Security base hours",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[0].then.required_hours"
+                  ]
+                },
+                {
+                  "key": "securityHolidayOvertime",
+                  "label": "Security holiday overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[1].then.overtime_hours"
+                  ]
+                },
+                {
+                  "key": "driverRestOvertime",
+                  "label": "Driver rest overtime (hours)",
+                  "type": "number",
+                  "default": 8,
+                  "paths": [
+                    "rules[2].then.overtime_hours"
+                  ]
+                }
+              ],
+              "scope": {
+                "role_tags": [
+                  "security",
+                  "driver"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "security_base_hours",
+                  "when": {
+                    "role": "security"
+                  },
+                  "then": {
+                    "required_hours": 8
+                  }
+                },
+                {
+                  "id": "security_holiday_overtime",
+                  "when": {
+                    "role": "security",
+                    "is_holiday": true,
+                    "has_punch": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "保安节假日算加班"
+                  }
+                },
+                {
+                  "id": "driver_rest_punch_overtime",
+                  "when": {
+                    "role": "driver",
+                    "shift": "休息",
+                    "clockIn1_exists": true
+                  },
+                  "then": {
+                    "overtime_hours": 8,
+                    "reason": "司机休息日打卡算加班"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "部门提醒",
+              "category": "system",
+              "editable": false,
+              "scope": {
+                "department": [
+                  "国内销售",
+                  "服务测试部-调试"
+                ]
+              },
+              "rules": [
+                {
+                  "id": "trip_and_leave_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "事假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+事假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_sick_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "病假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+病假请核对"
+                  }
+                },
+                {
+                  "id": "trip_and_injury_warning",
+                  "when": {
+                    "exceptionReason_contains": [
+                      "出差",
+                      "工伤假"
+                    ]
+                  },
+                  "then": {
+                    "warning": "出差+工伤假请核对"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "加班单核对",
+              "category": "system",
+              "editable": false,
+              "params": [
+                {
+                  "key": "lateCheckoutAfter",
+                  "label": "Late checkout after",
+                  "type": "string",
+                  "default": "19:00",
+                  "paths": [
+                    "rules[0].when.clockOut2_after"
+                  ]
+                },
+                {
+                  "key": "lateCheckoutWarning",
+                  "label": "Warning text",
+                  "type": "string",
+                  "default": "下班晚但无加班单",
+                  "paths": [
+                    "rules[0].then.warning"
+                  ]
+                },
+                {
+                  "key": "restPunchWarning",
+                  "label": "Rest punch warning",
+                  "type": "string",
+                  "default": "休息日打卡但无加班单",
+                  "paths": [
+                    "rules[2].then.warning"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "late_checkout_without_overtime",
+                  "when": {
+                    "clockOut2_after": "19:00",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "下班晚但无加班单"
+                  }
+                },
+                {
+                  "id": "overtime_without_punch",
+                  "when": {
+                    "overtime_hours_gt": 0,
+                    "has_punch": false
+                  },
+                  "then": {
+                    "warning": "有加班单但未打卡"
+                  }
+                },
+                {
+                  "id": "rest_punch_without_overtime",
+                  "when": {
+                    "exceptionReason_contains": "休息并打卡",
+                    "overtime_hours_eq": 0
+                  },
+                  "then": {
+                    "warning": "休息日打卡但无加班单"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "用户自定义",
+              "category": "custom",
+              "editable": true,
+              "description": "为考勤管理员预留的自定义规则模板",
+              "rules": []
+            }
+          ],
+          "library": [
+            {
+              "name": "RemoteTemplate-20260206-131105-A",
+              "category": "custom",
+              "editable": true,
+              "description": "按考勤组配置的自定义规则示例，可按需调整",
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "params": [
+                {
+                  "key": "groupName",
+                  "label": "Attendance group",
+                  "type": "string",
+                  "default": "单休车间",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ]
+                },
+                {
+                  "key": "lateAfter",
+                  "label": "Late after (HH:MM)",
+                  "type": "string",
+                  "default": "09:10",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ]
+                },
+                {
+                  "key": "earlyBefore",
+                  "label": "Leave before (HH:MM)",
+                  "type": "string",
+                  "default": "17:50",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "group_late_warning",
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  },
+                  "then": {
+                    "warning": "迟到，请核对"
+                  }
+                },
+                {
+                  "id": "group_early_leave_warning",
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  },
+                  "then": {
+                    "warning": "早退，请核对"
+                  }
+                },
+                {
+                  "id": "leave_with_punch_warning",
+                  "when": {
+                    "has_punch": true,
+                    "leave_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假但仍有正常打卡，请核对"
+                  }
+                },
+                {
+                  "id": "leave_and_overtime_warning",
+                  "when": {
+                    "leave_hours_gt": 0,
+                    "overtime_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假且存在加班工时，请核对"
+                  }
+                }
+              ]
+            }
+          ],
+          "versions": []
+        }
+      },
+      "passed": true
+    },
+    "template_save_B": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "ok": true,
+        "data": {
+          "templates": [
+            {
+              "name": "RemoteTemplate-20260206-131105-B",
+              "category": "custom",
+              "editable": true,
+              "description": "按考勤组配置的自定义规则示例，可按需调整",
+              "scope": {
+                "attendance_group": [
+                  "单休车间"
+                ]
+              },
+              "params": [
+                {
+                  "key": "groupName",
+                  "label": "Attendance group",
+                  "type": "string",
+                  "default": "单休车间",
+                  "paths": [
+                    "scope.attendance_group[0]"
+                  ]
+                },
+                {
+                  "key": "lateAfter",
+                  "label": "Late after (HH:MM)",
+                  "type": "string",
+                  "default": "09:10",
+                  "paths": [
+                    "rules[0].when.clockIn1_after"
+                  ]
+                },
+                {
+                  "key": "earlyBefore",
+                  "label": "Leave before (HH:MM)",
+                  "type": "string",
+                  "default": "17:50",
+                  "paths": [
+                    "rules[1].when.clockOut1_before"
+                  ]
+                }
+              ],
+              "rules": [
+                {
+                  "id": "group_late_warning",
+                  "when": {
+                    "clockIn1_after": "09:10"
+                  },
+                  "then": {
+                    "warning": "迟到，请核对"
+                  }
+                },
+                {
+                  "id": "group_early_leave_warning",
+                  "when": {
+                    "clockOut1_before": "17:50"
+                  },
+                  "then": {
+                    "warning": "早退，请核对"
+                  }
+                },
+                {
+                  "id": "leave_with_punch_warning",
+                  "when": {
+                    "has_punch": true,
+                    "leave_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假但仍有正常打卡，请核对"
+                  }
+                },
+                {
+                  "id": "leave_and_overtime_warning",
+                  "when": {
+                    "leave_hours_gt": 0,
+                    "overtime_hours_gt": 0
+                  },
+                  "then": {
+                    "warning": "请假且存在加班工时，请核对"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "passed": true
+    },
+    "plugins_attendance_active": {
+      "status": 200,
+      "ok": true,
+      "body": {
+        "attendancePlugin": {
+          "name": "plugin-attendance",
+          "version": "0.1.0",
+          "displayName": "Attendance",
+          "status": "active",
+          "lastAttempt": "2026-02-06T13:09:07.691Z",
+          "contributes": {
+            "views": [
+              {
+                "id": "attendance",
+                "name": "Attendance",
+                "component": "AttendanceView",
+                "location": "main-nav",
+                "order": 50
+              }
+            ]
+          }
+        }
+      },
+      "passed": true
+    }
+  },
+  "summary": {
+    "pass": 13,
+    "fail": 0
+  }
+}
