@@ -8257,6 +8257,25 @@ module.exports = {
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
           const groupRuleSetMap = parsed.data.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
+          const groupSync = normalizeGroupSyncOptions(
+            parsed.data.groupSync,
+            parsed.data.ruleSetId,
+            parsed.data.timezone
+          )
+          const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
+          const groupWarnings = []
+          if (groupNames.size && !groupSync?.autoCreate) {
+            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+            for (const [key, name] of groupNames.entries()) {
+              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+            }
+          }
+          if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
+            for (const key of groupNames.keys()) {
+              if (!groupRuleSetMap.has(key)) groupRuleSetMap.set(key, groupSync.ruleSetId)
+            }
+          }
+
           const ruleSetConfigCache = new Map()
           if (parsed.data.ruleSetId && ruleSetConfig) {
             ruleSetConfigCache.set(parsed.data.ruleSetId, ruleSetConfig)
