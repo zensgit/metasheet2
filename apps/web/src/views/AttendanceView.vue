@@ -910,6 +910,45 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Rule Template Library</h4>
+                <button class="attendance__btn" :disabled="ruleTemplateLoading" @click="loadRuleTemplates">
+                  {{ ruleTemplateLoading ? 'Loading...' : 'Reload templates' }}
+                </button>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-rule-template-system">
+                  <span>System templates (read-only)</span>
+                  <textarea
+                    id="attendance-rule-template-system"
+                    name="ruleTemplateSystem"
+                    v-model="ruleTemplateSystemText"
+                    rows="6"
+                    readonly
+                  />
+                </label>
+                <label class="attendance__field attendance__field--full" for="attendance-rule-template-library">
+                  <span>Library templates (JSON)</span>
+                  <textarea
+                    id="attendance-rule-template-library"
+                    name="ruleTemplateLibrary"
+                    v-model="ruleTemplateLibraryText"
+                    rows="8"
+                    placeholder="[]"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="ruleTemplateSaving" @click="copySystemTemplates">
+                  Copy system to library
+                </button>
+                <button class="attendance__btn attendance__btn--primary" :disabled="ruleTemplateSaving" @click="saveRuleTemplates">
+                  {{ ruleTemplateSaving ? 'Saving...' : 'Save library' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Attendance groups</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
                   {{ attendanceGroupLoading ? 'Loading...' : 'Reload groups' }}
@@ -2926,6 +2965,8 @@ const rotationAssignmentLoading = ref(false)
 const rotationAssignmentSaving = ref(false)
 const ruleSetLoading = ref(false)
 const ruleSetSaving = ref(false)
+const ruleTemplateLoading = ref(false)
+const ruleTemplateSaving = ref(false)
 const attendanceGroupLoading = ref(false)
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
@@ -2948,6 +2989,8 @@ const approvalFlows = ref<AttendanceApprovalFlow[]>([])
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
+const ruleTemplateSystemText = ref('[]')
+const ruleTemplateLibraryText = ref('[]')
 const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
@@ -3389,6 +3432,22 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   try {
     const parsed = JSON.parse(trimmed)
     if (parsed && typeof parsed === 'object') return parsed as Record<string, any>
+    return null
+  } catch {
+    return null
+  }
+}
+
+function parseTemplateLibrary(value: string): any[] | null {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) return parsed
+    if (parsed && typeof parsed === 'object') {
+      const templates = (parsed as any).templates ?? (parsed as any).library
+      if (Array.isArray(templates)) return templates
+    }
     return null
   } catch {
     return null
@@ -5665,6 +5724,65 @@ async function loadRuleSetTemplate() {
   }
 }
 
+async function loadRuleTemplates() {
+  ruleTemplateLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance/rule-templates')
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load rule templates')
+    }
+    adminForbidden.value = false
+    const systemTemplates = data.data?.system ?? []
+    const libraryTemplates = data.data?.library ?? []
+    ruleTemplateSystemText.value = JSON.stringify(systemTemplates, null, 2)
+    ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
+    setStatus('Rule templates loaded.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to load rule templates', 'error')
+  } finally {
+    ruleTemplateLoading.value = false
+  }
+}
+
+async function saveRuleTemplates() {
+  ruleTemplateSaving.value = true
+  try {
+    const templates = parseTemplateLibrary(ruleTemplateLibraryText.value)
+    if (!templates) {
+      throw new Error('Template library must be valid JSON array')
+    }
+    const response = await apiFetch('/api/attendance/rule-templates', {
+      method: 'PUT',
+      body: JSON.stringify({ templates }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to save rule templates')
+    }
+    adminForbidden.value = false
+    ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? templates, null, 2)
+    setStatus('Rule templates saved.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to save rule templates', 'error')
+  } finally {
+    ruleTemplateSaving.value = false
+  }
+}
+
+function copySystemTemplates() {
+  ruleTemplateLibraryText.value = ruleTemplateSystemText.value
+  setStatus('System templates copied to library.')
+}
+
 function resetPayrollTemplateForm() {
   payrollTemplateEditingId.value = null
   payrollTemplateForm.name = ''
@@ -5942,6 +6060,7 @@ async function loadAdminData() {
     loadSettings(),
     loadRule(),
     loadRuleSets(),
+    loadRuleTemplates(),
     loadAttendanceGroups(),
     loadImportBatches(),
     loadPayrollTemplates(),
