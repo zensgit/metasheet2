@@ -78,3 +78,18 @@ To support reproducible UI acceptance evidence, `scripts/verify-attendance-impor
 - `UI_SCREENSHOT_PATH` (optional)
 
 When provided, the script saves a full-page screenshot after record verification, enabling script-level proof for release checks.
+
+## Delivery Progress Against Plan
+
+Completed:
+
+1. Safe merge of `PR #105` to `main` (without mixing parallel changes).
+2. Split and isolated `7371685c` into a dedicated branch/PR (`#106`), then merged to `main`.
+3. Re-ran remote API/UI acceptance after merge; blocker issue is cleared.
+
+Current status:
+
+- `main` now contains both stabilized tracks:
+  - group sync hardening + expanded integration coverage
+  - import template payload safety in backend template + frontend payload build path
+- Attendance import default-template flow is now compatible with API validation without requiring manual payload cleanup.

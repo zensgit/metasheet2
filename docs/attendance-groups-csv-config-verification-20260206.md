@@ -123,3 +123,50 @@ Result:
 - Code/CI: pass (PR checks green)
 - Local integration: pass
 - Remote acceptance: partial pass (blocked by timezone fallback behavior in deployed runtime)
+
+## Post-Merge Re-Validation (Main includes PR #106)
+
+Merge baseline:
+
+- PR #105 merged to `main`: commit `0195d136`
+- PR #106 merged to `main`: commit `635a9da7`
+
+Artifacts:
+
+- API acceptance (post-106): `output/playwright/attendance-remote-api-acceptance-20260206-main-after-106.json`
+- UI screenshots:
+  - `output/playwright/attendance-ui/attendance-import-ui-20260206-run1.png`
+  - `output/playwright/attendance-ui/attendance-import-ui-20260206-run2.png`
+
+### API Result (post-106)
+
+- Summary: pass `13`, fail `0`
+- Key checkpoint:
+  - `csv_import_without_timezone`: pass
+  - `csv_import_with_timezone`: pass
+
+Conclusion:
+
+- The previously observed remote blocker (`groupSync.autoCreate` without timezone causing 500) is no longer reproducible in current main runtime.
+- Day-4 gate is now satisfied.
+
+### UI Result (post-106)
+
+Executed `scripts/verify-attendance-import-ui.mjs` twice with identical parameters and `UI_SCREENSHOT_PATH`.
+
+- Run1: pass
+- Run2: pass
+- Both runs verified records loading under date range + user filters and produced screenshots.
+
+Conclusion:
+
+- Day-5 gate is satisfied (script passes repeatedly, evidence reproducible).
+
+### Pre-Release Decision
+
+- CI: pass
+- API acceptance: pass
+- UI acceptance: pass
+- Blocker-level runtime mismatch: none detected
+
+Decision: **Go** for test/pre-release usage.
