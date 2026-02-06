@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { MetaSheetServer } from '../../src/index'
+import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
 import { Pool } from 'pg'
@@ -89,6 +89,9 @@ describe('Attendance Plugin Integration', () => {
     }
 
     const repoRoot = path.join(__dirname, '../../../../')
+    // Important: load MetaSheetServer only after DATABASE_URL is set,
+    // since the DB pool is initialized during module import.
+    const { MetaSheetServer } = await import('../../src/index')
     server = new MetaSheetServer({
       port: 0,
       host: '127.0.0.1',

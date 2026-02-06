@@ -5318,6 +5318,9 @@ module.exports = {
           return
         }
         if (isDatabaseSchemaError(error)) {
+          // Surface the underlying missing table/column during integration testing and misconfigured deploys.
+          // The response stays generic to avoid leaking schema details to clients.
+          logger.error('Attendance resolveRequest failed due to missing tables/columns', error)
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
           return
         }
