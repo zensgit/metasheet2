@@ -82,6 +82,14 @@ describe('Attendance Plugin Integration', () => {
       if (!rotationRuleCheck.rows[0]?.name) return
       const rotationAssignmentCheck = await pool.query(`SELECT to_regclass('public.attendance_rotation_assignments') AS name`)
       if (!rotationAssignmentCheck.rows[0]?.name) return
+      const groupCheck = await pool.query(`SELECT to_regclass('public.attendance_groups') AS name`)
+      if (!groupCheck.rows[0]?.name) return
+      const groupMemberCheck = await pool.query(`SELECT to_regclass('public.attendance_group_members') AS name`)
+      if (!groupMemberCheck.rows[0]?.name) return
+      const templateLibraryCheck = await pool.query(`SELECT to_regclass('public.attendance_rule_template_library') AS name`)
+      if (!templateLibraryCheck.rows[0]?.name) return
+      const templateVersionCheck = await pool.query(`SELECT to_regclass('public.attendance_rule_template_versions') AS name`)
+      if (!templateVersionCheck.rows[0]?.name) return
     } catch {
       return
     } finally {
@@ -111,6 +119,7 @@ describe('Attendance Plugin Integration', () => {
 
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
+    const runSuffix = Date.now().toString(36)
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
@@ -467,6 +476,173 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(importPayload),
     })
     expect(importRes.status).toBe(200)
+
+    const groupName = `QA Group ${runSuffix}`
+    const createGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: groupName,
+        timezone: 'UTC',
+        description: 'integration-test',
+      }),
+    })
+    expect(createGroupRes.status).toBe(200)
+    const groupId = (createGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(groupId).toBeTruthy()
+
+    if (groupId) {
+      const addGroupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userIds: ['attendance-test'],
+        }),
+      })
+      expect(addGroupMemberRes.status).toBe(200)
+
+      const listGroupMembersRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(listGroupMembersRes.status).toBe(200)
+      const groupMemberItems = (listGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
+      expect(groupMemberItems.some(item => item.userId === 'attendance-test')).toBe(true)
+    }
+
+    const csvGroupName = `CSV Group ${runSuffix}`
+    const csvImportPayload = {
+      userId: 'attendance-test',
+      csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,${csvGroupName},09:00,18:00,正常`,
+      mapping: {
+        columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ],
+      },
+      userMap: {
+        A001: 'attendance-test',
+      },
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: true,
+      },
+      mode: 'override',
+    }
+
+    const csvImportRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(csvImportPayload),
+    })
+    expect(csvImportRes.status).toBe(200)
+
+    const listGroupsRes = await requestJson(`${baseUrl}/api/attendance/groups?pageSize=200`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listGroupsRes.status).toBe(200)
+    const groups = (listGroupsRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+    const csvGroup = groups.find(item => item.name === csvGroupName)
+    expect(csvGroup?.id).toBeTruthy()
+
+    if (csvGroup?.id) {
+      const csvGroupMembersRes = await requestJson(`${baseUrl}/api/attendance/groups/${csvGroup.id}/members?pageSize=200`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(csvGroupMembersRes.status).toBe(200)
+      const csvGroupMembers = (csvGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
+      expect(csvGroupMembers.some(item => item.userId === 'attendance-test')).toBe(true)
+    }
+
+    const templateGetRes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(templateGetRes.status).toBe(200)
+    const templateData = (templateGetRes.body as {
+      data?: {
+        system?: Record<string, unknown>[]
+        library?: Record<string, unknown>[]
+      }
+    } | undefined)?.data
+    const templateBase = (templateData?.library?.[0] ?? templateData?.system?.[0]) ?? null
+
+    if (templateBase) {
+      const templateAName = `Template-${runSuffix}-A`
+      const templateBName = `Template-${runSuffix}-B`
+      const templateA = { ...templateBase, name: templateAName, category: 'custom', editable: true }
+      const templateB = { ...templateBase, name: templateBName, category: 'custom', editable: true }
+
+      const saveTemplateARes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ templates: [templateA] }),
+      })
+      expect(saveTemplateARes.status).toBe(200)
+
+      const afterTemplateARes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(afterTemplateARes.status).toBe(200)
+      const versionAId = (afterTemplateARes.body as { data?: { versions?: { id?: string }[] } } | undefined)?.data?.versions?.[0]?.id
+      expect(versionAId).toBeTruthy()
+
+      const saveTemplateBRes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ templates: [templateB] }),
+      })
+      expect(saveTemplateBRes.status).toBe(200)
+
+      if (versionAId) {
+        const restoreTemplateRes = await requestJson(`${baseUrl}/api/attendance/rule-templates/restore`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ versionId: versionAId }),
+        })
+        expect(restoreTemplateRes.status).toBe(200)
+
+        const afterRestoreRes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+        expect(afterRestoreRes.status).toBe(200)
+        const libraryNames = ((afterRestoreRes.body as { data?: { library?: { name?: string }[] } } | undefined)?.data?.library ?? [])
+          .map(item => item.name)
+        expect(libraryNames.includes(templateAName)).toBe(true)
+      }
+    }
 
     const reportRes = await requestJson(`${baseUrl}/api/attendance/reports/requests?from=${workDate}&to=${workDate}`, {
       headers: {
