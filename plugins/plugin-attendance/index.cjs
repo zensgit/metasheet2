@@ -83,6 +83,7 @@ let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
+const templateLibraryVersionCache = new Map()
 
 const SYSTEM_TEMPLATE_NAMES = new Set(DEFAULT_TEMPLATES.map((tpl) => tpl.name))
 
@@ -3045,6 +3046,21 @@ function mapTemplateLibraryRow(row) {
   }
 }
 
+function mapTemplateLibraryVersionRow(row) {
+  if (!row) return null
+  const version = Number(row.version ?? 0)
+  if (!Number.isFinite(version) || version <= 0) return null
+  const itemCount = Number(row.item_count ?? row.itemCount ?? 0)
+  return {
+    id: row.id,
+    version,
+    createdAt: row.created_at ?? row.createdAt ?? null,
+    createdBy: row.created_by ?? row.createdBy ?? null,
+    sourceVersionId: row.source_version_id ?? row.sourceVersionId ?? null,
+    itemCount: Number.isFinite(itemCount) ? itemCount : 0,
+  }
+}
+
 async function loadLegacyTemplateLibrary(db) {
   try {
     const rows = await db.query('SELECT value FROM system_configs WHERE key = $1', [TEMPLATE_LIBRARY_KEY])
@@ -3095,6 +3111,13 @@ function getTemplateLibraryCache(orgId) {
   return entry.value
 }
 
+function getTemplateLibraryVersionCache(orgId) {
+  const entry = templateLibraryVersionCache.get(orgId)
+  if (!entry) return null
+  if (Date.now() - entry.loadedAt >= TEMPLATE_LIBRARY_CACHE_TTL_MS) return null
+  return entry.value
+}
+
 async function getTemplateLibrary(db, orgId) {
   const cached = getTemplateLibraryCache(orgId)
   if (cached) return cached
@@ -3103,7 +3126,61 @@ async function getTemplateLibrary(db, orgId) {
   return next
 }
 
-async function saveTemplateLibrary(db, orgId, templates) {
+async function loadTemplateLibraryVersions(db, orgId) {
+  try {
+    const rows = await db.query(
+      `SELECT id, org_id, version, created_at, created_by, source_version_id,
+              jsonb_array_length(templates) AS item_count
+       FROM attendance_rule_template_versions
+       WHERE org_id = $1
+       ORDER BY version DESC`,
+      [orgId]
+    )
+    return rows.map(mapTemplateLibraryVersionRow).filter(Boolean)
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    return []
+  }
+}
+
+async function getTemplateLibraryVersions(db, orgId) {
+  const cached = getTemplateLibraryVersionCache(orgId)
+  if (cached) return cached
+  const next = await loadTemplateLibraryVersions(db, orgId)
+  templateLibraryVersionCache.set(orgId, { value: next, loadedAt: Date.now() })
+  return next
+}
+
+async function getTemplateLibraryVersionPayload(db, orgId, versionId, versionNumber) {
+  try {
+    let rows = []
+    if (versionId) {
+      rows = await db.query(
+        `SELECT * FROM attendance_rule_template_versions
+         WHERE org_id = $1 AND id = $2
+         LIMIT 1`,
+        [orgId, versionId]
+      )
+    }
+    if (!rows.length && Number.isFinite(versionNumber)) {
+      rows = await db.query(
+        `SELECT * FROM attendance_rule_template_versions
+         WHERE org_id = $1 AND version = $2
+         LIMIT 1`,
+        [orgId, versionNumber]
+      )
+    }
+    if (!rows.length) return null
+    const row = rows[0]
+    const templates = normalizeTemplateLibrary(row.templates ?? [])
+    return { id: row.id, version: Number(row.version ?? 0), templates }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+async function saveTemplateLibrary(db, orgId, templates, userId = null, sourceVersionId = null) {
   const normalized = normalizeTemplateLibrary(templates)
   const validated = validateEngineConfig({ templates: normalized })
   const stored = Array.isArray(validated?.templates) ? validated.templates : []
@@ -3126,8 +3203,33 @@ async function saveTemplateLibrary(db, orgId, templates) {
         ]
       )
     }
+    try {
+      const versionRows = await trx.query(
+        `SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+         FROM attendance_rule_template_versions
+         WHERE org_id = $1`,
+        [orgId]
+      )
+      const nextVersion = Number(versionRows[0]?.next_version ?? 1)
+      await trx.query(
+        `INSERT INTO attendance_rule_template_versions
+         (id, org_id, version, templates, created_at, created_by, source_version_id)
+         VALUES ($1, $2, $3, $4::jsonb, now(), $5, $6)`,
+        [
+          randomUUID(),
+          orgId,
+          nextVersion,
+          JSON.stringify(stored),
+          userId,
+          sourceVersionId,
+        ]
+      )
+    } catch (error) {
+      if (!isDatabaseSchemaError(error)) throw error
+    }
   })
   templateLibraryCache.set(orgId, { value: stored, loadedAt: Date.now() })
+  templateLibraryVersionCache.delete(orgId)
   return stored
 }
 
@@ -4205,6 +4307,13 @@ module.exports = {
       .object({
         templates: z.array(z.record(z.unknown())).optional(),
         library: z.array(z.record(z.unknown())).optional(),
+      })
+      .catchall(z.unknown())
+
+    const templateLibraryRestoreSchema = z
+      .object({
+        versionId: z.string().optional(),
+        version: z.coerce.number().optional(),
       })
       .catchall(z.unknown())
 
@@ -6613,11 +6722,13 @@ module.exports = {
       withPermission('attendance:admin', async (_req, res) => {
         const orgId = getOrgId(_req)
         const library = await getTemplateLibrary(db, orgId)
+        const versions = await getTemplateLibraryVersions(db, orgId)
         res.json({
           ok: true,
           data: {
             system: DEFAULT_TEMPLATES,
             library,
+            versions,
           },
         })
       })
@@ -6642,8 +6753,38 @@ module.exports = {
 
         const orgId = getOrgId(req)
         try {
-          const saved = await saveTemplateLibrary(db, orgId, templates)
+          const saved = await saveTemplateLibrary(db, orgId, templates, getUserId(req))
           res.json({ ok: true, data: { templates: saved } })
+        } catch (error) {
+          const { message, details } = formatEngineConfigError(error)
+          res.status(400).json({ ok: false, error: { code: 'INVALID_TEMPLATE_LIBRARY', message, details } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/rule-templates/restore',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = templateLibraryRestoreSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
+          return
+        }
+        const { versionId, version } = parsed.data
+        if (!versionId && !Number.isFinite(version)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'versionId or version is required' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const target = await getTemplateLibraryVersionPayload(db, orgId, versionId ?? null, version)
+        if (!target) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
+          return
+        }
+        try {
+          const saved = await saveTemplateLibrary(db, orgId, target.templates, getUserId(req), target.id)
+          res.json({ ok: true, data: { templates: saved, restoredFrom: target.id, version: target.version } })
         } catch (error) {
           const { message, details } = formatEngineConfigError(error)
           res.status(400).json({ ok: false, error: { code: 'INVALID_TEMPLATE_LIBRARY', message, details } })

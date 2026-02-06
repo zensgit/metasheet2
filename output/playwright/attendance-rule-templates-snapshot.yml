@@ -1,0 +1,1938 @@
+- generic [ref=e3]:
+  - navigation [ref=e4]:
+    - generic [ref=e6]: MetaSheet
+    - generic [ref=e7]:
+      - link "Grid" [ref=e8] [cursor=pointer]:
+        - /url: /grid
+      - link "Spreadsheets" [ref=e9] [cursor=pointer]:
+        - /url: /spreadsheets
+      - link "Kanban" [ref=e10] [cursor=pointer]:
+        - /url: /kanban
+      - link "Calendar" [ref=e11] [cursor=pointer]:
+        - /url: /calendar
+      - link "Gallery" [ref=e12] [cursor=pointer]:
+        - /url: /gallery
+      - link "Form" [ref=e13] [cursor=pointer]:
+        - /url: /form
+      - link "Attendance" [ref=e19] [cursor=pointer]:
+        - /url: /p/plugin-attendance/attendance
+      - link "Plugins" [ref=e14] [cursor=pointer]:
+        - /url: /admin/plugins
+      - link "PLM" [ref=e15] [cursor=pointer]:
+        - /url: /plm
+  - main [ref=e16]:
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - generic [ref=e22]:
+          - heading "Attendance" [level=2] [ref=e23]
+          - paragraph [ref=e24]: Track punches, summaries, and adjustments.
+        - generic [ref=e25]:
+          - button "Check In" [ref=e26] [cursor=pointer]
+          - button "Check Out" [ref=e27] [cursor=pointer]
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e30]: From
+          - textbox "From" [ref=e31]: 2026-01-07
+        - generic [ref=e32]:
+          - generic [ref=e33]: To
+          - textbox "To" [ref=e34]: 2026-02-06
+        - generic [ref=e35]:
+          - generic [ref=e36]: Org ID
+          - textbox "Org ID" [ref=e37]:
+            - /placeholder: default
+        - generic [ref=e38]:
+          - generic [ref=e39]: User ID (optional)
+          - textbox "User ID (optional)" [ref=e40]:
+            - /placeholder: Current user
+        - button "Refresh" [ref=e41] [cursor=pointer]
+      - generic [ref=e42]:
+        - generic [ref=e43]:
+          - heading "Summary" [level=3] [ref=e44]
+          - generic [ref=e45]:
+            - generic [ref=e46]:
+              - generic [ref=e47]: Total days
+              - strong [ref=e48]: "1"
+            - generic [ref=e49]:
+              - generic [ref=e50]: Total minutes
+              - strong [ref=e51]: "550"
+            - generic [ref=e52]:
+              - generic [ref=e53]: Late minutes
+              - strong [ref=e54]: "0"
+            - generic [ref=e55]:
+              - generic [ref=e56]: Early leave minutes
+              - strong [ref=e57]: "45"
+            - generic [ref=e58]:
+              - generic [ref=e59]: Leave minutes
+              - strong [ref=e60]: "0"
+            - generic [ref=e61]:
+              - generic [ref=e62]: Overtime minutes
+              - strong [ref=e63]: "0"
+            - generic [ref=e64]:
+              - generic [ref=e65]: Normal
+              - strong [ref=e66]: "0"
+            - generic [ref=e67]:
+              - generic [ref=e68]: Late
+              - strong [ref=e69]: "0"
+            - generic [ref=e70]:
+              - generic [ref=e71]: Early leave
+              - strong [ref=e72]: "1"
+            - generic [ref=e73]:
+              - generic [ref=e74]: Late + Early
+              - strong [ref=e75]: "0"
+            - generic [ref=e76]:
+              - generic [ref=e77]: Partial
+              - strong [ref=e78]: "0"
+            - generic [ref=e79]:
+              - generic [ref=e80]: Absent
+              - strong [ref=e81]: "0"
+            - generic [ref=e82]:
+              - generic [ref=e83]: Adjusted
+              - strong [ref=e84]: "0"
+            - generic [ref=e85]:
+              - generic [ref=e86]: "Off"
+              - strong [ref=e87]: "1"
+        - generic [ref=e88]:
+          - generic [ref=e89]:
+            - heading "Calendar" [level=3] [ref=e90]
+            - generic [ref=e91]:
+              - button "Prev" [ref=e92] [cursor=pointer]
+              - generic [ref=e93]: February 2026
+              - button "Next" [ref=e94] [cursor=pointer]
+          - generic [ref=e95]:
+            - generic [ref=e96]: Mon
+            - generic [ref=e97]: Tue
+            - generic [ref=e98]: Wed
+            - generic [ref=e99]: Thu
+            - generic [ref=e100]: Fri
+            - generic [ref=e101]: Sat
+            - generic [ref=e102]: Sun
+          - generic [ref=e103]:
+            - generic "2026-01-26" [ref=e104]:
+              - generic [ref=e105]: "26"
+              - generic [ref=e106]: "--"
+            - generic "2026-01-27" [ref=e107]:
+              - generic [ref=e108]: "27"
+              - generic [ref=e109]: "--"
+            - generic "2026-01-28" [ref=e110]:
+              - generic [ref=e111]: "28"
+              - generic [ref=e112]: "--"
+            - generic "2026-01-29" [ref=e113]:
+              - generic [ref=e114]: "29"
+              - generic [ref=e115]: "--"
+            - generic "2026-01-30" [ref=e116]:
+              - generic [ref=e117]: "30"
+              - generic [ref=e118]: "--"
+            - generic "2026-01-31" [ref=e119]:
+              - generic [ref=e120]: "31"
+              - generic [ref=e121]: "--"
+            - generic "2026-02-01" [ref=e122]:
+              - generic [ref=e123]: "1"
+              - generic [ref=e124]: "--"
+            - generic "2026-02-02" [ref=e125]:
+              - generic [ref=e126]: "2"
+              - generic [ref=e127]: "--"
+            - generic "2026-02-03" [ref=e128]:
+              - generic [ref=e129]: "3"
+              - generic [ref=e130]: "--"
+            - generic "2026-02-04" [ref=e131]:
+              - generic [ref=e132]: "4"
+              - generic [ref=e133]: "--"
+            - generic "2026-02-05" [ref=e134]:
+              - generic [ref=e135]: "5"
+              - generic [ref=e136]: "--"
+            - generic "2026-02-06" [ref=e137]:
+              - generic [ref=e138]: "6"
+              - generic [ref=e139]: "--"
+            - generic "2026-02-07" [ref=e140]:
+              - generic [ref=e141]: "7"
+              - generic [ref=e142]: "--"
+            - generic "2026-02-08" [ref=e143]:
+              - generic [ref=e144]: "8"
+              - generic [ref=e145]: "--"
+            - generic "2026-02-09" [ref=e146]:
+              - generic [ref=e147]: "9"
+              - generic [ref=e148]: "--"
+            - generic "2026-02-10" [ref=e149]:
+              - generic [ref=e150]: "10"
+              - generic [ref=e151]: "--"
+            - generic "2026-02-11" [ref=e152]:
+              - generic [ref=e153]: "11"
+              - generic [ref=e154]: "--"
+            - generic "2026-02-12" [ref=e155]:
+              - generic [ref=e156]: "12"
+              - generic [ref=e157]: "--"
+            - generic "2026-02-13" [ref=e158]:
+              - generic [ref=e159]: "13"
+              - generic [ref=e160]: "--"
+            - generic "2026-02-14" [ref=e161]:
+              - generic [ref=e162]: "14"
+              - generic [ref=e163]: "--"
+            - generic "2026-02-15" [ref=e164]:
+              - generic [ref=e165]: "15"
+              - generic [ref=e166]: "--"
+            - generic "2026-02-16" [ref=e167]:
+              - generic [ref=e168]: "16"
+              - generic [ref=e169]: "--"
+            - generic "2026-02-17" [ref=e170]:
+              - generic [ref=e171]: "17"
+              - generic [ref=e172]: "--"
+            - generic "2026-02-18" [ref=e173]:
+              - generic [ref=e174]: "18"
+              - generic [ref=e175]: "--"
+            - generic "2026-02-19" [ref=e176]:
+              - generic [ref=e177]: "19"
+              - generic [ref=e178]: "--"
+            - generic "2026-02-20" [ref=e179]:
+              - generic [ref=e180]: "20"
+              - generic [ref=e181]: "--"
+            - generic "2026-02-21" [ref=e182]:
+              - generic [ref=e183]: "21"
+              - generic [ref=e184]: "--"
+            - generic "2026-02-22" [ref=e185]:
+              - generic [ref=e186]: "22"
+              - generic [ref=e187]: "--"
+            - generic "2026-02-23" [ref=e188]:
+              - generic [ref=e189]: "23"
+              - generic [ref=e190]: "--"
+            - generic "2026-02-24" [ref=e191]:
+              - generic [ref=e192]: "24"
+              - generic [ref=e193]: "--"
+            - generic "2026-02-25" [ref=e194]:
+              - generic [ref=e195]: "25"
+              - generic [ref=e196]: "--"
+            - generic "2026-02-26" [ref=e197]:
+              - generic [ref=e198]: "26"
+              - generic [ref=e199]: "--"
+            - generic "2026-02-27" [ref=e200]:
+              - generic [ref=e201]: "27"
+              - generic [ref=e202]: "--"
+            - generic "2026-02-28" [ref=e203]:
+              - generic [ref=e204]: "28"
+              - generic [ref=e205]: "--"
+            - generic "2026-03-01" [ref=e206]:
+              - generic [ref=e207]: "1"
+              - generic [ref=e208]: "--"
+        - generic [ref=e209]:
+          - heading "Adjustment Request" [level=3] [ref=e210]
+          - generic [ref=e211]:
+            - generic [ref=e212]:
+              - generic [ref=e213]: Work date
+              - textbox "Work date" [ref=e214]: 2026-02-06
+            - generic [ref=e215]:
+              - generic [ref=e216]: Type
+              - combobox "Type" [ref=e217]:
+                - option "Missed check-in" [selected]
+                - option "Missed check-out"
+                - option "Time correction"
+                - option "Leave"
+                - option "Overtime"
+            - generic [ref=e218]:
+              - generic [ref=e219]: Requested in
+              - textbox "Requested in" [ref=e220]
+            - generic [ref=e221]:
+              - generic [ref=e222]: Requested out
+              - textbox "Requested out" [ref=e223]
+            - generic [ref=e224]:
+              - generic [ref=e225]: Reason
+              - textbox "Reason" [ref=e226]:
+                - /placeholder: Optional
+            - button "Submit request" [ref=e227] [cursor=pointer]
+          - generic [ref=e228]:
+            - generic [ref=e229]:
+              - generic [ref=e230]: Recent requests
+              - button "Reload" [ref=e231] [cursor=pointer]
+            - list [ref=e232]:
+              - listitem [ref=e233]:
+                - generic [ref=e234]:
+                  - strong [ref=e235]: 2026-01-23T00:00:00.000Z
+                  - text: · Missed check-in approved
+                - generic [ref=e236]:
+                  - generic [ref=e237]: "In: 2026/1/23 16:20:21"
+                  - generic [ref=e238]: "Out: --"
+              - listitem [ref=e239]:
+                - generic [ref=e240]:
+                  - strong [ref=e241]: 2026-01-23T00:00:00.000Z
+                  - text: · Missed check-in approved
+                - generic [ref=e243]: "Minutes: 60"
+                - generic [ref=e244]:
+                  - generic [ref=e245]: "In: 2026/1/23 22:00:00"
+                  - generic [ref=e246]: "Out: 2026/1/23 23:00:00"
+              - listitem [ref=e247]:
+                - generic [ref=e248]:
+                  - strong [ref=e249]: 2026-01-23T00:00:00.000Z
+                  - text: · Missed check-in pending
+                - generic [ref=e251]: "Minutes: 60"
+                - generic [ref=e252]:
+                  - generic [ref=e253]: "In: 2026/1/23 21:15:00"
+                  - generic [ref=e254]: "Out: 2026/1/23 22:15:00"
+                - generic [ref=e255]:
+                  - button "Cancel" [ref=e256] [cursor=pointer]
+                  - button "Approve" [ref=e257] [cursor=pointer]
+                  - button "Reject" [ref=e258] [cursor=pointer]
+        - generic [ref=e259]:
+          - generic [ref=e260]:
+            - heading "Request Report" [level=3] [ref=e261]
+            - button "Reload report" [ref=e262] [cursor=pointer]
+          - table [ref=e264]:
+            - rowgroup [ref=e265]:
+              - row "Type Status Total Minutes" [ref=e266]:
+                - columnheader "Type" [ref=e267]
+                - columnheader "Status" [ref=e268]
+                - columnheader "Total" [ref=e269]
+                - columnheader "Minutes" [ref=e270]
+            - rowgroup [ref=e271]:
+              - row "Missed check-in approved 2 60" [ref=e272]:
+                - cell "Missed check-in" [ref=e273]
+                - cell "approved" [ref=e274]
+                - cell "2" [ref=e275]
+                - cell "60" [ref=e276]
+              - row "Missed check-in pending 1 60" [ref=e277]:
+                - cell "Missed check-in" [ref=e278]
+                - cell "pending" [ref=e279]
+                - cell "1" [ref=e280]
+                - cell "60" [ref=e281]
+        - generic [ref=e282]:
+          - generic [ref=e283]:
+            - heading "Admin Console" [level=3] [ref=e284]
+            - button "Reload admin" [ref=e285] [cursor=pointer]
+          - generic [ref=e286]:
+            - generic [ref=e287]:
+              - heading "Settings" [level=4] [ref=e288]
+              - generic [ref=e289]:
+                - generic [ref=e290]:
+                  - generic [ref=e291]: Auto absence
+                  - checkbox "Auto absence" [ref=e292]
+                - generic [ref=e293]:
+                  - generic [ref=e294]: Run at
+                  - textbox "Run at" [ref=e295]: 00:15
+                - generic [ref=e296]:
+                  - generic [ref=e297]: Lookback days
+                  - spinbutton "Lookback days" [ref=e298]: "1"
+                - generic [ref=e299]:
+                  - generic [ref=e300]: Holiday first-day base hours
+                  - checkbox "Holiday first-day base hours" [checked] [ref=e301]
+                - generic [ref=e302]:
+                  - generic [ref=e303]: First-day base hours
+                  - spinbutton "First-day base hours" [ref=e304]: "8"
+                - generic [ref=e305]:
+                  - generic [ref=e306]: Overtime adds on holiday
+                  - checkbox "Overtime adds on holiday" [checked] [ref=e307]
+                - generic [ref=e308]:
+                  - generic [ref=e309]: Overtime source
+                  - combobox "Overtime source" [ref=e310]:
+                    - option "Approval" [selected]
+                    - option "Clock"
+                    - option "Both"
+                - generic [ref=e312]:
+                  - generic [ref=e313]:
+                    - heading "Holiday overrides" [level=5] [ref=e314]
+                    - button "Add override" [ref=e315] [cursor=pointer]
+                  - table [ref=e317]:
+                    - rowgroup [ref=e318]:
+                      - row "Holiday name Match First-day hours Enable Overtime adds Overtime source" [ref=e319]:
+                        - columnheader "Holiday name" [ref=e320]
+                        - columnheader "Match" [ref=e321]
+                        - columnheader "First-day hours" [ref=e322]
+                        - columnheader "Enable" [ref=e323]
+                        - columnheader "Overtime adds" [ref=e324]
+                        - columnheader "Overtime source" [ref=e325]
+                        - columnheader [ref=e326]
+                    - rowgroup [ref=e327]:
+                      - row "春节 Contains Approval Remove" [ref=e328]:
+                        - cell "春节" [ref=e329]:
+                          - textbox "春节" [ref=e330]
+                        - cell "Contains" [ref=e331]:
+                          - combobox [ref=e332]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e333]:
+                          - spinbutton [ref=e334]: "8"
+                        - cell [ref=e335]:
+                          - checkbox [checked] [ref=e336]
+                        - cell [ref=e337]:
+                          - checkbox [checked] [ref=e338]
+                        - cell "Approval" [ref=e339]:
+                          - combobox [ref=e340]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e341]:
+                          - button "Remove" [ref=e342] [cursor=pointer]
+                      - 'row "Attendance groups Known groups: 单双休, 单休车间 Roles 工段长 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e343]':
+                        - 'cell "Attendance groups Known groups: 单双休, 单休车间 Roles 工段长 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e344]':
+                          - generic [ref=e345]:
+                            - generic [ref=e346]:
+                              - generic [ref=e347]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e348]':
+                                - /placeholder: 单休办公,白班
+                              - generic [ref=e349]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e350]:
+                              - generic [ref=e351]: Roles
+                              - textbox "Roles" [ref=e352]:
+                                - /placeholder: 司机,工段长
+                                - text: 工段长
+                            - generic [ref=e353]:
+                              - generic [ref=e354]: Role tags
+                              - textbox "Role tags" [ref=e355]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e356]:
+                              - generic [ref=e357]: User IDs
+                              - textbox "User IDs" [ref=e358]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e359]:
+                              - generic [ref=e360]: User names
+                              - textbox "User names" [ref=e361]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e362]:
+                              - generic [ref=e363]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e364]:
+                                - /placeholder: uuid3
+                            - generic [ref=e365]:
+                              - generic [ref=e366]: Exclude user names
+                              - textbox "Exclude user names" [ref=e367]:
+                                - /placeholder: 王五
+                            - generic [ref=e368]:
+                              - generic [ref=e369]: Day index start
+                              - spinbutton "Day index start" [ref=e370]: "1"
+                            - generic [ref=e371]:
+                              - generic [ref=e372]: Day index end
+                              - spinbutton "Day index end" [ref=e373]: "6"
+                            - generic [ref=e374]:
+                              - generic [ref=e375]: Day index list
+                              - textbox "Day index list" [ref=e376]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e377]:
+                        - cell "春节" [ref=e378]:
+                          - textbox "春节" [ref=e379]
+                        - cell "Contains" [ref=e380]:
+                          - combobox [ref=e381]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e382]:
+                          - spinbutton [ref=e383]: "8"
+                        - cell [ref=e384]:
+                          - checkbox [checked] [ref=e385]
+                        - cell [ref=e386]:
+                          - checkbox [checked] [ref=e387]
+                        - cell "Approval" [ref=e388]:
+                          - combobox [ref=e389]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e390]:
+                          - button "Remove" [ref=e391] [cursor=pointer]
+                      - 'row "Attendance groups Known groups: 单双休, 单休车间 Roles Role tags User IDs User names 熊洪州 Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e392]':
+                        - 'cell "Attendance groups Known groups: 单双休, 单休车间 Roles Role tags User IDs User names 熊洪州 Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e393]':
+                          - generic [ref=e394]:
+                            - generic [ref=e395]:
+                              - generic [ref=e396]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e397]':
+                                - /placeholder: 单休办公,白班
+                              - generic [ref=e398]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e399]:
+                              - generic [ref=e400]: Roles
+                              - textbox "Roles" [ref=e401]:
+                                - /placeholder: 司机,工段长
+                            - generic [ref=e402]:
+                              - generic [ref=e403]: Role tags
+                              - textbox "Role tags" [ref=e404]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e405]:
+                              - generic [ref=e406]: User IDs
+                              - textbox "User IDs" [ref=e407]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e408]:
+                              - generic [ref=e409]: User names
+                              - textbox "User names" [ref=e410]:
+                                - /placeholder: 张三,李四
+                                - text: 熊洪州
+                            - generic [ref=e411]:
+                              - generic [ref=e412]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e413]:
+                                - /placeholder: uuid3
+                            - generic [ref=e414]:
+                              - generic [ref=e415]: Exclude user names
+                              - textbox "Exclude user names" [ref=e416]:
+                                - /placeholder: 王五
+                            - generic [ref=e417]:
+                              - generic [ref=e418]: Day index start
+                              - spinbutton "Day index start" [ref=e419]: "1"
+                            - generic [ref=e420]:
+                              - generic [ref=e421]: Day index end
+                              - spinbutton "Day index end" [ref=e422]: "6"
+                            - generic [ref=e423]:
+                              - generic [ref=e424]: Day index list
+                              - textbox "Day index list" [ref=e425]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e426]:
+                        - cell "春节" [ref=e427]:
+                          - textbox "春节" [ref=e428]
+                        - cell "Contains" [ref=e429]:
+                          - combobox [ref=e430]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e431]:
+                          - spinbutton [ref=e432]: "8"
+                        - cell [ref=e433]:
+                          - checkbox [checked] [ref=e434]
+                        - cell [ref=e435]:
+                          - checkbox [checked] [ref=e436]
+                        - cell "Approval" [ref=e437]:
+                          - combobox [ref=e438]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e439]:
+                          - button "Remove" [ref=e440] [cursor=pointer]
+                      - 'row "Attendance groups 单休办公 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e441]':
+                        - 'cell "Attendance groups 单休办公 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e442]':
+                          - generic [ref=e443]:
+                            - generic [ref=e444]:
+                              - generic [ref=e445]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e446]':
+                                - /placeholder: 单休办公,白班
+                                - text: 单休办公
+                              - generic [ref=e447]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e448]:
+                              - generic [ref=e449]: Roles
+                              - textbox "Roles" [ref=e450]:
+                                - /placeholder: 司机,工段长
+                            - generic [ref=e451]:
+                              - generic [ref=e452]: Role tags
+                              - textbox "Role tags" [ref=e453]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e454]:
+                              - generic [ref=e455]: User IDs
+                              - textbox "User IDs" [ref=e456]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e457]:
+                              - generic [ref=e458]: User names
+                              - textbox "User names" [ref=e459]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e460]:
+                              - generic [ref=e461]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e462]:
+                                - /placeholder: uuid3
+                            - generic [ref=e463]:
+                              - generic [ref=e464]: Exclude user names
+                              - textbox "Exclude user names" [ref=e465]:
+                                - /placeholder: 王五
+                            - generic [ref=e466]:
+                              - generic [ref=e467]: Day index start
+                              - spinbutton "Day index start" [ref=e468]: "1"
+                            - generic [ref=e469]:
+                              - generic [ref=e470]: Day index end
+                              - spinbutton "Day index end" [ref=e471]: "6"
+                            - generic [ref=e472]:
+                              - generic [ref=e473]: Day index list
+                              - textbox "Day index list" [ref=e474]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e475]:
+                        - cell "春节" [ref=e476]:
+                          - textbox "春节" [ref=e477]
+                        - cell "Contains" [ref=e478]:
+                          - combobox [ref=e479]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e480]:
+                          - spinbutton [ref=e481]: "8"
+                        - cell [ref=e482]:
+                          - checkbox [checked] [ref=e483]
+                        - cell [ref=e484]:
+                          - checkbox [checked] [ref=e485]
+                        - cell "Approval" [ref=e486]:
+                          - combobox [ref=e487]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e488]:
+                          - button "Remove" [ref=e489] [cursor=pointer]
+                      - 'row "Attendance groups Known groups: 单双休, 单休车间 Roles 总经理助理,财务部经理,服务测试部经理,技术部经理,人力行政总监,生产部经理,销售部经理,质监部经理 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e490]':
+                        - 'cell "Attendance groups Known groups: 单双休, 单休车间 Roles 总经理助理,财务部经理,服务测试部经理,技术部经理,人力行政总监,生产部经理,销售部经理,质监部经理 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e491]':
+                          - generic [ref=e492]:
+                            - generic [ref=e493]:
+                              - generic [ref=e494]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e495]':
+                                - /placeholder: 单休办公,白班
+                              - generic [ref=e496]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e497]:
+                              - generic [ref=e498]: Roles
+                              - textbox "Roles" [ref=e499]:
+                                - /placeholder: 司机,工段长
+                                - text: 总经理助理,财务部经理,服务测试部经理,技术部经理,人力行政总监,生产部经理,销售部经理,质监部经理
+                            - generic [ref=e500]:
+                              - generic [ref=e501]: Role tags
+                              - textbox "Role tags" [ref=e502]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e503]:
+                              - generic [ref=e504]: User IDs
+                              - textbox "User IDs" [ref=e505]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e506]:
+                              - generic [ref=e507]: User names
+                              - textbox "User names" [ref=e508]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e509]:
+                              - generic [ref=e510]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e511]:
+                                - /placeholder: uuid3
+                            - generic [ref=e512]:
+                              - generic [ref=e513]: Exclude user names
+                              - textbox "Exclude user names" [ref=e514]:
+                                - /placeholder: 王五
+                            - generic [ref=e515]:
+                              - generic [ref=e516]: Day index start
+                              - spinbutton "Day index start" [ref=e517]: "1"
+                            - generic [ref=e518]:
+                              - generic [ref=e519]: Day index end
+                              - spinbutton "Day index end" [ref=e520]: "6"
+                            - generic [ref=e521]:
+                              - generic [ref=e522]: Day index list
+                              - textbox "Day index list" [ref=e523]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e524]:
+                        - cell "春节" [ref=e525]:
+                          - textbox "春节" [ref=e526]
+                        - cell "Contains" [ref=e527]:
+                          - combobox [ref=e528]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e529]:
+                          - spinbutton [ref=e530]: "8"
+                        - cell [ref=e531]:
+                          - checkbox [ref=e532]
+                        - cell [ref=e533]:
+                          - checkbox [checked] [ref=e534]
+                        - cell "Approval" [ref=e535]:
+                          - combobox [ref=e536]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e537]:
+                          - button "Remove" [ref=e538] [cursor=pointer]
+                      - 'row "Attendance groups 保安 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e539]':
+                        - 'cell "Attendance groups 保安 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e540]':
+                          - generic [ref=e541]:
+                            - generic [ref=e542]:
+                              - generic [ref=e543]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e544]':
+                                - /placeholder: 单休办公,白班
+                                - text: 保安
+                              - generic [ref=e545]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e546]:
+                              - generic [ref=e547]: Roles
+                              - textbox "Roles" [ref=e548]:
+                                - /placeholder: 司机,工段长
+                            - generic [ref=e549]:
+                              - generic [ref=e550]: Role tags
+                              - textbox "Role tags" [ref=e551]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e552]:
+                              - generic [ref=e553]: User IDs
+                              - textbox "User IDs" [ref=e554]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e555]:
+                              - generic [ref=e556]: User names
+                              - textbox "User names" [ref=e557]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e558]:
+                              - generic [ref=e559]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e560]:
+                                - /placeholder: uuid3
+                            - generic [ref=e561]:
+                              - generic [ref=e562]: Exclude user names
+                              - textbox "Exclude user names" [ref=e563]:
+                                - /placeholder: 王五
+                            - generic [ref=e564]:
+                              - generic [ref=e565]: Day index start
+                              - spinbutton "Day index start" [ref=e566]
+                            - generic [ref=e567]:
+                              - generic [ref=e568]: Day index end
+                              - spinbutton "Day index end" [ref=e569]
+                            - generic [ref=e570]:
+                              - generic [ref=e571]: Day index list
+                              - textbox "Day index list" [ref=e572]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e573]:
+                        - cell "春节" [ref=e574]:
+                          - textbox "春节" [ref=e575]
+                        - cell "Contains" [ref=e576]:
+                          - combobox [ref=e577]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e578]:
+                          - spinbutton [ref=e579]: "8"
+                        - cell [ref=e580]:
+                          - checkbox [ref=e581]
+                        - cell [ref=e582]:
+                          - checkbox [checked] [ref=e583]
+                        - cell "Approval" [ref=e584]:
+                          - combobox [ref=e585]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e586]:
+                          - button "Remove" [ref=e587] [cursor=pointer]
+                      - 'row "Attendance groups 单休车间 Known groups: 单双休, 单休车间 Roles 仓库员,下料 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e588]':
+                        - 'cell "Attendance groups 单休车间 Known groups: 单双休, 单休车间 Roles 仓库员,下料 Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e589]':
+                          - generic [ref=e590]:
+                            - generic [ref=e591]:
+                              - generic [ref=e592]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e593]':
+                                - /placeholder: 单休办公,白班
+                                - text: 单休车间
+                              - generic [ref=e594]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e595]:
+                              - generic [ref=e596]: Roles
+                              - textbox "Roles" [ref=e597]:
+                                - /placeholder: 司机,工段长
+                                - text: 仓库员,下料
+                            - generic [ref=e598]:
+                              - generic [ref=e599]: Role tags
+                              - textbox "Role tags" [ref=e600]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e601]:
+                              - generic [ref=e602]: User IDs
+                              - textbox "User IDs" [ref=e603]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e604]:
+                              - generic [ref=e605]: User names
+                              - textbox "User names" [ref=e606]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e607]:
+                              - generic [ref=e608]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e609]:
+                                - /placeholder: uuid3
+                            - generic [ref=e610]:
+                              - generic [ref=e611]: Exclude user names
+                              - textbox "Exclude user names" [ref=e612]:
+                                - /placeholder: 王五
+                            - generic [ref=e613]:
+                              - generic [ref=e614]: Day index start
+                              - spinbutton "Day index start" [ref=e615]
+                            - generic [ref=e616]:
+                              - generic [ref=e617]: Day index end
+                              - spinbutton "Day index end" [ref=e618]
+                            - generic [ref=e619]:
+                              - generic [ref=e620]: Day index list
+                              - textbox "Day index list" [ref=e621]:
+                                - /placeholder: 1,2,3
+                      - row "春节 Contains Approval Remove" [ref=e622]:
+                        - cell "春节" [ref=e623]:
+                          - textbox "春节" [ref=e624]
+                        - cell "Contains" [ref=e625]:
+                          - combobox [ref=e626]:
+                            - option "Contains" [selected]
+                            - option "Equals"
+                            - option "Regex"
+                        - cell [ref=e627]:
+                          - spinbutton [ref=e628]: "8"
+                        - cell [ref=e629]:
+                          - checkbox [ref=e630]
+                        - cell [ref=e631]:
+                          - checkbox [checked] [ref=e632]
+                        - cell "Approval" [ref=e633]:
+                          - combobox [ref=e634]:
+                            - option "Approval" [selected]
+                            - option "Clock"
+                            - option "Both"
+                        - cell "Remove" [ref=e635]:
+                          - button "Remove" [ref=e636] [cursor=pointer]
+                      - 'row "Attendance groups 单休车间 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e637]':
+                        - 'cell "Attendance groups 单休车间 Known groups: 单双休, 单休车间 Roles Role tags User IDs User names Exclude user IDs Exclude user names Day index start Day index end Day index list" [ref=e638]':
+                          - generic [ref=e639]:
+                            - generic [ref=e640]:
+                              - generic [ref=e641]: Attendance groups
+                              - 'textbox "Attendance groups Known groups: 单双休, 单休车间" [ref=e642]':
+                                - /placeholder: 单休办公,白班
+                                - text: 单休车间
+                              - generic [ref=e643]: "Known groups: 单双休, 单休车间"
+                            - generic [ref=e644]:
+                              - generic [ref=e645]: Roles
+                              - textbox "Roles" [ref=e646]:
+                                - /placeholder: 司机,工段长
+                            - generic [ref=e647]:
+                              - generic [ref=e648]: Role tags
+                              - textbox "Role tags" [ref=e649]:
+                                - /placeholder: 车间,仓储
+                            - generic [ref=e650]:
+                              - generic [ref=e651]: User IDs
+                              - textbox "User IDs" [ref=e652]:
+                                - /placeholder: uuid1,uuid2
+                            - generic [ref=e653]:
+                              - generic [ref=e654]: User names
+                              - textbox "User names" [ref=e655]:
+                                - /placeholder: 张三,李四
+                            - generic [ref=e656]:
+                              - generic [ref=e657]: Exclude user IDs
+                              - textbox "Exclude user IDs" [ref=e658]:
+                                - /placeholder: uuid3
+                            - generic [ref=e659]:
+                              - generic [ref=e660]: Exclude user names
+                              - textbox "Exclude user names" [ref=e661]:
+                                - /placeholder: 王五
+                            - generic [ref=e662]:
+                              - generic [ref=e663]: Day index start
+                              - spinbutton "Day index start" [ref=e664]
+                            - generic [ref=e665]:
+                              - generic [ref=e666]: Day index end
+                              - spinbutton "Day index end" [ref=e667]
+                            - generic [ref=e668]:
+                              - generic [ref=e669]: Day index list
+                              - textbox "Day index list" [ref=e670]:
+                                - /placeholder: 1,2,3
+                - generic [ref=e671]:
+                  - generic [ref=e672]: Min punch interval (min)
+                  - spinbutton "Min punch interval (min)" [ref=e673]: "1"
+                - generic [ref=e674]:
+                  - generic [ref=e675]: IP allowlist
+                  - textbox "IP allowlist" [ref=e676]:
+                    - /placeholder: One per line or comma separated
+                - generic [ref=e677]:
+                  - generic [ref=e678]: Geo fence lat
+                  - spinbutton "Geo fence lat" [ref=e679]
+                - generic [ref=e680]:
+                  - generic [ref=e681]: Geo fence lng
+                  - spinbutton "Geo fence lng" [ref=e682]
+                - generic [ref=e683]:
+                  - generic [ref=e684]: Geo fence radius (m)
+                  - spinbutton "Geo fence radius (m)" [ref=e685]
+              - button "Save settings" [ref=e686] [cursor=pointer]
+            - generic [ref=e687]:
+              - generic [ref=e688]:
+                - heading "Holiday Sync" [level=4] [ref=e689]
+                - generic [ref=e690]:
+                  - button "Sync now" [ref=e691] [cursor=pointer]
+                  - button "Sync current year" [ref=e692] [cursor=pointer]
+                  - button "Sync next year" [ref=e693] [cursor=pointer]
+              - generic [ref=e694]:
+                - generic [ref=e695]:
+                  - generic [ref=e696]: Holiday source URL
+                  - textbox "Holiday source URL" [ref=e697]: https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master
+                - generic [ref=e698]:
+                  - generic [ref=e699]: Years (comma separated)
+                  - textbox "Years (comma separated)" [ref=e700]:
+                    - /placeholder: 2025,2026
+                    - text: 2026,2027
+                - generic [ref=e701]:
+                  - generic [ref=e702]: Auto sync (daily)
+                  - checkbox "Auto sync (daily)" [checked] [ref=e703]
+                - generic [ref=e704]:
+                  - generic [ref=e705]: Auto sync time
+                  - textbox "Auto sync time" [ref=e706]: 02:30
+                - generic [ref=e707]:
+                  - generic [ref=e708]: Auto sync timezone
+                  - textbox "Auto sync timezone" [ref=e709]:
+                    - /placeholder: Asia/Shanghai
+                    - text: Asia/Shanghai
+                - generic [ref=e710]:
+                  - generic [ref=e711]: Append day index
+                  - checkbox "Append day index" [checked] [ref=e712]
+                - generic [ref=e713]:
+                  - generic [ref=e714]: Index holidays
+                  - textbox "Index holidays" [ref=e715]:
+                    - /placeholder: 春节,国庆
+                    - text: 春节,国庆
+                - generic [ref=e716]:
+                  - generic [ref=e717]: Max index days
+                  - spinbutton "Max index days" [ref=e718]: "7"
+                - generic [ref=e719]:
+                  - generic [ref=e720]: Index format
+                  - combobox "Index format" [ref=e721]:
+                    - option "name-1" [selected]
+                    - option "name第1天"
+                    - option "name DAY1"
+                - generic [ref=e722]:
+                  - generic [ref=e723]: Overwrite existing
+                  - checkbox "Overwrite existing" [checked] [ref=e724]
+              - generic [ref=e725]:
+                - strong [ref=e726]: Last sync
+                - generic [ref=e727]: 2026/2/6 02:30:01 · success · 39 applied / 39 fetched · 2026,2027
+            - generic [ref=e728]:
+              - generic [ref=e729]:
+                - heading "Default Rule" [level=4] [ref=e730]
+                - button "Reload rule" [ref=e731] [cursor=pointer]
+              - generic [ref=e732]:
+                - generic [ref=e733]:
+                  - generic [ref=e734]: Name
+                  - textbox "Name" [ref=e735]: Default
+                - generic [ref=e736]:
+                  - generic [ref=e737]: Timezone
+                  - textbox "Timezone" [ref=e738]: UTC
+                - generic [ref=e739]:
+                  - generic [ref=e740]: Work start
+                  - textbox "Work start" [ref=e741]: 09:00
+                - generic [ref=e742]:
+                  - generic [ref=e743]: Work end
+                  - textbox "Work end" [ref=e744]: 18:00
+                - generic [ref=e745]:
+                  - generic [ref=e746]: Late grace (min)
+                  - spinbutton "Late grace (min)" [ref=e747]: "10"
+                - generic [ref=e748]:
+                  - generic [ref=e749]: Early grace (min)
+                  - spinbutton "Early grace (min)" [ref=e750]: "10"
+                - generic [ref=e751]:
+                  - generic [ref=e752]: Rounding (min)
+                  - spinbutton "Rounding (min)" [ref=e753]: "5"
+                - generic [ref=e754]:
+                  - generic [ref=e755]: Working days (0-6)
+                  - textbox "Working days (0-6)" [ref=e756]:
+                    - /placeholder: 1,2,3,4,5
+                    - text: 1,2,3,4,5
+              - button "Save rule" [ref=e757] [cursor=pointer]
+            - generic [ref=e758]:
+              - generic [ref=e759]:
+                - heading "Rule Sets" [level=4] [ref=e760]
+                - button "Reload rule sets" [ref=e761] [cursor=pointer]
+              - generic [ref=e762]:
+                - generic [ref=e763]:
+                  - generic [ref=e764]: Name
+                  - textbox "Name" [ref=e765]
+                - generic [ref=e766]:
+                  - generic [ref=e767]: Scope
+                  - combobox "Scope" [ref=e768]:
+                    - option "Org" [selected]
+                    - option "Department"
+                    - option "Project"
+                    - option "User"
+                    - option "Custom"
+                - generic [ref=e769]:
+                  - generic [ref=e770]: Version
+                  - spinbutton "Version" [ref=e771]: "1"
+                - generic [ref=e772]:
+                  - generic [ref=e773]: Default
+                  - checkbox "Default" [ref=e774]
+                - generic [ref=e775]:
+                  - generic [ref=e776]: Description
+                  - textbox "Description" [ref=e777]:
+                    - /placeholder: Optional
+                - generic [ref=e778]:
+                  - generic [ref=e779]: Config (JSON)
+                  - textbox "Config (JSON)" [ref=e780]:
+                    - /placeholder: "{\"source\":\"dingtalk\",\"mappings\":{\"columns\":[{\"sourceField\":\"1_on_duty_user_check_time\",\"targetField\":\"firstInAt\"}]}}"
+                    - text: "{}"
+              - generic [ref=e781]:
+                - button "Create rule set" [ref=e782] [cursor=pointer]
+                - button "Load template" [ref=e783] [cursor=pointer]
+              - table [ref=e785]:
+                - rowgroup [ref=e786]:
+                  - row "Name Scope Version Default Actions" [ref=e787]:
+                    - columnheader "Name" [ref=e788]
+                    - columnheader "Scope" [ref=e789]
+                    - columnheader "Version" [ref=e790]
+                    - columnheader "Default" [ref=e791]
+                    - columnheader "Actions" [ref=e792]
+                - rowgroup [ref=e793]:
+                  - row "考勤规则-正式 org 1 Yes Edit Delete" [ref=e794]:
+                    - cell "考勤规则-正式" [ref=e795]
+                    - cell "org" [ref=e796]
+                    - cell "1" [ref=e797]
+                    - cell "Yes" [ref=e798]
+                    - cell "Edit Delete" [ref=e799]:
+                      - button "Edit" [ref=e800] [cursor=pointer]
+                      - button "Delete" [ref=e801] [cursor=pointer]
+                  - row "E2E Rule Set org 1 No Edit Delete" [ref=e802]:
+                    - cell "E2E Rule Set" [ref=e803]
+                    - cell "org" [ref=e804]
+                    - cell "1" [ref=e805]
+                    - cell "No" [ref=e806]
+                    - cell "Edit Delete" [ref=e807]:
+                      - button "Edit" [ref=e808] [cursor=pointer]
+                      - button "Delete" [ref=e809] [cursor=pointer]
+                  - row "Default Rule Set org 1 No Edit Delete" [ref=e810]:
+                    - cell "Default Rule Set" [ref=e811]
+                    - cell "org" [ref=e812]
+                    - cell "1" [ref=e813]
+                    - cell "No" [ref=e814]
+                    - cell "Edit Delete" [ref=e815]:
+                      - button "Edit" [ref=e816] [cursor=pointer]
+                      - button "Delete" [ref=e817] [cursor=pointer]
+            - generic [ref=e818]:
+              - generic [ref=e819]:
+                - heading "Rule Template Library" [level=4] [ref=e820]
+                - button "Reload templates" [ref=e821] [cursor=pointer]
+              - generic [ref=e822]:
+                - generic [ref=e823]:
+                  - generic [ref=e824]: System templates (read-only)
+                  - textbox "System templates (read-only)" [ref=e825]: "[ { \"name\": \"单休车间规则\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"groupName\", \"label\": \"Attendance group\", \"type\": \"string\", \"default\": \"单休车间\", \"paths\": [ \"scope.attendance_group[0]\" ] }, { \"key\": \"restTripOvertimeHours\", \"label\": \"Rest day trip overtime (hours)\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[0].then.overtime_hours\" ] }, { \"key\": \"lateWarningAfter\", \"label\": \"Late checkout warning after\", \"type\": \"string\", \"default\": \"19:00\", \"paths\": [ \"rules[1].when.clockOut2_after\" ] } ], \"scope\": { \"attendance_group\": [ \"单休车间\" ] }, \"rules\": [ { \"id\": \"rest_trip_default_overtime\", \"when\": { \"shift\": \"休息\", \"approval_contains\": \"出差\" }, \"then\": { \"overtime_hours\": 8, \"reason\": \"单休车间休息日出差默认8小时\" } }, { \"id\": \"after7_no_overtime_warning\", \"when\": { \"clockOut2_after\": \"19:00\", \"overtime_hours_eq\": 0 }, \"then\": { \"warning\": \"下班晚但无加班单\" } }, { \"id\": \"rest_punch_no_overtime_warning\", \"when\": { \"exceptionReason_contains\": \"休息并打卡\", \"overtime_hours_eq\": 0 }, \"then\": { \"warning\": \"休息日打卡但无加班单\" } }, { \"id\": \"rest_punch_missing_checkout_warning\", \"when\": { \"exceptionReason_contains\": \"休息并打卡\", \"clockIn1_exists\": true, \"clockOut1_exists\": false }, \"then\": { \"warning\": \"休息日打卡但缺少下班卡\" } } ] }, { \"name\": \"通用提醒\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"tripMinHours\", \"label\": \"Trip minimum hours\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[2].when.actual_hours_lt\" ] }, { \"key\": \"leaveMinHours\", \"label\": \"Leave minimum hours\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[3].when.actual_hours_lt\" ] }, { \"key\": \"deptExemptions\", \"label\": \"Dept exemptions\", \"type\": \"stringArray\", \"default\": [ \"国内销售\", \"服务测试部-调试\" ], \"paths\": [ \"rules[2].when.department_not_contains\", \"rules[3].when.department_not_contains\" ] } ], \"rules\": [ { \"id\": \"overtime_approval_no_punch_warning\", \"when\": { \"approval_contains\": \"加班\", \"has_punch\": false }, \"then\": { \"warning\": \"有加班单但未打卡\" } }, { \"id\": \"trip_and_overtime_warning\", \"when\": { \"exceptionReason_contains\": \"出差\", \"overtime_hours_gt\": 0 }, \"then\": { \"warning\": \"出差同时存在加班工时，请核对\" } }, { \"id\": \"trip_low_hours_warning\", \"when\": { \"exceptionReason_contains\": \"出差\", \"shift_not_contains\": \"休息\", \"actual_hours_lt\": 8, \"department_not_contains\": [ \"国内销售\", \"服务测试部-调试\" ] }, \"then\": { \"warning\": \"出差当天实际工时不足8小时，请核对\" } }, { \"id\": \"leave_low_hours_warning\", \"when\": { \"exceptionReason_contains\": [ \"事假\", \"病假\", \"工伤假\" ], \"shift_not_contains\": \"休息\", \"actual_hours_lt\": 8, \"department_not_contains\": [ \"国内销售\", \"服务测试部-调试\" ] }, \"then\": { \"warning\": \"请假当天实际工时不足8小时，请核对\" } }, { \"id\": \"leave_makeup_missing_punch_warning\", \"when\": { \"exceptionReason_contains\": [ \"缺卡\", \"补卡\" ], \"clockIn2_exists\": false }, \"then\": { \"warning\": \"缺卡且补卡，但未找到上班2打卡，请核对\" } }, { \"id\": \"trip_and_leave_conflict_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"事假\" ] }, \"then\": { \"warning\": \"出差+事假请核对\" } }, { \"id\": \"trip_and_sick_conflict_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"病假\" ] }, \"then\": { \"warning\": \"出差+病假请核对\" } }, { \"id\": \"trip_and_injury_conflict_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"工伤假\" ] }, \"then\": { \"warning\": \"出差+工伤假请核对\" } } ] }, { \"name\": \"标准上下班提醒\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"lateAfter\", \"label\": \"Late after (HH:MM)\", \"type\": \"string\", \"default\": \"09:10\", \"paths\": [ \"rules[0].when.clockIn1_after\" ] }, { \"key\": \"earlyBefore\", \"label\": \"Leave before (HH:MM)\", \"type\": \"string\", \"default\": \"17:50\", \"paths\": [ \"rules[1].when.clockOut1_before\" ] }, { \"key\": \"lateWarning\", \"label\": \"Late warning text\", \"type\": \"string\", \"default\": \"迟到，请核对\", \"paths\": [ \"rules[0].then.warning\" ] }, { \"key\": \"earlyWarning\", \"label\": \"Early leave warning text\", \"type\": \"string\", \"default\": \"早退，请核对\", \"paths\": [ \"rules[1].then.warning\" ] } ], \"rules\": [ { \"id\": \"late_after_warning\", \"when\": { \"clockIn1_after\": \"09:10\" }, \"then\": { \"warning\": \"迟到，请核对\" } }, { \"id\": \"early_leave_warning\", \"when\": { \"clockOut1_before\": \"17:50\" }, \"then\": { \"warning\": \"早退，请核对\" } } ] }, { \"name\": \"缺卡补卡核对\", \"category\": \"system\", \"editable\": false, \"rules\": [ { \"id\": \"missing_checkout_warning\", \"when\": { \"clockIn1_exists\": true, \"clockOut1_exists\": false }, \"then\": { \"warning\": \"缺少下班卡\" } }, { \"id\": \"missing_checkin_warning\", \"when\": { \"clockIn1_exists\": false, \"clockOut1_exists\": true }, \"then\": { \"warning\": \"缺少上班卡\" } }, { \"id\": \"makeup_missing_second_in\", \"when\": { \"exceptionReason_contains_any\": [ \"补卡\", \"缺卡\" ], \"clockIn2_exists\": false }, \"then\": { \"warning\": \"缺卡/补卡但未找到上班2打卡\" } } ] }, { \"name\": \"休息日加班\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"restOvertimeHours\", \"label\": \"Rest day overtime (hours)\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[0].then.overtime_hours\" ] }, { \"key\": \"restReason\", \"label\": \"Reason text\", \"type\": \"string\", \"default\": \"休息日打卡算加班\", \"paths\": [ \"rules[0].then.reason\" ] } ], \"rules\": [ { \"id\": \"rest_day_punch_overtime\", \"when\": { \"shift_contains\": \"休息\", \"has_punch\": true }, \"then\": { \"overtime_hours\": 8, \"reason\": \"休息日打卡算加班\" } } ] }, { \"name\": \"节假日首日基准工时\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"holidayFirstDayHours\", \"label\": \"Holiday first-day hours\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[0].then.actual_hours\", \"rules[0].then.required_hours\" ] }, { \"key\": \"holidayFirstDayWarning\", \"label\": \"Warning text\", \"type\": \"string\", \"default\": \"节假日首日按8小时\", \"paths\": [ \"rules[0].then.warning\" ] } ], \"rules\": [ { \"id\": \"holiday-default-8h\", \"when\": { \"is_holiday\": true, \"holiday_first_day\": true, \"holiday_policy_enabled\": false }, \"then\": { \"actual_hours\": 8, \"required_hours\": 8, \"warning\": \"节假日首日按8小时\" } } ] }, { \"name\": \"角色规则\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"securityBaseHours\", \"label\": \"Security base hours\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[0].then.required_hours\" ] }, { \"key\": \"securityHolidayOvertime\", \"label\": \"Security holiday overtime (hours)\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[1].then.overtime_hours\" ] }, { \"key\": \"driverRestOvertime\", \"label\": \"Driver rest overtime (hours)\", \"type\": \"number\", \"default\": 8, \"paths\": [ \"rules[2].then.overtime_hours\" ] } ], \"scope\": { \"role_tags\": [ \"security\", \"driver\" ] }, \"rules\": [ { \"id\": \"security_base_hours\", \"when\": { \"role\": \"security\" }, \"then\": { \"required_hours\": 8 } }, { \"id\": \"security_holiday_overtime\", \"when\": { \"role\": \"security\", \"is_holiday\": true, \"has_punch\": true }, \"then\": { \"overtime_hours\": 8, \"reason\": \"保安节假日算加班\" } }, { \"id\": \"driver_rest_punch_overtime\", \"when\": { \"role\": \"driver\", \"shift\": \"休息\", \"clockIn1_exists\": true }, \"then\": { \"overtime_hours\": 8, \"reason\": \"司机休息日打卡算加班\" } } ] }, { \"name\": \"部门提醒\", \"category\": \"system\", \"editable\": false, \"scope\": { \"department\": [ \"国内销售\", \"服务测试部-调试\" ] }, \"rules\": [ { \"id\": \"trip_and_leave_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"事假\" ] }, \"then\": { \"warning\": \"出差+事假请核对\" } }, { \"id\": \"trip_and_sick_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"病假\" ] }, \"then\": { \"warning\": \"出差+病假请核对\" } }, { \"id\": \"trip_and_injury_warning\", \"when\": { \"exceptionReason_contains\": [ \"出差\", \"工伤假\" ] }, \"then\": { \"warning\": \"出差+工伤假请核对\" } } ] }, { \"name\": \"加班单核对\", \"category\": \"system\", \"editable\": false, \"params\": [ { \"key\": \"lateCheckoutAfter\", \"label\": \"Late checkout after\", \"type\": \"string\", \"default\": \"19:00\", \"paths\": [ \"rules[0].when.clockOut2_after\" ] }, { \"key\": \"lateCheckoutWarning\", \"label\": \"Warning text\", \"type\": \"string\", \"default\": \"下班晚但无加班单\", \"paths\": [ \"rules[0].then.warning\" ] }, { \"key\": \"restPunchWarning\", \"label\": \"Rest punch warning\", \"type\": \"string\", \"default\": \"休息日打卡但无加班单\", \"paths\": [ \"rules[2].then.warning\" ] } ], \"rules\": [ { \"id\": \"late_checkout_without_overtime\", \"when\": { \"clockOut2_after\": \"19:00\", \"overtime_hours_eq\": 0 }, \"then\": { \"warning\": \"下班晚但无加班单\" } }, { \"id\": \"overtime_without_punch\", \"when\": { \"overtime_hours_gt\": 0, \"has_punch\": false }, \"then\": { \"warning\": \"有加班单但未打卡\" } }, { \"id\": \"rest_punch_without_overtime\", \"when\": { \"exceptionReason_contains\": \"休息并打卡\", \"overtime_hours_eq\": 0 }, \"then\": { \"warning\": \"休息日打卡但无加班单\" } } ] }, { \"name\": \"用户自定义\", \"category\": \"custom\", \"editable\": true, \"description\": \"为考勤管理员预留的自定义规则模板\", \"rules\": [] } ]"
+                - generic [ref=e826]:
+                  - generic [ref=e827]: Library templates (JSON)
+                  - textbox "Library templates (JSON)" [ref=e828]:
+                    - /placeholder: "[]"
+                    - text: "[ { \"name\": \"考勤组自定义（示例）\", \"rules\": [ { \"id\": \"group_late_warning\", \"then\": { \"warning\": \"迟到，请核对\" }, \"when\": { \"clockIn1_after\": \"09:10\" } }, { \"id\": \"group_early_leave_warning\", \"then\": { \"warning\": \"早退，请核对\" }, \"when\": { \"clockOut1_before\": \"17:50\" } }, { \"id\": \"leave_with_punch_warning\", \"then\": { \"warning\": \"请假但仍有正常打卡，请核对\" }, \"when\": { \"has_punch\": true, \"leave_hours_gt\": 0 } }, { \"id\": \"leave_and_overtime_warning\", \"then\": { \"warning\": \"请假且存在加班工时，请核对\" }, \"when\": { \"leave_hours_gt\": 0, \"overtime_hours_gt\": 0 } } ], \"scope\": { \"attendance_group\": [ \"单休车间\" ] }, \"params\": [ { \"key\": \"groupName\", \"type\": \"string\", \"label\": \"Attendance group\", \"paths\": [ \"scope.attendance_group[0]\" ], \"default\": \"单休车间\" }, { \"key\": \"lateAfter\", \"type\": \"string\", \"label\": \"Late after (HH:MM)\", \"paths\": [ \"rules[0].when.clockIn1_after\" ], \"default\": \"09:10\" }, { \"key\": \"earlyBefore\", \"type\": \"string\", \"label\": \"Leave before (HH:MM)\", \"paths\": [ \"rules[1].when.clockOut1_before\" ], \"default\": \"17:50\" } ], \"category\": \"custom\", \"editable\": true, \"description\": \"按考勤组配置的自定义规则示例，可按需调整\" } ]"
+              - generic [ref=e829]:
+                - button "Copy system to library" [ref=e830] [cursor=pointer]
+                - button "Save library" [ref=e831] [cursor=pointer]
+              - generic [ref=e832]:
+                - heading "Template Versions" [level=5] [ref=e834]
+                - generic [ref=e835]: No versions yet.
+            - generic [ref=e836]:
+              - generic [ref=e837]:
+                - heading "Attendance groups" [level=4] [ref=e838]
+                - button "Reload groups" [ref=e839] [cursor=pointer]
+              - generic [ref=e840]:
+                - generic [ref=e841]:
+                  - generic [ref=e842]: Name
+                  - textbox "Name" [ref=e843]
+                - generic [ref=e844]:
+                  - generic [ref=e845]: Code
+                  - textbox "Code" [ref=e846]:
+                    - /placeholder: optional
+                - generic [ref=e847]:
+                  - generic [ref=e848]: Timezone
+                  - textbox "Timezone" [ref=e849]: Asia/Shanghai
+                - generic [ref=e850]:
+                  - generic [ref=e851]: Rule set
+                  - combobox "Rule set" [ref=e852]:
+                    - option "(Optional) Use default rule" [selected]
+                    - option "考勤规则-正式"
+                    - option "E2E Rule Set"
+                    - option "Default Rule Set"
+                - generic [ref=e853]:
+                  - generic [ref=e854]: Description
+                  - textbox "Description" [ref=e855]
+              - generic [ref=e856]:
+                - button "Create group" [ref=e857] [cursor=pointer]
+                - button "Reset" [ref=e858] [cursor=pointer]
+              - table [ref=e860]:
+                - rowgroup [ref=e861]:
+                  - row "Name Code Timezone Rule set Actions" [ref=e862]:
+                    - columnheader "Name" [ref=e863]
+                    - columnheader "Code" [ref=e864]
+                    - columnheader "Timezone" [ref=e865]
+                    - columnheader "Rule set" [ref=e866]
+                    - columnheader "Actions" [ref=e867]
+                - rowgroup [ref=e868]:
+                  - row "单双休 - Asia/Shanghai Default Edit Delete" [ref=e869]:
+                    - cell "单双休" [ref=e870]
+                    - cell "-" [ref=e871]
+                    - cell "Asia/Shanghai" [ref=e872]
+                    - cell "Default" [ref=e873]
+                    - cell "Edit Delete" [ref=e874]:
+                      - button "Edit" [ref=e875] [cursor=pointer]
+                      - button "Delete" [ref=e876] [cursor=pointer]
+                  - row "单休车间 - Asia/Shanghai Default Edit Delete" [ref=e877]:
+                    - cell "单休车间" [ref=e878]
+                    - cell "-" [ref=e879]
+                    - cell "Asia/Shanghai" [ref=e880]
+                    - cell "Default" [ref=e881]
+                    - cell "Edit Delete" [ref=e882]:
+                      - button "Edit" [ref=e883] [cursor=pointer]
+                      - button "Delete" [ref=e884] [cursor=pointer]
+            - generic [ref=e885]:
+              - generic [ref=e886]:
+                - heading "Group members" [level=4] [ref=e887]
+                - button "Reload members" [ref=e888] [cursor=pointer]
+              - generic [ref=e889]:
+                - generic [ref=e890]:
+                  - generic [ref=e891]: Group
+                  - combobox "Group" [ref=e892]:
+                    - option "Select a group"
+                    - option "单双休" [selected]
+                    - option "单休车间"
+                - generic [ref=e893]:
+                  - generic [ref=e894]: User IDs
+                  - textbox "User IDs Separate multiple IDs with commas or spaces." [ref=e895]:
+                    - /placeholder: userId1, userId2
+                  - generic [ref=e896]: Separate multiple IDs with commas or spaces.
+              - button "Add members" [ref=e898] [cursor=pointer]
+              - table [ref=e900]:
+                - rowgroup [ref=e901]:
+                  - row "User ID Joined Actions" [ref=e902]:
+                    - columnheader "User ID" [ref=e903]
+                    - columnheader "Joined" [ref=e904]
+                    - columnheader "Actions" [ref=e905]
+                - rowgroup [ref=e906]:
+                  - row "0613271732687725 2026/2/6 11:35:10 Remove" [ref=e907]:
+                    - cell "0613271732687725" [ref=e908]
+                    - cell "2026/2/6 11:35:10" [ref=e909]
+                    - cell "Remove" [ref=e910]:
+                      - button "Remove" [ref=e911] [cursor=pointer]
+                  - row "09141829115765 2026/2/6 11:35:10 Remove" [ref=e912]:
+                    - cell "09141829115765" [ref=e913]
+                    - cell "2026/2/6 11:35:10" [ref=e914]
+                    - cell "Remove" [ref=e915]:
+                      - button "Remove" [ref=e916] [cursor=pointer]
+                  - row "16765062440825131 2026/2/6 11:35:10 Remove" [ref=e917]:
+                    - cell "16765062440825131" [ref=e918]
+                    - cell "2026/2/6 11:35:10" [ref=e919]
+                    - cell "Remove" [ref=e920]:
+                      - button "Remove" [ref=e921] [cursor=pointer]
+                  - row "16778031191121446 2026/2/6 11:35:10 Remove" [ref=e922]:
+                    - cell "16778031191121446" [ref=e923]
+                    - cell "2026/2/6 11:35:10" [ref=e924]
+                    - cell "Remove" [ref=e925]:
+                      - button "Remove" [ref=e926] [cursor=pointer]
+                  - row "16981337605592269 2026/2/6 11:35:10 Remove" [ref=e927]:
+                    - cell "16981337605592269" [ref=e928]
+                    - cell "2026/2/6 11:35:10" [ref=e929]
+                    - cell "Remove" [ref=e930]:
+                      - button "Remove" [ref=e931] [cursor=pointer]
+                  - row "2847424523311549 2026/2/6 11:35:10 Remove" [ref=e932]:
+                    - cell "2847424523311549" [ref=e933]
+                    - cell "2026/2/6 11:35:10" [ref=e934]
+                    - cell "Remove" [ref=e935]:
+                      - button "Remove" [ref=e936] [cursor=pointer]
+            - generic [ref=e937]:
+              - generic [ref=e938]:
+                - heading "Import (DingTalk / Manual)" [level=4] [ref=e939]
+                - button "Load template" [ref=e940] [cursor=pointer]
+              - generic [ref=e941]:
+                - generic [ref=e942]:
+                  - generic [ref=e943]: Rule set
+                  - combobox "Rule set" [ref=e944]:
+                    - option "(Optional) Use default rule" [selected]
+                    - option "考勤规则-正式"
+                    - option "E2E Rule Set"
+                    - option "Default Rule Set"
+                - generic [ref=e945]:
+                  - generic [ref=e946]: Mapping profile
+                  - combobox "Mapping profile" [disabled] [ref=e947]:
+                    - option "(Optional) Select profile" [selected]
+                - generic [ref=e948]:
+                  - generic [ref=e949]: CSV file (optional)
+                  - button "CSV file (optional)" [ref=e950]
+                - generic [ref=e951]:
+                  - generic [ref=e952]: CSV header row
+                  - spinbutton "CSV header row" [ref=e953]
+                - generic [ref=e954]:
+                  - generic [ref=e955]: CSV delimiter
+                  - textbox "CSV delimiter" [ref=e956]:
+                    - /placeholder: ","
+                    - text: ","
+                - generic [ref=e957]:
+                  - generic [ref=e958]: User map JSON (optional)
+                  - button "User map JSON (optional)" [ref=e959]
+                - generic [ref=e960]:
+                  - generic [ref=e961]: User map key field
+                  - textbox "User map key field" [ref=e962]:
+                    - /placeholder: 工号
+                - generic [ref=e963]:
+                  - generic [ref=e964]: User map source fields
+                  - textbox "User map source fields" [ref=e965]:
+                    - /placeholder: empNo,工号,姓名
+                - generic [ref=e966]:
+                  - generic [ref=e967]: Auto-create groups
+                  - checkbox "Auto-create groups" [ref=e968]
+                - generic [ref=e969]:
+                  - generic [ref=e970]: Auto-assign group members
+                  - checkbox "Auto-assign group members" [ref=e971]
+                - generic [ref=e972]:
+                  - generic [ref=e973]: Group rule set
+                  - combobox "Group rule set" [ref=e974]:
+                    - option "(Optional) Use import rule set" [selected]
+                    - option "考勤规则-正式"
+                    - option "E2E Rule Set"
+                    - option "Default Rule Set"
+                - generic [ref=e975]:
+                  - generic [ref=e976]: Group timezone (optional)
+                  - textbox "Group timezone (optional)" [ref=e977]:
+                    - /placeholder: Asia/Shanghai
+                - generic [ref=e978]:
+                  - generic [ref=e979]: User ID
+                  - textbox "User ID" [ref=e980]:
+                    - /placeholder: Required if not in payload
+                - generic [ref=e981]:
+                  - generic [ref=e982]: Timezone
+                  - textbox "Timezone" [ref=e983]: Asia/Shanghai
+                - generic [ref=e984]:
+                  - generic [ref=e985]: Payload (JSON)
+                  - 'textbox "Payload (JSON) Default import mode is override (same user/date will be overwritten). Use mode: \\\"merge\\\" in payload if needed." [ref=e986]':
+                    - /placeholder: "{\\\"source\\\":\\\"dingtalk\\\",\\\"userId\\\":\\\"...\\\",\\\"columns\\\":[],\\\"data\\\":{}}"
+                    - text: "{}"
+                  - generic [ref=e987]:
+                    - text: Default import mode is
+                    - strong [ref=e988]: override
+                    - text: (same user/date will be overwritten). Use
+                    - code [ref=e989]: "mode: \\\"merge\\\""
+                    - text: in payload if needed.
+              - generic [ref=e990]:
+                - button "Load CSV" [ref=e991] [cursor=pointer]
+                - button "Apply profile" [ref=e992] [cursor=pointer]
+                - button "Preview" [ref=e993] [cursor=pointer]
+                - button "Import" [ref=e994] [cursor=pointer]
+              - generic [ref=e995]: No preview data.
+              - generic [ref=e996]:
+                - heading "Import batches" [level=4] [ref=e997]
+                - button "Reload batches" [ref=e998] [cursor=pointer]
+              - table [ref=e1000]:
+                - rowgroup [ref=e1001]:
+                  - row "Batch Status Rows Source Rule set Created Actions" [ref=e1002]:
+                    - columnheader "Batch" [ref=e1003]
+                    - columnheader "Status" [ref=e1004]
+                    - columnheader "Rows" [ref=e1005]
+                    - columnheader "Source" [ref=e1006]
+                    - columnheader "Rule set" [ref=e1007]
+                    - columnheader "Created" [ref=e1008]
+                    - columnheader "Actions" [ref=e1009]
+                - rowgroup [ref=e1010]:
+                  - row "19b85d71 rolled_back 1 manual Default 2026/2/5 09:55:50 View items Rollback" [ref=e1011]:
+                    - cell "19b85d71" [ref=e1012]
+                    - cell "rolled_back" [ref=e1013]
+                    - cell "1" [ref=e1014]
+                    - cell "manual" [ref=e1015]
+                    - cell "Default" [ref=e1016]
+                    - cell "2026/2/5 09:55:50" [ref=e1017]
+                    - cell "View items Rollback" [ref=e1018]:
+                      - button "View items" [ref=e1019] [cursor=pointer]
+                      - button "Rollback" [ref=e1020] [cursor=pointer]
+                  - row "9f879dad rolled_back 1 manual Default 2026/2/5 09:42:18 View items Rollback" [ref=e1021]:
+                    - cell "9f879dad" [ref=e1022]
+                    - cell "rolled_back" [ref=e1023]
+                    - cell "1" [ref=e1024]
+                    - cell "manual" [ref=e1025]
+                    - cell "Default" [ref=e1026]
+                    - cell "2026/2/5 09:42:18" [ref=e1027]
+                    - cell "View items Rollback" [ref=e1028]:
+                      - button "View items" [ref=e1029] [cursor=pointer]
+                      - button "Rollback" [ref=e1030] [cursor=pointer]
+                  - row "c4609455 rolled_back 11966 dingtalk_csv Default 2026/2/5 09:38:51 View items Rollback" [ref=e1031]:
+                    - cell "c4609455" [ref=e1032]
+                    - cell "rolled_back" [ref=e1033]
+                    - cell "11966" [ref=e1034]
+                    - cell "dingtalk_csv" [ref=e1035]
+                    - cell "Default" [ref=e1036]
+                    - cell "2026/2/5 09:38:51" [ref=e1037]
+                    - cell "View items Rollback" [ref=e1038]:
+                      - button "View items" [ref=e1039] [cursor=pointer]
+                      - button "Rollback" [ref=e1040] [cursor=pointer]
+                  - row "78b8c082 rolled_back 1 dingtalk_csv Default 2026/2/5 00:58:55 View items Rollback" [ref=e1041]:
+                    - cell "78b8c082" [ref=e1042]
+                    - cell "rolled_back" [ref=e1043]
+                    - cell "1" [ref=e1044]
+                    - cell "dingtalk_csv" [ref=e1045]
+                    - cell "Default" [ref=e1046]
+                    - cell "2026/2/5 00:58:55" [ref=e1047]
+                    - cell "View items Rollback" [ref=e1048]:
+                      - button "View items" [ref=e1049] [cursor=pointer]
+                      - button "Rollback" [ref=e1050] [cursor=pointer]
+                  - row "583a8875 rolled_back 1 dingtalk_csv Default 2026/2/5 00:55:26 View items Rollback" [ref=e1051]:
+                    - cell "583a8875" [ref=e1052]
+                    - cell "rolled_back" [ref=e1053]
+                    - cell "1" [ref=e1054]
+                    - cell "dingtalk_csv" [ref=e1055]
+                    - cell "Default" [ref=e1056]
+                    - cell "2026/2/5 00:55:26" [ref=e1057]
+                    - cell "View items Rollback" [ref=e1058]:
+                      - button "View items" [ref=e1059] [cursor=pointer]
+                      - button "Rollback" [ref=e1060] [cursor=pointer]
+                  - row "c9fc465a rolled_back 1 dingtalk_csv Default 2026/2/5 00:38:34 View items Rollback" [ref=e1061]:
+                    - cell "c9fc465a" [ref=e1062]
+                    - cell "rolled_back" [ref=e1063]
+                    - cell "1" [ref=e1064]
+                    - cell "dingtalk_csv" [ref=e1065]
+                    - cell "Default" [ref=e1066]
+                    - cell "2026/2/5 00:38:34" [ref=e1067]
+                    - cell "View items Rollback" [ref=e1068]:
+                      - button "View items" [ref=e1069] [cursor=pointer]
+                      - button "Rollback" [ref=e1070] [cursor=pointer]
+                  - row "6ddeee72 rolled_back 5 csv Default 2026/2/4 20:22:22 View items Rollback" [ref=e1071]:
+                    - cell "6ddeee72" [ref=e1072]
+                    - cell "rolled_back" [ref=e1073]
+                    - cell "5" [ref=e1074]
+                    - cell "csv" [ref=e1075]
+                    - cell "Default" [ref=e1076]
+                    - cell "2026/2/4 20:22:22" [ref=e1077]
+                    - cell "View items Rollback" [ref=e1078]:
+                      - button "View items" [ref=e1079] [cursor=pointer]
+                      - button "Rollback" [ref=e1080] [cursor=pointer]
+                  - row "b16ff6aa committed 11966 dingtalk_csv Default 2026/2/4 11:57:28 View items Rollback" [ref=e1081]:
+                    - cell "b16ff6aa" [ref=e1082]
+                    - cell "committed" [ref=e1083]
+                    - cell "11966" [ref=e1084]
+                    - cell "dingtalk_csv" [ref=e1085]
+                    - cell "Default" [ref=e1086]
+                    - cell "2026/2/4 11:57:28" [ref=e1087]
+                    - cell "View items Rollback" [ref=e1088]:
+                      - button "View items" [ref=e1089] [cursor=pointer]
+                      - button "Rollback" [ref=e1090] [cursor=pointer]
+                  - row "f9356925 rolled_back 11966 dingtalk_csv Default 2026/2/4 11:55:55 View items Rollback" [ref=e1091]:
+                    - cell "f9356925" [ref=e1092]
+                    - cell "rolled_back" [ref=e1093]
+                    - cell "11966" [ref=e1094]
+                    - cell "dingtalk_csv" [ref=e1095]
+                    - cell "Default" [ref=e1096]
+                    - cell "2026/2/4 11:55:55" [ref=e1097]
+                    - cell "View items Rollback" [ref=e1098]:
+                      - button "View items" [ref=e1099] [cursor=pointer]
+                      - button "Rollback" [ref=e1100] [cursor=pointer]
+                  - row "ee57096c rolled_back 11966 dingtalk_csv Default 2026/2/4 11:21:42 View items Rollback" [ref=e1101]:
+                    - cell "ee57096c" [ref=e1102]
+                    - cell "rolled_back" [ref=e1103]
+                    - cell "11966" [ref=e1104]
+                    - cell "dingtalk_csv" [ref=e1105]
+                    - cell "Default" [ref=e1106]
+                    - cell "2026/2/4 11:21:42" [ref=e1107]
+                    - cell "View items Rollback" [ref=e1108]:
+                      - button "View items" [ref=e1109] [cursor=pointer]
+                      - button "Rollback" [ref=e1110] [cursor=pointer]
+                  - row "c2211020 rolled_back 1 manual Default 2026/2/4 10:43:59 View items Rollback" [ref=e1111]:
+                    - cell "c2211020" [ref=e1112]
+                    - cell "rolled_back" [ref=e1113]
+                    - cell "1" [ref=e1114]
+                    - cell "manual" [ref=e1115]
+                    - cell "Default" [ref=e1116]
+                    - cell "2026/2/4 10:43:59" [ref=e1117]
+                    - cell "View items Rollback" [ref=e1118]:
+                      - button "View items" [ref=e1119] [cursor=pointer]
+                      - button "Rollback" [ref=e1120] [cursor=pointer]
+                  - row "495b928e committed 11966 dingtalk_csv 考勤规则-正式 2026/2/3 23:54:50 View items Rollback" [ref=e1121]:
+                    - cell "495b928e" [ref=e1122]
+                    - cell "committed" [ref=e1123]
+                    - cell "11966" [ref=e1124]
+                    - cell "dingtalk_csv" [ref=e1125]
+                    - cell "考勤规则-正式" [ref=e1126]
+                    - cell "2026/2/3 23:54:50" [ref=e1127]
+                    - cell "View items Rollback" [ref=e1128]:
+                      - button "View items" [ref=e1129] [cursor=pointer]
+                      - button "Rollback" [ref=e1130] [cursor=pointer]
+                  - row "ff82c0d3 rolled_back 11966 dingtalk_csv Default 2026/2/3 23:48:48 View items Rollback" [ref=e1131]:
+                    - cell "ff82c0d3" [ref=e1132]
+                    - cell "rolled_back" [ref=e1133]
+                    - cell "11966" [ref=e1134]
+                    - cell "dingtalk_csv" [ref=e1135]
+                    - cell "Default" [ref=e1136]
+                    - cell "2026/2/3 23:48:48" [ref=e1137]
+                    - cell "View items Rollback" [ref=e1138]:
+                      - button "View items" [ref=e1139] [cursor=pointer]
+                      - button "Rollback" [ref=e1140] [cursor=pointer]
+            - generic [ref=e1141]:
+              - generic [ref=e1142]:
+                - heading "Payroll Templates" [level=4] [ref=e1143]
+                - button "Reload templates" [ref=e1144] [cursor=pointer]
+              - generic [ref=e1145]:
+                - generic [ref=e1146]:
+                  - generic [ref=e1147]: Name
+                  - textbox "Name" [ref=e1148]
+                - generic [ref=e1149]:
+                  - generic [ref=e1150]: Timezone
+                  - textbox "Timezone" [ref=e1151]: Asia/Shanghai
+                - generic [ref=e1152]:
+                  - generic [ref=e1153]: Start day
+                  - spinbutton "Start day" [ref=e1154]: "1"
+                - generic [ref=e1155]:
+                  - generic [ref=e1156]: End day
+                  - spinbutton "End day" [ref=e1157]: "30"
+                - generic [ref=e1158]:
+                  - generic [ref=e1159]: End month offset
+                  - combobox "End month offset" [ref=e1160]:
+                    - option "Same month" [selected]
+                    - option "Next month"
+                - generic [ref=e1161]:
+                  - generic [ref=e1162]: Auto generate
+                  - checkbox "Auto generate" [checked] [ref=e1163]
+                - generic [ref=e1164]:
+                  - generic [ref=e1165]: Default
+                  - checkbox "Default" [ref=e1166]
+                - generic [ref=e1167]:
+                  - generic [ref=e1168]: Config (JSON)
+                  - textbox "Config (JSON)" [ref=e1169]:
+                    - /placeholder: "{}"
+                    - text: "{}"
+              - button "Create template" [ref=e1171] [cursor=pointer]
+              - table [ref=e1173]:
+                - rowgroup [ref=e1174]:
+                  - row "Name Timezone Start End Offset Default Actions" [ref=e1175]:
+                    - columnheader "Name" [ref=e1176]
+                    - columnheader "Timezone" [ref=e1177]
+                    - columnheader "Start" [ref=e1178]
+                    - columnheader "End" [ref=e1179]
+                    - columnheader "Offset" [ref=e1180]
+                    - columnheader "Default" [ref=e1181]
+                    - columnheader "Actions" [ref=e1182]
+                - rowgroup [ref=e1183]:
+                  - row "CN Payroll 26-25 Asia/Shanghai 26 25 1 Yes Edit Delete" [ref=e1184]:
+                    - cell "CN Payroll 26-25" [ref=e1185]
+                    - cell "Asia/Shanghai" [ref=e1186]
+                    - cell "26" [ref=e1187]
+                    - cell "25" [ref=e1188]
+                    - cell "1" [ref=e1189]
+                    - cell "Yes" [ref=e1190]
+                    - cell "Edit Delete" [ref=e1191]:
+                      - button "Edit" [ref=e1192] [cursor=pointer]
+                      - button "Delete" [ref=e1193] [cursor=pointer]
+                  - row "E2E Payroll Template Asia/Shanghai 26 25 1 No Edit Delete" [ref=e1194]:
+                    - cell "E2E Payroll Template" [ref=e1195]
+                    - cell "Asia/Shanghai" [ref=e1196]
+                    - cell "26" [ref=e1197]
+                    - cell "25" [ref=e1198]
+                    - cell "1" [ref=e1199]
+                    - cell "No" [ref=e1200]
+                    - cell "Edit Delete" [ref=e1201]:
+                      - button "Edit" [ref=e1202] [cursor=pointer]
+                      - button "Delete" [ref=e1203] [cursor=pointer]
+                  - row "Monthly Payroll UTC 25 6 1 No Edit Delete" [ref=e1204]:
+                    - cell "Monthly Payroll" [ref=e1205]
+                    - cell "UTC" [ref=e1206]
+                    - cell "25" [ref=e1207]
+                    - cell "6" [ref=e1208]
+                    - cell "1" [ref=e1209]
+                    - cell "No" [ref=e1210]
+                    - cell "Edit Delete" [ref=e1211]:
+                      - button "Edit" [ref=e1212] [cursor=pointer]
+                      - button "Delete" [ref=e1213] [cursor=pointer]
+            - generic [ref=e1214]:
+              - generic [ref=e1215]:
+                - heading "Payroll Cycles" [level=4] [ref=e1216]
+                - button "Reload cycles" [ref=e1217] [cursor=pointer]
+              - generic [ref=e1218]:
+                - generic [ref=e1219]:
+                  - generic [ref=e1220]: Template
+                  - combobox "Template" [ref=e1221]:
+                    - option "Manual" [selected]
+                    - option "CN Payroll 26-25"
+                    - option "E2E Payroll Template"
+                    - option "Monthly Payroll"
+                - generic [ref=e1222]:
+                  - generic [ref=e1223]: Name
+                  - textbox "Name" [ref=e1224]:
+                    - /placeholder: Optional
+                - generic [ref=e1225]:
+                  - generic [ref=e1226]: Anchor date
+                  - textbox "Anchor date" [ref=e1227]
+                - generic [ref=e1228]:
+                  - generic [ref=e1229]: Start date
+                  - textbox "Start date" [ref=e1230]
+                - generic [ref=e1231]:
+                  - generic [ref=e1232]: End date
+                  - textbox "End date" [ref=e1233]
+                - generic [ref=e1234]:
+                  - generic [ref=e1235]: Status
+                  - combobox "Status" [ref=e1236]:
+                    - option "Open" [selected]
+                    - option "Closed"
+                    - option "Archived"
+              - generic [ref=e1237]:
+                - button "Create cycle" [ref=e1238] [cursor=pointer]
+                - button "Load summary" [ref=e1239] [cursor=pointer]
+                - button "Export CSV" [ref=e1240] [cursor=pointer]
+              - table [ref=e1242]:
+                - rowgroup [ref=e1243]:
+                  - row "Name Template Start End Status Actions" [ref=e1244]:
+                    - columnheader "Name" [ref=e1245]
+                    - columnheader "Template" [ref=e1246]
+                    - columnheader "Start" [ref=e1247]
+                    - columnheader "End" [ref=e1248]
+                    - columnheader "Status" [ref=e1249]
+                    - columnheader "Actions" [ref=e1250]
+                - rowgroup [ref=e1251]:
+                  - row "CN Payroll 26-25 2026-03-26~2026-04-25 CN Payroll 26-25 2026-03-26T00:00:00.000Z 2026-04-25T00:00:00.000Z open Edit Delete" [ref=e1252]:
+                    - cell "CN Payroll 26-25 2026-03-26~2026-04-25" [ref=e1253]
+                    - cell "CN Payroll 26-25" [ref=e1254]
+                    - cell "2026-03-26T00:00:00.000Z" [ref=e1255]
+                    - cell "2026-04-25T00:00:00.000Z" [ref=e1256]
+                    - cell "open" [ref=e1257]
+                    - cell "Edit Delete" [ref=e1258]:
+                      - button "Edit" [ref=e1259] [cursor=pointer]
+                      - button "Delete" [ref=e1260] [cursor=pointer]
+                  - row "CN Payroll 26-25 2026-02-26~2026-03-25 CN Payroll 26-25 2026-02-26T00:00:00.000Z 2026-03-25T00:00:00.000Z open Edit Delete" [ref=e1261]:
+                    - cell "CN Payroll 26-25 2026-02-26~2026-03-25" [ref=e1262]
+                    - cell "CN Payroll 26-25" [ref=e1263]
+                    - cell "2026-02-26T00:00:00.000Z" [ref=e1264]
+                    - cell "2026-03-25T00:00:00.000Z" [ref=e1265]
+                    - cell "open" [ref=e1266]
+                    - cell "Edit Delete" [ref=e1267]:
+                      - button "Edit" [ref=e1268] [cursor=pointer]
+                      - button "Delete" [ref=e1269] [cursor=pointer]
+                  - row "E2E Cycle E2E Payroll Template 2026-01-26T00:00:00.000Z 2026-02-25T00:00:00.000Z open Edit Delete" [ref=e1270]:
+                    - cell "E2E Cycle" [ref=e1271]
+                    - cell "E2E Payroll Template" [ref=e1272]
+                    - cell "2026-01-26T00:00:00.000Z" [ref=e1273]
+                    - cell "2026-02-25T00:00:00.000Z" [ref=e1274]
+                    - cell "open" [ref=e1275]
+                    - cell "Edit Delete" [ref=e1276]:
+                      - button "Edit" [ref=e1277] [cursor=pointer]
+                      - button "Delete" [ref=e1278] [cursor=pointer]
+                  - row "-- Monthly Payroll 2026-01-25T00:00:00.000Z 2026-02-06T00:00:00.000Z open Edit Delete" [ref=e1279]:
+                    - cell "--" [ref=e1280]
+                    - cell "Monthly Payroll" [ref=e1281]
+                    - cell "2026-01-25T00:00:00.000Z" [ref=e1282]
+                    - cell "2026-02-06T00:00:00.000Z" [ref=e1283]
+                    - cell "open" [ref=e1284]
+                    - cell "Edit Delete" [ref=e1285]:
+                      - button "Edit" [ref=e1286] [cursor=pointer]
+                      - button "Delete" [ref=e1287] [cursor=pointer]
+            - generic [ref=e1288]:
+              - generic [ref=e1289]:
+                - heading "Leave Types" [level=4] [ref=e1290]
+                - button "Reload leave types" [ref=e1291] [cursor=pointer]
+              - generic [ref=e1292]:
+                - generic [ref=e1293]:
+                  - generic [ref=e1294]: Code
+                  - textbox "Code" [ref=e1295]
+                - generic [ref=e1296]:
+                  - generic [ref=e1297]: Name
+                  - textbox "Name" [ref=e1298]
+                - generic [ref=e1299]:
+                  - generic [ref=e1300]: Minutes / day
+                  - spinbutton "Minutes / day" [ref=e1301]: "480"
+                - generic [ref=e1302]:
+                  - generic [ref=e1303]: Requires approval
+                  - checkbox "Requires approval" [checked] [ref=e1304]
+                - generic [ref=e1305]:
+                  - generic [ref=e1306]: Requires attachment
+                  - checkbox "Requires attachment" [ref=e1307]
+                - generic [ref=e1308]:
+                  - generic [ref=e1309]: Active
+                  - checkbox "Active" [checked] [ref=e1310]
+              - button "Create leave type" [ref=e1312] [cursor=pointer]
+              - table [ref=e1314]:
+                - rowgroup [ref=e1315]:
+                  - row "Code Name Approval Attachment Minutes Active Actions" [ref=e1316]:
+                    - columnheader "Code" [ref=e1317]
+                    - columnheader "Name" [ref=e1318]
+                    - columnheader "Approval" [ref=e1319]
+                    - columnheader "Attachment" [ref=e1320]
+                    - columnheader "Minutes" [ref=e1321]
+                    - columnheader "Active" [ref=e1322]
+                    - columnheader "Actions" [ref=e1323]
+                - rowgroup [ref=e1324]:
+                  - row "annual Annual Leave Yes No 480 Yes Edit Delete" [ref=e1325]:
+                    - cell "annual" [ref=e1326]
+                    - cell "Annual Leave" [ref=e1327]
+                    - cell "Yes" [ref=e1328]
+                    - cell "No" [ref=e1329]
+                    - cell "480" [ref=e1330]
+                    - cell "Yes" [ref=e1331]
+                    - cell "Edit Delete" [ref=e1332]:
+                      - button "Edit" [ref=e1333] [cursor=pointer]
+                      - button "Delete" [ref=e1334] [cursor=pointer]
+            - generic [ref=e1335]:
+              - generic [ref=e1336]:
+                - heading "Overtime Rules" [level=4] [ref=e1337]
+                - button "Reload overtime rules" [ref=e1338] [cursor=pointer]
+              - generic [ref=e1339]:
+                - generic [ref=e1340]:
+                  - generic [ref=e1341]: Name
+                  - textbox "Name" [ref=e1342]
+                - generic [ref=e1343]:
+                  - generic [ref=e1344]: Min minutes
+                  - spinbutton "Min minutes" [ref=e1345]: "0"
+                - generic [ref=e1346]:
+                  - generic [ref=e1347]: Rounding
+                  - spinbutton "Rounding" [ref=e1348]: "15"
+                - generic [ref=e1349]:
+                  - generic [ref=e1350]: Max / day
+                  - spinbutton "Max / day" [ref=e1351]: "600"
+                - generic [ref=e1352]:
+                  - generic [ref=e1353]: Requires approval
+                  - checkbox "Requires approval" [checked] [ref=e1354]
+                - generic [ref=e1355]:
+                  - generic [ref=e1356]: Active
+                  - checkbox "Active" [checked] [ref=e1357]
+              - button "Create rule" [ref=e1359] [cursor=pointer]
+              - table [ref=e1361]:
+                - rowgroup [ref=e1362]:
+                  - row "Name Min Rounding Max Approval Active Actions" [ref=e1363]:
+                    - columnheader "Name" [ref=e1364]
+                    - columnheader "Min" [ref=e1365]
+                    - columnheader "Rounding" [ref=e1366]
+                    - columnheader "Max" [ref=e1367]
+                    - columnheader "Approval" [ref=e1368]
+                    - columnheader "Active" [ref=e1369]
+                    - columnheader "Actions" [ref=e1370]
+                - rowgroup [ref=e1371]:
+                  - row "Weekday OT 30 15 600 Yes Yes Edit Delete" [ref=e1372]:
+                    - cell "Weekday OT" [ref=e1373]
+                    - cell "30" [ref=e1374]
+                    - cell "15" [ref=e1375]
+                    - cell "600" [ref=e1376]
+                    - cell "Yes" [ref=e1377]
+                    - cell "Yes" [ref=e1378]
+                    - cell "Edit Delete" [ref=e1379]:
+                      - button "Edit" [ref=e1380] [cursor=pointer]
+                      - button "Delete" [ref=e1381] [cursor=pointer]
+            - generic [ref=e1382]:
+              - generic [ref=e1383]:
+                - heading "Approval Flows" [level=4] [ref=e1384]
+                - button "Reload flows" [ref=e1385] [cursor=pointer]
+              - generic [ref=e1386]:
+                - generic [ref=e1387]:
+                  - generic [ref=e1388]: Name
+                  - textbox "Name" [ref=e1389]
+                - generic [ref=e1390]:
+                  - generic [ref=e1391]: Request type
+                  - combobox "Request type" [ref=e1392]:
+                    - option "Missed check-in"
+                    - option "Missed check-out"
+                    - option "Time correction"
+                    - option "Leave" [selected]
+                    - option "Overtime"
+                - generic [ref=e1393]:
+                  - generic [ref=e1394]: Active
+                  - checkbox "Active" [checked] [ref=e1395]
+                - generic [ref=e1396]:
+                  - generic [ref=e1397]: Steps (JSON)
+                  - textbox "Steps (JSON)" [ref=e1398]:
+                    - /placeholder: "[{\"name\":\"Manager\",\"approverRoleIds\":[\"manager\"]}]"
+              - button "Create flow" [ref=e1400] [cursor=pointer]
+              - generic [ref=e1401]: No approval flows yet.
+            - generic [ref=e1402]:
+              - generic [ref=e1403]:
+                - heading "Rotation Rules" [level=4] [ref=e1404]
+                - button "Reload rotation rules" [ref=e1405] [cursor=pointer]
+              - generic [ref=e1406]:
+                - generic [ref=e1407]:
+                  - generic [ref=e1408]: Name
+                  - textbox "Name" [ref=e1409]
+                - generic [ref=e1410]:
+                  - generic [ref=e1411]: Timezone
+                  - textbox "Timezone" [ref=e1412]: Asia/Shanghai
+                - generic [ref=e1413]:
+                  - generic [ref=e1414]: Shift sequence (IDs)
+                  - textbox "Shift sequence (IDs)" [ref=e1415]:
+                    - /placeholder: shiftId1, shiftId2
+                - generic [ref=e1416]:
+                  - generic [ref=e1417]: Active
+                  - checkbox "Active Active" [checked] [ref=e1418]
+              - button "Create rotation" [ref=e1420] [cursor=pointer]
+              - table [ref=e1422]:
+                - rowgroup [ref=e1423]:
+                  - row "Name Timezone Sequence Active Actions" [ref=e1424]:
+                    - columnheader "Name" [ref=e1425]
+                    - columnheader "Timezone" [ref=e1426]
+                    - columnheader "Sequence" [ref=e1427]
+                    - columnheader "Active" [ref=e1428]
+                    - columnheader "Actions" [ref=e1429]
+                - rowgroup [ref=e1430]:
+                  - row "Test Rotation UTC e7599c2f-48ec-4395-b75d-7f848e90d602 Yes Edit Delete" [ref=e1431]:
+                    - cell "Test Rotation" [ref=e1432]
+                    - cell "UTC" [ref=e1433]
+                    - cell "e7599c2f-48ec-4395-b75d-7f848e90d602" [ref=e1434]
+                    - cell "Yes" [ref=e1435]
+                    - cell "Edit Delete" [ref=e1436]:
+                      - button "Edit" [ref=e1437] [cursor=pointer]
+                      - button "Delete" [ref=e1438] [cursor=pointer]
+                  - row "Test Rotation UTC a9d30cae-c5ee-4eaf-b81e-e97c70b979d3 Yes Edit Delete" [ref=e1439]:
+                    - cell "Test Rotation" [ref=e1440]
+                    - cell "UTC" [ref=e1441]
+                    - cell "a9d30cae-c5ee-4eaf-b81e-e97c70b979d3" [ref=e1442]
+                    - cell "Yes" [ref=e1443]
+                    - cell "Edit Delete" [ref=e1444]:
+                      - button "Edit" [ref=e1445] [cursor=pointer]
+                      - button "Delete" [ref=e1446] [cursor=pointer]
+                  - row "Test Rotation UTC ecde61f7-ff93-4e0c-b6c7-3fe5417eb225 Yes Edit Delete" [ref=e1447]:
+                    - cell "Test Rotation" [ref=e1448]
+                    - cell "UTC" [ref=e1449]
+                    - cell "ecde61f7-ff93-4e0c-b6c7-3fe5417eb225" [ref=e1450]
+                    - cell "Yes" [ref=e1451]
+                    - cell "Edit Delete" [ref=e1452]:
+                      - button "Edit" [ref=e1453] [cursor=pointer]
+                      - button "Delete" [ref=e1454] [cursor=pointer]
+                  - row "Test Rotation UTC ef00bec9-2934-4633-942b-c6e73b53e0a4 Yes Edit Delete" [ref=e1455]:
+                    - cell "Test Rotation" [ref=e1456]
+                    - cell "UTC" [ref=e1457]
+                    - cell "ef00bec9-2934-4633-942b-c6e73b53e0a4" [ref=e1458]
+                    - cell "Yes" [ref=e1459]
+                    - cell "Edit Delete" [ref=e1460]:
+                      - button "Edit" [ref=e1461] [cursor=pointer]
+                      - button "Delete" [ref=e1462] [cursor=pointer]
+            - generic [ref=e1463]:
+              - generic [ref=e1464]:
+                - heading "Rotation Assignments" [level=4] [ref=e1465]
+                - button "Reload rotations" [ref=e1466] [cursor=pointer]
+              - generic [ref=e1467]:
+                - generic [ref=e1468]:
+                  - generic [ref=e1469]: User ID
+                  - textbox "User ID" [ref=e1470]
+                - generic [ref=e1471]:
+                  - generic [ref=e1472]: Rotation rule
+                  - combobox "Rotation rule" [ref=e1473]:
+                    - option "Select rotation" [disabled]
+                    - option "Test Rotation" [selected]
+                    - option "Test Rotation"
+                    - option "Test Rotation"
+                    - option "Test Rotation"
+                - generic [ref=e1474]:
+                  - generic [ref=e1475]: Start date
+                  - textbox "Start date" [ref=e1476]: 2026-02-06
+                - generic [ref=e1477]:
+                  - generic [ref=e1478]: End date
+                  - textbox "End date" [ref=e1479]
+                - generic [ref=e1480]:
+                  - generic [ref=e1481]: Active
+                  - checkbox [checked] [ref=e1482]
+              - button "Create assignment" [ref=e1484] [cursor=pointer]
+              - table [ref=e1486]:
+                - rowgroup [ref=e1487]:
+                  - row "User Rotation Start End Active Actions" [ref=e1488]:
+                    - columnheader "User" [ref=e1489]
+                    - columnheader "Rotation" [ref=e1490]
+                    - columnheader "Start" [ref=e1491]
+                    - columnheader "End" [ref=e1492]
+                    - columnheader "Active" [ref=e1493]
+                    - columnheader "Actions" [ref=e1494]
+                - rowgroup [ref=e1495]:
+                  - row "attendance-test Test Rotation 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1496]:
+                    - cell "attendance-test" [ref=e1497]
+                    - cell "Test Rotation" [ref=e1498]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1499]
+                    - cell "--" [ref=e1500]
+                    - cell "Yes" [ref=e1501]
+                    - cell "Edit Delete" [ref=e1502]:
+                      - button "Edit" [ref=e1503] [cursor=pointer]
+                      - button "Delete" [ref=e1504] [cursor=pointer]
+                  - row "attendance-test Test Rotation 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1505]:
+                    - cell "attendance-test" [ref=e1506]
+                    - cell "Test Rotation" [ref=e1507]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1508]
+                    - cell "--" [ref=e1509]
+                    - cell "Yes" [ref=e1510]
+                    - cell "Edit Delete" [ref=e1511]:
+                      - button "Edit" [ref=e1512] [cursor=pointer]
+                      - button "Delete" [ref=e1513] [cursor=pointer]
+                  - row "attendance-test Test Rotation 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1514]:
+                    - cell "attendance-test" [ref=e1515]
+                    - cell "Test Rotation" [ref=e1516]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1517]
+                    - cell "--" [ref=e1518]
+                    - cell "Yes" [ref=e1519]
+                    - cell "Edit Delete" [ref=e1520]:
+                      - button "Edit" [ref=e1521] [cursor=pointer]
+                      - button "Delete" [ref=e1522] [cursor=pointer]
+                  - row "attendance-test Test Rotation 2026-01-28T00:00:00.000Z -- Yes Edit Delete" [ref=e1523]:
+                    - cell "attendance-test" [ref=e1524]
+                    - cell "Test Rotation" [ref=e1525]
+                    - cell "2026-01-28T00:00:00.000Z" [ref=e1526]
+                    - cell "--" [ref=e1527]
+                    - cell "Yes" [ref=e1528]
+                    - cell "Edit Delete" [ref=e1529]:
+                      - button "Edit" [ref=e1530] [cursor=pointer]
+                      - button "Delete" [ref=e1531] [cursor=pointer]
+            - generic [ref=e1532]:
+              - generic [ref=e1533]:
+                - heading "Shifts" [level=4] [ref=e1534]
+                - button "Reload shifts" [ref=e1535] [cursor=pointer]
+              - generic [ref=e1536]:
+                - generic [ref=e1537]:
+                  - generic [ref=e1538]: Name
+                  - textbox "Name" [ref=e1539]: Standard Shift
+                - generic [ref=e1540]:
+                  - generic [ref=e1541]: Timezone
+                  - textbox "Timezone" [ref=e1542]: Asia/Shanghai
+                - generic [ref=e1543]:
+                  - generic [ref=e1544]: Work start
+                  - textbox "Work start" [ref=e1545]: 09:00
+                - generic [ref=e1546]:
+                  - generic [ref=e1547]: Work end
+                  - textbox "Work end" [ref=e1548]: 18:00
+                - generic [ref=e1549]:
+                  - generic [ref=e1550]: Late grace (min)
+                  - spinbutton "Late grace (min)" [ref=e1551]: "10"
+                - generic [ref=e1552]:
+                  - generic [ref=e1553]: Early grace (min)
+                  - spinbutton "Early grace (min)" [ref=e1554]: "10"
+                - generic [ref=e1555]:
+                  - generic [ref=e1556]: Rounding (min)
+                  - spinbutton "Rounding (min)" [ref=e1557]: "5"
+                - generic [ref=e1558]:
+                  - generic [ref=e1559]: Working days (0-6)
+                  - textbox "Working days (0-6)" [ref=e1560]:
+                    - /placeholder: 1,2,3,4,5
+                    - text: 1,2,3,4,5
+              - button "Create shift" [ref=e1562] [cursor=pointer]
+              - table [ref=e1564]:
+                - rowgroup [ref=e1565]:
+                  - row "Name Timezone Start End Working days Actions" [ref=e1566]:
+                    - columnheader "Name" [ref=e1567]
+                    - columnheader "Timezone" [ref=e1568]
+                    - columnheader "Start" [ref=e1569]
+                    - columnheader "End" [ref=e1570]
+                    - columnheader "Working days" [ref=e1571]
+                    - columnheader "Actions" [ref=e1572]
+                - rowgroup [ref=e1573]:
+                  - row "Test Shift UTC 09:00:00 18:00:00 1,2,3,4,5 Edit Delete" [ref=e1574]:
+                    - cell "Test Shift" [ref=e1575]
+                    - cell "UTC" [ref=e1576]
+                    - cell "09:00:00" [ref=e1577]
+                    - cell "18:00:00" [ref=e1578]
+                    - cell "1,2,3,4,5" [ref=e1579]
+                    - cell "Edit Delete" [ref=e1580]:
+                      - button "Edit" [ref=e1581] [cursor=pointer]
+                      - button "Delete" [ref=e1582] [cursor=pointer]
+                  - row "Test Shift UTC 09:00:00 18:00:00 1,2,3,4,5 Edit Delete" [ref=e1583]:
+                    - cell "Test Shift" [ref=e1584]
+                    - cell "UTC" [ref=e1585]
+                    - cell "09:00:00" [ref=e1586]
+                    - cell "18:00:00" [ref=e1587]
+                    - cell "1,2,3,4,5" [ref=e1588]
+                    - cell "Edit Delete" [ref=e1589]:
+                      - button "Edit" [ref=e1590] [cursor=pointer]
+                      - button "Delete" [ref=e1591] [cursor=pointer]
+                  - row "Test Shift UTC 09:00:00 18:00:00 1,2,3,4,5 Edit Delete" [ref=e1592]:
+                    - cell "Test Shift" [ref=e1593]
+                    - cell "UTC" [ref=e1594]
+                    - cell "09:00:00" [ref=e1595]
+                    - cell "18:00:00" [ref=e1596]
+                    - cell "1,2,3,4,5" [ref=e1597]
+                    - cell "Edit Delete" [ref=e1598]:
+                      - button "Edit" [ref=e1599] [cursor=pointer]
+                      - button "Delete" [ref=e1600] [cursor=pointer]
+                  - row "Test Shift UTC 09:00:00 18:00:00 1,2,3,4,5 Edit Delete" [ref=e1601]:
+                    - cell "Test Shift" [ref=e1602]
+                    - cell "UTC" [ref=e1603]
+                    - cell "09:00:00" [ref=e1604]
+                    - cell "18:00:00" [ref=e1605]
+                    - cell "1,2,3,4,5" [ref=e1606]
+                    - cell "Edit Delete" [ref=e1607]:
+                      - button "Edit" [ref=e1608] [cursor=pointer]
+                      - button "Delete" [ref=e1609] [cursor=pointer]
+            - generic [ref=e1610]:
+              - generic [ref=e1611]:
+                - heading "Assignments" [level=4] [ref=e1612]
+                - button "Reload assignments" [ref=e1613] [cursor=pointer]
+              - generic [ref=e1614]:
+                - generic [ref=e1615]:
+                  - generic [ref=e1616]: User ID
+                  - textbox "User ID" [ref=e1617]
+                - generic [ref=e1618]:
+                  - generic [ref=e1619]: Shift
+                  - combobox "Shift" [ref=e1620]:
+                    - option "Select shift" [disabled]
+                    - option "Test Shift" [selected]
+                    - option "Test Shift"
+                    - option "Test Shift"
+                    - option "Test Shift"
+                - generic [ref=e1621]:
+                  - generic [ref=e1622]: Start date
+                  - textbox "Start date" [ref=e1623]: 2026-02-06
+                - generic [ref=e1624]:
+                  - generic [ref=e1625]: End date
+                  - textbox "End date" [ref=e1626]
+                - generic [ref=e1627]:
+                  - generic [ref=e1628]: Active
+                  - checkbox "Active" [checked] [ref=e1629]
+              - button "Create assignment" [ref=e1631] [cursor=pointer]
+              - table [ref=e1633]:
+                - rowgroup [ref=e1634]:
+                  - row "User Shift Start End Active Actions" [ref=e1635]:
+                    - columnheader "User" [ref=e1636]
+                    - columnheader "Shift" [ref=e1637]
+                    - columnheader "Start" [ref=e1638]
+                    - columnheader "End" [ref=e1639]
+                    - columnheader "Active" [ref=e1640]
+                    - columnheader "Actions" [ref=e1641]
+                - rowgroup [ref=e1642]:
+                  - row "attendance-test Test Shift 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1643]:
+                    - cell "attendance-test" [ref=e1644]
+                    - cell "Test Shift" [ref=e1645]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1646]
+                    - cell "--" [ref=e1647]
+                    - cell "Yes" [ref=e1648]
+                    - cell "Edit Delete" [ref=e1649]:
+                      - button "Edit" [ref=e1650] [cursor=pointer]
+                      - button "Delete" [ref=e1651] [cursor=pointer]
+                  - row "attendance-test Test Shift 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1652]:
+                    - cell "attendance-test" [ref=e1653]
+                    - cell "Test Shift" [ref=e1654]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1655]
+                    - cell "--" [ref=e1656]
+                    - cell "Yes" [ref=e1657]
+                    - cell "Edit Delete" [ref=e1658]:
+                      - button "Edit" [ref=e1659] [cursor=pointer]
+                      - button "Delete" [ref=e1660] [cursor=pointer]
+                  - row "attendance-test Test Shift 2026-01-29T00:00:00.000Z -- Yes Edit Delete" [ref=e1661]:
+                    - cell "attendance-test" [ref=e1662]
+                    - cell "Test Shift" [ref=e1663]
+                    - cell "2026-01-29T00:00:00.000Z" [ref=e1664]
+                    - cell "--" [ref=e1665]
+                    - cell "Yes" [ref=e1666]
+                    - cell "Edit Delete" [ref=e1667]:
+                      - button "Edit" [ref=e1668] [cursor=pointer]
+                      - button "Delete" [ref=e1669] [cursor=pointer]
+                  - row "attendance-test Test Shift 2026-01-28T00:00:00.000Z -- Yes Edit Delete" [ref=e1670]:
+                    - cell "attendance-test" [ref=e1671]
+                    - cell "Test Shift" [ref=e1672]
+                    - cell "2026-01-28T00:00:00.000Z" [ref=e1673]
+                    - cell "--" [ref=e1674]
+                    - cell "Yes" [ref=e1675]
+                    - cell "Edit Delete" [ref=e1676]:
+                      - button "Edit" [ref=e1677] [cursor=pointer]
+                      - button "Delete" [ref=e1678] [cursor=pointer]
+            - generic [ref=e1679]:
+              - generic [ref=e1680]:
+                - heading "Holidays" [level=4] [ref=e1681]
+                - button "Reload holidays" [ref=e1682] [cursor=pointer]
+              - generic [ref=e1683]:
+                - generic [ref=e1684]:
+                  - generic [ref=e1685]: Date
+                  - textbox "Date" [ref=e1686]: 2026-02-06
+                - generic [ref=e1687]:
+                  - generic [ref=e1688]: Name
+                  - textbox "Name" [ref=e1689]:
+                    - /placeholder: Optional
+                - generic [ref=e1690]:
+                  - generic [ref=e1691]: Working day override
+                  - checkbox "Working day override" [ref=e1692]
+              - button "Create holiday" [ref=e1694] [cursor=pointer]
+              - table [ref=e1696]:
+                - rowgroup [ref=e1697]:
+                  - row "Date Name Working day Actions" [ref=e1698]:
+                    - columnheader "Date" [ref=e1699]
+                    - columnheader "Name" [ref=e1700]
+                    - columnheader "Working day" [ref=e1701]
+                    - columnheader "Actions" [ref=e1702]
+                - rowgroup [ref=e1703]:
+                  - row "2026-02-04T00:00:00.000Z Test Holiday No Edit Delete" [ref=e1704]:
+                    - cell "2026-02-04T00:00:00.000Z" [ref=e1705]
+                    - cell "Test Holiday" [ref=e1706]
+                    - cell "No" [ref=e1707]
+                    - cell "Edit Delete" [ref=e1708]:
+                      - button "Edit" [ref=e1709] [cursor=pointer]
+                      - button "Delete" [ref=e1710] [cursor=pointer]
+                  - row "2026-02-05T00:00:00.000Z Test Holiday No Edit Delete" [ref=e1711]:
+                    - cell "2026-02-05T00:00:00.000Z" [ref=e1712]
+                    - cell "Test Holiday" [ref=e1713]
+                    - cell "No" [ref=e1714]
+                    - cell "Edit Delete" [ref=e1715]:
+                      - button "Edit" [ref=e1716] [cursor=pointer]
+                      - button "Delete" [ref=e1717] [cursor=pointer]
+      - generic [ref=e1718]:
+        - generic [ref=e1719]:
+          - heading "Records" [level=3] [ref=e1720]
+          - generic [ref=e1721]:
+            - button "Reload" [ref=e1722] [cursor=pointer]
+            - button "Export CSV" [ref=e1723] [cursor=pointer]
+        - table [ref=e1724]:
+          - rowgroup [ref=e1725]:
+            - row "Date First in Last out Work (min) Late Early leave Leave Overtime Status" [ref=e1726]:
+              - columnheader "Date" [ref=e1727]
+              - columnheader "First in" [ref=e1728]
+              - columnheader "Last out" [ref=e1729]
+              - columnheader "Work (min)" [ref=e1730]
+              - columnheader "Late" [ref=e1731]
+              - columnheader "Early leave" [ref=e1732]
+              - columnheader "Leave" [ref=e1733]
+              - columnheader "Overtime" [ref=e1734]
+              - columnheader "Status" [ref=e1735]
+          - rowgroup [ref=e1736]:
+            - row "2026-02-02T00:00:00.000Z 2026/2/2 15:51:00 2026/2/3 01:05:00 550 0 45 -- -- Early leave" [ref=e1737]:
+              - cell "2026-02-02T00:00:00.000Z" [ref=e1738]
+              - cell "2026/2/2 15:51:00" [ref=e1739]
+              - cell "2026/2/3 01:05:00" [ref=e1740]
+              - cell "550" [ref=e1741]
+              - cell "0" [ref=e1742]
+              - cell "45" [ref=e1743]
+              - cell "--" [ref=e1744]
+              - cell "--" [ref=e1745]
+              - cell "Early leave" [ref=e1746]
+            - row "2026-02-01T00:00:00.000Z 2026/2/1 15:51:00 2026/2/2 01:05:00 550 0 0 -- -- Off" [ref=e1747]:
+              - cell "2026-02-01T00:00:00.000Z" [ref=e1748]
+              - cell "2026/2/1 15:51:00" [ref=e1749]
+              - cell "2026/2/2 01:05:00" [ref=e1750]
+              - cell "550" [ref=e1751]
+              - cell "0" [ref=e1752]
+              - cell "0" [ref=e1753]
+              - cell "--" [ref=e1754]
+              - cell "--" [ref=e1755]
+              - cell "Off" [ref=e1756]
+        - generic [ref=e1757]:
+          - button "Prev" [disabled] [ref=e1758]
+          - generic [ref=e1759]: Page 1 / 1
+          - button "Next" [disabled] [ref=e1760]

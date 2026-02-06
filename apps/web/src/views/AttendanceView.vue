@@ -911,7 +911,11 @@
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
                 <h4>Rule Template Library</h4>
-                <button class="attendance__btn" :disabled="ruleTemplateLoading" @click="loadRuleTemplates">
+                <button
+                  class="attendance__btn"
+                  :disabled="ruleTemplateLoading || ruleTemplateSaving || ruleTemplateRestoring"
+                  @click="loadRuleTemplates"
+                >
                   {{ ruleTemplateLoading ? 'Loading...' : 'Reload templates' }}
                 </button>
               </div>
@@ -938,12 +942,52 @@
                 </label>
               </div>
               <div class="attendance__admin-actions">
-                <button class="attendance__btn" :disabled="ruleTemplateSaving" @click="copySystemTemplates">
+                <button class="attendance__btn" :disabled="ruleTemplateSaving || ruleTemplateRestoring" @click="copySystemTemplates">
                   Copy system to library
                 </button>
-                <button class="attendance__btn attendance__btn--primary" :disabled="ruleTemplateSaving" @click="saveRuleTemplates">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="ruleTemplateSaving || ruleTemplateRestoring"
+                  @click="saveRuleTemplates"
+                >
                   {{ ruleTemplateSaving ? 'Saving...' : 'Save library' }}
                 </button>
+              </div>
+              <div class="attendance__admin-subsection">
+                <div class="attendance__admin-section-header">
+                  <h5>Template Versions</h5>
+                </div>
+                <div v-if="ruleTemplateVersions.length === 0" class="attendance__empty">No versions yet.</div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table">
+                    <thead>
+                      <tr>
+                        <th>Version</th>
+                        <th>Items</th>
+                        <th>Created</th>
+                        <th>Created by</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="version in ruleTemplateVersions" :key="version.id">
+                        <td>{{ version.version }}</td>
+                        <td>{{ version.itemCount ?? '--' }}</td>
+                        <td>{{ formatDateTime(version.createdAt ?? null) }}</td>
+                        <td>{{ version.createdBy || '--' }}</td>
+                        <td class="attendance__table-actions">
+                          <button
+                            class="attendance__btn"
+                            :disabled="ruleTemplateRestoring || ruleTemplateSaving"
+                            @click="restoreRuleTemplates(version.id)"
+                          >
+                            Restore
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
 
@@ -2711,6 +2755,15 @@ interface AttendanceRuleSet {
   isDefault: boolean
 }
 
+interface AttendanceRuleTemplateVersion {
+  id: string
+  version: number
+  createdAt?: string | null
+  createdBy?: string | null
+  sourceVersionId?: string | null
+  itemCount?: number | null
+}
+
 interface AttendanceGroup {
   id: string
   orgId?: string
@@ -2967,6 +3020,7 @@ const ruleSetLoading = ref(false)
 const ruleSetSaving = ref(false)
 const ruleTemplateLoading = ref(false)
 const ruleTemplateSaving = ref(false)
+const ruleTemplateRestoring = ref(false)
 const attendanceGroupLoading = ref(false)
 const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
@@ -2991,6 +3045,7 @@ const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const ruleTemplateSystemText = ref('[]')
 const ruleTemplateLibraryText = ref('[]')
+const ruleTemplateVersions = ref<AttendanceRuleTemplateVersion[]>([])
 const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
@@ -3452,6 +3507,40 @@ function parseTemplateLibrary(value: string): any[] | null {
   } catch {
     return null
   }
+}
+
+function validateTemplateLibrarySchema(templates: any[]): { ok: boolean; errors: string[] } {
+  const errors: string[] = []
+  templates.forEach((template, index) => {
+    if (!template || typeof template !== 'object' || Array.isArray(template)) {
+      errors.push(`[${index}] template must be an object`)
+      return
+    }
+    if (typeof template.name !== 'string' || template.name.trim().length === 0) {
+      errors.push(`[${index}].name must be a non-empty string`)
+    }
+    if (!Array.isArray(template.rules)) {
+      errors.push(`[${index}].rules must be an array`)
+    } else {
+      template.rules.forEach((rule: any, ruleIndex: number) => {
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+          errors.push(`[${index}].rules[${ruleIndex}] must be an object`)
+        }
+      })
+    }
+    if (template.params !== undefined && !Array.isArray(template.params)) {
+      errors.push(`[${index}].params must be an array when provided`)
+    } else if (Array.isArray(template.params)) {
+      template.params.forEach((param: any, paramIndex: number) => {
+        if (!param || typeof param !== 'object' || Array.isArray(param)) {
+          errors.push(`[${index}].params[${paramIndex}] must be an object`)
+        } else if (typeof param.key !== 'string' || param.key.trim().length === 0) {
+          errors.push(`[${index}].params[${paramIndex}].key must be a non-empty string`)
+        }
+      })
+    }
+  })
+  return { ok: errors.length === 0, errors }
 }
 
 function buildImportPayload(): Record<string, any> | null {
@@ -5739,6 +5828,7 @@ async function loadRuleTemplates() {
     adminForbidden.value = false
     const systemTemplates = data.data?.system ?? []
     const libraryTemplates = data.data?.library ?? []
+    ruleTemplateVersions.value = Array.isArray(data.data?.versions) ? data.data.versions : []
     ruleTemplateSystemText.value = JSON.stringify(systemTemplates, null, 2)
     ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
     setStatus('Rule templates loaded.')
@@ -5755,6 +5845,11 @@ async function saveRuleTemplates() {
     const templates = parseTemplateLibrary(ruleTemplateLibraryText.value)
     if (!templates) {
       throw new Error('Template library must be valid JSON array')
+    }
+    const validation = validateTemplateLibrarySchema(templates)
+    if (!validation.ok) {
+      const preview = validation.errors.slice(0, 3).join('; ')
+      throw new Error(`Template schema errors: ${preview}`)
     }
     const response = await apiFetch('/api/attendance/rule-templates', {
       method: 'PUT',
@@ -5775,6 +5870,34 @@ async function saveRuleTemplates() {
     setStatus(error?.message || 'Failed to save rule templates', 'error')
   } finally {
     ruleTemplateSaving.value = false
+  }
+}
+
+async function restoreRuleTemplates(versionId: string) {
+  if (!versionId) return
+  if (!window.confirm('Restore this template version? This will overwrite the current library.')) return
+  ruleTemplateRestoring.value = true
+  try {
+    const response = await apiFetch('/api/attendance/rule-templates/restore', {
+      method: 'POST',
+      body: JSON.stringify({ versionId }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to restore rule templates')
+    }
+    adminForbidden.value = false
+    ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? [], null, 2)
+    await loadRuleTemplates()
+    setStatus('Rule templates restored.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to restore rule templates', 'error')
+  } finally {
+    ruleTemplateRestoring.value = false
   }
 }
 

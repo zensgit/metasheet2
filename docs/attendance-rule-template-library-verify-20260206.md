@@ -17,15 +17,17 @@
    - System templates (read-only)
    - Library templates (JSON)
    - Copy/Save buttons
+6. Verify **Template Versions** table renders with Restore action.
 
 ## Evidence
-- Playwright snapshot: `.playwright-cli/page-2026-02-06T04-10-05-052Z.yml`
-  - Contains heading `Rule Template Library`.
+- Playwright snapshot: `output/playwright/attendance-rule-templates-snapshot.yml`
+  - Contains heading `Rule Template Library` and `Template Versions`.
 - Screenshot (viewport): `output/playwright/attendance-rule-templates-viewport.png`
 
 ## Result
 - ✅ Rule Template Library section rendered in attendance admin console.
-- ✅ UI controls present (reload, copy, save).
+- ✅ Template Versions table rendered with Restore action.
 
 ## Notes
+- Schema validation errors are surfaced via the status banner when JSON is invalid.
 - Using `VITE_API_BASE` keeps API requests same-origin to the Vite proxy, avoiding CORS issues.
