@@ -2,6 +2,13 @@ const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 const token = process.env.AUTH_TOKEN || ''
 const orgId = process.env.ORG_ID || 'default'
 const defaultTimezone = process.env.TIMEZONE || 'Asia/Shanghai'
+const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
+
+function normalizeProductMode(value) {
+  if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
+  if (value === 'platform') return 'platform'
+  return ''
+}
 
 function die(message) {
   console.error(`[attendance-smoke-api] ERROR: ${message}`)
@@ -76,6 +83,15 @@ async function run() {
   const userId = user?.userId || user?.id || user?.user_id
   if (!userId) die('GET /auth/me did not return user.id')
   if (features?.attendance !== true) die('features.attendance is not true (attendance plugin not available)')
+  const expectProductMode = normalizeProductMode(expectProductModeRaw)
+  if (expectProductMode) {
+    const actualMode = normalizeProductMode(features?.mode)
+    if (!actualMode) die(`features.mode missing (expected '${expectProductMode}')`)
+    if (actualMode !== expectProductMode) {
+      die(`features.mode expected '${expectProductMode}', got '${actualMode}'`)
+    }
+    log(`product mode ok: mode=${actualMode}`)
+  }
   log(`auth/me ok: userId=${userId} role=${String(user?.role || '')}`)
 
   // 2) plugins active
