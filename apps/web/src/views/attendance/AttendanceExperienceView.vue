@@ -86,11 +86,22 @@ const desktopOnlyMessage = computed(() => {
 
 function updateMobileState(): void {
   if (typeof window === 'undefined') return
+  // Prefer media query (most stable) then fallback to viewport measurements.
+  // Some environments can report a scaled `innerWidth` even when the CSS viewport is narrow.
+  try {
+    if (window.matchMedia?.('(max-width: 899px)')?.matches) {
+      isMobile.value = true
+      return
+    }
+  } catch {
+    // ignore
+  }
+
   const docWidth = typeof document !== 'undefined'
     ? document.documentElement?.clientWidth
     : 0
   const viewportWidth = window.visualViewport?.width ?? 0
-  const width = viewportWidth || docWidth || window.innerWidth
+  const width = Math.max(viewportWidth || 0, docWidth || 0) || window.innerWidth
 
   // NOTE: `window.innerWidth` can be misleading on mobile due to viewport scaling.
   // Prefer visualViewport / clientWidth for consistent gating.
