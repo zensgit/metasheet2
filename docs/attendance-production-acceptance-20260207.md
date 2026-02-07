@@ -50,6 +50,11 @@ This environment must support creating at least these 3 roles via permissions:
 - approver: `attendance:read`, `attendance:approve`
 - admin: `attendance:read`, `attendance:write`, `attendance:approve`, `attendance:admin`
 
+You can provision permissions either via:
+
+- UI: `Attendance -> Admin Center -> User Access`
+- Script: `scripts/ops/attendance-provision-user.sh` (admin token required)
+
 Run (example for employee):
 
 ```bash
