@@ -630,6 +630,59 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>User Access</h4>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="provisionLoading" @click="loadProvisioningUser">
+                    {{ provisionLoading ? 'Loading...' : 'Load' }}
+                  </button>
+                  <button class="attendance__btn attendance__btn--primary" :disabled="provisionLoading" @click="grantProvisioningRole">
+                    {{ provisionLoading ? 'Working...' : 'Grant role' }}
+                  </button>
+                  <button class="attendance__btn" :disabled="provisionLoading" @click="revokeProvisioningRole">
+                    {{ provisionLoading ? 'Working...' : 'Revoke role' }}
+                  </button>
+                </div>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-provision-user-id">
+                  <span>User ID (UUID)</span>
+                  <input
+                    id="attendance-provision-user-id"
+                    name="provisionUserId"
+                    v-model="provisionForm.userId"
+                    type="text"
+                    placeholder="e.g. 0cdf4a9c-4fe1-471b-be08-854b683dc930"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-provision-role">
+                  <span>Role template</span>
+                  <select
+                    id="attendance-provision-role"
+                    name="provisionRole"
+                    v-model="provisionForm.role"
+                  >
+                    <option value="employee">employee</option>
+                    <option value="approver">approver</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </label>
+              </div>
+              <p v-if="provisionStatusMessage" class="attendance__status" :class="{ 'attendance__status--error': provisionStatusKind === 'error' }">
+                {{ provisionStatusMessage }}
+              </p>
+              <div v-if="provisionPermissions.length > 0" class="attendance__chip-list">
+                <span v-for="perm in provisionPermissions" :key="perm" class="attendance__status-chip">
+                  {{ perm }}
+                </span>
+                <span v-if="provisionUserIsAdmin" class="attendance__status-chip">
+                  isAdmin=true
+                </span>
+              </div>
+              <p v-else-if="provisionHasLoaded" class="attendance__empty">No permissions loaded.</p>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Holiday Sync</h4>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
@@ -2603,6 +2656,7 @@ import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 
 type AttendancePageMode = 'overview' | 'admin'
+type ProvisionRole = 'employee' | 'approver' | 'admin'
 
 const props = withDefaults(
   defineProps<{
@@ -2658,6 +2712,13 @@ interface AttendanceRequestReportItem {
   status: string
   total: number
   minutes: number
+}
+
+interface PermissionUserResponse {
+  userId: string
+  permissions: string[]
+  isAdmin: boolean
+  degraded?: boolean
 }
 
 interface AttendanceSettings {
@@ -3010,6 +3071,12 @@ const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const settingsLoading = ref(false)
 const holidaySyncLoading = ref(false)
+const provisionLoading = ref(false)
+const provisionHasLoaded = ref(false)
+const provisionStatusMessage = ref('')
+const provisionStatusKind = ref<'info' | 'error'>('info')
+const provisionPermissions = ref<string[]>([])
+const provisionUserIsAdmin = ref(false)
 const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
@@ -3045,6 +3112,12 @@ const payrollCycleSaving = ref(false)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+
+const provisionRolePermissions: Record<ProvisionRole, string[]> = {
+  employee: ['attendance:read', 'attendance:write'],
+  approver: ['attendance:read', 'attendance:approve'],
+  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
+}
 
 const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
@@ -3245,6 +3318,11 @@ const settingsForm = reactive({
   geoFenceLng: '',
   geoFenceRadius: '',
   minPunchIntervalMinutes: 1,
+})
+
+const provisionForm = reactive({
+  userId: '',
+  role: 'employee' as ProvisionRole,
 })
 
 const ruleForm = reactive({
@@ -3996,6 +4074,123 @@ function setStatus(message: string, kind: 'info' | 'error' = 'info') {
       statusMessage.value = ''
     }
   }, 4000)
+}
+
+function setProvisionStatus(message: string, kind: 'info' | 'error' = 'info') {
+  provisionStatusKind.value = kind
+  provisionStatusMessage.value = message
+  if (!message) return
+  window.setTimeout(() => {
+    if (provisionStatusMessage.value === message) {
+      provisionStatusMessage.value = ''
+    }
+  }, 6000)
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
+}
+
+async function fetchProvisioningUser(userId: string) {
+  const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
+  if (response.status === 403) {
+    adminForbidden.value = true
+    throw new Error('Admin permissions required')
+  }
+  const data: PermissionUserResponse = await response.json()
+  if (!response.ok) {
+    const message = (data as any)?.error || (data as any)?.message || 'Failed to load permissions'
+    throw new Error(message)
+  }
+  provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
+  provisionUserIsAdmin.value = Boolean(data.isAdmin)
+}
+
+async function loadProvisioningUser() {
+  const userId = provisionForm.userId.trim()
+  provisionHasLoaded.value = true
+  if (!isUuid(userId)) {
+    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    return
+  }
+  provisionLoading.value = true
+  try {
+    await fetchProvisioningUser(userId)
+    setProvisionStatus(`Loaded ${provisionPermissions.value.length} permission(s).`)
+  } catch (error: any) {
+    setProvisionStatus(error?.message || 'Failed to load permissions', 'error')
+  } finally {
+    provisionLoading.value = false
+  }
+}
+
+async function grantProvisioningRole() {
+  const userId = provisionForm.userId.trim()
+  provisionHasLoaded.value = true
+  if (!isUuid(userId)) {
+    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    return
+  }
+  provisionLoading.value = true
+  try {
+    const role = provisionForm.role
+    const permissions = provisionRolePermissions[role] || []
+    for (const permission of permissions) {
+      const response = await apiFetch('/api/permissions/grant', {
+        method: 'POST',
+        body: JSON.stringify({ userId, permission }),
+      })
+      if (response.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data?.error || data?.message || `Failed to grant ${permission}`)
+      }
+    }
+    await fetchProvisioningUser(userId)
+    setProvisionStatus(`Role '${role}' granted.`)
+  } catch (error: any) {
+    setProvisionStatus(error?.message || 'Failed to grant role', 'error')
+  } finally {
+    provisionLoading.value = false
+  }
+}
+
+async function revokeProvisioningRole() {
+  const userId = provisionForm.userId.trim()
+  provisionHasLoaded.value = true
+  if (!isUuid(userId)) {
+    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    return
+  }
+  provisionLoading.value = true
+  try {
+    const role = provisionForm.role
+    const permissions = provisionRolePermissions[role] || []
+    for (const permission of permissions) {
+      const response = await apiFetch('/api/permissions/revoke', {
+        method: 'POST',
+        body: JSON.stringify({ userId, permission }),
+      })
+      if (response.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const data = await response.json()
+      // 404 is fine for revokes (permission not present).
+      if (!response.ok && response.status !== 404) {
+        throw new Error(data?.error || data?.message || `Failed to revoke ${permission}`)
+      }
+    }
+    await fetchProvisioningUser(userId)
+    setProvisionStatus(`Role '${role}' revoked.`)
+  } catch (error: any) {
+    setProvisionStatus(error?.message || 'Failed to revoke role', 'error')
+  } finally {
+    provisionLoading.value = false
+  }
 }
 
 async function punch(eventType: 'check_in' | 'check_out') {
@@ -6593,6 +6788,17 @@ watch(importProfileId, () => {
 .attendance__request-actions {
   display: flex;
   gap: 8px;
+}
+
+.attendance__chip-list {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__chip-list .attendance__status-chip {
+  margin-left: 0;
 }
 
 .attendance__status-chip {

@@ -2,6 +2,7 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { randomUUID } from 'node:crypto'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
@@ -288,6 +289,35 @@ async function run() {
 
   await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, '03-admin-loaded.png'), fullPage: true })
+
+  // 4.1) Permission provisioning UI (P1): grant a minimal role to a random UUID and verify it loads.
+  logInfo('Validating permission provisioning UI')
+  const provisionUserId = randomUUID()
+  const userAccessSection = page.locator('div.attendance__admin-section').filter({
+    has: page.getByRole('heading', { name: 'User Access' }),
+  })
+  await userAccessSection.getByLabel('User ID (UUID)').fill(provisionUserId)
+  await userAccessSection.locator('#attendance-provision-role').selectOption('employee')
+
+  const grantResp = waitForJsonResponse(
+    page,
+    (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/permissions/grant'),
+    { label: 'Grant permission' }
+  )
+  await userAccessSection.getByRole('button', { name: 'Grant role' }).click()
+  await grantResp
+  await userAccessSection.locator('text=attendance:read').waitFor({ timeout: timeoutMs })
+  await userAccessSection.locator('text=attendance:write').waitFor({ timeout: timeoutMs })
+
+  const loadResp = waitForJsonResponse(
+    page,
+    (resp) => resp.request().method() === 'GET' && resp.url().includes(`/api/permissions/user/${provisionUserId}`),
+    { label: 'Load permissions' }
+  )
+  await userAccessSection.getByRole('button', { name: 'Load' }).click()
+  await loadResp
+  await page.screenshot({ path: path.join(outputDir, '03a-admin-user-access.png'), fullPage: true })
+
   const importSection = page.locator('div.attendance__admin-section').filter({
     has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)' }),
   })

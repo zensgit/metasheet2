@@ -41,8 +41,9 @@ Out of scope for this delivery:
 
 - API smoke:
   - `scripts/ops/attendance-smoke-api.sh`
-- Provision user permissions (admin token required):
-  - `scripts/ops/attendance-provision-user.sh`
+- Provision user permissions:
+  - UI (Admin Center): `Attendance -> Admin Center -> User Access`
+  - Script (admin token required): `scripts/ops/attendance-provision-user.sh`
 - Playwright acceptance (desktop admin flow):
   - `scripts/verify-attendance-production-flow.mjs`
 - Playwright acceptance (attendance-focused shell + mobile gating):
