@@ -2,25 +2,29 @@
   <div id="app">
     <nav class="app-nav" v-if="showNav">
       <div class="nav-brand">
-        <span class="brand-text">MetaSheet</span>
+        <span class="brand-text">{{ brandText }}</span>
       </div>
       <div class="nav-links">
-        <router-link to="/grid" class="nav-link">Grid</router-link>
-        <router-link to="/spreadsheets" class="nav-link">Spreadsheets</router-link>
-        <router-link to="/kanban" class="nav-link">Kanban</router-link>
-        <router-link to="/calendar" class="nav-link">Calendar</router-link>
-        <router-link to="/gallery" class="nav-link">Gallery</router-link>
-        <router-link to="/form" class="nav-link">Form</router-link>
-        <router-link
-          v-for="item in pluginNavItems"
-          :key="item.id"
-          :to="item.path"
-          class="nav-link"
-        >
-          {{ item.label }}
-        </router-link>
-        <router-link to="/admin/plugins" class="nav-link">Plugins</router-link>
-        <router-link to="/plm" class="nav-link">PLM</router-link>
+        <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">Attendance</router-link>
+
+        <template v-else>
+          <router-link to="/grid" class="nav-link">Grid</router-link>
+          <router-link to="/spreadsheets" class="nav-link">Spreadsheets</router-link>
+          <router-link to="/kanban" class="nav-link">Kanban</router-link>
+          <router-link to="/calendar" class="nav-link">Calendar</router-link>
+          <router-link to="/gallery" class="nav-link">Gallery</router-link>
+          <router-link to="/form" class="nav-link">Form</router-link>
+          <router-link
+            v-for="item in pluginNavItems"
+            :key="item.id"
+            :to="item.path"
+            class="nav-link"
+          >
+            {{ item.label }}
+          </router-link>
+          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">Plugins</router-link>
+          <router-link to="/plm" class="nav-link">PLM</router-link>
+        </template>
       </div>
     </nav>
     <!-- CI trigger: lockfile update -->
@@ -34,15 +38,25 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { usePlugins } from './composables/usePlugins'
+import { useFeatureFlags } from './stores/featureFlags'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
+const { loadProductFeatures, isAttendanceFocused, hasFeature } = useFeatureFlags()
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
+const attendanceFocused = computed(() => isAttendanceFocused())
+const isAdmin = computed(() => hasFeature('attendanceAdmin'))
+const brandText = computed(() => {
+  if (attendanceFocused.value) return 'Attendance'
+  return 'MetaSheet'
+})
+
 onMounted(async () => {
+  await loadProductFeatures()
   await fetchPlugins()
 })
 </script>

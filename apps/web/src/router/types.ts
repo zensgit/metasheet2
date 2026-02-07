@@ -213,6 +213,9 @@ export interface RouteMeta {
   icon?: string
   keepAlive?: boolean
   transition?: string
+
+  // Product capability guard
+  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport'
 }
 
 /**
