@@ -26,7 +26,12 @@ function get_env_value() {
   fi
   # Don't "source" the env file because values can contain '#' and other characters.
   # We treat it as a simple KEY=VALUE file (no spaces around '=').
-  grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | sed -E "s/^${key}=//"
+  #
+  # IMPORTANT: keys may be absent; that must not hard-fail preflight before we can
+  # emit a helpful error/warn. We therefore avoid `pipefail` propagation here.
+  local line
+  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
+  echo "${line#${key}=}"
 }
 
 info "Repo root: ${ROOT_DIR}"
@@ -79,4 +84,3 @@ elif [[ "$PRODUCT_MODE" != "attendance" && "$PRODUCT_MODE" != "platform" && "$PR
 fi
 
 info "Preflight OK"
-
