@@ -183,29 +183,6 @@ const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
 const requireImportCommitToken = process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'
 const importCommitTokens = new Map()
 
-async function ensureImportTokenTable(db) {
-  if (!db) return
-  try {
-    await db.query(
-      `CREATE TABLE IF NOT EXISTS attendance_import_tokens (
-        token text PRIMARY KEY,
-        org_id text NOT NULL,
-        user_id text NOT NULL,
-        expires_at timestamptz NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now()
-      )`
-    )
-    await db.query(
-      'CREATE INDEX IF NOT EXISTS attendance_import_tokens_org_idx ON attendance_import_tokens(org_id)'
-    )
-    await db.query(
-      'CREATE INDEX IF NOT EXISTS attendance_import_tokens_expires_idx ON attendance_import_tokens(expires_at)'
-    )
-  } catch (error) {
-    if (isDatabaseSchemaError(error)) return
-  }
-}
-
 async function pruneImportCommitTokensDb(db) {
   if (!db) return
   try {
@@ -228,6 +205,40 @@ async function createImportCommitToken({ db, orgId, userId }) {
   pruneImportCommitTokens()
   const token = randomUUID()
   const expiresAt = Date.now() + IMPORT_COMMIT_TOKEN_TTL_MS
+
+  // Production mode: tokens must be shareable across multiple backend instances.
+  // When enforcement is enabled, require DB persistence and fail fast if the table is missing.
+  if (requireImportCommitToken) {
+    if (!db) {
+      throw new HttpError(
+        503,
+        'DB_NOT_READY',
+        'Database connection is required to issue import commit tokens.',
+      )
+    }
+    await pruneImportCommitTokensDb(db)
+    try {
+      await db.query(
+        `INSERT INTO attendance_import_tokens
+         (token, org_id, user_id, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [token, orgId, userId, new Date(expiresAt)]
+      )
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        throw new HttpError(
+          503,
+          'DB_NOT_READY',
+          'Attendance import token table missing. Run migrations before enabling token enforcement.',
+        )
+      }
+      throw error
+    }
+
+    importCommitTokens.set(token, { orgId, userId, expiresAt })
+    return { token, expiresAt }
+  }
+
   importCommitTokens.set(token, { orgId, userId, expiresAt })
   if (db) {
     await pruneImportCommitTokensDb(db)
@@ -262,6 +273,13 @@ async function consumeImportCommitToken(token, { db, orgId, userId }) {
       try {
         await db.query('DELETE FROM attendance_import_tokens WHERE token = $1', [token])
       } catch (error) {
+        if (isDatabaseSchemaError(error) && requireImportCommitToken) {
+          throw new HttpError(
+            503,
+            'DB_NOT_READY',
+            'Attendance import token table missing. Run migrations before enabling token enforcement.',
+          )
+        }
         if (!isDatabaseSchemaError(error)) {
           throw error
         }
@@ -270,7 +288,16 @@ async function consumeImportCommitToken(token, { db, orgId, userId }) {
     return true
   }
 
-  if (!db) return false
+  if (!db) {
+    if (requireImportCommitToken) {
+      throw new HttpError(
+        503,
+        'DB_NOT_READY',
+        'Database connection is required to validate import commit tokens.',
+      )
+    }
+    return false
+  }
   await pruneImportCommitTokensDb(db)
   try {
     const rows = await db.query(
@@ -287,7 +314,16 @@ async function consumeImportCommitToken(token, { db, orgId, userId }) {
     await db.query('DELETE FROM attendance_import_tokens WHERE token = $1', [token])
     return true
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return false
+    if (isDatabaseSchemaError(error)) {
+      if (requireImportCommitToken) {
+        throw new HttpError(
+          503,
+          'DB_NOT_READY',
+          'Attendance import token table missing. Run migrations before enabling token enforcement.',
+        )
+      }
+      return false
+    }
     throw error
   }
 }
@@ -4030,8 +4066,6 @@ module.exports = {
       }
     }
 
-    await ensureImportTokenTable(db)
-
     const settingsSchema = z.object({
       autoAbsence: z.object({
         enabled: z.boolean().optional(),
@@ -7288,15 +7322,24 @@ module.exports = {
           return
         }
 
-        const { token, expiresAt } = await createImportCommitToken({ db, orgId, userId: requesterId })
-        res.json({
-          ok: true,
-          data: {
-            commitToken: token,
-            expiresAt: new Date(expiresAt).toISOString(),
-            ttlSeconds: Math.floor(IMPORT_COMMIT_TOKEN_TTL_MS / 1000),
-          },
-        })
+        try {
+          const { token, expiresAt } = await createImportCommitToken({ db, orgId, userId: requesterId })
+          res.json({
+            ok: true,
+            data: {
+              commitToken: token,
+              expiresAt: new Date(expiresAt).toISOString(),
+              ttlSeconds: Math.floor(IMPORT_COMMIT_TOKEN_TTL_MS / 1000),
+            },
+          })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          logger.error('Attendance import token prepare failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to prepare import token' } })
+        }
       })
     )
 
@@ -7311,18 +7354,35 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const userId = parsed.data.userId ?? getUserId(req)
+        const requesterId = getUserId(req)
+        const userId = parsed.data.userId ?? requesterId
         if (!userId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
           return
         }
         if (requireImportCommitToken) {
+          if (!requesterId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
           const commitToken = parsed.data.commitToken
           if (!commitToken) {
             res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
             return
           }
-          const tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId })
+          let tokenOk = false
+          try {
+            // Tokens are bound to the requester, not the imported row's userId.
+            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            logger.error('Attendance import token validation failed (preview)', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+            return
+          }
           if (!tokenOk) {
             res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
             return
@@ -7742,7 +7802,18 @@ module.exports = {
           return
         }
         if (commitToken) {
-          const tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          let tokenOk = false
+          try {
+            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            logger.error('Attendance import token validation failed (commit)', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+            return
+          }
           if (!tokenOk && requireImportCommitToken) {
             res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
             return
@@ -8308,10 +8379,38 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const userId = parsed.data.userId ?? getUserId(req)
+        const requesterId = getUserId(req)
+        const userId = parsed.data.userId ?? requesterId
         if (!userId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
           return
+        }
+        if (requireImportCommitToken) {
+          if (!requesterId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const commitToken = parsed.data.commitToken
+          if (!commitToken) {
+            res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+            return
+          }
+          let tokenOk = false
+          try {
+            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            logger.error('Attendance import token validation failed (legacy import)', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+            return
+          }
+          if (!tokenOk) {
+            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+            return
+          }
         }
 
         try {

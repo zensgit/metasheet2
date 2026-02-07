@@ -3760,10 +3760,20 @@ function isImportCommitTokenValid(): boolean {
   return Number.isFinite(expiresAt) && expiresAt - Date.now() > 60 * 1000
 }
 
-async function ensureImportCommitToken(): Promise<boolean> {
+async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+  if (options.forceRefresh) {
+    importCommitToken.value = ''
+    importCommitTokenExpiresAt.value = ''
+  }
   if (isImportCommitTokenValid()) return true
   try {
     const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    if (response.status === 404) {
+      // Legacy backend: commit token endpoints not available.
+      importCommitToken.value = ''
+      importCommitTokenExpiresAt.value = ''
+      return true
+    }
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to prepare import token')
@@ -3785,10 +3795,9 @@ async function previewImport() {
   }
   importLoading.value = true
   try {
-    const tokenOk = await ensureImportCommitToken()
-    if (tokenOk && importCommitToken.value) {
-      payload.commitToken = importCommitToken.value
-    }
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    if (!tokenOk) return
+    if (importCommitToken.value) payload.commitToken = importCommitToken.value
     const response = await apiFetch('/api/attendance/import/preview', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -3804,6 +3813,9 @@ async function previewImport() {
     ]
     importCsvWarnings.value = Array.from(new Set(previewWarnings))
     setStatus(`Preview loaded (${importPreview.value.length} rows).`)
+    // Token is single-use (consumed by preview); clear it to avoid reusing a stale token.
+    importCommitToken.value = ''
+    importCommitTokenExpiresAt.value = ''
   } catch (error) {
     setStatus((error as Error).message || 'Failed to preview import', 'error')
   } finally {
@@ -3819,10 +3831,9 @@ async function runImport() {
   }
   importLoading.value = true
   try {
-    const tokenOk = await ensureImportCommitToken()
-    if (tokenOk && importCommitToken.value) {
-      payload.commitToken = importCommitToken.value
-    }
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    if (!tokenOk) return
+    if (importCommitToken.value) payload.commitToken = importCommitToken.value
     const runLegacyImport = async () => {
       const legacyResponse = await apiFetch('/api/attendance/import', {
         method: 'POST',
@@ -3846,20 +3857,16 @@ async function runImport() {
       } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken()
-        if (refreshed && importCommitToken.value) {
-          payload.commitToken = importCommitToken.value
-          response = await apiFetch('/api/attendance/import/commit', {
-            method: 'POST',
-            body: JSON.stringify(payload),
-          })
-          data = await response.json().catch(() => ({}))
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        if (!refreshed || !importCommitToken.value) {
+          throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
         }
-        if (!response.ok || !data.ok) {
-          const legacy = await runLegacyImport()
-          response = legacy.response
-          data = legacy.data
-        }
+        payload.commitToken = importCommitToken.value
+        response = await apiFetch('/api/attendance/import/commit', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+        data = await response.json().catch(() => ({}))
       }
     }
     if (!response.ok || !data.ok) {
@@ -3881,6 +3888,8 @@ async function runImport() {
     }
     await loadRecords()
     await loadImportBatches()
+    importCommitToken.value = ''
+    importCommitTokenExpiresAt.value = ''
   } catch (error) {
     setStatus((error as Error).message || 'Failed to import attendance', 'error')
   } finally {
