@@ -57,13 +57,14 @@ docker compose -f docker-compose.app.yml up -d
 ## 5) Run migrations
 
 ```bash
-docker compose -f docker-compose.app.yml exec backend node packages/core-backend/dist/db/migrate.js
+docker compose -f docker-compose.app.yml exec backend node packages/core-backend/dist/src/db/migrate.js
 ```
 
 ## 6) Access
 
-- Web: `http://<host>:8080`
-- API: `http://<host>:8900`
+- Web: `http://<host>:8081`
+- API (via web proxy): `http://<host>:8081/api`
+- API (host-local only): `http://127.0.0.1:8900` (use SSH port-forwarding for remote access)
 
 ## Notes
 

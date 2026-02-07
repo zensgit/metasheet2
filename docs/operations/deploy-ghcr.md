@@ -32,7 +32,7 @@ bash scripts/deploy-ghcr-gh.sh
 - Create `docker/app.env` if missing (credentials are generated and stored locally)
 - Create `docker-compose.override.yml` to map ports
 - Pull and run `docker-compose.app.yml`
-- Run migrations with `packages/core-backend/dist/db/migrate.js`
+- Run migrations with `packages/core-backend/dist/src/db/migrate.js`
 
 ## Notes
 

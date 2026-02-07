@@ -99,7 +99,7 @@ sleep 30
 
 echo "🗃️  运行数据库迁移..."
 sudo docker compose -f docker-compose.app.yml -f docker-compose.override.yml exec -T backend \
-    node packages/core-backend/dist/db/migrate.js || echo "⚠️  数据库迁移可能需要手动执行"
+    node packages/core-backend/dist/src/db/migrate.js || echo "⚠️  数据库迁移可能需要手动执行"
 
 # 获取服务器 IP
 SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s ipinfo.io/ip 2>/dev/null || echo "YOUR_SERVER_IP")
