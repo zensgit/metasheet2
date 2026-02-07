@@ -86,7 +86,15 @@ const desktopOnlyMessage = computed(() => {
 
 function updateMobileState(): void {
   if (typeof window === 'undefined') return
-  isMobile.value = window.innerWidth < 900
+  const docWidth = typeof document !== 'undefined'
+    ? document.documentElement?.clientWidth
+    : 0
+  const viewportWidth = window.visualViewport?.width ?? 0
+  const width = viewportWidth || docWidth || window.innerWidth
+
+  // NOTE: `window.innerWidth` can be misleading on mobile due to viewport scaling.
+  // Prefer visualViewport / clientWidth for consistent gating.
+  isMobile.value = width < 900
 }
 
 function normalizeTab(value: unknown): AttendanceTab {
