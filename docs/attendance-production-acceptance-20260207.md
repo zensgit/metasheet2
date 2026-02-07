@@ -122,16 +122,25 @@ Go when:
 
 This section records the latest successful execution evidence (no secrets included).
 
-- Preflight: `PASS` on `142.171.239.56` (repo head `9010ec1e`), with one warning: `PRODUCT_MODE` not set (platform mode).
-- API Smoke: `PASS`
+- Preflight: `PASS` on `142.171.239.56` (no warnings; `PRODUCT_MODE=attendance`).
+- API Smoke: `PASS` (including `EXPECT_PRODUCT_MODE=attendance`).
+- Permission provisioning: `PASS` via `scripts/ops/attendance-provision-user.sh`.
 - Playwright:
   - Desktop admin run #1: `PASS`
     - Evidence: `output/playwright/attendance-prod-acceptance/desktop-admin-1/`
   - Desktop admin run #2: `PASS`
     - Note: punch can return `PUNCH_TOO_SOON` (HTTP 429) when runs are too close; script treats it as best-effort.
     - Evidence: `output/playwright/attendance-prod-acceptance/desktop-admin-2/`
+  - Desktop admin run #3: `PASS`
+    - Evidence: `output/playwright/attendance-prod-acceptance/desktop-admin-3/`
+  - Desktop admin run #4: `PASS`
+    - Evidence: `output/playwright/attendance-prod-acceptance/desktop-admin-4/`
   - Attendance-focused shell (desktop): `PASS`
     - Evidence: `output/playwright/attendance-prod-acceptance/focused-desktop/`
+  - Attendance-focused shell (desktop) rerun: `PASS`
+    - Evidence: `output/playwright/attendance-prod-acceptance/focused-desktop-2/`
   - Attendance-focused shell (mobile): `PASS`
     - Evidence: `output/playwright/attendance-prod-acceptance/focused-mobile/`
     - It validates "Desktop recommended" gating for the admin center on mobile.
+  - Attendance-focused shell (mobile) rerun: `PASS`
+    - Evidence: `output/playwright/attendance-prod-acceptance/focused-mobile-2/`
