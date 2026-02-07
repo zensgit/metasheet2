@@ -3,6 +3,7 @@ import fs from 'fs/promises'
 import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
+const apiBaseEnv = process.env.API_BASE || ''
 const token = process.env.AUTH_TOKEN || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
@@ -14,9 +15,29 @@ const featuresJson = process.env.FEATURES_JSON || ''
 const mobile = process.env.UI_MOBILE === 'true'
 const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-flow'
+const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 
 function logInfo(message) {
   console.log(`[attendance-full-flow] ${message}`)
+}
+
+function normalizeUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function normalizeProductMode(value) {
+  if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
+  if (value === 'platform') return 'platform'
+  return ''
+}
+
+function deriveApiBaseFromWebUrl(url) {
+  try {
+    const u = new URL(url)
+    return `${u.origin}/api`
+  } catch {
+    return ''
+  }
 }
 
 async function setAuth(page) {
@@ -48,6 +69,33 @@ function parseFeatures(raw) {
   } catch {
     return null
   }
+}
+
+async function fetchAuthMeFeatures(apiBase) {
+  if (!apiBase) return null
+  if (typeof fetch !== 'function') {
+    throw new Error('Node 18+ is required (global fetch missing)')
+  }
+
+  const url = `${normalizeUrl(apiBase)}/auth/me`
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  const raw = await res.text()
+  let body = null
+  try {
+    body = raw ? JSON.parse(raw) : null
+  } catch {
+    body = null
+  }
+  if (!res.ok) {
+    throw new Error(`GET /auth/me failed: HTTP ${res.status} ${raw.slice(0, 160)}`)
+  }
+  const payload = body?.data ?? body ?? {}
+  return payload?.features && typeof payload.features === 'object' ? payload.features : null
 }
 
 async function ensureAttendanceLoaded(page) {
@@ -101,8 +149,40 @@ async function run() {
     process.exit(1)
   }
 
-  const features = parseFeatures(featuresJson) || {}
-  const expectAttendanceFocused = productMode === 'attendance' || features?.mode === 'attendance'
+  const apiBase = normalizeUrl(apiBaseEnv) || deriveApiBaseFromWebUrl(webUrl)
+
+  // Resolve expected features:
+  // 1) Explicit FEATURES_JSON override (local/dev).
+  // 2) Live /api/auth/me (production verification).
+  const overrideFeatures = parseFeatures(featuresJson)
+  let liveFeatures = null
+  if (!overrideFeatures) {
+    try {
+      liveFeatures = await fetchAuthMeFeatures(apiBase)
+      if (liveFeatures) {
+        logInfo(`Loaded features from ${apiBase}/auth/me`)
+      }
+    } catch (error) {
+      logInfo(`WARN: failed to load /auth/me features (${(error && error.message) || error})`)
+    }
+  }
+
+  const features = (overrideFeatures || liveFeatures || {}) ?? {}
+  const resolvedMode =
+    normalizeProductMode(productMode) ||
+    normalizeProductMode(features?.mode)
+  const expectAttendanceFocused = resolvedMode === 'attendance'
+
+  const expectProductMode = normalizeProductMode(expectProductModeRaw)
+  if (expectProductMode) {
+    const actualMode = normalizeProductMode(resolvedMode || features?.mode)
+    if (!actualMode) {
+      throw new Error(`Expected product mode '${expectProductMode}', but features.mode is missing`)
+    }
+    if (actualMode !== expectProductMode) {
+      throw new Error(`Expected product mode '${expectProductMode}', got '${actualMode}'`)
+    }
+  }
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({

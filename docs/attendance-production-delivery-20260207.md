@@ -13,6 +13,7 @@ This is the delivery package definition for bringing the Attendance plugin to a 
 3. Import commit tokens are safe across restarts (DB-backed when required).
 4. Reverse proxy remains stable across backend redeploys (no stale backend container IP).
 5. Repeatable acceptance using Playwright with stored artifacts.
+6. Admins can provision employee/approver/admin permissions via the existing permission APIs.
 
 Out of scope for this delivery:
 
@@ -40,6 +41,8 @@ Out of scope for this delivery:
 
 - API smoke:
   - `scripts/ops/attendance-smoke-api.sh`
+- Provision user permissions (admin token required):
+  - `scripts/ops/attendance-provision-user.sh`
 - Playwright acceptance (desktop admin flow):
   - `scripts/verify-attendance-production-flow.mjs`
 - Playwright acceptance (attendance-focused shell + mobile gating):
