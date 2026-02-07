@@ -1,0 +1,18 @@
+version: '3.8'
+
+# Debug-only overrides for docker-compose.app.yml.
+# This file is NOT intended for production use. It only binds DB/Redis to localhost
+# to support server-side troubleshooting via SSH.
+#
+# Usage:
+#   docker compose -f docker-compose.app.yml -f docker-compose.app.debug.yml up -d
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
