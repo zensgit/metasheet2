@@ -4,8 +4,8 @@ This document describes the minimum required environment variables to run MetaSh
 
 ## Files
 
-- Copy `/Users/huazhou/Downloads/Github/metasheet2/docker/app.env.example` to `/Users/huazhou/Downloads/Github/metasheet2/docker/app.env`
-- Never commit `/Users/huazhou/Downloads/Github/metasheet2/docker/app.env` (it is gitignored)
+- Copy `docker/app.env.example` to `docker/app.env`
+- Never commit `docker/app.env` (it is gitignored)
 
 ## Required (Production)
 
@@ -27,4 +27,3 @@ This document describes the minimum required environment variables to run MetaSh
 - If you change `JWT_SECRET`, all existing tokens become invalid (users will need to log in again).
 - If `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` is enabled, ensure migrations are applied:
   - `zzzz20260207150000_create_attendance_import_tokens`
-

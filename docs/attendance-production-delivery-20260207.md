@@ -26,8 +26,8 @@ Out of scope for this delivery:
 
 - Postgres and Redis must NOT be exposed on public interfaces.
   - Production compose must not include `ports: ["5432:5432"]` or `ports: ["6379:6379"]`.
-  - For debug only, use `/Users/huazhou/Downloads/Github/metasheet2/docker-compose.app.debug.yml` which binds DB/Redis to localhost.
-- `/Users/huazhou/Downloads/Github/metasheet2/docker/app.env` must not use default secrets.
+  - For debug only, use `docker-compose.app.debug.yml` which binds DB/Redis to localhost.
+ - `docker/app.env` must not use default secrets.
 
 ### Deploy
 
@@ -58,4 +58,3 @@ If a deploy fails:
 Notes:
 
 - DB migrations are forward-only. This delivery only adds tables; it is safe to keep them during rollback.
-
