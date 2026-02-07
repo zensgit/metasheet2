@@ -1,6 +1,6 @@
 # Attendance Import Commit Token Persistence (Design)
 
-Date: 2026-02-04
+Date: 2026-02-07
 
 ## Goal
 Prevent commit token failures in multi-instance or restart scenarios by persisting import commit tokens outside process memory.
@@ -20,14 +20,17 @@ attendance_import_tokens
 Indexes:
 - `attendance_import_tokens_org_idx` on `org_id`
 - `attendance_import_tokens_expires_idx` on `expires_at`
+- `attendance_import_tokens_user_idx` on (`org_id`, `user_id`)
 
 ## Migration
-- Added `packages/core-backend/migrations/055_create_attendance_import_tokens.sql` to formalize table creation.
+- Added `packages/core-backend/src/db/migrations/zzzz20260207150000_create_attendance_import_tokens.ts` to formalize table creation.
+- The plugin **must not** create tables at runtime (production hardening). Migrations are required.
 
 ## Lifecycle
 1. **Prepare**
    - Generate UUID token
-   - Save to memory + DB (if available)
+   - Persist to DB
+   - Cache in memory as an optimization (optional)
    - Return token + expiresAt
 
 2. **Consume**
@@ -44,9 +47,15 @@ Indexes:
 - If not set, commit endpoint accepts payloads without token (useful for test envs).
 
 ## Failure Modes / Fallback
-- If DB table cannot be created (schema missing), token persistence is skipped.
-- When token enforcement is disabled, UI/API can still use legacy `/api/attendance/import`.
+- If `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` and `attendance_import_tokens` is missing:
+  - `/api/attendance/import/prepare` returns `503 DB_NOT_READY`
+  - `/api/attendance/import/preview` + `/api/attendance/import/commit` return `503 DB_NOT_READY`
+  - legacy `/api/attendance/import` also requires a valid `commitToken` (prevents bypass + masks)
+- When token enforcement is disabled:
+  - preview/commit accept missing tokens
+  - legacy `/api/attendance/import` remains available for older UI compatibility
 
 ## Notes
 - Token persistence removes reliance on single-instance in-memory storage.
 - DB storage is small and short-lived (TTL 10 minutes).
+- Frontend should treat `commitToken` as **single-use** (refresh before preview/commit).
