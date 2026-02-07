@@ -150,3 +150,14 @@ This section records the latest successful execution evidence (no secrets includ
     - It validates "Desktop recommended" gating for the admin center on mobile.
   - Attendance-focused shell (mobile) rerun: `PASS`
     - Evidence: `output/playwright/attendance-prod-acceptance/focused-mobile-2/`
+
+## Post-Merge Addendum (2026-02-07)
+
+After merging PR `#116` (adds Admin Center -> User Access UI), the following additional acceptance runs passed:
+
+- Desktop admin flow (includes provisioning UI check): `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/desktop-admin-permission-ui/`
+- Attendance-focused shell (desktop): `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/focused-desktop-permission-ui/`
+- Attendance-focused shell (mobile): `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/focused-mobile-permission-ui/`
