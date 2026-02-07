@@ -104,6 +104,26 @@ Expected:
 - Overview loads and records reload completes
 - Admin/Workflow screenshots exist under `output/playwright/attendance-full-flow/`
 
+## Executed Results (This Workspace)
+Completed runs on **2026-02-07**:
+
+1. Frontend build: **PASS**
+   - `pnpm --filter @metasheet/web build`
+2. Frontend tests: **PASS**
+   - `pnpm --filter @metasheet/web exec vitest run --watch=false`
+3. Backend unit tests: **PASS**
+   - `cd packages/core-backend && pnpm exec vitest run tests/unit --reporter=dot`
+4. Playwright full flow (local Vite dev server, attendance-focused, desktop): **PASS**
+   - Output: `output/playwright/attendance-full-flow-local/attendance-focused/`
+5. Playwright full flow (local Vite dev server, attendance-focused, mobile): **PASS**
+   - Output: `output/playwright/attendance-full-flow-local/mobile/`
+6. Playwright full flow (remote preprod, platform mode): **PASS**
+   - Output: `output/playwright/attendance-full-flow-remote/platform/`
+
+Notes:
+- If port `8899` is occupied, Vite will pick another port (for example `8901`). Update `WEB_URL` accordingly.
+- The remote preprod UI will only show the attendance-focused nav **after** it is deployed with this branch (or any build that includes the product shell changes). Until then, only the platform-mode smoke applies.
+
 ## Manual Spot Checks (Optional)
 In browser DevTools:
 ```js
