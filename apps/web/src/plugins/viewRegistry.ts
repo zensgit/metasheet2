@@ -1,6 +1,6 @@
 import type { Component } from 'vue'
-import AttendanceView from '../views/AttendanceView.vue'
+import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
 
 export const viewRegistry: Record<string, Component> = {
-  AttendanceView,
+  AttendanceView: AttendanceExperienceView,
 }

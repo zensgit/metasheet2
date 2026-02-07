@@ -4,6 +4,8 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
 
@@ -18,12 +20,15 @@ import SpreadsheetsView from './views/SpreadsheetsView.vue'
 import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
 import PluginManagerView from './views/PluginManagerView.vue'
 import PluginViewHost from './views/PluginViewHost.vue'
+import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
+import HomeRedirect from './views/HomeRedirect.vue'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
-    redirect: '/grid'
+    component: HomeRedirect,
+    meta: { title: 'Home', hideNavbar: true }
   },
   {
     path: '/grid',
@@ -58,7 +63,8 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/attendance',
     name: 'attendance',
-    redirect: '/p/plugin-attendance/attendance'
+    component: AttendanceExperienceView,
+    meta: { title: 'Attendance', requiredFeature: 'attendance' }
   },
   {
     path: '/p/:plugin/:viewId',
@@ -88,7 +94,7 @@ const routes: RouteRecordRaw[] = [
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
-    meta: { title: 'Plugins' }
+    meta: { title: 'Plugins', requiredFeature: 'attendanceAdmin' }
   },
   {
     path: '/:pathMatch(.*)*',
@@ -104,12 +110,46 @@ const router = createRouter({
 })
 
 // Navigation guard for page title
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   const title = to.meta?.title
   if (title) {
     document.title = `${title} - MetaSheet`
   } else {
     document.title = 'MetaSheet'
+  }
+
+  // Product capability guard + attendance focused mode restriction.
+  try {
+    const mod = await import('./stores/featureFlags')
+    const { useFeatureFlags } = mod
+    const flags = useFeatureFlags()
+    await flags.loadProductFeatures()
+
+    const required = to.meta?.requiredFeature
+    const requiredFeature =
+      required === 'attendance' ||
+      required === 'workflow' ||
+      required === 'attendanceAdmin' ||
+      required === 'attendanceImport'
+        ? required
+        : null
+
+    if (requiredFeature && !flags.hasFeature(requiredFeature)) {
+      return next(flags.resolveHomePath())
+    }
+
+    if (flags.isAttendanceFocused()) {
+      const allowed = new Set<string>([
+        '/attendance',
+        '/p/plugin-attendance/attendance',
+      ])
+      const path = String(to.path || '')
+      if (!allowed.has(path)) {
+        return next('/attendance')
+      }
+    }
+  } catch {
+    // If guard fails (network/offline), don't block navigation.
   }
   next()
 })
@@ -117,6 +157,7 @@ router.beforeEach((to, from, next) => {
 // Create and mount app
 const app = createApp(App)
 
+app.use(ElementPlus)
 app.use(router)
 
 app.mount('#app')

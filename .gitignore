@@ -52,3 +52,6 @@ tmp/
 package-lock.json
 yarn.lock
 claudedocs/
+
+# Playwright artifacts (kept locally; referenced by docs/reports when needed)
+output/playwright/

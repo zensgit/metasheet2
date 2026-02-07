@@ -11,7 +11,7 @@
       <p class="attendance__empty" v-else>Enable the attendance plugin to use this page.</p>
     </div>
     <template v-else>
-      <header class="attendance__header">
+      <header class="attendance__header" v-if="showOverview">
         <div>
           <h2 class="attendance__title">Attendance</h2>
           <p class="attendance__subtitle">Track punches, summaries, and adjustments.</p>
@@ -26,7 +26,7 @@
         </div>
       </header>
 
-      <section class="attendance__filters">
+      <section class="attendance__filters" v-if="showOverview">
         <label class="attendance__field" for="attendance-from-date">
           <span>From</span>
           <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
@@ -55,7 +55,7 @@
         </span>
       </section>
 
-      <section class="attendance__grid">
+      <section class="attendance__grid" v-if="showOverview">
         <div class="attendance__card">
           <h3>Summary</h3>
           <div v-if="summary" class="attendance__summary">
@@ -315,7 +315,59 @@
             </table>
           </div>
         </div>
+      </section>
 
+      <section class="attendance__card" v-if="showOverview">
+        <div class="attendance__records-header">
+          <h3>Records</h3>
+          <div class="attendance__records-actions">
+            <button class="attendance__btn" :disabled="loading" @click="loadRecords">Reload</button>
+            <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
+              {{ exporting ? 'Exporting...' : 'Export CSV' }}
+            </button>
+          </div>
+        </div>
+        <div v-if="records.length === 0" class="attendance__empty">No records.</div>
+        <table v-else class="attendance__table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>First in</th>
+              <th>Last out</th>
+              <th>Work (min)</th>
+              <th>Late</th>
+              <th>Early leave</th>
+              <th>Leave</th>
+              <th>Overtime</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="record in records" :key="record.id">
+              <td>{{ record.work_date }}</td>
+              <td>{{ formatDateTime(record.first_in_at) }}</td>
+              <td>{{ formatDateTime(record.last_out_at) }}</td>
+              <td>{{ record.work_minutes }}</td>
+              <td>{{ record.late_minutes }}</td>
+              <td>{{ record.early_leave_minutes }}</td>
+              <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
+              <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
+              <td>{{ formatStatus(record.status) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="attendance__pagination">
+          <button class="attendance__btn" :disabled="recordsPage <= 1 || loading" @click="changeRecordsPage(-1)">
+            Prev
+          </button>
+          <span>Page {{ recordsPage }} / {{ recordsTotalPages }}</span>
+          <button class="attendance__btn" :disabled="recordsPage >= recordsTotalPages || loading" @click="changeRecordsPage(1)">
+            Next
+          </button>
+        </div>
+      </section>
+
+      <section class="attendance__grid" v-if="showAdmin">
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>Admin Console</h3>
@@ -2541,56 +2593,6 @@
           </div>
         </div>
       </section>
-
-      <section class="attendance__card">
-        <div class="attendance__records-header">
-          <h3>Records</h3>
-          <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="loadRecords">Reload</button>
-            <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
-              {{ exporting ? 'Exporting...' : 'Export CSV' }}
-            </button>
-          </div>
-        </div>
-        <div v-if="records.length === 0" class="attendance__empty">No records.</div>
-        <table v-else class="attendance__table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>First in</th>
-              <th>Last out</th>
-              <th>Work (min)</th>
-              <th>Late</th>
-              <th>Early leave</th>
-              <th>Leave</th>
-              <th>Overtime</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="record in records" :key="record.id">
-              <td>{{ record.work_date }}</td>
-              <td>{{ formatDateTime(record.first_in_at) }}</td>
-              <td>{{ formatDateTime(record.last_out_at) }}</td>
-              <td>{{ record.work_minutes }}</td>
-              <td>{{ record.late_minutes }}</td>
-              <td>{{ record.early_leave_minutes }}</td>
-              <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
-              <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
-              <td>{{ formatStatus(record.status) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <div class="attendance__pagination">
-          <button class="attendance__btn" :disabled="recordsPage <= 1 || loading" @click="changeRecordsPage(-1)">
-            Prev
-          </button>
-          <span>Page {{ recordsPage }} / {{ recordsTotalPages }}</span>
-          <button class="attendance__btn" :disabled="recordsPage >= recordsTotalPages || loading" @click="changeRecordsPage(1)">
-            Next
-          </button>
-        </div>
-      </section>
     </template>
   </div>
 </template>
@@ -2599,6 +2601,17 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+
+type AttendancePageMode = 'overview' | 'admin'
+
+const props = withDefaults(
+  defineProps<{
+    mode?: AttendancePageMode
+  }>(),
+  {
+    mode: 'overview',
+  }
+)
 
 interface AttendanceSummary {
   total_days: number
@@ -3119,6 +3132,9 @@ const pluginFailed = computed(() => pluginsLoaded.value && attendancePluginEntry
 const pluginLoading = computed(() => !pluginsLoaded.value || pluginsLoading.value)
 const pluginMissing = computed(() => pluginsLoaded.value && !attendancePluginActive.value)
 const pluginErrorMessage = computed(() => pluginsError.value)
+
+const showAdmin = computed(() => props.mode === 'admin')
+const showOverview = computed(() => props.mode === 'overview')
 
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))

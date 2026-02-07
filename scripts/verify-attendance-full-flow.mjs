@@ -1,0 +1,175 @@
+import { chromium } from '@playwright/test'
+import fs from 'fs/promises'
+import path from 'path'
+
+const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
+const token = process.env.AUTH_TOKEN || ''
+const headless = process.env.HEADLESS !== 'false'
+const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
+const fromDate = process.env.FROM_DATE || ''
+const toDate = process.env.TO_DATE || ''
+const userId = process.env.USER_ID || ''
+const productMode = process.env.PRODUCT_MODE || ''
+const featuresJson = process.env.FEATURES_JSON || ''
+const mobile = process.env.UI_MOBILE === 'true'
+const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
+const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-flow'
+
+function logInfo(message) {
+  console.log(`[attendance-full-flow] ${message}`)
+}
+
+async function setAuth(page) {
+  if (!token) return
+  await page.addInitScript((value) => {
+    if (value) localStorage.setItem('auth_token', value)
+  }, token)
+}
+
+async function setProductFeatures(page) {
+  if (!productMode && !featuresJson) return
+  await page.addInitScript((payload) => {
+    const modeValue = payload?.modeValue
+    const jsonValue = payload?.jsonValue
+    if (typeof modeValue === 'string' && modeValue) {
+      localStorage.setItem('metasheet_product_mode', modeValue)
+    }
+    if (typeof jsonValue === 'string' && jsonValue) {
+      localStorage.setItem('metasheet_features', jsonValue)
+    }
+  }, { modeValue: productMode, jsonValue: featuresJson })
+}
+
+function parseFeatures(raw) {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+async function ensureAttendanceLoaded(page) {
+  await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
+  // Use exact match to avoid strict-mode collisions with headings like "Attendance groups".
+  await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+}
+
+async function assertNavForAttendanceMode(page) {
+  const nav = page.locator('nav.app-nav')
+  await nav.waitFor({ timeout: timeoutMs })
+  const gridLink = page.getByRole('link', { name: 'Grid' })
+  if (await gridLink.count()) {
+    throw new Error('Expected attendance-focused nav (no Grid link), but Grid link is visible')
+  }
+  const attendanceLink = page.getByRole('link', { name: 'Attendance' })
+  if (!(await attendanceLink.count())) {
+    throw new Error('Expected Attendance link in nav, but not found')
+  }
+}
+
+async function setDateRange(page, from, to) {
+  if (from) {
+    await page.locator('#attendance-from-date').fill(from)
+  }
+  if (to) {
+    await page.locator('#attendance-to-date').fill(to)
+  }
+}
+
+async function refreshRecords(page) {
+  await page.getByRole('button', { name: 'Refresh' }).click()
+  const recordsSection = page.locator('section.attendance__card').filter({
+    has: page.getByRole('heading', { name: 'Records' }),
+  })
+  await recordsSection.getByRole('button', { name: 'Reload' }).click()
+}
+
+async function assertHasRecords(page) {
+  await page.waitForTimeout(800)
+  const empty = page.locator('text=No records.')
+  if (allowEmptyRecords) return
+  if (await empty.count()) {
+    throw new Error('No records found in Records table')
+  }
+}
+
+async function run() {
+  if (!token) {
+    logInfo('AUTH_TOKEN is required')
+    process.exit(1)
+  }
+
+  const features = parseFeatures(featuresJson) || {}
+  const expectAttendanceFocused = productMode === 'attendance' || features?.mode === 'attendance'
+
+  const browser = await chromium.launch({ headless })
+  const context = await browser.newContext({
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 720 },
+    deviceScaleFactor: mobile ? 2 : 1,
+    isMobile: mobile,
+  })
+  const page = await context.newPage()
+  await setAuth(page)
+  await setProductFeatures(page)
+
+  logInfo(`Navigating to ${webUrl}`)
+  await page.goto(webUrl, { waitUntil: 'networkidle', timeout: timeoutMs })
+
+  await ensureAttendanceLoaded(page)
+
+  if (expectAttendanceFocused) {
+    await assertNavForAttendanceMode(page)
+    logInfo('Nav verified (attendance-focused)')
+  }
+
+  if (fromDate || toDate) {
+    await setDateRange(page, fromDate, toDate)
+  }
+  if (userId) {
+    await page.locator('#attendance-user-id').fill(userId)
+  }
+  await refreshRecords(page)
+  await assertHasRecords(page)
+
+  await fs.mkdir(outputDir, { recursive: true })
+  await page.screenshot({ path: path.join(outputDir, '01-overview.png'), fullPage: true })
+  logInfo('Saved overview screenshot')
+
+  // Admin Center (if enabled)
+  if (features.attendanceAdmin) {
+    await page.getByRole('button', { name: 'Admin Center' }).click()
+    if (mobile) {
+      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+    } else {
+      await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
+    }
+    await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
+    logInfo('Saved admin screenshot')
+    if (mobile) {
+      await page.getByRole('button', { name: 'Back to Overview' }).click()
+    }
+  }
+
+  // Workflow Designer (if enabled)
+  if (features.workflow) {
+    await page.getByRole('button', { name: 'Workflow Designer' }).click()
+    if (mobile) {
+      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+    } else {
+      await page.locator('.workflow-designer').waitFor({ timeout: timeoutMs })
+    }
+    await page.screenshot({ path: path.join(outputDir, '03-workflow.png'), fullPage: true })
+    logInfo('Saved workflow screenshot')
+  }
+
+  await context.close()
+  await browser.close()
+  logInfo('Full flow verification complete')
+}
+
+run().catch((error) => {
+  console.error('[attendance-full-flow] Failed:', error)
+  process.exit(1)
+})

@@ -149,4 +149,15 @@ paths:
                     type: object
                     properties:
                       user: { $ref: '#/components/schemas/User' }
+                      features:
+                        type: object
+                        description: Product capability flags for UI shells.
+                        properties:
+                          attendance: { type: boolean }
+                          workflow: { type: boolean }
+                          attendanceAdmin: { type: boolean }
+                          attendanceImport: { type: boolean }
+                          mode:
+                            type: string
+                            enum: [platform, attendance]
         '401': { $ref: '#/components/responses/Unauthorized' }

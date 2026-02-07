@@ -11,6 +11,10 @@ const toDate = process.env.TO_DATE || ''
 const userIds = (process.env.USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean)
 const debug = process.env.UI_DEBUG === 'true'
 const screenshotPath = process.env.UI_SCREENSHOT_PATH || ''
+const productMode = process.env.PRODUCT_MODE || ''
+const featuresJson = process.env.FEATURES_JSON || ''
+const mobile = process.env.UI_MOBILE === 'true'
+const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 
 function logInfo(message) {
   console.log(`[attendance-import-ui] ${message}`)
@@ -21,6 +25,30 @@ async function setAuth(page) {
   await page.addInitScript((value) => {
     if (value) localStorage.setItem('auth_token', value)
   }, token)
+}
+
+async function setProductFeatures(page) {
+  if (!productMode && !featuresJson) return
+  await page.addInitScript((payload) => {
+    const modeValue = payload?.modeValue
+    const jsonValue = payload?.jsonValue
+    if (typeof modeValue === 'string' && modeValue) {
+      localStorage.setItem('metasheet_product_mode', modeValue)
+    }
+    if (typeof jsonValue === 'string' && jsonValue) {
+      localStorage.setItem('metasheet_features', jsonValue)
+    }
+  }, { modeValue: productMode, jsonValue: featuresJson })
+}
+
+function parseFeatures(raw) {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 async function setDateRange(page, from, to) {
@@ -47,8 +75,39 @@ async function refreshRecords(page) {
 async function assertHasRecords(page) {
   await page.waitForTimeout(1000)
   const empty = page.locator('text=No records.')
+  if (allowEmptyRecords) return
   if (await empty.count()) {
     throw new Error('No records found in Records table')
+  }
+}
+
+async function assertTabPresence(page, features) {
+  if (!features) return
+
+  await page.locator('nav.attendance-shell__tabs').waitFor({ timeout: timeoutMs })
+
+  const shouldHaveAdmin = Boolean(features.attendanceAdmin)
+  const shouldHaveWorkflow = Boolean(features.workflow)
+
+  const adminTab = page.getByRole('button', { name: 'Admin Center' })
+  const workflowTab = page.getByRole('button', { name: 'Workflow Designer' })
+
+  if (shouldHaveAdmin) {
+    if (!(await adminTab.count())) throw new Error('Expected Admin Center tab, but not found')
+  } else if (await adminTab.count()) {
+    throw new Error('Admin Center tab should not be visible')
+  }
+
+  if (shouldHaveWorkflow) {
+    if (!(await workflowTab.count())) throw new Error('Expected Workflow Designer tab, but not found')
+  } else if (await workflowTab.count()) {
+    throw new Error('Workflow Designer tab should not be visible')
+  }
+
+  if (mobile && shouldHaveWorkflow) {
+    await workflowTab.click()
+    await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+    await page.getByRole('button', { name: 'Back to Overview' }).click()
   }
 }
 
@@ -63,11 +122,20 @@ async function run() {
   }
 
   const browser = await chromium.launch({ headless })
-  const page = await browser.newPage()
+  const context = await browser.newContext({
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 720 },
+    deviceScaleFactor: mobile ? 2 : 1,
+    isMobile: mobile,
+  })
+  const page = await context.newPage()
   await setAuth(page)
+  await setProductFeatures(page)
 
   logInfo(`Navigating to ${webUrl}`)
   await page.goto(webUrl, { waitUntil: 'networkidle', timeout: timeoutMs })
+
+  const features = parseFeatures(featuresJson)
+  await assertTabPresence(page, features)
 
   for (const userId of userIds) {
     if (debug) logInfo(`Validating user ${userId}`)
@@ -84,6 +152,7 @@ async function run() {
     logInfo(`Saved screenshot: ${screenshotPath}`)
   }
 
+  await context.close()
   await browser.close()
   logInfo('UI verification complete')
 }
