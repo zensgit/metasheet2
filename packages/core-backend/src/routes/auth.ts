@@ -6,7 +6,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
 import jwt, { type SignOptions } from 'jsonwebtoken'
-import { authService } from '../auth/AuthService'
+import { authService, type User } from '../auth/AuthService'
+import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('AuthRouter')
@@ -426,9 +427,31 @@ authRouter.get('/me', async (req: Request, res: Response) => {
       })
     }
 
+    const authUser = user as User
+    type ProductMode = 'platform' | 'attendance'
+    const normalizeProductMode = (value: unknown): ProductMode => {
+      if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
+      return 'platform'
+    }
+
+    const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
+    const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
+    const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
+    const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
+    const workflow = FEATURE_FLAGS.workflowEnabled
+
     res.json({
       success: true,
-      data: { user }
+      data: {
+        user: authUser,
+        features: {
+          attendance,
+          workflow,
+          attendanceAdmin,
+          attendanceImport,
+          mode: normalizeProductMode(process.env.PRODUCT_MODE),
+        },
+      }
     })
   } catch (error) {
     logger.error('Get user info error', error instanceof Error ? error : undefined)

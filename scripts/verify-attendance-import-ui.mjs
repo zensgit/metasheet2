@@ -29,14 +29,16 @@ async function setAuth(page) {
 
 async function setProductFeatures(page) {
   if (!productMode && !featuresJson) return
-  await page.addInitScript((modeValue, jsonValue) => {
+  await page.addInitScript((payload) => {
+    const modeValue = payload?.modeValue
+    const jsonValue = payload?.jsonValue
     if (typeof modeValue === 'string' && modeValue) {
       localStorage.setItem('metasheet_product_mode', modeValue)
     }
     if (typeof jsonValue === 'string' && jsonValue) {
       localStorage.setItem('metasheet_features', jsonValue)
     }
-  }, productMode, featuresJson)
+  }, { modeValue: productMode, jsonValue: featuresJson })
 }
 
 function parseFeatures(raw) {

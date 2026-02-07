@@ -1,28 +1,19 @@
 <template>
-  <section class="attendance-workflow">
+  <section v-if="!canDesign" class="attendance-workflow">
     <article class="attendance-workflow__card">
       <h3>Approval Workflow Designer</h3>
-      <p v-if="!canDesign" class="attendance-workflow__empty">
+      <p class="attendance-workflow__empty">
         Workflow capability is not enabled for this tenant.
       </p>
-      <template v-else>
-        <p class="attendance-workflow__desc">
-          Design attendance approval flows inside the Attendance module. This page is optimized for desktop.
-        </p>
-        <ul class="attendance-workflow__list">
-          <li>Leave request approval chain</li>
-          <li>Overtime approval chain</li>
-          <li>Missed check-in / check-out correction flow</li>
-        </ul>
-        <p class="attendance-workflow__hint">
-          Next step: connect this designer to workflow templates and publish controls.
-        </p>
-      </template>
     </article>
   </section>
+
+  <WorkflowDesigner v-else />
 </template>
 
 <script setup lang="ts">
+import WorkflowDesigner from '../WorkflowDesigner.vue'
+
 withDefaults(
   defineProps<{
     canDesign?: boolean
@@ -67,4 +58,3 @@ withDefaults(
   gap: 6px;
 }
 </style>
-

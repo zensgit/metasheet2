@@ -11,7 +11,7 @@ Support a "sell attendance as a standalone product" UX without maintaining a sep
 - **Mobile**: prioritize punch/request/approve/records; desktop-only for advanced admin/design tasks.
 
 ## Non-goals (This Iteration)
-- A full workflow designer implementation (only a stub page is provided).
+- A polished workflow product (multi-workflow list, publish history, and governance UI).
 - Replacing the plugin system routing model (we integrate with it).
 - A complete RBAC model in the frontend (we use a safe heuristic + future server flags).
 
@@ -30,14 +30,17 @@ We introduced a frontend feature model with a clear precedence order:
 1. **Local overrides (highest priority)**:
    - `localStorage.metasheet_product_mode` = `attendance|platform`
    - `localStorage.metasheet_features` = JSON payload (partial `ProductFeatures`)
-2. **Backend features** (optional, future):
-   - If backend adds `data.features` in `/api/auth/me`, it will be consumed.
+2. **Backend features**:
+   - `/api/auth/me` returns `data.features` (mode + capabilities).
 3. **Plugin inference (lowest priority)**:
-   - `/api/plugins` is used to infer if `plugin-attendance` exists and if the environment looks "attendance-only".
+   - `/api/plugins` is only used to infer module presence (e.g. attendance plugin active), not product shell mode.
 
 This allows:
-- Real production control via backend flags (future), and
+- Real production control via backend flags, and
 - Immediate development/testing control via localStorage injection (Playwright supported).
+
+#### Safety Note: Default Mode
+If neither local override nor backend features specify a product mode, the frontend defaults to **platform mode** (do not auto-switch to attendance-only based on plugin listing).
 
 ### 2) Capability-Driven Routing
 Files:
@@ -64,7 +67,7 @@ Files:
 We introduced an Attendance "experience shell" with tabs:
 - **Overview**: punch + summary + calendar + requests + records
 - **Admin Center**: the existing admin console and its sections
-- **Workflow Designer**: only shown if `features.workflow=true` (stub page in this iteration)
+- **Workflow Designer**: only shown if `features.workflow=true` (embeds the existing `WorkflowDesigner.vue`)
 
 The legacy `AttendanceView.vue` is now a host component supporting:
 - `mode="overview"` to render only the user-facing cards
@@ -99,12 +102,9 @@ Plugin-contributed view `AttendanceView` now maps to `AttendanceExperienceView`,
 - `/attendance` uses the same upgraded UI
 
 ## Future Work (Recommended Next Steps)
-1. **Backend capability flags**:
-   - Extend `/api/auth/me` to include `data.features` so frontend does not rely on inference.
-2. **Real workflow designer**:
-   - Embed `WorkflowDesigner.vue` (existing view) into the Attendance workflow tab (capability gated).
-3. **Fine-grained RBAC**:
+1. **Purchase model**:
+   - Persist tenant-level purchased capabilities (DB), not only env vars, and emit in `data.features`.
+2. **Fine-grained RBAC**:
    - Replace admin heuristic with explicit permissions from backend (per tenant/user).
-4. **Further extraction**:
+3. **Further extraction**:
    - Split `AttendanceView.vue` into dedicated components (import UI, settings forms, etc).
-

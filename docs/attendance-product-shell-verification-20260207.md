@@ -14,7 +14,7 @@ Verify the "attendance-only focused shell" UI refactor and its capability-driven
 5. Regression:
    - Frontend build passes
    - Frontend unit tests pass
-   - UI acceptance script supports feature/mode injection
+   - UI acceptance scripts support feature/mode injection
 
 ## Build / Tests
 
@@ -38,6 +38,7 @@ Note:
 ## UI Automation
 Script:
 - `scripts/verify-attendance-import-ui.mjs`
+- `scripts/verify-attendance-full-flow.mjs`
 
 New supported envs:
 - `PRODUCT_MODE` (e.g. `attendance`)
@@ -87,6 +88,22 @@ node scripts/verify-attendance-import-ui.mjs
 Expected:
 - When clicking `Workflow Designer` tab, page shows **Desktop recommended** gate.
 
+### Scenario D: Full Flow Smoke (Root -> Attendance -> Tabs)
+```bash
+WEB_URL=http://localhost:8899/ \
+AUTH_TOKEN="<token>" \
+PRODUCT_MODE=attendance \
+FEATURES_JSON='{"attendance":true,"workflow":true,"attendanceAdmin":true,"attendanceImport":true,"mode":"attendance"}' \
+ALLOW_EMPTY_RECORDS=true \
+OUTPUT_DIR=output/playwright/attendance-full-flow \
+node scripts/verify-attendance-full-flow.mjs
+```
+Expected:
+- `/` redirects to `/attendance`
+- Attendance-focused nav shows no `Grid`
+- Overview loads and records reload completes
+- Admin/Workflow screenshots exist under `output/playwright/attendance-full-flow/`
+
 ## Manual Spot Checks (Optional)
 In browser DevTools:
 ```js
@@ -105,6 +122,5 @@ Expected:
 - Landing on `/` goes to `/attendance`
 
 ## Known Limitations
-- Backend `/api/auth/me` does not yet emit `data.features`; frontend currently relies on localStorage override and plugin inference.
-- Workflow designer is a stub in this iteration (UI placeholder).
-
+- Backend `data.features` currently uses env-driven `PRODUCT_MODE` (defaults to `platform` unless explicitly set).
+- Workflow designer is embedded as-is (ElementPlus + BPMN.js). UX polish (multi-workflow list/publish history) is out of scope for this iteration.

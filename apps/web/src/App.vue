@@ -26,6 +26,11 @@
           <router-link to="/plm" class="nav-link">PLM</router-link>
         </template>
       </div>
+
+      <div v-if="attendanceFocused" class="nav-actions">
+        <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+        <button class="nav-link nav-link--button" type="button" @click="logout">Sign out</button>
+      </div>
     </nav>
     <!-- CI trigger: lockfile update -->
     <main class="app-main">
@@ -54,6 +59,36 @@ const brandText = computed(() => {
   if (attendanceFocused.value) return 'Attendance'
   return 'MetaSheet'
 })
+
+const accountEmail = computed(() => {
+  if (typeof localStorage === 'undefined') return ''
+  const token = localStorage.getItem('auth_token')
+  if (!token) return ''
+  const chunks = token.split('.')
+  if (chunks.length < 2) return ''
+  try {
+    const normalized = chunks[1]
+      .replace(/-/g, '+')
+      .replace(/_/g, '/')
+      .padEnd(Math.ceil(chunks[1].length / 4) * 4, '=')
+    const json = atob(normalized)
+    const payload = JSON.parse(json) as { email?: unknown }
+    return typeof payload.email === 'string' ? payload.email : ''
+  } catch {
+    return ''
+  }
+})
+
+function logout(): void {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('auth_token')
+    localStorage.removeItem('metasheet_features')
+    localStorage.removeItem('metasheet_product_mode')
+    localStorage.removeItem('user_permissions')
+    localStorage.removeItem('user_roles')
+  }
+  window.location.assign('/')
+}
 
 onMounted(async () => {
   await loadProductFeatures()
@@ -112,12 +147,29 @@ html, body {
   gap: 8px;
 }
 
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nav-user {
+  color: #6b7280;
+  font-size: 13px;
+}
+
 .nav-link {
   padding: 8px 16px;
   text-decoration: none;
   color: #666;
   border-radius: 4px;
   transition: all 0.2s;
+}
+
+.nav-link--button {
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
 }
 
 .nav-link:hover {

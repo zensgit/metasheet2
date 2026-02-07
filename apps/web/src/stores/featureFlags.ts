@@ -54,7 +54,11 @@ function parseJwtPayload(token: string | null): Record<string, unknown> {
   const chunks = token.split('.')
   if (chunks.length < 2) return {}
   try {
-    const json = atob(chunks[1])
+    const normalized = chunks[1]
+      .replace(/-/g, '+')
+      .replace(/_/g, '/')
+      .padEnd(Math.ceil(chunks[1].length / 4) * 4, '=')
+    const json = atob(normalized)
     const parsed = JSON.parse(json)
     return parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
@@ -161,7 +165,6 @@ function isAdminRole(payload: any): boolean {
 function inferPluginFeatures(payload: any): {
   attendance: boolean
   workflow: boolean
-  attendanceOnly: boolean
 } {
   const list: any[] = Array.isArray(payload) ? payload : Array.isArray(payload?.list) ? payload.list : []
   const active = list.filter((item) => item?.status === 'active')
@@ -170,21 +173,13 @@ function inferPluginFeatures(payload: any): {
   const attendance = activeNames.some((name) => name === 'plugin-attendance' || name.endsWith('/plugin-attendance'))
   const workflow = activeNames.some((name) => name.includes('workflow'))
 
-  const mainNavPlugins = active.filter((item) =>
-    Array.isArray(item?.contributes?.views)
-      && item.contributes.views.some((view: any) => view?.location === 'main-nav'),
-  )
-  const attendanceOnly = attendance
-    && mainNavPlugins.length === 1
-    && String(mainNavPlugins[0]?.name || '').toLowerCase().includes('attendance')
-
-  return { attendance, workflow, attendanceOnly }
+  return { attendance, workflow }
 }
 
 function resolveFeatures(
   backend: Partial<ProductFeatures>,
   override: Partial<ProductFeatures>,
-  pluginInference: { attendance: boolean; workflow: boolean; attendanceOnly: boolean },
+  pluginInference: { attendance: boolean; workflow: boolean },
   isAdmin: boolean,
 ): ProductFeatures {
   const attendance = boolOrDefault(
@@ -213,7 +208,7 @@ function resolveFeatures(
 
   const mode = normalizeMode(override.mode)
     || normalizeMode(backend.mode)
-    || (pluginInference.attendanceOnly ? 'attendance' : 'platform')
+    || 'platform'
 
   return {
     attendance,
@@ -295,4 +290,3 @@ export function useFeatureFlags() {
     resolveHomePath,
   }
 }
-

@@ -4,6 +4,8 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
 
@@ -155,6 +157,7 @@ router.beforeEach(async (to, from, next) => {
 // Create and mount app
 const app = createApp(App)
 
+app.use(ElementPlus)
 app.use(router)
 
 app.mount('#app')
