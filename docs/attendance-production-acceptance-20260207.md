@@ -40,6 +40,7 @@ Expected:
   - plugin-attendance is active
   - import preview + commit works
   - group auto-create + membership works
+  - adjustment requests create + approve works
 
 ## Gate 3: Permission Provisioning (Must Pass)
 
@@ -123,7 +124,7 @@ Go when:
 This section records the latest successful execution evidence (no secrets included).
 
 - Preflight: `PASS` on `142.171.239.56` (no warnings; `PRODUCT_MODE=attendance`).
-- API Smoke: `PASS` (including `EXPECT_PRODUCT_MODE=attendance`).
+- API Smoke: `PASS` (import preview/commit, group auto-create+membership, adjustment request create+approve; `EXPECT_PRODUCT_MODE=attendance`).
 - Permission provisioning: `PASS` via `scripts/ops/attendance-provision-user.sh`.
 - Playwright:
   - Desktop admin run #1: `PASS`

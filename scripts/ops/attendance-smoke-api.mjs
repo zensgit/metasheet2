@@ -68,6 +68,11 @@ function makeCsv(workDate, userId, groupName) {
   ].join('\n')
 }
 
+function isoMinutesAgo(minutes) {
+  const ms = Math.max(0, Number(minutes) || 0) * 60 * 1000
+  return new Date(Date.now() - ms).toISOString()
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -186,6 +191,40 @@ async function run() {
   const hasMember = memberItems.some((m) => m && (m.userId === userId || m.user_id === userId))
   if (!hasMember) die('importing user is not a member of created group')
   log('group + membership ok')
+
+  // 9) request create + approve
+  const requestPayload = {
+    workDate,
+    requestType: 'time_correction',
+    requestedInAt: isoMinutesAgo(60),
+    requestedOutAt: isoMinutesAgo(0),
+    reason: 'smoke test',
+    orgId,
+  }
+
+  const createReq = await apiFetch('/attendance/requests', {
+    method: 'POST',
+    body: JSON.stringify(requestPayload),
+  })
+  assertOk(createReq, 'POST /attendance/requests')
+  const request = createReq.body?.data?.request
+  const requestId = request?.id
+  if (!requestId) die('request create did not return request.id')
+  log(`request created: id=${requestId}`)
+
+  const approveReq = await apiFetch(`/attendance/requests/${requestId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ comment: 'smoke approve' }),
+  })
+  assertOk(approveReq, 'POST /attendance/requests/:id/approve')
+  log('request approved')
+
+  const listReq = await apiFetch(`/attendance/requests?status=approved&from=${workDate}&to=${workDate}&pageSize=50`, { method: 'GET' })
+  assertOk(listReq, 'GET /attendance/requests (approved)')
+  const approvedItems = listReq.body?.data?.items || []
+  const found = Array.isArray(approvedItems) && approvedItems.some((item) => item && item.id === requestId)
+  if (!found) die('approved request not found in list')
+  log('requests list ok')
 
   log('SMOKE PASS')
 }
