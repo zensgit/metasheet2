@@ -1567,18 +1567,19 @@ function mapPayrollCycleRow(row) {
   }
 }
 
-	function mapImportBatchRow(row) {
+function mapImportBatchRow(row) {
+  const meta = normalizeMetadata(row.meta)
 	  return {
 	    id: row.id,
 	    orgId: row.org_id ?? DEFAULT_ORG_ID,
-	    idempotencyKey: row.idempotency_key ?? null,
+	    idempotencyKey: row.idempotency_key ?? meta?.idempotencyKey ?? null,
 	    createdBy: row.created_by,
 	    source: row.source ?? null,
 	    ruleSetId: row.rule_set_id ?? null,
 	    mapping: normalizeMetadata(row.mapping),
     rowCount: Number(row.row_count ?? 0),
     status: row.status ?? 'committed',
-    meta: normalizeMetadata(row.meta),
+    meta,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -1645,12 +1646,19 @@ function mapPayrollCycleRow(row) {
 	}
 
 	async function loadIdempotentImportBatch(client, orgId, idempotencyKey) {
+	  const hasColumn = await hasImportBatchIdempotencyColumn(client)
 	  const rows = await client.query(
-	    `SELECT id, meta
-	     FROM attendance_import_batches
-	     WHERE org_id = $1 AND idempotency_key = $2 AND status = $3
-	     ORDER BY created_at DESC
-	     LIMIT 1`,
+	    hasColumn
+	      ? `SELECT id, meta
+	         FROM attendance_import_batches
+	         WHERE org_id = $1 AND idempotency_key = $2 AND status = $3
+	         ORDER BY created_at DESC
+	         LIMIT 1`
+	      : `SELECT id, meta
+	         FROM attendance_import_batches
+	         WHERE org_id = $1 AND (meta->>'idempotencyKey') = $2 AND status = $3
+	         ORDER BY created_at DESC
+	         LIMIT 1`,
 	    [orgId, idempotencyKey, 'committed']
 	  )
 	  if (!rows.length) return null
@@ -8075,25 +8083,22 @@ module.exports = {
 	          ? parsed.data.idempotencyKey.trim()
 	          : ''
 	        if (idempotencyKey) {
-	          const idempotencySupported = await hasImportBatchIdempotencyColumn(db)
-	          if (idempotencySupported) {
-	            const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
-	            if (existing) {
-	              res.json({
-	                ok: true,
-	                data: {
-	                  batchId: existing.batchId,
-	                  imported: existing.imported,
-	                  items: [],
-	                  skipped: [],
-	                  csvWarnings: [],
-	                  groupWarnings: [],
-	                  meta: existing.meta,
-	                  idempotent: true,
-	                },
-	              })
-	              return
-	            }
+	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+	          if (existing) {
+	            res.json({
+	              ok: true,
+	              data: {
+	                batchId: existing.batchId,
+	                imported: existing.imported,
+	                items: [],
+	                skipped: [],
+	                csvWarnings: [],
+	                groupWarnings: [],
+	                meta: existing.meta,
+	                idempotent: true,
+	              },
+	            })
+	            return
 	          }
 	        }
 

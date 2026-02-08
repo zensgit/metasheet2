@@ -12,7 +12,8 @@ This is the delivery package definition for bringing the Attendance plugin to a 
    - `/api/attendance/import/commit`
 3. Import commit tokens are safe across restarts (DB-backed when required).
 4. Import commits support an optional `idempotencyKey` (deduplicates retries; unique per org).
-   - Requires DB migration: `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
+   - Works even when the `attendance_import_batches.idempotency_key` column is not present by falling back to `attendance_import_batches.meta.idempotencyKey`.
+   - Recommended hardening (uniqueness + faster lookup): `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
 5. Reverse proxy remains stable across backend redeploys (no stale backend container IP).
 6. Repeatable acceptance using Playwright with stored artifacts.
 7. Admins can provision employee/approver/admin permissions via the existing permission APIs.
@@ -30,7 +31,7 @@ Out of scope for this delivery:
 - Postgres and Redis must NOT be exposed on public interfaces.
   - Production compose must not include `ports: ["5432:5432"]` or `ports: ["6379:6379"]`.
   - For debug only, use `docker-compose.app.debug.yml` which binds DB/Redis to localhost.
- - `docker/app.env` must not use default secrets.
+- `docker/app.env` must not use default secrets.
 
 ### Deploy
 
