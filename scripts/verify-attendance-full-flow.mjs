@@ -4,7 +4,7 @@ import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
-const token = process.env.AUTH_TOKEN || ''
+let token = process.env.AUTH_TOKEN || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
 const fromDate = process.env.FROM_DATE || ''
@@ -37,6 +37,39 @@ function deriveApiBaseFromWebUrl(url) {
     return `${u.origin}/api`
   } catch {
     return ''
+  }
+}
+
+async function refreshAuthToken(apiBase) {
+  if (!apiBase || !token) return false
+  const url = `${normalizeUrl(apiBase)}/auth/refresh-token`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    const raw = await res.text()
+    let body = null
+    try {
+      body = raw ? JSON.parse(raw) : null
+    } catch {
+      body = null
+    }
+    if (!res.ok || body?.success === false) {
+      logInfo(`WARN: token refresh failed: HTTP ${res.status}`)
+      return false
+    }
+    const nextToken = body?.data?.token
+    if (typeof nextToken === 'string' && nextToken.length > 20) {
+      token = nextToken
+      return true
+    }
+    logInfo('WARN: token refresh response missing token')
+    return false
+  } catch (error) {
+    logInfo(`WARN: token refresh error (${(error && error.message) || error})`)
+    return false
   }
 }
 
@@ -98,6 +131,22 @@ async function fetchAuthMeFeatures(apiBase) {
   return payload?.features && typeof payload.features === 'object' ? payload.features : null
 }
 
+async function endpointExists(apiBase, pathname) {
+  if (!apiBase) return false
+  try {
+    const url = `${normalizeUrl(apiBase)}${pathname}`
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    return res.status !== 404
+  } catch {
+    return false
+  }
+}
+
 async function ensureAttendanceLoaded(page) {
   await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
   // Use exact match to avoid strict-mode collisions with headings like "Attendance groups".
@@ -150,6 +199,7 @@ async function run() {
   }
 
   const apiBase = normalizeUrl(apiBaseEnv) || deriveApiBaseFromWebUrl(webUrl)
+  await refreshAuthToken(apiBase)
 
   // Resolve expected features:
   // 1) Explicit FEATURES_JSON override (local/dev).
@@ -213,6 +263,15 @@ async function run() {
   await refreshRecords(page)
   await assertHasRecords(page)
 
+  const today = new Date().toISOString().slice(0, 10)
+  const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
+  if (anomaliesSupported) {
+    await page.getByRole('heading', { name: 'Anomalies', exact: true }).waitFor({ timeout: timeoutMs })
+    logInfo('Anomalies card verified')
+  } else {
+    logInfo('WARN: /attendance/anomalies not available (skipping anomalies UI assertion)')
+  }
+
   await fs.mkdir(outputDir, { recursive: true })
   await page.screenshot({ path: path.join(outputDir, '01-overview.png'), fullPage: true })
   logInfo('Saved overview screenshot')
@@ -224,6 +283,9 @@ async function run() {
       await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
     } else {
       await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: 'Payroll Cycles', exact: true }).waitFor({ timeout: timeoutMs })
+      await page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' }).waitFor({ timeout: timeoutMs })
+      logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
     logInfo('Saved admin screenshot')

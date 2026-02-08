@@ -161,3 +161,18 @@ After merging PR `#116` (adds Admin Center -> User Access UI), the following add
   - Evidence: `output/playwright/attendance-prod-acceptance/focused-desktop-permission-ui/`
 - Attendance-focused shell (mobile): `PASS`
   - Evidence: `output/playwright/attendance-prod-acceptance/focused-mobile-permission-ui/`
+
+## Latest Execution Record (2026-02-08)
+
+This section records a follow-up validation run after additional production-hardening changes:
+
+- API Smoke: `PASS` (`EXPECT_PRODUCT_MODE=attendance`)
+- Playwright full flow:
+  - Desktop: `PASS`
+    - Evidence: `output/playwright/attendance-full-flow-remote-20260208-desktop/`
+  - Mobile: `PASS`
+    - Evidence: `output/playwright/attendance-full-flow-remote-20260208-mobile/`
+
+Notes:
+
+- The verifiers refresh JWTs via `POST /api/auth/refresh-token` before running (best-effort).

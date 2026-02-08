@@ -3,7 +3,8 @@ import fs from 'fs/promises'
 import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/attendance'
-const token = process.env.AUTH_TOKEN || ''
+let token = process.env.AUTH_TOKEN || ''
+const apiBaseEnv = process.env.API_BASE || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 30000)
 const fromDate = process.env.FROM_DATE || ''
@@ -18,6 +19,52 @@ const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 
 function logInfo(message) {
   console.log(`[attendance-import-ui] ${message}`)
+}
+
+function normalizeUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function deriveApiBaseFromWebUrl(url) {
+  try {
+    const u = new URL(url)
+    return `${u.origin}/api`
+  } catch {
+    return ''
+  }
+}
+
+async function refreshAuthToken(apiBase) {
+  if (!apiBase || !token) return false
+  const url = `${normalizeUrl(apiBase)}/auth/refresh-token`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    const raw = await res.text()
+    let body = null
+    try {
+      body = raw ? JSON.parse(raw) : null
+    } catch {
+      body = null
+    }
+    if (!res.ok || body?.success === false) {
+      logInfo(`WARN: token refresh failed: HTTP ${res.status}`)
+      return false
+    }
+    const nextToken = body?.data?.token
+    if (typeof nextToken === 'string' && nextToken.length > 20) {
+      token = nextToken
+      return true
+    }
+    logInfo('WARN: token refresh response missing token')
+    return false
+  } catch (error) {
+    logInfo(`WARN: token refresh error (${(error && error.message) || error})`)
+    return false
+  }
 }
 
 async function setAuth(page) {
@@ -120,6 +167,9 @@ async function run() {
     logInfo('USER_IDS is required (comma separated)')
     process.exit(1)
   }
+
+  const apiBase = normalizeUrl(apiBaseEnv) || deriveApiBaseFromWebUrl(webUrl)
+  await refreshAuthToken(apiBase)
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({
