@@ -1,5 +1,5 @@
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
-const token = process.env.AUTH_TOKEN || ''
+let token = process.env.AUTH_TOKEN || ''
 const orgId = process.env.ORG_ID || 'default'
 const defaultTimezone = process.env.TIMEZONE || 'Asia/Shanghai'
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
@@ -17,6 +17,39 @@ function die(message) {
 
 function log(message) {
   console.log(`[attendance-smoke-api] ${message}`)
+}
+
+async function refreshAuthToken() {
+  const url = `${apiBase}/auth/refresh-token`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    const raw = await res.text()
+    let body = null
+    try {
+      body = raw ? JSON.parse(raw) : null
+    } catch {
+      body = null
+    }
+    if (!res.ok || body?.success === false) {
+      // Keep the old token as fallback; subsequent /auth/me will surface the real error if it's expired.
+      log(`WARN: token refresh failed: HTTP ${res.status}`)
+      return false
+    }
+    const nextToken = body?.data?.token
+    if (typeof nextToken === 'string' && nextToken.length > 20) {
+      token = nextToken
+      return true
+    }
+    log('WARN: token refresh response missing token')
+    return false
+  } catch (error) {
+    log(`WARN: token refresh error: ${(error && error.message) || String(error)}`)
+    return false
+  }
 }
 
 async function apiFetch(path, init = {}) {
@@ -78,6 +111,7 @@ async function run() {
   if (!token) die('AUTH_TOKEN is required')
 
   log(`API_BASE=${apiBase}`)
+  await refreshAuthToken()
 
   // 1) auth/me
   const me = await apiFetch('/auth/me', { method: 'GET' })

@@ -49,6 +49,7 @@ import { rolesRouter } from './routes/roles'
 import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
 import { permissionsRouter } from './routes/permissions'
+import { attendanceAdminRouter } from './routes/attendance-admin'
 import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
@@ -483,6 +484,7 @@ export class MetaSheetServer {
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
+    this.app.use(attendanceAdminRouter())
     this.app.use(filesRouter())
     this.app.use(spreadsheetsRouter(this.injector))
     this.app.use(spreadsheetPermissionsRouter())

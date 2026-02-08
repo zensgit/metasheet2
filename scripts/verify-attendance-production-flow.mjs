@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
-const token = process.env.AUTH_TOKEN || ''
+let token = process.env.AUTH_TOKEN || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 60000)
 const mobile = process.env.UI_MOBILE === 'true'
@@ -37,6 +37,39 @@ function deriveApiBase(rawWebUrl) {
   if (apiBaseEnv) return apiBaseEnv.replace(/\/+$/, '')
   const url = new URL(rawWebUrl)
   return `${url.origin}/api`
+}
+
+async function refreshAuthToken(apiBase) {
+  if (!apiBase || !token) return false
+  const url = `${apiBase.replace(/\/+$/, '')}/auth/refresh-token`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    const raw = await res.text()
+    let body = null
+    try {
+      body = raw ? JSON.parse(raw) : null
+    } catch {
+      body = null
+    }
+    if (!res.ok || body?.success === false) {
+      logWarn(`token refresh failed: HTTP ${res.status}`)
+      return false
+    }
+    const nextToken = body?.data?.token
+    if (typeof nextToken === 'string' && nextToken.length > 20) {
+      token = nextToken
+      return true
+    }
+    logWarn('token refresh response missing token')
+    return false
+  } catch (error) {
+    logWarn(`token refresh error: ${(error && error.message) || String(error)}`)
+    return false
+  }
 }
 
 async function apiGetJson(url, tokenValue) {
@@ -192,6 +225,8 @@ async function run() {
   const apiBase = deriveApiBase(attendanceUrl)
   logInfo(`WEB_URL=${attendanceUrl}`)
   logInfo(`API_BASE=${apiBase}`)
+
+  await refreshAuthToken(apiBase)
 
   const me = await apiGetJson(`${apiBase}/auth/me`, token)
   if (!me.ok) {
