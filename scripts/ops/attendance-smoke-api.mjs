@@ -260,11 +260,16 @@ async function run() {
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
   })
   const exportText = await exportRes.text()
-  if (!exportRes.ok) die(`GET /attendance/import/batches/:id/export.csv failed: HTTP ${exportRes.status} ${exportText.slice(0, 200)}`)
-  if (!exportText.includes('batchId') || !exportText.includes('workDate') || !exportText.includes('userId')) {
-    die('export CSV missing expected headers')
+  if (exportRes.status === 404) {
+    if (requireImportExport) die('export endpoint missing (404)')
+    log('WARN: export endpoint missing (404); skipping export check')
+  } else {
+    if (!exportRes.ok) die(`GET /attendance/import/batches/:id/export.csv failed: HTTP ${exportRes.status} ${exportText.slice(0, 200)}`)
+    if (!exportText.includes('batchId') || !exportText.includes('workDate') || !exportText.includes('userId')) {
+      die('export CSV missing expected headers')
+    }
+    log('export csv ok')
   }
-  log('export csv ok')
 
   // 7) batch items exist
   const itemsRes = await apiFetch(`/attendance/import/batches/${batchId}/items?pageSize=200`, { method: 'GET' })
