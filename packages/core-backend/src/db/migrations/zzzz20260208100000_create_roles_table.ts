@@ -40,72 +40,52 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   }
 
   // Backfill roles from existing references to avoid breaking routes that check role existence.
-  await sql`
-    DO $$ BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'roles'
-      ) AND EXISTS (
-        SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'user_roles'
-      ) THEN
-        INSERT INTO roles (id, name)
-        SELECT DISTINCT ur.role_id, ur.role_id
-        FROM user_roles ur
-        WHERE ur.role_id IS NOT NULL AND ur.role_id <> ''
-        ON CONFLICT (id) DO NOTHING;
-      END IF;
-    END $$;
-  `.execute(db)
+  const userRolesExists = await checkTableExists(db, 'user_roles')
+  if (userRolesExists) {
+    await sql`
+      INSERT INTO roles (id, name)
+      SELECT DISTINCT ur.role_id, ur.role_id
+      FROM user_roles ur
+      WHERE ur.role_id IS NOT NULL AND ur.role_id <> ''
+      ON CONFLICT (id) DO NOTHING;
+    `.execute(db)
+  }
 
-  await sql`
-    DO $$ BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'roles'
-      ) AND EXISTS (
-        SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'role_permissions'
-      ) THEN
-        INSERT INTO roles (id, name)
-        SELECT DISTINCT rp.role_id, rp.role_id
-        FROM role_permissions rp
-        WHERE rp.role_id IS NOT NULL AND rp.role_id <> ''
-        ON CONFLICT (id) DO NOTHING;
-      END IF;
-    END $$;
-  `.execute(db)
+  const rolePermissionsExists = await checkTableExists(db, 'role_permissions')
+  if (rolePermissionsExists) {
+    await sql`
+      INSERT INTO roles (id, name)
+      SELECT DISTINCT rp.role_id, rp.role_id
+      FROM role_permissions rp
+      WHERE rp.role_id IS NOT NULL AND rp.role_id <> ''
+      ON CONFLICT (id) DO NOTHING;
+    `.execute(db)
+  }
 
   // Seed attendance roles used by the Attendance Admin Center "User Access" panel.
   await sql`
-    DO $$ BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'roles'
-      ) THEN
-        INSERT INTO roles (id, name)
-        VALUES
-          ('attendance_employee', 'Attendance Employee'),
-          ('attendance_approver', 'Attendance Approver'),
-          ('attendance_admin', 'Attendance Admin')
-        ON CONFLICT (id) DO NOTHING;
-      END IF;
-    END $$;
+    INSERT INTO roles (id, name)
+    VALUES
+      ('attendance_employee', 'Attendance Employee'),
+      ('attendance_approver', 'Attendance Approver'),
+      ('attendance_admin', 'Attendance Admin')
+    ON CONFLICT (id) DO NOTHING;
   `.execute(db)
 
   // Ensure role_permissions has the expected mapping (permissions are seeded elsewhere).
-  for (const role of attendanceRoles) {
-    for (const permissionCode of role.permissions) {
-      await sql`
-        DO $$ BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'role_permissions'
-          ) AND EXISTS (
-            SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'permissions'
-          ) THEN
-            INSERT INTO role_permissions (role_id, permission_code)
-            SELECT ${role.id}, p.code
-            FROM permissions p
-            WHERE p.code = ${permissionCode}
-            ON CONFLICT DO NOTHING;
-          END IF;
-        END $$;
-      `.execute(db)
+  const permissionsExists = await checkTableExists(db, 'permissions')
+  if (rolePermissionsExists && permissionsExists) {
+    for (const role of attendanceRoles) {
+      for (const permissionCode of role.permissions) {
+        // DO $$ blocks do not support Kysely bind parameters reliably, so keep this as a plain query.
+        await sql`
+          INSERT INTO role_permissions (role_id, permission_code)
+          SELECT ${role.id}, p.code
+          FROM permissions p
+          WHERE p.code = ${permissionCode}
+          ON CONFLICT DO NOTHING;
+        `.execute(db)
+      }
     }
   }
 }
@@ -114,4 +94,3 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 export async function down(_db: Kysely<unknown>): Promise<void> {
   return
 }
-
