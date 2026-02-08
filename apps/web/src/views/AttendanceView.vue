@@ -288,6 +288,58 @@
 
         <div class="attendance__card">
           <div class="attendance__requests-header">
+            <h3>Anomalies</h3>
+            <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="loadAnomalies">
+              {{ anomaliesLoading ? 'Loading...' : 'Reload anomalies' }}
+            </button>
+          </div>
+          <div v-if="anomaliesLoading" class="attendance__empty">Loading anomalies...</div>
+          <div v-else-if="anomalies.length === 0" class="attendance__empty">No anomalies.</div>
+          <div v-else class="attendance__table-wrapper">
+            <table class="attendance__table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Status</th>
+                  <th>Warnings</th>
+                  <th>Request</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in anomalies" :key="item.recordId">
+                  <td>{{ item.workDate }}</td>
+                  <td>{{ formatStatus(item.status) }}</td>
+                  <td>{{ formatWarningsShort(item.warnings) }}</td>
+                  <td>
+                    <template v-if="item.request">
+                      {{ formatRequestType(item.request.requestType) }}
+                      <span
+                        class="attendance__status-chip"
+                        :class="`attendance__status-chip--${item.request.status}`"
+                      >
+                        {{ item.request.status }}
+                      </span>
+                    </template>
+                    <span v-else>--</span>
+                  </td>
+                  <td class="attendance__table-actions">
+                    <button
+                      class="attendance__btn"
+                      :disabled="item.state === 'pending'"
+                      @click="prefillRequestFromAnomaly(item)"
+                    >
+                      {{ item.state === 'pending' ? 'Pending request' : 'Create request' }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="attendance__card">
+          <div class="attendance__requests-header">
             <h3>Request Report</h3>
             <button class="attendance__btn" :disabled="reportLoading" @click="loadRequestReport">
               {{ reportLoading ? 'Loading...' : 'Reload report' }}
@@ -1861,6 +1913,93 @@
                   Cancel edit
                 </button>
               </div>
+
+              <details class="attendance__details">
+                <summary class="attendance__details-summary">Batch generate cycles</summary>
+                <div class="attendance__admin-grid attendance__admin-grid--compact">
+                  <label class="attendance__field" for="attendance-payroll-cycle-gen-template">
+                    <span>Template</span>
+                    <select
+                      id="attendance-payroll-cycle-gen-template"
+                      name="payrollCycleGenTemplate"
+                      v-model="payrollCycleGenerateForm.templateId"
+                      :disabled="payrollTemplates.length === 0"
+                    >
+                      <option value="">Default template</option>
+                      <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
+                        {{ item.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-payroll-cycle-gen-anchor">
+                    <span>Anchor date</span>
+                    <input
+                      id="attendance-payroll-cycle-gen-anchor"
+                      name="payrollCycleGenAnchor"
+                      v-model="payrollCycleGenerateForm.anchorDate"
+                      type="date"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-payroll-cycle-gen-count">
+                    <span>Count</span>
+                    <input
+                      id="attendance-payroll-cycle-gen-count"
+                      name="payrollCycleGenCount"
+                      v-model.number="payrollCycleGenerateForm.count"
+                      type="number"
+                      min="1"
+                      max="36"
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-payroll-cycle-gen-status">
+                    <span>Status</span>
+                    <select
+                      id="attendance-payroll-cycle-gen-status"
+                      name="payrollCycleGenStatus"
+                      v-model="payrollCycleGenerateForm.status"
+                    >
+                      <option value="open">Open</option>
+                      <option value="closed">Closed</option>
+                      <option value="archived">Archived</option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-payroll-cycle-gen-prefix">
+                    <span>Name prefix</span>
+                    <input
+                      id="attendance-payroll-cycle-gen-prefix"
+                      name="payrollCycleGenPrefix"
+                      v-model="payrollCycleGenerateForm.namePrefix"
+                      type="text"
+                      placeholder="Optional"
+                    />
+                  </label>
+                  <label class="attendance__field attendance__field--full" for="attendance-payroll-cycle-gen-metadata">
+                    <span>Metadata (JSON)</span>
+                    <textarea
+                      id="attendance-payroll-cycle-gen-metadata"
+                      name="payrollCycleGenMetadata"
+                      v-model="payrollCycleGenerateForm.metadata"
+                      rows="2"
+                      placeholder="{}"
+                    />
+                  </label>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="payrollCycleGenerating"
+                    @click="generatePayrollCycles"
+                  >
+                    {{ payrollCycleGenerating ? 'Generating...' : 'Generate cycles' }}
+                  </button>
+                  <button class="attendance__btn" :disabled="payrollCycleGenerating" @click="resetPayrollCycleGenerateForm">
+                    Reset
+                  </button>
+                  <span v-if="payrollCycleGenerateResult" class="attendance__empty">
+                    Created {{ payrollCycleGenerateResult.created }}, skipped {{ payrollCycleGenerateResult.skipped }}.
+                  </span>
+                </div>
+              </details>
               <div v-if="payrollCycleSummary" class="attendance__summary">
                 <div class="attendance__summary-item">
                   <span>Cycle total minutes</span>
@@ -2784,6 +2923,28 @@ interface AttendanceRecord {
   meta?: Record<string, any>
 }
 
+interface AttendanceAnomaly {
+  recordId: string
+  workDate: string
+  status: string
+  isWorkday?: boolean
+  firstInAt: string | null
+  lastOutAt: string | null
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  leaveMinutes?: number
+  overtimeMinutes?: number
+  warnings: string[]
+  state: 'open' | 'pending'
+  request?: {
+    id: string
+    status: string
+    requestType: string
+  } | null
+  suggestedRequestType: string | null
+}
+
 interface AttendanceRequest {
   id: string
   work_date: string
@@ -3175,6 +3336,8 @@ const requestSubmitting = ref(false)
 const summary = ref<AttendanceSummary | null>(null)
 const records = ref<AttendanceRecord[]>([])
 const requests = ref<AttendanceRequest[]>([])
+const anomalies = ref<AttendanceAnomaly[]>([])
+const anomaliesLoading = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const calendarMonth = ref(new Date())
@@ -3233,6 +3396,8 @@ const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
+const payrollCycleGenerating = ref(false)
+const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -3563,6 +3728,15 @@ const payrollCycleForm = reactive({
   status: 'open',
 })
 
+const payrollCycleGenerateForm = reactive({
+  templateId: '',
+  anchorDate: toDateInput(today),
+  count: 1,
+  status: 'open',
+  namePrefix: '',
+  metadata: '{}',
+})
+
 const importForm = reactive({
   ruleSetId: '',
   userId: '',
@@ -3632,6 +3806,25 @@ function formatRequestType(value: string): string {
     overtime: 'Overtime request',
   }
   return map[value] ?? value
+}
+
+function formatWarningsShort(warnings: string[]): string {
+  if (!warnings || warnings.length === 0) return '--'
+  const head = warnings.slice(0, 2).join(', ')
+  if (warnings.length > 2) return `${head} (+${warnings.length - 2})`
+  return head
+}
+
+async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
+  if (item.state === 'pending') {
+    setStatus('A pending request already exists for this work date.', 'error')
+    return
+  }
+  requestForm.workDate = item.workDate
+  requestForm.requestType = item.suggestedRequestType ?? 'time_correction'
+  setStatus('Request form updated from anomaly.')
+  await nextTick()
+  document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -4741,6 +4934,28 @@ async function loadRequests() {
   requests.value = data.data.items
 }
 
+async function loadAnomalies() {
+  anomaliesLoading.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      page: '1',
+      pageSize: '50',
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+    })
+    const response = await apiFetch(`/api/attendance/anomalies?${query.toString()}`)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to load anomalies')
+    }
+    anomalies.value = data.data?.items ?? []
+  } finally {
+    anomaliesLoading.value = false
+  }
+}
+
 async function loadRequestReport() {
   reportLoading.value = true
   try {
@@ -4769,7 +4984,7 @@ async function refreshAll() {
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   try {
-    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadRequestReport(), loadHolidays()])
+    await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
     setStatus(error?.message || 'Refresh failed', 'error')
   } finally {
@@ -6735,6 +6950,16 @@ function resetPayrollCycleForm() {
   payrollCycleSummary.value = null
 }
 
+function resetPayrollCycleGenerateForm() {
+  payrollCycleGenerateForm.templateId = ''
+  payrollCycleGenerateForm.anchorDate = toDateInput(today)
+  payrollCycleGenerateForm.count = 1
+  payrollCycleGenerateForm.status = 'open'
+  payrollCycleGenerateForm.namePrefix = ''
+  payrollCycleGenerateForm.metadata = '{}'
+  payrollCycleGenerateResult.value = null
+}
+
 function editPayrollCycle(item: AttendancePayrollCycle) {
   payrollCycleEditingId.value = item.id
   payrollCycleForm.templateId = item.templateId ?? ''
@@ -6765,6 +6990,55 @@ async function loadPayrollCycles() {
     setStatus(error?.message || 'Failed to load payroll cycles', 'error')
   } finally {
     payrollCycleLoading.value = false
+  }
+}
+
+async function generatePayrollCycles() {
+  payrollCycleGenerating.value = true
+  try {
+    const anchorDate = payrollCycleGenerateForm.anchorDate
+    if (!anchorDate) {
+      throw new Error('Anchor date is required for generation')
+    }
+
+    const metadata = parseJsonConfig(payrollCycleGenerateForm.metadata)
+    if (!metadata) {
+      throw new Error('Metadata must be valid JSON')
+    }
+
+    const payload: Record<string, any> = {
+      templateId: payrollCycleGenerateForm.templateId || undefined,
+      anchorDate,
+      count: payrollCycleGenerateForm.count,
+      status: payrollCycleGenerateForm.status,
+      namePrefix: payrollCycleGenerateForm.namePrefix.trim() || undefined,
+      metadata,
+      orgId: normalizedOrgId(),
+    }
+
+    const response = await apiFetch('/api/attendance/payroll-cycles/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error?.message || 'Failed to generate payroll cycles')
+    }
+
+    const created = Array.isArray(data.data?.created) ? data.data.created.length : 0
+    const skipped = Array.isArray(data.data?.skipped) ? data.data.skipped.length : 0
+    payrollCycleGenerateResult.value = { created, skipped }
+    adminForbidden.value = false
+    await loadPayrollCycles()
+    setStatus('Payroll cycles generated.')
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to generate payroll cycles', 'error')
+  } finally {
+    payrollCycleGenerating.value = false
   }
 }
 
@@ -7452,6 +7726,28 @@ watch(importMode, () => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
+}
+
+.attendance__admin-grid--compact {
+  margin-top: 12px;
+}
+
+.attendance__details {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px dashed #d1d5db;
+  background: #fafafa;
+}
+
+.attendance__details[open] {
+  background: #fff;
+}
+
+.attendance__details-summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #111827;
 }
 
 @media (max-width: 768px) {

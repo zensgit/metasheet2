@@ -294,6 +294,54 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    AttendanceAnomaly:
+      type: object
+      properties:
+        recordId:
+          type: string
+        workDate:
+          type: string
+          format: date
+        status:
+          type: string
+        isWorkday:
+          type: boolean
+        firstInAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastOutAt:
+          type: string
+          format: date-time
+          nullable: true
+        workMinutes:
+          type: integer
+        lateMinutes:
+          type: integer
+        earlyLeaveMinutes:
+          type: integer
+        leaveMinutes:
+          type: integer
+        overtimeMinutes:
+          type: integer
+        warnings:
+          type: array
+          items:
+            type: string
+        state:
+          type: string
+          enum: [open, pending]
+        request:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            status: { type: string }
+            requestType: { type: string }
+        suggestedRequestType:
+          type: string
+          nullable: true
     AttendanceLeaveType:
       type: object
       properties:

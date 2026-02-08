@@ -433,6 +433,27 @@ describe('Attendance Plugin Integration', () => {
       })
 
       expect([201, 409]).toContain(payrollCycleRes.status)
+
+      const payrollGenerateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          templateId: payrollTemplateId,
+          anchorDate: workDate,
+          count: 2,
+          status: 'open',
+          namePrefix: 'Integration Payroll',
+        }),
+      })
+      expect(payrollGenerateRes.status).toBe(200)
+      const genBody = payrollGenerateRes.body as { ok?: boolean; data?: { created?: unknown[]; skipped?: unknown[] } } | undefined
+      expect(genBody?.ok).toBe(true)
+      const createdCount = Array.isArray(genBody?.data?.created) ? genBody?.data?.created.length : 0
+      const skippedCount = Array.isArray(genBody?.data?.skipped) ? genBody?.data?.skipped.length : 0
+      expect(createdCount + skippedCount).toBe(2)
     }
 
     const importTemplateRes = await requestJson(`${baseUrl}/api/attendance/import/template`, {
@@ -479,6 +500,47 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(importPayload),
     })
     expect(importRes.status).toBe(200)
+
+    const anomalyDate = (() => {
+      const dt = new Date()
+      // Pick a weekday so `is_workday` stays true and the anomalies endpoint can surface the record.
+      while (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) {
+        dt.setUTCDate(dt.getUTCDate() + 1)
+      }
+      return dt.toISOString().slice(0, 10)
+    })()
+
+    const anomalyPayload = {
+      userId: 'attendance-test',
+      rows: [
+        {
+          workDate: anomalyDate,
+          fields: {
+            firstInAt: `${anomalyDate}T09:00:00Z`,
+          },
+        },
+      ],
+      mode: 'override',
+    }
+
+    const anomalyImportRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(anomalyPayload),
+    })
+    expect(anomalyImportRes.status).toBe(200)
+
+    const anomaliesRes = await requestJson(`${baseUrl}/api/attendance/anomalies?from=${anomalyDate}&to=${anomalyDate}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(anomaliesRes.status).toBe(200)
+    const anomalyItems = (anomaliesRes.body as { data?: { items?: { workDate?: string; status?: string }[] } } | undefined)?.data?.items ?? []
+    expect(anomalyItems.some(item => item.workDate === anomalyDate && item.status === 'partial')).toBe(true)
 
     const groupName = `QA Group ${runSuffix}`
     const createGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {

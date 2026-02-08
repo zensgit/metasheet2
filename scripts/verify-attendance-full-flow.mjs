@@ -131,6 +131,22 @@ async function fetchAuthMeFeatures(apiBase) {
   return payload?.features && typeof payload.features === 'object' ? payload.features : null
 }
 
+async function endpointExists(apiBase, pathname) {
+  if (!apiBase) return false
+  try {
+    const url = `${normalizeUrl(apiBase)}${pathname}`
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    return res.status !== 404
+  } catch {
+    return false
+  }
+}
+
 async function ensureAttendanceLoaded(page) {
   await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
   // Use exact match to avoid strict-mode collisions with headings like "Attendance groups".
@@ -247,6 +263,15 @@ async function run() {
   await refreshRecords(page)
   await assertHasRecords(page)
 
+  const today = new Date().toISOString().slice(0, 10)
+  const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
+  if (anomaliesSupported) {
+    await page.getByRole('heading', { name: 'Anomalies', exact: true }).waitFor({ timeout: timeoutMs })
+    logInfo('Anomalies card verified')
+  } else {
+    logInfo('WARN: /attendance/anomalies not available (skipping anomalies UI assertion)')
+  }
+
   await fs.mkdir(outputDir, { recursive: true })
   await page.screenshot({ path: path.join(outputDir, '01-overview.png'), fullPage: true })
   logInfo('Saved overview screenshot')
@@ -258,6 +283,9 @@ async function run() {
       await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
     } else {
       await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: 'Payroll Cycles', exact: true }).waitFor({ timeout: timeoutMs })
+      await page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' }).waitFor({ timeout: timeoutMs })
+      logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
     logInfo('Saved admin screenshot')

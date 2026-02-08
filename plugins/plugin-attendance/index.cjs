@@ -4694,10 +4694,10 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/records',
-      withPermission('attendance:read', async (req, res) => {
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/records',
+	      withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -4784,14 +4784,187 @@ module.exports = {
           }
           logger.error('Attendance records query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load records' } })
-        }
-      })
-    )
+	        }
+	      })
+	    )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/summary',
-      withPermission('attendance:read', async (req, res) => {
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/anomalies',
+	      withPermission('attendance:read', async (req, res) => {
+	        const schema = z.object({
+	          userId: z.string().optional(),
+	          orgId: z.string().optional(),
+	          from: z.string().optional(),
+	          to: z.string().optional(),
+	        })
+
+	        const parsed = schema.safeParse({
+	          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+	          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+	          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+	          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+	        })
+
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const requesterId = getUserId(req)
+	        if (!requesterId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+
+	        const orgId = getOrgId(req)
+	        const targetUserId = parsed.data.userId ?? requesterId
+	        if (targetUserId !== requesterId) {
+	          const allowed = await canAccessOtherUsers(requesterId)
+	          if (!allowed) {
+	            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+	            return
+	          }
+	        }
+
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
+	        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+
+	        const excludedStatuses = ['normal', 'off', 'adjusted']
+
+	        const extractWarnings = (snapshot) => {
+	          if (!snapshot || typeof snapshot !== 'object') return []
+	          const out = []
+	          if (Array.isArray(snapshot.warnings)) out.push(...snapshot.warnings)
+	          if (snapshot.metrics && typeof snapshot.metrics === 'object' && Array.isArray(snapshot.metrics.warnings)) {
+	            out.push(...snapshot.metrics.warnings)
+	          }
+	          if (snapshot.policy && Array.isArray(snapshot.policy.warnings)) out.push(...snapshot.policy.warnings)
+	          if (snapshot.engine && Array.isArray(snapshot.engine.warnings)) out.push(...snapshot.engine.warnings)
+	          return Array.from(new Set(out.map((w) => String(w)).filter(Boolean)))
+	        }
+
+	        const suggestRequestType = (row) => {
+	          const status = row?.status ? String(row.status) : ''
+	          if (status === 'absent') return 'leave'
+	          if (status === 'partial') {
+	            if (!row.first_in_at) return 'missed_check_in'
+	            if (!row.last_out_at) return 'missed_check_out'
+	            return 'time_correction'
+	          }
+	          if (status === 'late' || status === 'early_leave' || status === 'late_early') return 'time_correction'
+	          return null
+	        }
+
+	        try {
+	          const countRows = await db.query(
+	            `SELECT COUNT(*)::int AS total
+	             FROM attendance_records
+	             WHERE user_id = $1
+	               AND org_id = $2
+	               AND work_date BETWEEN $3 AND $4
+	               AND COALESCE(is_workday, true) = true
+	               AND COALESCE(status, '') <> ALL($5)`,
+	            [targetUserId, orgId, from, to, excludedStatuses]
+	          )
+	          const total = Number(countRows[0]?.total ?? 0)
+
+	          const rows = await db.query(
+	            `SELECT *
+	             FROM attendance_records
+	             WHERE user_id = $1
+	               AND org_id = $2
+	               AND work_date BETWEEN $3 AND $4
+	               AND COALESCE(is_workday, true) = true
+	               AND COALESCE(status, '') <> ALL($5)
+	             ORDER BY work_date DESC
+	             LIMIT $6 OFFSET $7`,
+	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
+	          )
+
+	          const requestRows = await db.query(
+	            `SELECT id, work_date, request_type, status
+	             FROM attendance_requests
+	             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
+	             ORDER BY work_date DESC, created_at DESC`,
+	            [targetUserId, orgId, from, to]
+	          )
+	          const requestByDate = new Map()
+	          for (const row of requestRows) {
+	            const workDate = row.work_date
+	            const entry = requestByDate.get(workDate) ?? {
+	              hasPending: false,
+	              pending: null,
+	              latest: null,
+	            }
+	            const summary = {
+	              id: row.id,
+	              status: row.status,
+	              requestType: row.request_type,
+	            }
+	            if (!entry.latest) entry.latest = summary
+	            if (row.status === 'pending') {
+	              entry.hasPending = true
+	              if (!entry.pending) entry.pending = summary
+	            }
+	            requestByDate.set(workDate, entry)
+	          }
+
+	          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
+	          const items = rows.map((row) => {
+	            const meta = normalizeMetadata(row.meta)
+	            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+	            const warnings = extractWarnings(meta)
+	            const requestSummary = requestByDate.get(row.work_date) ?? { hasPending: false, pending: null, latest: null }
+	            const suggestedRequestType = suggestRequestType(row)
+	            const state = requestSummary.hasPending ? 'pending' : 'open'
+
+	            return {
+	              recordId: row.id,
+	              workDate: row.work_date,
+	              status: row.status,
+	              isWorkday: row.is_workday,
+	              firstInAt: row.first_in_at,
+	              lastOutAt: row.last_out_at,
+	              workMinutes: Number(row.work_minutes ?? 0),
+	              lateMinutes: Number(row.late_minutes ?? 0),
+	              earlyLeaveMinutes: Number(row.early_leave_minutes ?? 0),
+	              leaveMinutes: approved.leaveMinutes,
+	              overtimeMinutes: approved.overtimeMinutes,
+	              warnings,
+	              state,
+	              request: requestSummary.pending ?? requestSummary.latest,
+	              suggestedRequestType,
+	            }
+	          })
+
+	          res.json({
+	            ok: true,
+	            data: {
+	              items,
+	              total,
+	              page,
+	              pageSize,
+	              from,
+	              to,
+	            },
+	          })
+	        } catch (error) {
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance anomalies query failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load anomalies' } })
+	        }
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/summary',
+	      withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
