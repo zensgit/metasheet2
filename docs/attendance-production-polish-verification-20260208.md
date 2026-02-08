@@ -58,6 +58,17 @@ Expected:
   - group auto-create + membership
   - request create + approve
 
+Optional strictness (recommended after deploying the polish build):
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+API_BASE="http://<HOST>:<PORT>/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-smoke-api.sh
+```
+
 Note:
 - The smoke script calls `/api/auth/refresh-token` first (best-effort) to reduce expired-token flakiness.
 
@@ -173,4 +184,3 @@ On the remote environment, the following gates were reported as PASS:
 
 Artifacts (example):
 - `output/playwright/attendance-prod-acceptance/*`
-

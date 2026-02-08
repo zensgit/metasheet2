@@ -101,8 +101,11 @@ Notable behaviors:
    - When DB column exists, committed batches are de-duplicated by `(orgId, idempotencyKey)`.
 3. **Batch items querying**
    - `GET /api/attendance/import/batches/:id/items`
-   - Supports `type` filter: `all|imported|skipped|anomalies`
-   - Used by frontend CSV export for both items and anomalies.
+   - Returns paginated batch items (imported rows have `recordId`, skipped/anomalies have `recordId=null`).
+   - Used by the frontend as a fallback when CSV export endpoint is unavailable (older deployments).
+4. **CSV export**
+   - `GET /api/attendance/import/batches/:id/export.csv?type=all|imported|skipped|anomalies`
+   - Preferred by the frontend for large batches and for exporting anomalies without client-side paging.
 
 ### Auth token refresh
 Endpoint:
@@ -112,6 +115,11 @@ Used by:
 - `scripts/ops/attendance-smoke-api.mjs`
 - `scripts/verify-attendance-full-flow.mjs`
 - `scripts/verify-attendance-production-flow.mjs`
+
+Smoke strictness knobs:
+- `REQUIRE_ATTENDANCE_ADMIN_API=true` to fail if `/api/attendance-admin/*` is missing.
+- `REQUIRE_IDEMPOTENCY=true` to fail if idempotent retry is not supported.
+- `REQUIRE_IMPORT_EXPORT=true` to fail if `/export.csv` is missing.
 
 ## Frontend UX
 
