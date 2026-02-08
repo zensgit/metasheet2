@@ -11,9 +11,10 @@ This is the delivery package definition for bringing the Attendance plugin to a 
    - `/api/attendance/import/preview`
    - `/api/attendance/import/commit`
 3. Import commit tokens are safe across restarts (DB-backed when required).
-4. Reverse proxy remains stable across backend redeploys (no stale backend container IP).
-5. Repeatable acceptance using Playwright with stored artifacts.
-6. Admins can provision employee/approver/admin permissions via the existing permission APIs.
+4. Import commits support an optional `idempotencyKey` (deduplicates retries; unique per org).
+5. Reverse proxy remains stable across backend redeploys (no stale backend container IP).
+6. Repeatable acceptance using Playwright with stored artifacts.
+7. Admins can provision employee/approver/admin permissions via the existing permission APIs.
 
 Out of scope for this delivery:
 

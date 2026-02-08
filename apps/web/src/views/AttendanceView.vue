@@ -1522,6 +1522,7 @@
                   <thead>
                     <tr>
                       <th>Work date</th>
+                      <th>User ID</th>
                       <th>Work minutes</th>
                       <th>Late</th>
                       <th>Early leave</th>
@@ -1531,8 +1532,9 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in importPreview" :key="item.workDate">
+                    <tr v-for="item in importPreview" :key="`${item.userId}-${item.workDate}`">
                       <td>{{ item.workDate }}</td>
+                      <td>{{ item.userId }}</td>
                       <td>{{ item.workMinutes }}</td>
                       <td>{{ item.lateMinutes }}</td>
                       <td>{{ item.earlyLeaveMinutes }}</td>
@@ -4274,6 +4276,33 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
   importLoading.value = true
 
   try {
+    // Prefer server-side exports when available (works for large batches and includes skipped rows).
+    const exportType = onlyAnomalies ? 'anomalies' : 'all'
+    const serverResponse = await apiFetch(`/api/attendance/import/batches/${batchId}/export.csv?type=${exportType}`, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/csv',
+      },
+    })
+    if (serverResponse.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    if (serverResponse.ok) {
+      const csvText = await serverResponse.text()
+      const stamp = new Date().toISOString().slice(0, 10)
+      const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
+      downloadCsvText(filename, csvText)
+      setStatus('CSV exported.')
+      return
+    }
+
+    // Backward-compatible fallback for older deployments without the export endpoint.
+    if (serverResponse.status !== 404) {
+      const errorText = await serverResponse.text().catch(() => '')
+      throw new Error(errorText || `Failed to export CSV (HTTP ${serverResponse.status})`)
+    }
+
     const allItems = await fetchAllImportBatchItems(batchId)
     if (allItems.length === 0) {
       setStatus('No batch items found.', 'error')
