@@ -1,0 +1,186 @@
+# Attendance Production Polish (Verification)
+
+Date: 2026-02-08
+
+This document verifies the "production polish" deliverables:
+
+1. Admin UX: user search + access panel (roles/permissions).
+2. Import reliability: dedup + idempotency + anomalies persistence + CSV export.
+3. Access control: attendance role templates assign/unassign.
+4. Ops/verification: smoke + Playwright scripts auto-refresh JWT.
+
+## Environments
+
+Example (remote):
+- Web: `http://<HOST>:<PORT>/attendance`
+- API: `http://<HOST>:<PORT>/api`
+
+## Pre-req: Migrations Applied
+
+Required migrations for this iteration:
+- `packages/core-backend/src/db/migrations/zzzz20260208100000_create_roles_table.ts`
+- `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
+
+If running via docker compose (production):
+```bash
+docker compose -f docker-compose.app.yml exec -T backend \
+  node packages/core-backend/dist/src/db/migrate.js
+```
+
+## Gate 1: Preflight
+
+Command:
+```bash
+scripts/ops/attendance-preflight.sh
+```
+
+Expected:
+- PASS (exit code 0)
+- DB/Redis not publicly exposed
+- `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` enforced for production import safety
+
+## Gate 2: API Smoke
+
+Command:
+```bash
+API_BASE="http://<HOST>:<PORT>/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-smoke-api.sh
+```
+
+Expected:
+- PASS
+- Validates:
+  - `/api/auth/me` + `features.attendance=true`
+  - attendance plugin active
+  - import prepare/preview/commit works
+  - group auto-create + membership
+  - request create + approve
+
+Optional strictness (recommended after deploying the polish build):
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+API_BASE="http://<HOST>:<PORT>/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-smoke-api.sh
+```
+
+Note:
+- The smoke script calls `/api/auth/refresh-token` first (best-effort) to reduce expired-token flakiness.
+
+## Gate 3: Permission Provisioning (Role Bundles)
+
+### Option A: UI
+Path:
+- `Attendance -> Admin Center -> User Access`
+
+Checks:
+- Search a user by email/name/id
+- Load user access summary (roles + permissions)
+- Assign/unassign role templates:
+  - employee / approver / admin
+
+### Option B: Script
+Command:
+```bash
+API_BASE="http://<HOST>:<PORT>/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+USER_ID="<TARGET_USER_UUID>" \
+ROLE="employee" \
+scripts/ops/attendance-provision-user.sh
+```
+
+Expected:
+- PASS (curl succeeds for all permission grants)
+
+## Gate 4: Playwright End-to-End
+
+### 4.1 Desktop admin flow
+Command:
+```bash
+AUTH_TOKEN="<ADMIN_JWT>" \
+WEB_URL="http://<HOST>:<PORT>/attendance" \
+API_BASE="http://<HOST>:<PORT>/api" \
+OUTPUT_DIR="output/playwright/attendance-prod-acceptance/desktop-admin-latest" \
+HEADLESS="true" \
+node scripts/verify-attendance-production-flow.mjs
+```
+
+Expected:
+- PASS
+- Evidence under `output/playwright/attendance-prod-acceptance/desktop-admin-latest/`
+
+### 4.2 Attendance-focused shell (desktop + mobile)
+Desktop:
+```bash
+AUTH_TOKEN="<ADMIN_JWT>" \
+WEB_URL="http://<HOST>:<PORT>/" \
+API_BASE="http://<HOST>:<PORT>/api" \
+EXPECT_PRODUCT_MODE="attendance" \
+OUTPUT_DIR="output/playwright/attendance-prod-acceptance/focused-desktop-latest" \
+HEADLESS="true" \
+node scripts/verify-attendance-full-flow.mjs
+```
+
+Mobile:
+```bash
+AUTH_TOKEN="<ADMIN_JWT>" \
+WEB_URL="http://<HOST>:<PORT>/" \
+API_BASE="http://<HOST>:<PORT>/api" \
+EXPECT_PRODUCT_MODE="attendance" \
+OUTPUT_DIR="output/playwright/attendance-prod-acceptance/focused-mobile-latest" \
+HEADLESS="true" \
+UI_MOBILE="true" \
+node scripts/verify-attendance-full-flow.mjs
+```
+
+Expected:
+- Desktop PASS
+- Mobile PASS and shows "Desktop recommended" gate for Admin Center / Workflow Designer
+
+Note:
+- Desktop flow may log `PUNCH_TOO_SOON` when the two Playwright runs happen within the configured minimum punch interval; this is an expected business guard and is treated as best-effort by scripts.
+
+## Import-Specific Acceptance (Manual Spot Checks)
+
+### A) Preview flags duplicate rows
+1. Use the import UI to set a payload that contains two rows with the same `(userId, workDate)`.
+2. Click `Preview`.
+
+Expected:
+- Duplicate row appears in preview as invalid with warning:
+  - `Duplicate row for same user/workDate (skipped during commit).`
+
+### B) Commit persists anomalies and supports export
+1. Click `Import` (commit).
+2. Open `Import Batches`.
+3. Click:
+  - `Export items CSV`
+  - `Export anomalies CSV`
+
+Expected:
+- items CSV includes all rows (imported + skipped)
+- anomalies CSV includes only rows that were skipped/invalid or contain warnings
+
+### C) Idempotent commit (optional)
+1. Send two commits with the same `idempotencyKey`.
+
+Expected:
+- second commit returns the existing committed batch (idempotent behavior)
+- no duplicate attendance records created
+
+## Execution Record (2026-02-08)
+
+On the remote environment, the following gates were reported as PASS:
+- Gate 1: Preflight PASS
+- Gate 2: API Smoke PASS
+- Gate 3: Permission Provisioning PASS (employee/approver/admin)
+- Gate 4: Playwright Desktop PASS
+- Gate 4: Playwright Mobile PASS
+
+Artifacts (example):
+- `output/playwright/attendance-prod-acceptance/*`

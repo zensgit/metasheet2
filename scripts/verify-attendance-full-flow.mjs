@@ -4,7 +4,7 @@ import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
-const token = process.env.AUTH_TOKEN || ''
+let token = process.env.AUTH_TOKEN || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
 const fromDate = process.env.FROM_DATE || ''
@@ -37,6 +37,39 @@ function deriveApiBaseFromWebUrl(url) {
     return `${u.origin}/api`
   } catch {
     return ''
+  }
+}
+
+async function refreshAuthToken(apiBase) {
+  if (!apiBase || !token) return false
+  const url = `${normalizeUrl(apiBase)}/auth/refresh-token`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    const raw = await res.text()
+    let body = null
+    try {
+      body = raw ? JSON.parse(raw) : null
+    } catch {
+      body = null
+    }
+    if (!res.ok || body?.success === false) {
+      logInfo(`WARN: token refresh failed: HTTP ${res.status}`)
+      return false
+    }
+    const nextToken = body?.data?.token
+    if (typeof nextToken === 'string' && nextToken.length > 20) {
+      token = nextToken
+      return true
+    }
+    logInfo('WARN: token refresh response missing token')
+    return false
+  } catch (error) {
+    logInfo(`WARN: token refresh error (${(error && error.message) || error})`)
+    return false
   }
 }
 
@@ -150,6 +183,7 @@ async function run() {
   }
 
   const apiBase = normalizeUrl(apiBaseEnv) || deriveApiBaseFromWebUrl(webUrl)
+  await refreshAuthToken(apiBase)
 
   // Resolve expected features:
   // 1) Explicit FEATURES_JSON override (local/dev).

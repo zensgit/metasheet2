@@ -1567,14 +1567,15 @@ function mapPayrollCycleRow(row) {
   }
 }
 
-function mapImportBatchRow(row) {
-  return {
-    id: row.id,
-    orgId: row.org_id ?? DEFAULT_ORG_ID,
-    createdBy: row.created_by,
-    source: row.source ?? null,
-    ruleSetId: row.rule_set_id ?? null,
-    mapping: normalizeMetadata(row.mapping),
+	function mapImportBatchRow(row) {
+	  return {
+	    id: row.id,
+	    orgId: row.org_id ?? DEFAULT_ORG_ID,
+	    idempotencyKey: row.idempotency_key ?? null,
+	    createdBy: row.created_by,
+	    source: row.source ?? null,
+	    ruleSetId: row.rule_set_id ?? null,
+	    mapping: normalizeMetadata(row.mapping),
     rowCount: Number(row.row_count ?? 0),
     status: row.status ?? 'committed',
     meta: normalizeMetadata(row.meta),
@@ -1583,18 +1584,94 @@ function mapImportBatchRow(row) {
   }
 }
 
-function mapImportItemRow(row) {
-  return {
-    id: row.id,
-    batchId: row.batch_id,
-    orgId: row.org_id ?? DEFAULT_ORG_ID,
-    userId: row.user_id,
-    workDate: row.work_date,
-    recordId: row.record_id ?? null,
-    previewSnapshot: normalizeMetadata(row.preview_snapshot),
-    createdAt: row.created_at,
-  }
-}
+	function mapImportItemRow(row) {
+	  return {
+	    id: row.id,
+	    batchId: row.batch_id,
+	    orgId: row.org_id ?? DEFAULT_ORG_ID,
+	    userId: row.user_id,
+	    workDate: row.work_date,
+	    recordId: row.record_id ?? null,
+	    previewSnapshot: normalizeMetadata(row.preview_snapshot),
+	    createdAt: row.created_at,
+	  }
+	}
+
+	let cachedImportBatchIdempotencyColumn = null
+
+	async function hasImportBatchIdempotencyColumn(client) {
+	  if (cachedImportBatchIdempotencyColumn != null) return cachedImportBatchIdempotencyColumn
+	  try {
+	    const rows = await client.query(
+	      `SELECT 1
+	       FROM information_schema.columns
+	       WHERE table_name = 'attendance_import_batches'
+	         AND column_name = 'idempotency_key'
+	         AND table_schema = current_schema()
+	       LIMIT 1`,
+	      []
+	    )
+	    cachedImportBatchIdempotencyColumn = rows.length > 0
+	  } catch (_error) {
+	    cachedImportBatchIdempotencyColumn = false
+	  }
+	  return cachedImportBatchIdempotencyColumn
+	}
+
+	function buildSkippedImportSnapshot({ warnings, row, reason }) {
+	  const safeWarnings = Array.isArray(warnings) ? warnings.map((w) => String(w)) : []
+	  const snapshot = {
+	    warnings: safeWarnings,
+	    metrics: {
+	      workMinutes: 0,
+	      lateMinutes: 0,
+	      earlyLeaveMinutes: 0,
+	      leaveMinutes: 0,
+	      overtimeMinutes: 0,
+	      status: 'invalid',
+	    },
+	    skip: {
+	      reason: reason || null,
+	    },
+	  }
+	  if (row && typeof row === 'object') {
+	    snapshot.row = {
+	      workDate: row.workDate ?? null,
+	      userId: row.userId ?? row.user_id ?? null,
+	      fields: row.fields ?? {},
+	    }
+	  }
+	  return snapshot
+	}
+
+	async function loadIdempotentImportBatch(client, orgId, idempotencyKey) {
+	  const rows = await client.query(
+	    `SELECT id, meta
+	     FROM attendance_import_batches
+	     WHERE org_id = $1 AND idempotency_key = $2 AND status = $3
+	     ORDER BY created_at DESC
+	     LIMIT 1`,
+	    [orgId, idempotencyKey, 'committed']
+	  )
+	  if (!rows.length) return null
+	  const batch = rows[0]
+	  const counts = await client.query(
+	    `SELECT
+	       COUNT(*) FILTER (WHERE record_id IS NOT NULL)::int AS imported,
+	       COUNT(*) FILTER (WHERE record_id IS NULL)::int AS skipped
+	     FROM attendance_import_items
+	     WHERE batch_id = $1 AND org_id = $2`,
+	    [batch.id, orgId]
+	  )
+	  const imported = Number(counts[0]?.imported ?? 0)
+	  const skipped = Number(counts[0]?.skipped ?? 0)
+	  return {
+	    batchId: batch.id,
+	    imported,
+	    skipped,
+	    meta: normalizeMetadata(batch.meta),
+	  }
+	}
 
 function mapIntegrationRow(row) {
   return {
@@ -4364,14 +4441,15 @@ module.exports = {
       user_id: z.string().optional(),
     })
 
-    const importPayloadSchema = z.object({
-      source: z.enum(['dingtalk', 'manual', 'dingtalk_csv', 'dingtalk_api', 'csv']).optional(),
-      orgId: z.string().optional(),
-      userId: z.string().optional(),
-      timezone: z.string().optional(),
-      ruleSetId: z.string().uuid().optional(),
-      engine: z.record(z.unknown()).optional(),
-      userMap: z.record(z.unknown()).optional(),
+	    const importPayloadSchema = z.object({
+	      source: z.enum(['dingtalk', 'manual', 'dingtalk_csv', 'dingtalk_api', 'csv']).optional(),
+	      orgId: z.string().optional(),
+	      userId: z.string().optional(),
+	      idempotencyKey: z.string().trim().min(1).max(128).optional(),
+	      timezone: z.string().optional(),
+	      ruleSetId: z.string().uuid().optional(),
+	      engine: z.record(z.unknown()).optional(),
+	      userMap: z.record(z.unknown()).optional(),
       userMapKeyField: z.string().optional(),
       userMapSourceFields: z.array(z.string()).optional(),
       mappingProfileId: z.string().optional(),
@@ -7472,6 +7550,7 @@ module.exports = {
 
           const statusMap = parsed.data.statusMap ?? {}
           const preview = []
+          const seenKeys = new Set()
           for (const row of rows) {
             const workDate = row.workDate
             const rowUserId = resolveRowUserId({
@@ -7528,6 +7607,29 @@ module.exports = {
               })
               continue
             }
+
+            const dedupKey = `${rowUserId}:${workDate}`
+            if (seenKeys.has(dedupKey)) {
+              preview.push({
+                userId: rowUserId,
+                workDate,
+                firstInAt: null,
+                lastOutAt: null,
+                workMinutes: 0,
+                lateMinutes: 0,
+                earlyLeaveMinutes: 0,
+                leaveMinutes: 0,
+                overtimeMinutes: 0,
+                status: 'invalid',
+                isWorkday: undefined,
+                warnings: ['Duplicate row for same user/workDate (skipped during commit).'],
+                appliedPolicies: [],
+                userGroups: [],
+              })
+              continue
+            }
+            seenKeys.add(dedupKey)
+
             let activeRuleSetId = parsed.data.ruleSetId ?? null
             let activeRuleSetConfig = ruleSetConfig
             if (!activeRuleSetId && groupRuleSetMap.size) {
@@ -7789,17 +7891,43 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
+	        const orgId = getOrgId(req)
+	        const requesterId = getUserId(req)
+	        if (!requesterId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+	          return
+	        }
 
-        const commitToken = parsed.data.commitToken
-        if (!commitToken && requireImportCommitToken) {
-          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
-          return
+	        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+	          ? parsed.data.idempotencyKey.trim()
+	          : ''
+	        if (idempotencyKey) {
+	          const idempotencySupported = await hasImportBatchIdempotencyColumn(db)
+	          if (idempotencySupported) {
+	            const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+	            if (existing) {
+	              res.json({
+	                ok: true,
+	                data: {
+	                  batchId: existing.batchId,
+	                  imported: existing.imported,
+	                  items: [],
+	                  skipped: [],
+	                  csvWarnings: [],
+	                  groupWarnings: [],
+	                  meta: existing.meta,
+	                  idempotent: true,
+	                },
+	              })
+	              return
+	            }
+	          }
+	        }
+
+	        const commitToken = parsed.data.commitToken
+	        if (!commitToken && requireImportCommitToken) {
+	          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+	          return
         }
         if (commitToken) {
           let tokenOk = false
@@ -7904,11 +8032,12 @@ module.exports = {
             }
           }
 
-          const statusMap = parsed.data.statusMap ?? {}
-          const results = []
-          const skipped = []
-          const batchId = randomUUID()
-          let batchMeta = null
+	          const statusMap = parsed.data.statusMap ?? {}
+	          const results = []
+	          const skipped = []
+	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
+	          const batchId = randomUUID()
+	          let batchMeta = null
 
           await db.transaction(async (trx) => {
             let groupIdMap = null
@@ -7925,40 +8054,61 @@ module.exports = {
               }
             }
             const groupMembersToInsert = new Map()
-            batchMeta = {
-              ...(parsed.data.batchMeta ?? {}),
-              mappingProfileId: parsed.data.mappingProfileId ?? null,
-              groupSync: groupSync
-                ? {
+	            batchMeta = {
+	              ...(parsed.data.batchMeta ?? {}),
+	              idempotencyKey: idempotencyKey || undefined,
+	              mappingProfileId: parsed.data.mappingProfileId ?? null,
+	              groupSync: groupSync
+	                ? {
                     autoCreate: groupSync.autoCreate,
                     autoAssignMembers: groupSync.autoAssignMembers,
                     ruleSetId: groupSync.ruleSetId,
                     timezone: groupSync.timezone,
                   }
-                : undefined,
-              groupCreated,
-            }
-            await trx.query(
-              `INSERT INTO attendance_import_batches
-               (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
-              [
-                batchId,
-                orgId,
-                requesterId,
-                parsed.data.source ?? null,
-                parsed.data.ruleSetId ?? null,
-                JSON.stringify(mapping),
-                rows.length,
-                'committed',
-                JSON.stringify(batchMeta),
-              ]
-            )
+	                : undefined,
+	              groupCreated,
+	            }
+	            const batchInsert = idempotencyEnabled
+	              ? {
+	                  sql: `INSERT INTO attendance_import_batches
+	                   (id, org_id, idempotency_key, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
+	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, now(), now())`,
+	                  params: [
+	                    batchId,
+	                    orgId,
+	                    idempotencyKey,
+	                    requesterId,
+	                    parsed.data.source ?? null,
+	                    parsed.data.ruleSetId ?? null,
+	                    JSON.stringify(mapping),
+	                    rows.length,
+	                    'committed',
+	                    JSON.stringify(batchMeta),
+	                  ],
+	                }
+	              : {
+	                  sql: `INSERT INTO attendance_import_batches
+	                   (id, org_id, created_by, source, rule_set_id, mapping, row_count, status, meta, created_at, updated_at)
+	                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, now(), now())`,
+	                  params: [
+	                    batchId,
+	                    orgId,
+	                    requesterId,
+	                    parsed.data.source ?? null,
+	                    parsed.data.ruleSetId ?? null,
+	                    JSON.stringify(mapping),
+	                    rows.length,
+	                    'committed',
+	                    JSON.stringify(batchMeta),
+	                  ],
+	                }
+	            await trx.query(batchInsert.sql, batchInsert.params)
 
-            for (const row of rows) {
-              const workDate = row.workDate
-              const groupKey = resolveAttendanceGroupKey(row)
-              const rowUserId = resolveRowUserId({
+	            const seenRowKeys = new Set()
+	            for (const row of rows) {
+	              const workDate = row.workDate
+	              const groupKey = resolveAttendanceGroupKey(row)
+	              const rowUserId = resolveRowUserId({
                 row,
                 fallbackUserId: requesterId,
                 userMap: parsed.data.userMap,
@@ -7984,29 +8134,67 @@ module.exports = {
                   importWarnings.push(`Missing required: ${missingRequired.join(', ')}`)
                 }
               }
-              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
-                const missingPunch = punchRequiredFields.filter((field) => {
-                  const value = resolveRequiredFieldValue(row, field)
-                  return value === undefined || value === null || value === ''
-                })
-                if (missingPunch.length) {
-                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
-                }
-              }
-              if (importWarnings.length) {
-                skipped.push({
-                  userId: rowUserId ?? null,
-                  workDate: workDate ?? null,
-                  warnings: importWarnings,
-                })
-                continue
-              }
-              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-                const groupEntry = groupIdMap.get(groupKey)
-                if (groupEntry?.id) {
-                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
-                }
-              }
+	              if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
+	                const missingPunch = punchRequiredFields.filter((field) => {
+	                  const value = resolveRequiredFieldValue(row, field)
+	                  return value === undefined || value === null || value === ''
+	                })
+	                if (missingPunch.length) {
+	                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
+	                }
+	              }
+	              if (importWarnings.length) {
+	                const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+	                await trx.query(
+	                  `INSERT INTO attendance_import_items
+	                   (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+	                  [
+	                    randomUUID(),
+	                    batchId,
+	                    orgId,
+	                    rowUserId ?? null,
+	                    workDate ?? null,
+	                    null,
+	                    JSON.stringify(snapshot),
+	                  ]
+	                )
+	                skipped.push({
+	                  userId: rowUserId ?? null,
+	                  workDate: workDate ?? null,
+	                  warnings: importWarnings,
+	                })
+	                continue
+	              }
+
+	              const dedupKey = `${rowUserId}:${workDate}`
+	              if (seenRowKeys.has(dedupKey)) {
+	                const warnings = ['Duplicate row in payload (same userId + workDate)']
+	                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
+	                await trx.query(
+	                  `INSERT INTO attendance_import_items
+	                   (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+	                  [
+	                    randomUUID(),
+	                    batchId,
+	                    orgId,
+	                    rowUserId,
+	                    workDate,
+	                    null,
+	                    JSON.stringify(snapshot),
+	                  ]
+	                )
+	                skipped.push({ userId: rowUserId, workDate, warnings })
+	                continue
+	              }
+	              seenRowKeys.add(dedupKey)
+	              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
+	                const groupEntry = groupIdMap.get(groupKey)
+	                if (groupEntry?.id) {
+	                  groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+	                }
+	              }
               let activeRuleSetId = parsed.data.ruleSetId ?? null
               let activeRuleSetConfig = ruleSetConfig
               if (!activeRuleSetId && groupRuleSetMap.size) {
@@ -8357,14 +8545,41 @@ module.exports = {
               meta: batchMeta,
             },
           })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance import commit failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
-        }
+	        } catch (error) {
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          const maybeConstraint = String(error?.constraint ?? '')
+	          const isIdempotencyUnique = Boolean(idempotencyKey)
+	            && String(error?.code ?? '') === '23505'
+	            && maybeConstraint.includes('uq_attendance_import_batches_idempotency_key')
+	          if (isIdempotencyUnique && await hasImportBatchIdempotencyColumn(db)) {
+	            try {
+	              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+	              if (existing) {
+	                res.json({
+	                  ok: true,
+	                  data: {
+	                    batchId: existing.batchId,
+	                    imported: existing.imported,
+	                    items: [],
+	                    skipped: [],
+	                    csvWarnings: [],
+	                    groupWarnings: [],
+	                    meta: existing.meta,
+	                    idempotent: true,
+	                  },
+	                })
+	                return
+	              }
+	            } catch (_error) {
+	              // Fall through to generic error response.
+	            }
+	          }
+	          logger.error('Attendance import commit failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
+	        }
       })
     )
 
@@ -9221,6 +9436,7 @@ module.exports = {
                     ]
                   )
 
+                  const seenRowKeys = new Set()
                   for (const row of importRows) {
                     const workDate = row.workDate
                     const rowUserId = resolveRowUserId({
@@ -9259,9 +9475,47 @@ module.exports = {
                       }
                     }
                     if (importWarnings.length) {
+                      const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+                      await trx.query(
+                        `INSERT INTO attendance_import_items
+                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+                        [
+                          randomUUID(),
+                          newBatchId,
+                          orgId,
+                          rowUserId ?? null,
+                          workDate ?? null,
+                          null,
+                          JSON.stringify(snapshot),
+                        ]
+                      )
                       skippedRows.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings: importWarnings })
                       continue
                     }
+
+                    const dedupKey = `${rowUserId}:${workDate}`
+                    if (seenRowKeys.has(dedupKey)) {
+                      const warnings = ['Duplicate row in payload (same userId + workDate)']
+                      const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
+                      await trx.query(
+                        `INSERT INTO attendance_import_items
+                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+                        [
+                          randomUUID(),
+                          newBatchId,
+                          orgId,
+                          rowUserId,
+                          workDate,
+                          null,
+                          JSON.stringify(snapshot),
+                        ]
+                      )
+                      skippedRows.push({ userId: rowUserId, workDate, warnings })
+                      continue
+                    }
+                    seenRowKeys.add(dedupKey)
                     const context = await resolveWorkContext({
                       db: trx,
                       orgId,
@@ -9585,10 +9839,10 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/import/batches/:id/items',
-      withPermission('attendance:admin', async (req, res) => {
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/batches/:id/items',
+	      withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
         const batchId = req.params.id
         const { page, pageSize, offset } = parsePagination(req.query)
@@ -9622,12 +9876,148 @@ module.exports = {
           logger.error('Attendance import items query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load import items' } })
         }
-      })
-    )
+	      })
+	    )
 
-    context.api.http.addRoute(
-      'POST',
-      '/api/attendance/import/rollback/:id',
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/batches/:id/export.csv',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const orgId = getOrgId(req)
+	        const batchId = req.params.id
+	        const rawType = String(req.query?.type ?? req.query?.kind ?? '').toLowerCase()
+	        const type = ['all', 'imported', 'skipped', 'anomalies'].includes(rawType) ? rawType : 'all'
+
+	        const csvEscape = (value) => {
+	          const text = value === null || value === undefined ? '' : String(value)
+	          if (/[\",\n]/.test(text)) return `"${text.replace(/\"/g, '\"\"')}"`
+	          return text
+	        }
+
+	        const extractMetrics = (snapshot) => {
+	          if (!snapshot || typeof snapshot !== 'object') return {}
+	          const metrics = snapshot.metrics
+	          if (metrics && typeof metrics === 'object' && !Array.isArray(metrics)) return metrics
+	          return {}
+	        }
+
+	        const extractWarnings = (snapshot) => {
+	          if (!snapshot || typeof snapshot !== 'object') return []
+	          const out = []
+	          if (Array.isArray(snapshot.warnings)) out.push(...snapshot.warnings)
+	          const metrics = extractMetrics(snapshot)
+	          if (Array.isArray(metrics.warnings)) out.push(...metrics.warnings)
+	          if (snapshot.policy && Array.isArray(snapshot.policy.warnings)) out.push(...snapshot.policy.warnings)
+	          if (snapshot.engine && Array.isArray(snapshot.engine.warnings)) out.push(...snapshot.engine.warnings)
+	          return Array.from(new Set(out.map((w) => String(w)).filter(Boolean)))
+	        }
+
+	        const isAnomaly = (row, snapshot) => {
+	          const metrics = extractMetrics(snapshot)
+	          const warnings = extractWarnings(snapshot)
+	          const status = metrics.status ? String(metrics.status) : ''
+	          const lateMinutes = Number(metrics.lateMinutes ?? 0)
+	          const earlyLeaveMinutes = Number(metrics.earlyLeaveMinutes ?? 0)
+	          const leaveMinutes = Number(metrics.leaveMinutes ?? 0)
+	          const overtimeMinutes = Number(metrics.overtimeMinutes ?? 0)
+	          return Boolean(
+	            warnings.length
+	            || row.record_id == null
+	            || (status && status !== 'normal')
+	            || lateMinutes > 0
+	            || earlyLeaveMinutes > 0
+	            || leaveMinutes > 0
+	            || overtimeMinutes > 0
+	          )
+	        }
+
+	        try {
+	          // Ensure batch exists (nicer 404 vs empty CSV).
+	          const batchRows = await db.query(
+	            'SELECT id FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	            [batchId, orgId]
+	          )
+	          if (!batchRows.length) {
+	            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Import batch not found' } })
+	            return
+	          }
+
+	          const where = type === 'imported'
+	            ? 'AND record_id IS NOT NULL'
+	            : type === 'skipped'
+	              ? 'AND record_id IS NULL'
+	              : ''
+
+	          const rows = await db.query(
+	            `SELECT * FROM attendance_import_items
+	             WHERE batch_id = $1 AND org_id = $2
+	             ${where}
+	             ORDER BY created_at ASC`,
+	            [batchId, orgId]
+	          )
+
+	          const headers = [
+	            'batchId',
+	            'itemId',
+	            'workDate',
+	            'userId',
+	            'recordId',
+	            'status',
+	            'workMinutes',
+	            'lateMinutes',
+	            'earlyLeaveMinutes',
+	            'leaveMinutes',
+	            'overtimeMinutes',
+	            'warnings',
+	          ]
+
+	          const lines = []
+	          lines.push(headers.map(csvEscape).join(','))
+
+	          for (const row of rows) {
+	            const snapshot = normalizeMetadata(row.preview_snapshot)
+	            if (type === 'anomalies' && !isAnomaly(row, snapshot)) continue
+
+	            const metrics = extractMetrics(snapshot)
+	            const warnings = extractWarnings(snapshot)
+	            const status = metrics.status ? String(metrics.status) : ''
+
+	            const values = [
+	              batchId,
+	              row.id,
+	              row.work_date ?? '',
+	              row.user_id ?? '',
+	              row.record_id ?? '',
+	              status,
+	              Number(metrics.workMinutes ?? 0),
+	              Number(metrics.lateMinutes ?? 0),
+	              Number(metrics.earlyLeaveMinutes ?? 0),
+	              Number(metrics.leaveMinutes ?? 0),
+	              Number(metrics.overtimeMinutes ?? 0),
+	              warnings.join('; '),
+	            ]
+	            lines.push(values.map(csvEscape).join(','))
+	          }
+
+	          const stamp = new Date().toISOString().slice(0, 10)
+	          const filename = `attendance-import-${String(batchId).slice(0, 8)}-${type}-${stamp}.csv`
+	          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+	          res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`)
+	          res.send(lines.join('\n'))
+	        } catch (error) {
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance import export failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export import items' } })
+	        }
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/import/rollback/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
         const batchId = req.params.id

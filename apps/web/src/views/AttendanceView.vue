@@ -636,13 +636,70 @@
                     {{ provisionLoading ? 'Loading...' : 'Load' }}
                   </button>
                   <button class="attendance__btn attendance__btn--primary" :disabled="provisionLoading" @click="grantProvisioningRole">
-                    {{ provisionLoading ? 'Working...' : 'Grant role' }}
+                    {{ provisionLoading ? 'Working...' : 'Assign role' }}
                   </button>
                   <button class="attendance__btn" :disabled="provisionLoading" @click="revokeProvisioningRole">
-                    {{ provisionLoading ? 'Working...' : 'Revoke role' }}
+                    {{ provisionLoading ? 'Working...' : 'Remove role' }}
                   </button>
                 </div>
               </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-provision-search">
+                  <span>User search (email/name/id)</span>
+                  <input
+                    id="attendance-provision-search"
+                    v-model="provisionSearchQuery"
+                    type="text"
+                    placeholder="Search users to avoid pasting UUIDs"
+                    @keydown.enter.prevent="searchProvisionUsers(1)"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="provisionSearchLoading" @click="searchProvisionUsers(1)">
+                  {{ provisionSearchLoading ? 'Searching...' : 'Search' }}
+                </button>
+                <button
+                  class="attendance__btn"
+                  :disabled="provisionSearchLoading || provisionSearchPage <= 1"
+                  @click="searchProvisionUsers(provisionSearchPage - 1)"
+                >
+                  Prev
+                </button>
+                <button
+                  class="attendance__btn"
+                  :disabled="provisionSearchLoading || !provisionSearchHasNext"
+                  @click="searchProvisionUsers(provisionSearchPage + 1)"
+                >
+                  Next
+                </button>
+                <span v-if="provisionSearchHasSearched" class="attendance__field-hint">
+                  Page {{ provisionSearchPage }} · {{ provisionSearchTotal }} result(s)
+                </span>
+              </div>
+              <div v-if="provisionSearchResults.length > 0" class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Name</th>
+                      <th>User ID</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="user in provisionSearchResults" :key="user.id">
+                      <td>{{ user.email }}</td>
+                      <td>{{ user.name || '--' }}</td>
+                      <td><code>{{ user.id.slice(0, 8) }}</code></td>
+                      <td class="attendance__table-actions">
+                        <button class="attendance__btn" @click="selectProvisionUser(user)">Select</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-else-if="provisionSearchHasSearched" class="attendance__empty">No users found.</p>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-provision-user-id">
                   <span>User ID (UUID)</span>
@@ -653,6 +710,9 @@
                     type="text"
                     placeholder="e.g. 0cdf4a9c-4fe1-471b-be08-854b683dc930"
                   />
+                  <small v-if="provisionUserProfile" class="attendance__field-hint">
+                    Selected: {{ provisionUserProfile.email }}{{ provisionUserProfile.name ? ` (${provisionUserProfile.name})` : '' }}
+                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-provision-role">
                   <span>Role template</span>
@@ -670,6 +730,11 @@
               <p v-if="provisionStatusMessage" class="attendance__status" :class="{ 'attendance__status--error': provisionStatusKind === 'error' }">
                 {{ provisionStatusMessage }}
               </p>
+              <div v-if="provisionRoles.length > 0" class="attendance__chip-list">
+                <span v-for="role in provisionRoles" :key="role" class="attendance__status-chip">
+                  {{ role }}
+                </span>
+              </div>
               <div v-if="provisionPermissions.length > 0" class="attendance__chip-list">
                 <span v-for="perm in provisionPermissions" :key="perm" class="attendance__status-chip">
                   {{ perm }}
@@ -1272,6 +1337,16 @@
                     </option>
                   </select>
                 </label>
+                <label class="attendance__field" for="attendance-import-mode">
+                  <span>Import mode</span>
+                  <select id="attendance-import-mode" v-model="importMode">
+                    <option value="override">override</option>
+                    <option value="merge">merge</option>
+                  </select>
+                  <small class="attendance__field-hint">
+                    <code>override</code>: overwrite same user/date. <code>merge</code>: keep existing fields when present.
+                  </small>
+                </label>
                 <label class="attendance__field" for="attendance-import-profile">
                   <span>Mapping profile</span>
                   <select
@@ -1447,6 +1522,7 @@
                   <thead>
                     <tr>
                       <th>Work date</th>
+                      <th>User ID</th>
                       <th>Work minutes</th>
                       <th>Late</th>
                       <th>Early leave</th>
@@ -1456,8 +1532,9 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in importPreview" :key="item.workDate">
+                    <tr v-for="item in importPreview" :key="`${item.userId}-${item.workDate}`">
                       <td>{{ item.workDate }}</td>
+                      <td>{{ item.userId }}</td>
                       <td>{{ item.workMinutes }}</td>
                       <td>{{ item.lateMinutes }}</td>
                       <td>{{ item.earlyLeaveMinutes }}</td>
@@ -1513,7 +1590,17 @@
               </div>
 
               <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
-                <h5 class="attendance__subheading">Batch items</h5>
+                <div class="attendance__subheading-row">
+                  <h5 class="attendance__subheading">Batch items</h5>
+                  <div class="attendance__table-actions">
+                    <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(false)">
+                      Export items CSV
+                    </button>
+                    <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(true)">
+                      Export anomalies CSV
+                    </button>
+                  </div>
+                </div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2721,6 +2808,30 @@ interface PermissionUserResponse {
   degraded?: boolean
 }
 
+interface AttendanceAdminUserSearchItem {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  is_active: boolean
+  is_admin: boolean
+  last_login_at: string | null
+  created_at: string
+}
+
+interface AttendanceAdminUserProfileSummary {
+  id: string
+  email: string
+  name: string | null
+}
+
+interface AttendanceAdminRoleTemplate {
+  id: ProvisionRole
+  roleId: string
+  permissions: string[]
+  description: string
+}
+
 interface AttendanceSettings {
   autoAbsence?: {
     enabled?: boolean
@@ -2914,8 +3025,8 @@ interface AttendanceImportItem {
   id: string
   batchId: string
   orgId?: string
-  userId: string
-  workDate: string
+  userId: string | null
+  workDate: string | null
   recordId?: string | null
   previewSnapshot?: Record<string, any> | null
   createdAt?: string
@@ -3077,6 +3188,19 @@ const provisionStatusMessage = ref('')
 const provisionStatusKind = ref<'info' | 'error'>('info')
 const provisionPermissions = ref<string[]>([])
 const provisionUserIsAdmin = ref(false)
+const provisionRoles = ref<string[]>([])
+const provisionUserProfile = ref<AttendanceAdminUserProfileSummary | null>(null)
+const provisionRoleTemplates = ref<AttendanceAdminRoleTemplate[]>([])
+const provisionSearchQuery = ref('')
+const provisionSearchResults = ref<AttendanceAdminUserSearchItem[]>([])
+const provisionSearchLoading = ref(false)
+const provisionSearchHasSearched = ref(false)
+const provisionSearchPage = ref(1)
+const provisionSearchTotal = ref(0)
+const provisionSearchPageSize = 10
+const provisionSearchHasNext = computed(() => {
+  return provisionSearchPage.value * provisionSearchPageSize < provisionSearchTotal.value
+})
 const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
@@ -3161,6 +3285,7 @@ const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
+const importMode = ref<'override' | 'merge'>('override')
 const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
@@ -3670,9 +3795,17 @@ function buildImportPayload(): Record<string, any> | null {
       timezone: importGroupTimezone.value || undefined,
     }
   }
-  if (!payload.mode) payload.mode = 'override'
+  payload.mode = importMode.value || payload.mode || 'override'
   if (payload.mappingProfileId === '') delete payload.mappingProfileId
   return payload
+}
+
+function syncImportModeToPayload() {
+  const base = parseJsonConfig(importForm.payload)
+  if (!base) return
+  const current = typeof (base as any).mode === 'string' ? String((base as any).mode) : ''
+  if (current === importMode.value) return
+  importForm.payload = JSON.stringify({ ...base, mode: importMode.value }, null, 2)
 }
 
 function payrollTemplateName(templateId?: string | null): string {
@@ -3689,7 +3822,9 @@ async function loadImportTemplate() {
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load import template')
     }
-    importForm.payload = JSON.stringify(data.data?.payloadExample ?? {}, null, 2)
+    const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
+    importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
+    importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     setStatus('Import template loaded.')
   } catch (error) {
@@ -4058,6 +4193,208 @@ async function rollbackImportBatch(batchId: string) {
   }
 }
 
+function csvEscape(value: unknown): string {
+  const text = value === null || value === undefined ? '' : String(value)
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function downloadCsvText(filename: string, csvText: string) {
+  const blob = new Blob([csvText], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function extractImportSnapshotMetrics(snapshot?: Record<string, any> | null): Record<string, any> {
+  if (!snapshot || typeof snapshot !== 'object') return {}
+  const metrics = (snapshot as any).metrics
+  if (metrics && typeof metrics === 'object' && !Array.isArray(metrics)) return metrics
+  return {}
+}
+
+function extractImportSnapshotWarnings(snapshot?: Record<string, any> | null): string[] {
+  if (!snapshot || typeof snapshot !== 'object') return []
+  const warnings: string[] = []
+  const direct = (snapshot as any).warnings
+  if (Array.isArray(direct)) warnings.push(...direct.map((w) => String(w)))
+  const metrics = extractImportSnapshotMetrics(snapshot)
+  const metricWarnings = (metrics as any).warnings
+  if (Array.isArray(metricWarnings)) warnings.push(...metricWarnings.map((w: any) => String(w)))
+  const policyWarnings = (snapshot as any).policy?.warnings
+  if (Array.isArray(policyWarnings)) warnings.push(...policyWarnings.map((w: any) => String(w)))
+  const engineWarnings = (snapshot as any).engine?.warnings
+  if (Array.isArray(engineWarnings)) warnings.push(...engineWarnings.map((w: any) => String(w)))
+  return Array.from(new Set(warnings))
+}
+
+async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImportItem[]> {
+  const pageSize = 200
+  let page = 1
+  let total: number | null = null
+  const items: AttendanceImportItem[] = []
+
+  while (total === null || items.length < total) {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    })
+    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${params.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || 'Failed to load import items')
+    }
+    const pageItems = Array.isArray(data.data?.items) ? data.data.items : []
+    items.push(...pageItems)
+    const nextTotal = Number(data.data?.total)
+    if (Number.isFinite(nextTotal)) total = nextTotal
+    if (pageItems.length === 0) break
+    page += 1
+    if (page > 500) break
+  }
+
+  return items
+}
+
+async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
+  const batchId = importBatchSelectedId.value
+  if (!batchId) {
+    setStatus('Select a batch first.', 'error')
+    return
+  }
+  importLoading.value = true
+
+  try {
+    // Prefer server-side exports when available (works for large batches and includes skipped rows).
+    const exportType = onlyAnomalies ? 'anomalies' : 'all'
+    const serverResponse = await apiFetch(`/api/attendance/import/batches/${batchId}/export.csv?type=${exportType}`, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/csv',
+      },
+    })
+    if (serverResponse.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    if (serverResponse.ok) {
+      const csvText = await serverResponse.text()
+      const stamp = new Date().toISOString().slice(0, 10)
+      const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
+      downloadCsvText(filename, csvText)
+      setStatus('CSV exported.')
+      return
+    }
+
+    // Backward-compatible fallback for older deployments without the export endpoint.
+    if (serverResponse.status !== 404) {
+      const errorText = await serverResponse.text().catch(() => '')
+      throw new Error(errorText || `Failed to export CSV (HTTP ${serverResponse.status})`)
+    }
+
+    const allItems = await fetchAllImportBatchItems(batchId)
+    if (allItems.length === 0) {
+      setStatus('No batch items found.', 'error')
+      return
+    }
+    allItems.sort((a, b) => {
+      const dateCmp = String(a.workDate ?? '').localeCompare(String(b.workDate ?? ''))
+      if (dateCmp !== 0) return dateCmp
+      return String(a.userId ?? '').localeCompare(String(b.userId ?? ''))
+    })
+
+    const headers = [
+      'batchId',
+      'itemId',
+      'workDate',
+      'userId',
+      'recordId',
+      'status',
+      'workMinutes',
+      'lateMinutes',
+      'earlyLeaveMinutes',
+      'leaveMinutes',
+      'overtimeMinutes',
+      'warnings',
+    ]
+
+    const rows = allItems.map((item) => {
+      const snapshot = item.previewSnapshot
+      const metrics = extractImportSnapshotMetrics(snapshot)
+      const warnings = extractImportSnapshotWarnings(snapshot)
+
+      const status = String((metrics as any).status ?? '')
+      const workMinutes = Number((metrics as any).workMinutes ?? 0)
+      const lateMinutes = Number((metrics as any).lateMinutes ?? 0)
+      const earlyLeaveMinutes = Number((metrics as any).earlyLeaveMinutes ?? 0)
+      const leaveMinutes = Number((metrics as any).leaveMinutes ?? 0)
+      const overtimeMinutes = Number((metrics as any).overtimeMinutes ?? 0)
+
+      const isAnomaly = Boolean(
+        warnings.length
+        || (item.recordId ?? null) === null
+        || (status && status !== 'normal')
+        || lateMinutes > 0
+        || earlyLeaveMinutes > 0
+        || leaveMinutes > 0
+        || overtimeMinutes > 0,
+      )
+
+      return {
+        item,
+        status,
+        workMinutes,
+        lateMinutes,
+        earlyLeaveMinutes,
+        leaveMinutes,
+        overtimeMinutes,
+        warnings,
+        isAnomaly,
+      }
+    }).filter((row) => (onlyAnomalies ? row.isAnomaly : true))
+
+    const lines: string[] = []
+    lines.push(headers.map(csvEscape).join(','))
+    rows.forEach(({ item, status, workMinutes, lateMinutes, earlyLeaveMinutes, leaveMinutes, overtimeMinutes, warnings }) => {
+      const values = [
+        batchId,
+        item.id,
+        item.workDate || '',
+        item.userId || '',
+        item.recordId || '',
+        status,
+        workMinutes,
+        lateMinutes,
+        earlyLeaveMinutes,
+        leaveMinutes,
+        overtimeMinutes,
+        warnings.join('; '),
+      ]
+      lines.push(values.map(csvEscape).join(','))
+    })
+
+    const stamp = new Date().toISOString().slice(0, 10)
+    const filename = `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`
+    downloadCsvText(filename, lines.join('\n'))
+    setStatus(`CSV exported (${rows.length}/${allItems.length}).`)
+  } catch (error: any) {
+    setStatus(error?.message || 'Failed to export CSV', 'error')
+  } finally {
+    importLoading.value = false
+  }
+}
+
 function setStatus(message: string, kind: 'info' | 'error' = 'info') {
   statusKind.value = kind
   if (statusMessage.value === message && message) {
@@ -4091,7 +4428,86 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
 }
 
+function normalizeProvisionUserProfile(value: any, fallbackUserId: string): AttendanceAdminUserProfileSummary | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || value.userId || value.user_id || fallbackUserId || '')
+  const email = String(value.email || '')
+  const name = value.name === null || value.name === undefined ? null : String(value.name)
+  if (!id || !email) return null
+  return { id, email, name }
+}
+
+function applyProvisionAccessPayload(payload: any, fallbackUserId: string) {
+  provisionPermissions.value = Array.isArray(payload?.permissions) ? payload.permissions : []
+  provisionUserIsAdmin.value = Boolean(payload?.isAdmin)
+  provisionRoles.value = Array.isArray(payload?.roles) ? payload.roles : []
+  const profile = normalizeProvisionUserProfile(payload?.user, fallbackUserId)
+  provisionUserProfile.value = profile
+}
+
+async function loadProvisionRoleTemplates() {
+  try {
+    const response = await apiFetch('/api/attendance-admin/role-templates')
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    if (response.status === 404) return
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) return
+    const templates = Array.isArray(data.data?.templates) ? data.data.templates : []
+    provisionRoleTemplates.value = templates
+  } catch {
+    // Non-blocking: UI can still use static template ids.
+  }
+}
+
+async function searchProvisionUsers(page: number) {
+  const q = provisionSearchQuery.value.trim()
+  provisionSearchHasSearched.value = true
+  if (!q) {
+    provisionSearchResults.value = []
+    provisionSearchTotal.value = 0
+    provisionSearchPage.value = 1
+    setProvisionStatus('Enter a search query (email/name/id).', 'error')
+    return
+  }
+  provisionSearchLoading.value = true
+  try {
+    const params = new URLSearchParams({
+      q,
+      page: String(page),
+      pageSize: String(provisionSearchPageSize),
+    })
+    const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || 'Failed to search users')
+    }
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    provisionSearchResults.value = items
+    provisionSearchTotal.value = Number(data.data?.total ?? items.length) || 0
+    provisionSearchPage.value = Number(data.data?.page ?? page) || page
+  } catch (error: any) {
+    setProvisionStatus(error?.message || 'Failed to search users', 'error')
+  } finally {
+    provisionSearchLoading.value = false
+  }
+}
+
+function selectProvisionUser(user: AttendanceAdminUserSearchItem) {
+  provisionForm.userId = user.id
+  provisionUserProfile.value = { id: user.id, email: user.email, name: user.name }
+  provisionHasLoaded.value = true
+  void loadProvisioningUser()
+}
+
 async function fetchProvisioningUser(userId: string) {
+  provisionRoles.value = []
   const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
   if (response.status === 403) {
     adminForbidden.value = true
@@ -4106,6 +4522,24 @@ async function fetchProvisioningUser(userId: string) {
   provisionUserIsAdmin.value = Boolean(data.isAdmin)
 }
 
+async function fetchProvisioningUserAccess(userId: string) {
+  const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access`)
+  if (response.status === 404) {
+    // Backward compatibility: old deployments only support /api/permissions/user/:id
+    await fetchProvisioningUser(userId)
+    return
+  }
+  if (response.status === 403) {
+    adminForbidden.value = true
+    throw new Error('Admin permissions required')
+  }
+  const data = await response.json().catch(() => null)
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.error?.message || 'Failed to load user access')
+  }
+  applyProvisionAccessPayload(data.data, userId)
+}
+
 async function loadProvisioningUser() {
   const userId = provisionForm.userId.trim()
   provisionHasLoaded.value = true
@@ -4115,7 +4549,7 @@ async function loadProvisioningUser() {
   }
   provisionLoading.value = true
   try {
-    await fetchProvisioningUser(userId)
+    await fetchProvisioningUserAccess(userId)
     setProvisionStatus(`Loaded ${provisionPermissions.value.length} permission(s).`)
   } catch (error: any) {
     setProvisionStatus(error?.message || 'Failed to load permissions', 'error')
@@ -4134,6 +4568,26 @@ async function grantProvisioningRole() {
   provisionLoading.value = true
   try {
     const role = provisionForm.role
+    // Prefer attendance-scoped role assignment (role templates) when available.
+    const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ template: role }),
+    })
+    if (modern.status !== 404) {
+      if (modern.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const modernData = await modern.json().catch(() => null)
+      if (!modern.ok || !modernData?.ok) {
+        throw new Error(modernData?.error?.message || 'Failed to assign role')
+      }
+      applyProvisionAccessPayload(modernData.data, userId)
+      setProvisionStatus(`Role '${role}' assigned.`)
+      return
+    }
+
+    // Backward compatibility: old deployments grant permissions directly.
     const permissions = provisionRolePermissions[role] || []
     for (const permission of permissions) {
       const response = await apiFetch('/api/permissions/grant', {
@@ -4168,6 +4622,26 @@ async function revokeProvisioningRole() {
   provisionLoading.value = true
   try {
     const role = provisionForm.role
+    // Prefer attendance-scoped role unassignment when available.
+    const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
+      method: 'POST',
+      body: JSON.stringify({ template: role }),
+    })
+    if (modern.status !== 404) {
+      if (modern.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const modernData = await modern.json().catch(() => null)
+      if (!modern.ok || !modernData?.ok) {
+        throw new Error(modernData?.error?.message || 'Failed to remove role')
+      }
+      applyProvisionAccessPayload(modernData.data, userId)
+      setProvisionStatus(`Role '${role}' removed.`)
+      return
+    }
+
+    // Backward compatibility: old deployments revoke permissions directly.
     const permissions = provisionRolePermissions[role] || []
     for (const permission of permissions) {
       const response = await apiFetch('/api/permissions/revoke', {
@@ -6411,6 +6885,7 @@ async function exportPayrollCycleSummary() {
 async function loadAdminData() {
   await Promise.all([
     loadSettings(),
+    loadProvisionRoleTemplates(),
     loadRule(),
     loadRuleSets(),
     loadRuleTemplates(),
@@ -6465,6 +6940,10 @@ watch(importProfileId, () => {
   if (!importUserMapSourceFields.value && profile.userMapSourceFields?.length) {
     importUserMapSourceFields.value = profile.userMapSourceFields.join(', ')
   }
+})
+
+watch(importMode, () => {
+  syncImportModeToPayload()
 })
 </script>
 
@@ -6858,6 +7337,14 @@ watch(importProfileId, () => {
   margin: 12px 0;
   font-size: 14px;
   font-weight: 600;
+}
+
+.attendance__subheading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .attendance__code {
