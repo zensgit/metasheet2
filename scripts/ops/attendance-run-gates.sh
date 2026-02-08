@@ -184,12 +184,31 @@ function run_playwright_full_flow_mobile() {
   return 1
 }
 
-maybe_run_preflight || true
-run_api_smoke
-maybe_run_provision || true
-run_playwright_production_flow
-run_playwright_full_flow_desktop
-run_playwright_full_flow_mobile
+exit_code=0
+
+if ! maybe_run_preflight; then
+  exit_code=1
+fi
+
+if ! run_api_smoke; then
+  exit_code=1
+fi
+
+if ! maybe_run_provision; then
+  exit_code=1
+fi
+
+if ! run_playwright_production_flow; then
+  exit_code=1
+fi
+
+if ! run_playwright_full_flow_desktop; then
+  exit_code=1
+fi
+
+if ! run_playwright_full_flow_mobile; then
+  exit_code=1
+fi
 
 cat <<EOF
 
@@ -204,3 +223,5 @@ cat <<EOF
 Artifacts:
   ${OUTPUT_ROOT}
 EOF
+
+exit "$exit_code"
