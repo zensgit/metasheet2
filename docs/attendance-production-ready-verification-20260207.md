@@ -40,9 +40,14 @@ On `142.171.239.56`:
 
 ## DB Migration Result (Expected)
 
-The following migration must be applied when `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1`:
+The following migrations must be applied when `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1`:
 
-- `zzzz20260207150000_create_attendance_import_tokens`
+- `packages/core-backend/src/db/migrations/zzzz20260207150000_create_attendance_import_tokens.ts`
+
+Optional (recommended) import reliability hardening:
+
+- `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
+  - Enables `idempotencyKey` de-duplication across commit retries (unique per org).
 
 ## End-to-End Verification (Playwright)
 
@@ -89,4 +94,3 @@ Go when all are true:
 2. `/api/attendance/import/prepare` + `/preview` + `/commit` works without relying on legacy `/api/attendance/import`.
 3. Nginx `/api/*` proxy is stable across redeploys (no persistent 502 due to stale backend IP).
 4. Playwright verification passes at least twice consecutively.
-

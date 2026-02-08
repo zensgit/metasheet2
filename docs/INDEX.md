@@ -48,6 +48,10 @@
 | [preprod-validation-report-20260122.md](./preprod-validation-report-20260122.md) | 预发验证报告 (2026-01-22) |
 | [verification-attendance-dev-20260119.md](./verification-attendance-dev-20260119.md) | 考勤模块开发环境验证 |
 | [attendance-plugin-verification-report-20260120.md](./attendance-plugin-verification-report-20260120.md) | 考勤插件验证报告 (2026-01-20) |
+| **[attendance-production-delivery-20260207.md](./attendance-production-delivery-20260207.md)** | 考勤插件生产交付包定义 (2026-02-07) |
+| **[attendance-production-acceptance-20260207.md](./attendance-production-acceptance-20260207.md)** | 考勤插件生产验收 Gate 口径 (2026-02-07) |
+| [attendance-production-ready-verification-20260207.md](./attendance-production-ready-verification-20260207.md) | 考勤插件生产就绪验证记录 (2026-02-07) |
+| [attendance-production-polish-verification-20260208.md](./attendance-production-polish-verification-20260208.md) | 考勤插件生产打磨验证记录 (2026-02-08) |
 | [VERIFICATION_RELEASE_SUMMARY.md](./VERIFICATION_RELEASE_SUMMARY.md) | 最新全量验证汇总 (2025-12-22) |
 | [univer-full-verification-summary-2025-12-20-run4.md](./univer-full-verification-summary-2025-12-20-run4.md) | Univer 全量验证报告 |
 | [verification-phase1-final-2025-12-22.md](./verification-phase1-final-2025-12-22.md) | Phase 1 全量回归报告 |

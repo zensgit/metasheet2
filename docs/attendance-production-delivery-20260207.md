@@ -12,6 +12,7 @@ This is the delivery package definition for bringing the Attendance plugin to a 
    - `/api/attendance/import/commit`
 3. Import commit tokens are safe across restarts (DB-backed when required).
 4. Import commits support an optional `idempotencyKey` (deduplicates retries; unique per org).
+   - Requires DB migration: `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
 5. Reverse proxy remains stable across backend redeploys (no stale backend container IP).
 6. Repeatable acceptance using Playwright with stored artifacts.
 7. Admins can provision employee/approver/admin permissions via the existing permission APIs.
@@ -40,6 +41,8 @@ Out of scope for this delivery:
 
 ### Smoke / Acceptance
 
+- Run all gates (recommended):
+  - `API_BASE=... AUTH_TOKEN=... scripts/ops/attendance-run-gates.sh`
 - API smoke:
   - `scripts/ops/attendance-smoke-api.sh`
 - Provision user permissions:

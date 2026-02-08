@@ -327,7 +327,8 @@ async function run() {
 
   // 4.1) Permission provisioning UI (P1): grant a minimal role to a random UUID and verify it loads.
   logInfo('Validating permission provisioning UI')
-  const provisionUserId = randomUUID()
+  // Modern attendance-admin APIs require the target user to exist. Use the current user for a stable smoke check.
+  const provisionUserId = userId || randomUUID()
   const userAccessSection = page.locator('div.attendance__admin-section').filter({
     has: page.getByRole('heading', { name: 'User Access' }),
   })
@@ -336,18 +337,34 @@ async function run() {
 
   const grantResp = waitForJsonResponse(
     page,
-    (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/permissions/grant'),
-    { label: 'Grant permission' }
+    (resp) => {
+      if (resp.request().method() !== 'POST') return false
+      const url = resp.url()
+      return (
+        url.includes(`/api/attendance-admin/users/${provisionUserId}/roles/assign`) ||
+        url.includes('/api/permissions/grant')
+      )
+    },
+    { label: 'Assign role' }
   )
-  await userAccessSection.getByRole('button', { name: 'Grant role' }).click()
+  // Modern deployments use attendance-scoped role templates ("Assign role").
+  // Older deployments fall back to /api/permissions/grant with the same button.
+  await userAccessSection.getByRole('button', { name: 'Assign role' }).click()
   await grantResp
   await userAccessSection.locator('text=attendance:read').waitFor({ timeout: timeoutMs })
   await userAccessSection.locator('text=attendance:write').waitFor({ timeout: timeoutMs })
 
   const loadResp = waitForJsonResponse(
     page,
-    (resp) => resp.request().method() === 'GET' && resp.url().includes(`/api/permissions/user/${provisionUserId}`),
-    { label: 'Load permissions' }
+    (resp) => {
+      if (resp.request().method() !== 'GET') return false
+      const url = resp.url()
+      return (
+        url.includes(`/api/attendance-admin/users/${provisionUserId}/access`) ||
+        url.includes(`/api/permissions/user/${provisionUserId}`)
+      )
+    },
+    { label: 'Load user access' }
   )
   await userAccessSection.getByRole('button', { name: 'Load' }).click()
   await loadResp

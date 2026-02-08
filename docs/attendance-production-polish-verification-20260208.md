@@ -18,8 +18,12 @@ Example (remote):
 ## Pre-req: Migrations Applied
 
 Required migrations for this iteration:
-- `packages/core-backend/src/db/migrations/zzzz20260208100000_create_roles_table.ts`
-- `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
+- RBAC core (roles/permissions/assignments):
+  - `packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts`
+- Import commit-token persistence (when `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1`):
+  - `packages/core-backend/src/db/migrations/zzzz20260207150000_create_attendance_import_tokens.ts`
+- Import commit idempotency (recommended):
+  - `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
 
 If running via docker compose (production):
 ```bash
@@ -118,7 +122,7 @@ Expected:
 Desktop:
 ```bash
 AUTH_TOKEN="<ADMIN_JWT>" \
-WEB_URL="http://<HOST>:<PORT>/" \
+WEB_URL="http://<HOST>:<PORT>/attendance" \
 API_BASE="http://<HOST>:<PORT>/api" \
 EXPECT_PRODUCT_MODE="attendance" \
 OUTPUT_DIR="output/playwright/attendance-prod-acceptance/focused-desktop-latest" \
@@ -129,7 +133,7 @@ node scripts/verify-attendance-full-flow.mjs
 Mobile:
 ```bash
 AUTH_TOKEN="<ADMIN_JWT>" \
-WEB_URL="http://<HOST>:<PORT>/" \
+WEB_URL="http://<HOST>:<PORT>/attendance" \
 API_BASE="http://<HOST>:<PORT>/api" \
 EXPECT_PRODUCT_MODE="attendance" \
 OUTPUT_DIR="output/playwright/attendance-prod-acceptance/focused-mobile-latest" \

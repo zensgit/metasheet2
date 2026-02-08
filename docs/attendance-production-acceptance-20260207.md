@@ -7,6 +7,27 @@ This report defines the acceptance steps and expected evidence for production re
 - Web: `http://142.171.239.56:8081/attendance`
 - API: `http://142.171.239.56:8081/api`
 
+## One-Command Gate Runner (Recommended)
+
+Run all gates (preflight when available + API smoke + Playwright desktop/mobile) and store artifacts under `output/playwright/`:
+
+```bash
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-run-gates.sh
+```
+
+Optional strictness (recommended after applying the idempotency migration):
+
+```bash
+REQUIRE_IDEMPOTENCY="true" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-run-gates.sh
+```
+
 ## Gate 1: Preflight (Must Pass)
 
 Run:
