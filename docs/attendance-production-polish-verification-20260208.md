@@ -24,6 +24,7 @@ Required migrations for this iteration:
   - `packages/core-backend/src/db/migrations/zzzz20260207150000_create_attendance_import_tokens.ts`
 - Import commit idempotency (recommended):
   - `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
+  - Note: idempotency retries also work without this column by falling back to `attendance_import_batches.meta.idempotencyKey`, but the migration adds uniqueness + faster lookup.
 
 If running via docker compose (production):
 ```bash
@@ -185,6 +186,12 @@ On the remote environment, the following gates were reported as PASS:
 - Gate 3: Permission Provisioning PASS (employee/approver/admin)
 - Gate 4: Playwright Desktop PASS
 - Gate 4: Playwright Mobile PASS
+
+Strict flags (idempotency + export) should be treated as P0 for production.
+
+Current note:
+- `REQUIRE_IDEMPOTENCY=true` failed on the remote image before deploying the idempotency fix in `plugins/plugin-attendance/index.cjs` (retry required a commitToken).
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
 
 Artifacts (example):
 - `output/playwright/attendance-prod-acceptance/*`

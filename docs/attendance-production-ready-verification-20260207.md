@@ -47,7 +47,8 @@ The following migrations must be applied when `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1
 Optional (recommended) import reliability hardening:
 
 - `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts`
-  - Enables `idempotencyKey` de-duplication across commit retries (unique per org).
+  - Adds `attendance_import_batches.idempotency_key` + unique index (per org) for faster lookup and stronger uniqueness.
+  - Note: commit retries can still be de-duplicated without this column via `attendance_import_batches.meta.idempotencyKey` fallback (but without DB-enforced uniqueness).
 
 ## End-to-End Verification (Playwright)
 

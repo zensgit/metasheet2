@@ -18,7 +18,7 @@ EXPECT_PRODUCT_MODE="attendance" \
 scripts/ops/attendance-run-gates.sh
 ```
 
-Optional strictness (recommended after applying the idempotency migration):
+Optional strictness (recommended):
 
 ```bash
 REQUIRE_IDEMPOTENCY="true" \
@@ -27,6 +27,11 @@ AUTH_TOKEN="<ADMIN_JWT>" \
 EXPECT_PRODUCT_MODE="attendance" \
 scripts/ops/attendance-run-gates.sh
 ```
+
+Notes:
+
+- Idempotency retries work even when the DB column `attendance_import_batches.idempotency_key` is not present by falling back to `attendance_import_batches.meta.idempotencyKey`.
+- The migration `packages/core-backend/src/db/migrations/zzzz20260208120000_add_attendance_import_idempotency_key.ts` is still recommended for uniqueness + faster lookup.
 
 ## Gate 1: Preflight (Must Pass)
 
@@ -60,6 +65,7 @@ Expected:
   - `/api/auth/me` features.mode is `attendance` (when `EXPECT_PRODUCT_MODE=attendance`)
   - plugin-attendance is active
   - import preview + commit works
+  - import commit idempotency retry works (when `REQUIRE_IDEMPOTENCY=true`)
   - group auto-create + membership works
   - adjustment requests create + approve works
 
@@ -197,3 +203,24 @@ This section records a follow-up validation run after additional production-hard
 Notes:
 
 - The verifiers refresh JWTs via `POST /api/auth/refresh-token` before running (best-effort).
+
+### Strict Gate Run (REQUIRE_IDEMPOTENCY=true)
+
+If you enable strict flags:
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-run-gates.sh
+```
+
+Expected after deploying the idempotency fix in this branch:
+- Gate 2 `API Smoke` passes and logs `idempotency ok`.
+
+Evidence (current remote image before deploy):
+- Gate 2 `API Smoke`: `FAIL` (idempotency retry required a commitToken)
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
