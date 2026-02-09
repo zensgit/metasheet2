@@ -198,6 +198,40 @@ This section records a follow-up validation run after additional production-hard
   - Desktop: `PASS`
     - Evidence: `output/playwright/attendance-full-flow-remote-20260208-desktop/`
   - Mobile: `PASS`
+
+## Latest Execution Record (2026-02-09) - Strict Gates (2x consecutive)
+
+Strict gate command (no secrets; token placeholder only):
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+RUN_PREFLIGHT="false" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="26979f88-e7cc-4b40-a975-a0353d19aec0" \
+scripts/ops/attendance-run-gates.sh
+```
+
+Results:
+
+1. Strict run #1: `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-163619/`
+   - API smoke log contains:
+     - `idempotency ok`
+     - `export csv ok`
+2. Strict run #2 (consecutive): `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-164032/`
+   - API smoke log contains:
+     - `idempotency ok`
+     - `export csv ok`
+
+Notes:
+
+- Gate 1 (Preflight) is host-only and can show as `SKIP` when running the gate runner from a workstation without `docker/app.env`.
+- Provisioning gate is executed when `PROVISION_USER_ID` is set; it provisions role bundles via `POST /api/permissions/grant` (admin token required).
     - Evidence: `output/playwright/attendance-full-flow-remote-20260208-mobile/`
 
 Notes:

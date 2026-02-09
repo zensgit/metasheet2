@@ -90,6 +90,10 @@ Execution record (2026-02-09):
    - API smoke: `output/playwright/attendance-prod-acceptance/20260209-123959/gate-api-smoke.log`
 2. Strict run #2 (consecutive): PASS
    - Evidence: `output/playwright/attendance-prod-acceptance/20260209-124300/`
+3. Strict run #3: PASS
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-163619/`
+4. Strict run #4 (consecutive): PASS
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-164032/`
 
 Provisioning role-bundle scripts were also executed and stored under:
 
@@ -101,6 +105,7 @@ Notes:
 
 - Gate 1 (Preflight) was skipped in the recorded runs because the runner host did not have `docker/app.env`.
 - The Playwright scripts treat `PUNCH_TOO_SOON` as a best-effort business guard; it must not fail the run.
+- The provisioning script supports best-effort JWT refresh via `POST /api/auth/refresh-token` to avoid invalid-token flakiness.
 
 ## Local Observability Stack (Optional)
 
@@ -113,4 +118,3 @@ docker compose -f docker/observability/docker-compose.yml up -d
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (admin/admin)
 - Dashboard: "Attendance Overview"
-
