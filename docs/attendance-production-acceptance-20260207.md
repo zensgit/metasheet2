@@ -7,6 +7,12 @@ This report defines the acceptance steps and expected evidence for production re
 - Web: `http://142.171.239.56:8081/attendance`
 - API: `http://142.171.239.56:8081/api`
 
+## GA Daily Gates (Reference)
+
+For GA-level daily verification (strict gates twice + metrics sanity + 10k perf baseline), see:
+
+- `docs/attendance-production-ga-daily-gates-20260209.md`
+
 ## One-Command Gate Runner (Recommended)
 
 Run all gates (preflight when available + API smoke + Playwright desktop/mobile) and store artifacts under `output/playwright/`:

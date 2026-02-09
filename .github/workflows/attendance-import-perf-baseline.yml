@@ -1,0 +1,52 @@
+name: Attendance Import Perf Baseline (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: 'API base (must end with /api)'
+        required: false
+        default: 'http://142.171.239.56:8081/api'
+      rows:
+        description: 'CSV rows to generate (default 10000)'
+        required: false
+        default: '10000'
+      mode:
+        description: 'preview or commit'
+        required: false
+        default: 'commit'
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      ROWS: ${{ inputs.rows || '10000' }}
+      MODE: ${{ inputs.mode || 'commit' }}
+      ROLLBACK: 'true'
+      EXPORT_CSV: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run perf baseline (rollback enabled)
+        run: |
+          set -euo pipefail
+          node ./scripts/ops/attendance-import-perf.mjs
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-import-perf/**
+

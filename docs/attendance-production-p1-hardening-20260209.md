@@ -107,6 +107,41 @@ Notes:
 - The Playwright scripts treat `PUNCH_TOO_SOON` as a best-effort business guard; it must not fail the run.
 - The provisioning script supports best-effort JWT refresh via `POST /api/auth/refresh-token` to avoid invalid-token flakiness.
 
+## Ops Verification Additions (GA Enablers)
+
+These checks are recommended for GA-level readiness but are not part of the original "production usable" gate set.
+
+### 1) Metrics Sanity (host-only)
+
+Run on the production host (backend binds to `127.0.0.1:8900`):
+
+```bash
+scripts/ops/attendance-check-metrics.sh
+```
+
+Expected:
+
+- PASS and the Prometheus endpoint contains:
+  - `attendance_api_errors_total`
+  - `attendance_rate_limited_total`
+
+### 2) Import Perf Baseline (10k, rollback enabled)
+
+Run against the target environment (token placeholder only):
+
+```bash
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+ROWS="10000" \
+MODE="commit" \
+ROLLBACK="true" \
+node scripts/ops/attendance-import-perf.mjs
+```
+
+Evidence:
+
+- `output/playwright/attendance-import-perf/<runId>/perf-summary.json`
+
 ## Local Observability Stack (Optional)
 
 To view the new metrics/dashboard locally:

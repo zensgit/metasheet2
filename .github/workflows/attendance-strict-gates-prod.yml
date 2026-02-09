@@ -1,0 +1,82 @@
+name: Attendance Strict Gates (Prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: 'API base (must end with /api)'
+        required: false
+        default: 'http://142.171.239.56:8081/api'
+      expect_product_mode:
+        description: 'Expected product mode (from /api/auth/me -> features.mode)'
+        required: false
+        default: 'attendance'
+      require_attendance_admin_api:
+        description: 'Require attendance admin API endpoints (true/false)'
+        required: false
+        default: 'true'
+      require_idempotency:
+        description: 'Require import idempotencyKey retry behavior (true/false)'
+        required: false
+        default: 'true'
+      require_import_export:
+        description: 'Require import batch export.csv endpoint (true/false)'
+        required: false
+        default: 'true'
+  schedule:
+    # Daily at 02:15 UTC.
+    - cron: '15 2 * * *'
+
+concurrency:
+  group: attendance-strict-gates-prod
+  cancel-in-progress: true
+
+jobs:
+  strict-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
+      EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
+      RUN_PREFLIGHT: 'false'
+      REQUIRE_ATTENDANCE_ADMIN_API: ${{ inputs.require_attendance_admin_api || 'true' }}
+      REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
+      REQUIRE_IMPORT_EXPORT: ${{ inputs.require_import_export || 'true' }}
+      HEADLESS: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps
+
+      - name: Run strict gates twice (remote)
+        run: |
+          set -euo pipefail
+          ./scripts/ops/attendance-run-strict-gates-twice.sh
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-strict-gates-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-prod-acceptance/**
+
