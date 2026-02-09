@@ -44,6 +44,8 @@ Out of scope for this delivery:
 
 - Run all gates (recommended):
   - `API_BASE=... AUTH_TOKEN=... scripts/ops/attendance-run-gates.sh`
+- Strict gates twice (stability PASS, recommended for Go/No-Go):
+  - `API_BASE=... AUTH_TOKEN=... PROVISION_USER_ID=... scripts/ops/attendance-run-strict-gates-twice.sh`
 - API smoke:
   - `scripts/ops/attendance-smoke-api.sh`
 - Provision user permissions:
