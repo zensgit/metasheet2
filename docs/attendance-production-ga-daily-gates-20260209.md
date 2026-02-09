@@ -149,3 +149,20 @@ Date:
   - previewMs:
   - commitMs:
   - Notes:
+
+## Latest Notes (2026-02-09)
+
+Strict gates twice (remote) passed:
+
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260209-181349-1/`
+  - `output/playwright/attendance-prod-acceptance/20260209-181349-2/`
+
+Perf baseline notes:
+
+- 2k preview/commit + rollback passed (examples):
+  - `output/playwright/attendance-import-perf/attendance-perf-mlfhy37t-g4n509/perf-summary.json`
+  - `output/playwright/attendance-import-perf/attendance-perf-mlfhywc4-6w52wb/perf-summary.json`
+- 10k preview returned `504 Gateway Time-out` through nginx on `http://142.171.239.56:8081/api`.
+  - Fix shipped in repo (requires web deploy): `docker/nginx.conf` increases `/api/` proxy timeouts to `300s`.
+  - After deployment, re-run the 10k baseline.
