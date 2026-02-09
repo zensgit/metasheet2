@@ -235,6 +235,17 @@ Execution record (2026-02-09):
     - `output/playwright/attendance-prod-acceptance/20260209-110635/gate-api-smoke.log`
 - Strict run #2 (consecutive): `PASS`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-110911/`
+ - Strict run #3: `PASS`
+   - Note: Gate 1 `Preflight` was `SKIP` because the gate runner was executed from a workstation that does not have `docker/app.env`.
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-123959/`
+   - API smoke log includes `idempotency ok` + `export csv ok`:
+     - `output/playwright/attendance-prod-acceptance/20260209-123959/gate-api-smoke.log`
+   - Provisioning scripts executed (role bundles):
+     - `output/playwright/attendance-prod-acceptance/20260209-123959/gate-provision-employee.log`
+     - `output/playwright/attendance-prod-acceptance/20260209-123959/gate-provision-approver.log`
+     - `output/playwright/attendance-prod-acceptance/20260209-123959/gate-provision-admin.log`
+ - Strict run #4 (consecutive): `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-124300/`
 
 Historical (pre-deploy remote image):
 - Gate 2 `API Smoke`: `FAIL` (idempotency retry required a commitToken)

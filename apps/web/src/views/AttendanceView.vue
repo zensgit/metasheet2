@@ -800,6 +800,152 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
+                <h4>Batch Provisioning</h4>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="provisionBatchLoading"
+                    @click="grantProvisioningRoleBatch"
+                  >
+                    {{ provisionBatchLoading ? 'Working...' : 'Assign role (batch)' }}
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    :disabled="provisionBatchLoading"
+                    @click="revokeProvisioningRoleBatch"
+                  >
+                    {{ provisionBatchLoading ? 'Working...' : 'Remove role (batch)' }}
+                  </button>
+                  <button class="attendance__btn" :disabled="provisionBatchLoading" @click="clearProvisionBatch">
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-provision-batch-user-ids">
+                  <span>User IDs (UUIDs)</span>
+                  <textarea
+                    id="attendance-provision-batch-user-ids"
+                    v-model="provisionBatchUserIdsText"
+                    rows="4"
+                    placeholder="uuid1\nuuid2\n..."
+                  />
+                  <small class="attendance__field-hint">
+                    Parsed: {{ provisionBatchIds.length }} user(s)
+                    <template v-if="provisionBatchInvalidIds.length">
+                      · Invalid: {{ provisionBatchInvalidIds.length }}
+                    </template>
+                  </small>
+                </label>
+                <label class="attendance__field" for="attendance-provision-batch-role">
+                  <span>Role template</span>
+                  <select
+                    id="attendance-provision-batch-role"
+                    name="provisionBatchRole"
+                    v-model="provisionBatchRole"
+                  >
+                    <option value="employee">employee</option>
+                    <option value="approver">approver</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </label>
+              </div>
+              <p
+                v-if="provisionBatchStatusMessage"
+                class="attendance__status"
+                :class="{ 'attendance__status--error': provisionBatchStatusKind === 'error' }"
+              >
+                {{ provisionBatchStatusMessage }}
+              </p>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
+                <h4>Audit Logs</h4>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="auditLogLoading" @click="loadAuditLogs(1)">
+                    {{ auditLogLoading ? 'Loading...' : 'Reload logs' }}
+                  </button>
+                </div>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--full" for="attendance-audit-search">
+                  <span>Search (action/actor/resource/route)</span>
+                  <input
+                    id="attendance-audit-search"
+                    v-model="auditLogQuery"
+                    type="text"
+                    placeholder="commit, export.csv, userId..."
+                    @keydown.enter.prevent="loadAuditLogs(1)"
+                  />
+                </label>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" :disabled="auditLogLoading || auditLogPage <= 1" @click="loadAuditLogs(auditLogPage - 1)">
+                  Prev
+                </button>
+                <button
+                  class="attendance__btn"
+                  :disabled="auditLogLoading || auditLogPage >= auditLogTotalPages"
+                  @click="loadAuditLogs(auditLogPage + 1)"
+                >
+                  Next
+                </button>
+                <span v-if="auditLogTotal" class="attendance__field-hint">
+                  Page {{ auditLogPage }} / {{ auditLogTotalPages }} · {{ auditLogTotal }} row(s)
+                </span>
+              </div>
+              <p
+                v-if="auditLogStatusMessage"
+                class="attendance__status"
+                :class="{ 'attendance__status--error': auditLogStatusKind === 'error' }"
+              >
+                {{ auditLogStatusMessage }}
+              </p>
+              <div v-if="auditLogs.length === 0" class="attendance__empty">No audit logs.</div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Actor</th>
+                      <th>Action</th>
+                      <th>Route</th>
+                      <th>Status</th>
+                      <th>Latency</th>
+                      <th>Error</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template v-for="item in auditLogs" :key="item.id">
+                      <tr>
+                        <td>{{ formatDateTime(item.occurred_at) }}</td>
+                        <td><code>{{ item.actor_id ? item.actor_id.slice(0, 8) : '--' }}</code></td>
+                        <td>{{ item.action }}</td>
+                        <td><code>{{ item.route || '--' }}</code></td>
+                        <td>{{ item.status_code ?? '--' }}</td>
+                        <td>{{ item.latency_ms ?? '--' }}</td>
+                        <td>{{ item.meta?.error?.code || '--' }}</td>
+                        <td class="attendance__table-actions">
+                          <button class="attendance__btn" @click="toggleAuditLogMeta(item)">
+                            {{ auditLogSelectedId === item.id ? 'Hide' : 'View' }}
+                          </button>
+                        </td>
+                      </tr>
+                      <tr v-if="auditLogSelectedId === item.id" class="attendance__table-row--meta">
+                        <td colspan="8">
+                          <pre class="attendance__code">{{ formatJson(item.meta) }}</pre>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="attendance__admin-section">
+              <div class="attendance__admin-section-header">
                 <h4>Holiday Sync</h4>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
@@ -2993,6 +3139,23 @@ interface AttendanceAdminRoleTemplate {
   description: string
 }
 
+interface AttendanceAuditLogItem {
+  id: string
+  actor_id: string | null
+  actor_type: string | null
+  action: string
+  resource_type: string | null
+  resource_id: string | null
+  request_id: string | null
+  ip: string | null
+  user_agent: string | null
+  route: string | null
+  status_code: number | null
+  latency_ms: number | null
+  occurred_at: string
+  meta: Record<string, any>
+}
+
 interface AttendanceSettings {
   autoAbsence?: {
     enabled?: boolean
@@ -3364,6 +3527,24 @@ const provisionSearchPageSize = 10
 const provisionSearchHasNext = computed(() => {
   return provisionSearchPage.value * provisionSearchPageSize < provisionSearchTotal.value
 })
+const provisionBatchLoading = ref(false)
+const provisionBatchUserIdsText = ref('')
+const provisionBatchRole = ref<ProvisionRole>('employee')
+const provisionBatchStatusMessage = ref('')
+const provisionBatchStatusKind = ref<'info' | 'error'>('info')
+const provisionBatchParsed = computed(() => parseUserIdListText(provisionBatchUserIdsText.value))
+const provisionBatchIds = computed(() => provisionBatchParsed.value.valid)
+const provisionBatchInvalidIds = computed(() => provisionBatchParsed.value.invalid)
+const auditLogLoading = ref(false)
+const auditLogs = ref<AttendanceAuditLogItem[]>([])
+const auditLogQuery = ref('')
+const auditLogStatusMessage = ref('')
+const auditLogStatusKind = ref<'info' | 'error'>('info')
+const auditLogPage = ref(1)
+const auditLogTotal = ref(0)
+const auditLogPageSize = 50
+const auditLogTotalPages = computed(() => Math.max(1, Math.ceil(auditLogTotal.value / auditLogPageSize)))
+const auditLogSelectedId = ref('')
 const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
@@ -4617,8 +4798,53 @@ function setProvisionStatus(message: string, kind: 'info' | 'error' = 'info') {
   }, 6000)
 }
 
+function setProvisionBatchStatus(message: string, kind: 'info' | 'error' = 'info') {
+  provisionBatchStatusKind.value = kind
+  provisionBatchStatusMessage.value = message
+  if (!message) return
+  window.setTimeout(() => {
+    if (provisionBatchStatusMessage.value === message) {
+      provisionBatchStatusMessage.value = ''
+    }
+  }, 6000)
+}
+
+function setAuditLogStatus(message: string, kind: 'info' | 'error' = 'info') {
+  auditLogStatusKind.value = kind
+  auditLogStatusMessage.value = message
+  if (!message) return
+  window.setTimeout(() => {
+    if (auditLogStatusMessage.value === message) {
+      auditLogStatusMessage.value = ''
+    }
+  }, 6000)
+}
+
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
+}
+
+function parseUserIdListText(raw: string): { valid: string[]; invalid: string[] } {
+  const tokens = String(raw || '')
+    .split(/[,\s;]+/g)
+    .map((v) => v.trim())
+    .filter(Boolean)
+
+  const valid: string[] = []
+  const invalid: string[] = []
+  const seen = new Set<string>()
+
+  for (const token of tokens) {
+    if (seen.has(token)) continue
+    seen.add(token)
+    if (isUuid(token)) {
+      valid.push(token)
+    } else {
+      invalid.push(token)
+    }
+  }
+
+  return { valid, invalid }
 }
 
 function normalizeProvisionUserProfile(value: any, fallbackUserId: string): AttendanceAdminUserProfileSummary | null {
@@ -4857,6 +5083,228 @@ async function revokeProvisioningRole() {
     setProvisionStatus(error?.message || 'Failed to revoke role', 'error')
   } finally {
     provisionLoading.value = false
+  }
+}
+
+async function grantProvisioningRoleBatch() {
+  provisionBatchStatusMessage.value = ''
+  const role = provisionBatchRole.value
+  const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
+  if (invalid.length) {
+    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    return
+  }
+  if (valid.length === 0) {
+    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    return
+  }
+
+  provisionBatchLoading.value = true
+  try {
+    const batch = await apiFetch('/api/attendance-admin/users/batch/roles/assign', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: valid, template: role }),
+    })
+    if (batch.status !== 404) {
+      if (batch.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const batchData = await batch.json().catch(() => null)
+      if (!batch.ok || !batchData?.ok) {
+        throw new Error(batchData?.error?.message || 'Failed to batch assign role')
+      }
+      const updated = Number(batchData.data?.updated ?? 0) || 0
+      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${valid.length} user(s).`)
+      return
+    }
+
+    // Backward compatibility: per-user role assign or direct permission grants.
+    const failed: string[] = []
+    let updated = 0
+    for (const userId of valid) {
+      try {
+        const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
+          method: 'POST',
+          body: JSON.stringify({ template: role }),
+        })
+        if (modern.status !== 404) {
+          if (modern.status === 403) {
+            adminForbidden.value = true
+            throw new Error('Admin permissions required')
+          }
+          const modernData = await modern.json().catch(() => null)
+          if (!modern.ok || !modernData?.ok) {
+            throw new Error(modernData?.error?.message || 'Failed to assign role')
+          }
+          updated += 1
+          continue
+        }
+
+        const permissions = provisionRolePermissions[role] || []
+        for (const permission of permissions) {
+          const response = await apiFetch('/api/permissions/grant', {
+            method: 'POST',
+            body: JSON.stringify({ userId, permission }),
+          })
+          if (response.status === 403) {
+            adminForbidden.value = true
+            throw new Error('Admin permissions required')
+          }
+          const data = await response.json().catch(() => null)
+          if (!response.ok) {
+            throw new Error(data?.error || data?.message || `Failed to grant ${permission}`)
+          }
+        }
+        updated += 1
+      } catch {
+        failed.push(userId)
+      }
+    }
+
+    const message = failed.length
+      ? `Role '${role}' assigned to ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`
+      : `Role '${role}' assigned to ${updated}/${valid.length} user(s).`
+    setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
+  } catch (error: any) {
+    setProvisionBatchStatus(error?.message || 'Failed to batch assign role', 'error')
+  } finally {
+    provisionBatchLoading.value = false
+  }
+}
+
+async function revokeProvisioningRoleBatch() {
+  provisionBatchStatusMessage.value = ''
+  const role = provisionBatchRole.value
+  const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
+  if (invalid.length) {
+    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    return
+  }
+  if (valid.length === 0) {
+    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    return
+  }
+
+  provisionBatchLoading.value = true
+  try {
+    const batch = await apiFetch('/api/attendance-admin/users/batch/roles/unassign', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: valid, template: role }),
+    })
+    if (batch.status !== 404) {
+      if (batch.status === 403) {
+        adminForbidden.value = true
+        throw new Error('Admin permissions required')
+      }
+      const batchData = await batch.json().catch(() => null)
+      if (!batch.ok || !batchData?.ok) {
+        throw new Error(batchData?.error?.message || 'Failed to batch remove role')
+      }
+      const updated = Number(batchData.data?.updated ?? 0) || 0
+      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${valid.length} user(s).`)
+      return
+    }
+
+    // Backward compatibility: per-user role unassign or direct permission revokes.
+    const failed: string[] = []
+    let updated = 0
+    for (const userId of valid) {
+      try {
+        const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
+          method: 'POST',
+          body: JSON.stringify({ template: role }),
+        })
+        if (modern.status !== 404) {
+          if (modern.status === 403) {
+            adminForbidden.value = true
+            throw new Error('Admin permissions required')
+          }
+          const modernData = await modern.json().catch(() => null)
+          if (!modern.ok || !modernData?.ok) {
+            throw new Error(modernData?.error?.message || 'Failed to remove role')
+          }
+          updated += 1
+          continue
+        }
+
+        const permissions = provisionRolePermissions[role] || []
+        for (const permission of permissions) {
+          const response = await apiFetch('/api/permissions/revoke', {
+            method: 'POST',
+            body: JSON.stringify({ userId, permission }),
+          })
+          if (response.status === 403) {
+            adminForbidden.value = true
+            throw new Error('Admin permissions required')
+          }
+          const data = await response.json().catch(() => null)
+          if (!response.ok && response.status !== 404) {
+            throw new Error(data?.error || data?.message || `Failed to revoke ${permission}`)
+          }
+        }
+        updated += 1
+      } catch {
+        failed.push(userId)
+      }
+    }
+
+    const message = failed.length
+      ? `Role '${role}' removed from ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`
+      : `Role '${role}' removed from ${updated}/${valid.length} user(s).`
+    setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
+  } catch (error: any) {
+    setProvisionBatchStatus(error?.message || 'Failed to batch remove role', 'error')
+  } finally {
+    provisionBatchLoading.value = false
+  }
+}
+
+function clearProvisionBatch() {
+  provisionBatchUserIdsText.value = ''
+  provisionBatchStatusMessage.value = ''
+  provisionBatchStatusKind.value = 'info'
+}
+
+function toggleAuditLogMeta(item: AttendanceAuditLogItem) {
+  auditLogSelectedId.value = auditLogSelectedId.value === item.id ? '' : item.id
+}
+
+async function loadAuditLogs(page: number) {
+  auditLogSelectedId.value = ''
+  auditLogLoading.value = true
+  try {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(auditLogPageSize),
+    })
+    const q = auditLogQuery.value.trim()
+    if (q) params.set('q', q)
+    const response = await apiFetch(`/api/attendance-admin/audit-logs?${params.toString()}`)
+    if (response.status === 404) {
+      auditLogs.value = []
+      auditLogTotal.value = 0
+      auditLogPage.value = 1
+      setAuditLogStatus('Audit log API not available on this deployment.', 'error')
+      return
+    }
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || 'Failed to load audit logs')
+    }
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    auditLogs.value = items
+    auditLogTotal.value = Number(data.data?.total ?? items.length) || 0
+    auditLogPage.value = Number(data.data?.page ?? page) || page
+    setAuditLogStatus(`Loaded ${items.length} log(s).`)
+  } catch (error: any) {
+    setAuditLogStatus(error?.message || 'Failed to load audit logs', 'error')
+  } finally {
+    auditLogLoading.value = false
   }
 }
 

@@ -78,8 +78,11 @@ export async function logSafetyOperation(entry: AuditEntry): Promise<void> {
         resource_type,
         resource_id,
         metadata,
-        created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        meta,
+        ip,
+        created_at,
+        occurred_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6, $8, $7, $7)`,
       [
         entry.userId,
         'user',
@@ -87,7 +90,8 @@ export async function logSafetyOperation(entry: AuditEntry): Promise<void> {
         'admin_operation',
         entry.operationType,
         JSON.stringify({ ...metadata, ip: entry.userIp }),
-        entry.timestamp
+        entry.timestamp,
+        entry.userIp
       ]
     );
 

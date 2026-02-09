@@ -1,0 +1,93 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "${DS_PROM}",
+        "enable": true,
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "name": "Prom Alerts",
+        "target": {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "time_series"
+        }
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Attendance API Errors (rate)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(rate(attendance_api_errors_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Attendance Rate Limited (rate)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "targets": [
+        { "expr": "sum(rate(attendance_rate_limited_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Import Commit Errors (rate)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "sum(rate(attendance_api_errors_total{job=\"$job\",route=\"/api/attendance/import/commit\"}[5m]))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "table",
+      "title": "Top Error Routes (5m rate)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "expr": "topk(10, sum(rate(attendance_api_errors_total{job=\"$job\"}[5m])) by (route))",
+          "datasource": "${DS_PROM}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["attendance"],
+  "templating": {
+    "list": [
+      { "type": "datasource", "name": "DS_PROM", "query": "prometheus" },
+      {
+        "type": "query",
+        "name": "job",
+        "datasource": "${DS_PROM}",
+        "refresh": 2,
+        "query": "label_values(up, job)",
+        "current": { "text": "metasheet-backend", "value": "metasheet-backend" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "",
+  "title": "Attendance Overview",
+  "uid": "attendance-overview",
+  "version": 1
+}
+

@@ -71,11 +71,26 @@ Notes:
 ## Post-Delivery Backlog (P1/P2)
 
 P1 (1-2 weeks, production hardening):
-- Observability + alerts: import/approve error rate, latency, and failure reason aggregation (Grafana dashboards + Prometheus alerts).
-- Audit trail: who imported/approved/changed rules, and when (admin-visible logs + retention policy).
-- Admin productization: improve User Access UI (batch grant/revoke, templates, and audit traceability).
-- Import performance: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
-- Security: enforce import/export rate limits + optional IP allowlist by default; lock down admin endpoints with stronger guardrails.
+- Observability + alerts (implemented 2026-02-09):
+  - Prometheus alert rules: `ops/prometheus/attendance-alerts.yml`
+  - Grafana dashboard: `docker/observability/grafana/dashboards/attendance-overview.json`
+- Audit trail + retention (implemented 2026-02-09):
+  - Attendance audit inserts into `operation_audit_logs` (best-effort, write ops + exports).
+  - Retention worker (production-only by default): `packages/core-backend/src/audit/operation-audit-retention.ts`
+  - Admin audit API: `GET /api/attendance-admin/audit-logs`
+- Admin productization (implemented 2026-02-09):
+  - Batch role assign/unassign API:
+    - `POST /api/attendance-admin/users/batch/roles/assign`
+    - `POST /api/attendance-admin/users/batch/roles/unassign`
+  - Admin Center UI:
+    - Batch Provisioning (multi-UUID input)
+    - Audit Logs viewer (search + paging + meta preview)
+- Import performance (partial, implemented 2026-02-09):
+  - Import commit uses buffered bulk inserts for items (reduces DB roundtrips).
+  - Remaining: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
+- Security (implemented 2026-02-09):
+  - Rate limits for import/export/admin writes (production-only by default).
+  - Optional IP allowlist enforcement (when configured in `attendance.settings`).
 
 P2 (later, feature expansion):
 - Payroll: full salary settlement pipeline (beyond payroll cycles and anomaly batching).

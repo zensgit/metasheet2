@@ -33,6 +33,12 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   },
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value.trim())
+}
+
 async function ensureAttendanceRoleTemplates(): Promise<void> {
   // Ensure permission codes exist.
   await query(
@@ -242,6 +248,123 @@ export function attendanceAdminRouter(): Router {
     }
   })
 
+  r.get('/api/attendance-admin/audit-logs', async (req: Request, res: Response) => {
+    try {
+      const q = String(req.query.q || '').trim()
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 50,
+        maxPageSize: 200,
+      })
+
+      const term = q ? `%${q}%` : '%'
+      const where = q
+        ? `WHERE resource_type = 'attendance'
+             AND (
+               action ILIKE $1 OR actor_id ILIKE $1 OR resource_id ILIKE $1 OR route ILIKE $1
+             )`
+        : `WHERE resource_type = 'attendance'`
+
+      const count = await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM operation_audit_logs ${where}`,
+        q ? [term] : undefined,
+      )
+      const total = count.rows[0]?.c ?? 0
+
+      const listSql = `
+        SELECT
+          id,
+          actor_id,
+          actor_type,
+          action,
+          resource_type,
+          resource_id,
+          request_id,
+          COALESCE(ip, ip_address) AS ip,
+          user_agent,
+          route,
+          status_code,
+          latency_ms,
+          COALESCE(occurred_at, created_at) AS occurred_at,
+          COALESCE(meta, metadata, '{}'::jsonb) AS meta
+        FROM operation_audit_logs
+        ${where}
+        ORDER BY COALESCE(occurred_at, created_at) DESC
+        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+      `
+      const params = q ? [term, pageSize, offset] : [pageSize, offset]
+      const list = await query(listSql, params)
+
+      return jsonOk(res, { items: list.rows, page, pageSize, total })
+    } catch (error) {
+      return jsonError(res, 500, 'AUDIT_LOGS_FAILED', (error as Error)?.message || 'Failed to load audit logs')
+    }
+  })
+
+  r.post('/api/attendance-admin/users/batch/roles/assign', async (req: Request, res: Response) => {
+    try {
+      const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
+      const userIds = rawIds.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+      if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds is required')
+      const invalid = userIds.filter((id) => !isUuid(id))
+      if (invalid.length) return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}`)
+
+      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
+      const roleId = String(req.body?.roleId || '').trim()
+      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+      const finalRoleId = resolved?.roleId || roleId
+      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+
+      await ensureAttendanceRoleTemplates()
+
+      const insert = await query<{ user_id: string }>(
+        `INSERT INTO user_roles (user_id, role_id)
+         SELECT unnest($1::uuid[]), $2
+         ON CONFLICT DO NOTHING
+         RETURNING user_id`,
+        [userIds, finalRoleId],
+      )
+
+      return jsonOk(res, {
+        roleId: finalRoleId,
+        requested: userIds.length,
+        updated: insert.rowCount ?? insert.rows.length,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
+    }
+  })
+
+  r.post('/api/attendance-admin/users/batch/roles/unassign', async (req: Request, res: Response) => {
+    try {
+      const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
+      const userIds = rawIds.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+      if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds is required')
+      const invalid = userIds.filter((id) => !isUuid(id))
+      if (invalid.length) return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}`)
+
+      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
+      const roleId = String(req.body?.roleId || '').trim()
+      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+      const finalRoleId = resolved?.roleId || roleId
+      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+
+      const del = await query<{ user_id: string }>(
+        `DELETE FROM user_roles
+         WHERE role_id = $2 AND user_id = ANY($1::uuid[])
+         RETURNING user_id`,
+        [userIds, finalRoleId],
+      )
+
+      return jsonOk(res, {
+        roleId: finalRoleId,
+        requested: userIds.length,
+        updated: del.rowCount ?? del.rows.length,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
+    }
+  })
+
   return r
 }
-
