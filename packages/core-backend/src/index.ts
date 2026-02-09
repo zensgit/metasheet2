@@ -41,6 +41,8 @@ import { cache } from './cache-init'
 import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
+import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
@@ -92,6 +94,7 @@ export class MetaSheetServer {
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
+  private stopOperationAuditRetention?: () => void
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -446,6 +449,10 @@ export class MetaSheetServer {
       if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
       return next()
     })
+
+    // Attendance production guards (audit + security). Must run after auth so req.user is available.
+    this.app.use(attendanceAuditMiddleware())
+    this.app.use(attendanceSecurityMiddleware())
 
     // 健康检查
     this.app.get('/health', (req, res) => {
@@ -835,6 +842,15 @@ export class MetaSheetServer {
 
     const shutdownTasks: Promise<void>[] = []
 
+    // 0. Stop background tasks
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopOperationAuditRetention?.()
+      } catch (err) {
+        this.logger.warn(`Operation audit retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
@@ -1020,6 +1036,11 @@ export class MetaSheetServer {
         this.httpServer.listen(this.port, onListening)
       }
     })
+
+    // Background tasks (after server starts listening)
+    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+      this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+    }
 
     // Register signal handlers only for real runtime, not test runners.
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {

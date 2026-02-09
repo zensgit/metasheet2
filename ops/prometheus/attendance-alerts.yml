@@ -1,0 +1,33 @@
+groups:
+  - name: attendance-production
+    rules:
+      - alert: AttendanceApi5xxHigh
+        expr: sum(rate(attendance_api_errors_total{status=~"5.."}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance API 5xx rate is high
+          runbook: Check backend logs and recent deploys; validate DB/Redis health; inspect import/approval endpoints.
+
+      - alert: AttendanceImportCommitErrors
+        expr: sum(rate(attendance_api_errors_total{route="/api/attendance/import/commit"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance import commit is failing
+          runbook: Inspect import batch audit logs; verify idempotency behavior; check DB constraints and plugin status.
+
+      - alert: AttendanceRateLimitedHigh
+        expr: sum(rate(attendance_rate_limited_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance API rate limiting is frequently triggered
+          runbook: Confirm allowlist and rate limit settings; check for abusive traffic; adjust ATTENDANCE_RATE_LIMIT_* envs if needed.
+

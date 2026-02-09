@@ -194,6 +194,13 @@ Strict gate notes:
 - `REQUIRE_IDEMPOTENCY=true` + `REQUIRE_IMPORT_EXPORT=true` now passes after deploying PR `#120`.
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162644/`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162845/`
+- Follow-up strict run (2026-02-09): two consecutive strict gate runs passed (including Gate 3 provisioning).
+  - Note: Gate 1 preflight is host-only and may show as `SKIP` when the gate runner is executed from a workstation without `docker/app.env`.
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260209-110635/`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260209-110911/`
+  - Additional strict runs (2026-02-09): two more consecutive strict gate runs passed (provisioning logs captured under the first run directory).
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260209-123959/`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260209-124300/`
 - Historical (pre-deploy remote image): idempotency retry required a commitToken.
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
 

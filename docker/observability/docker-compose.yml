@@ -19,6 +19,7 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../../ops/prometheus/phase5-recording-rules.yml:/etc/prometheus/rules/phase5-recording-rules.yml:ro
       - ../../ops/prometheus/phase5-alerts.yml:/etc/prometheus/rules/phase5-alerts.yml:ro
+      - ../../ops/prometheus/attendance-alerts.yml:/etc/prometheus/rules/attendance-alerts.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'

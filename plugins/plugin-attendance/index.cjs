@@ -8280,13 +8280,48 @@ module.exports = {
 	                    JSON.stringify(batchMeta),
 	                  ],
 	                }
-	            await trx.query(batchInsert.sql, batchInsert.params)
+		            await trx.query(batchInsert.sql, batchInsert.params)
 
-	            const seenRowKeys = new Set()
-	            for (const row of rows) {
-	              const workDate = row.workDate
-	              const groupKey = resolveAttendanceGroupKey(row)
-	              const rowUserId = resolveRowUserId({
+		            const importItemsBuffer = []
+		            const IMPORT_ITEMS_CHUNK_SIZE = 300
+		            const flushImportItems = async () => {
+		              if (!importItemsBuffer.length) return
+		              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
+		              const values = chunk
+		                .map((_, idx) => {
+		                  const base = idx * 7
+		                  return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
+		                })
+		                .join(', ')
+		              const params = []
+		              for (const item of chunk) {
+		                params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
+		              }
+		              await trx.query(
+		                `INSERT INTO attendance_import_items
+		                 (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+		                 VALUES ${values}`,
+		                params
+		              )
+		            }
+		            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
+		              importItemsBuffer.push({
+		                id: randomUUID(),
+		                userId: userId ?? null,
+		                workDate: workDate ?? null,
+		                recordId: recordId ?? null,
+		                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
+		              })
+		              if (importItemsBuffer.length >= IMPORT_ITEMS_CHUNK_SIZE) {
+		                await flushImportItems()
+		              }
+		            }
+
+		            const seenRowKeys = new Set()
+		            for (const row of rows) {
+		              const workDate = row.workDate
+		              const groupKey = resolveAttendanceGroupKey(row)
+		              const rowUserId = resolveRowUserId({
                 row,
                 fallbackUserId: requesterId,
                 userMap: parsed.data.userMap,
@@ -8321,51 +8356,35 @@ module.exports = {
 	                  importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	                }
 	              }
-	              if (importWarnings.length) {
-	                const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-	                await trx.query(
-	                  `INSERT INTO attendance_import_items
-	                   (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-	                  [
-	                    randomUUID(),
-	                    batchId,
-	                    orgId,
-	                    rowUserId ?? null,
-	                    workDate ?? null,
-	                    null,
-	                    JSON.stringify(snapshot),
-	                  ]
-	                )
-	                skipped.push({
-	                  userId: rowUserId ?? null,
-	                  workDate: workDate ?? null,
-	                  warnings: importWarnings,
-	                })
+		              if (importWarnings.length) {
+		                const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		                await enqueueImportItem({
+		                  userId: rowUserId ?? null,
+		                  workDate: workDate ?? null,
+		                  recordId: null,
+		                  previewSnapshot: snapshot,
+		                })
+		                skipped.push({
+		                  userId: rowUserId ?? null,
+		                  workDate: workDate ?? null,
+		                  warnings: importWarnings,
+		                })
 	                continue
 	              }
 
-	              const dedupKey = `${rowUserId}:${workDate}`
-	              if (seenRowKeys.has(dedupKey)) {
-	                const warnings = ['Duplicate row in payload (same userId + workDate)']
-	                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-	                await trx.query(
-	                  `INSERT INTO attendance_import_items
-	                   (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-	                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-	                  [
-	                    randomUUID(),
-	                    batchId,
-	                    orgId,
-	                    rowUserId,
-	                    workDate,
-	                    null,
-	                    JSON.stringify(snapshot),
-	                  ]
-	                )
-	                skipped.push({ userId: rowUserId, workDate, warnings })
-	                continue
-	              }
+		              const dedupKey = `${rowUserId}:${workDate}`
+		              if (seenRowKeys.has(dedupKey)) {
+		                const warnings = ['Duplicate row in payload (same userId + workDate)']
+		                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
+		                await enqueueImportItem({
+		                  userId: rowUserId,
+		                  workDate,
+		                  recordId: null,
+		                  previewSnapshot: snapshot,
+		                })
+		                skipped.push({ userId: rowUserId, workDate, warnings })
+		                continue
+		              }
 	              seenRowKeys.add(dedupKey)
 	              if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
 	                const groupEntry = groupIdMap.get(groupKey)
@@ -8652,25 +8671,17 @@ module.exports = {
                 engine: meta?.engine ?? null,
               }
 
-              await trx.query(
-                `INSERT INTO attendance_import_items
-                 (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
-                [
-                  randomUUID(),
-                  batchId,
-                  orgId,
-                  rowUserId,
-                  workDate,
-                  record.id,
-                  JSON.stringify(snapshot),
-                ]
-              )
+		              await enqueueImportItem({
+		                userId: rowUserId,
+		                workDate,
+		                recordId: record.id,
+		                previewSnapshot: snapshot,
+		              })
 
-              results.push({
-                id: record.id,
-                userId: rowUserId,
-                workDate,
+		              results.push({
+		                id: record.id,
+		                userId: rowUserId,
+		                workDate,
                 engine: engineResult
                   ? {
                       appliedRules: engineResult.appliedRules,
@@ -8680,13 +8691,15 @@ module.exports = {
                       base: engineAdjustment.meta?.base ?? null,
                     }
                   : null,
-              })
-            }
+		              })
+		            }
 
-            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-              const groupMembersAdded = await insertAttendanceGroupMembers(
-                trx,
-                orgId,
+		            await flushImportItems()
+
+		            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
+		              const groupMembersAdded = await insertAttendanceGroupMembers(
+		                trx,
+		                orgId,
                 Array.from(groupMembersToInsert.values())
               )
               if (batchMeta) {
