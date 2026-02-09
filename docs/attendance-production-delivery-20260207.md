@@ -39,6 +39,8 @@ Out of scope for this delivery:
    - `scripts/ops/attendance-preflight.sh`
 2. Deploy + migrate + restart web:
    - `scripts/ops/deploy-attendance-prod.sh`
+3. If large imports (10k+ rows) return `504 Gateway Time-out` via nginx:
+   - Ensure `docker/nginx.conf` sets `proxy_read_timeout`/`proxy_send_timeout` high enough (example: `300s`), then restart the `web` container.
 
 ### Smoke / Acceptance
 

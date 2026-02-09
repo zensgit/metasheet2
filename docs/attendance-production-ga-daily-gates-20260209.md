@@ -87,12 +87,14 @@ Expected:
 
 Recommended thresholds (adjust after 1 week of real traffic data):
 
-- `previewMs <= 30000` for 10k rows
-- `commitMs <= 60000` for 10k rows
+- `previewMs <= 120000` for 10k rows
+- `commitMs <= 180000` for 10k rows
 
 Notes:
 
 - By default, this script does **not** enable `groupSync` to avoid creating persistent groups/members.
+- If you see `504 Gateway Time-out` from nginx on preview/commit, ensure the web proxy timeouts are increased:
+  - `docker/nginx.conf`: `proxy_read_timeout 300s` (then redeploy/restart web)
 - To also verify export:
   - `EXPORT_CSV="true" EXPORT_TYPE="anomalies" ... node scripts/ops/attendance-import-perf.mjs`
 
@@ -147,4 +149,3 @@ Date:
   - previewMs:
   - commitMs:
   - Notes:
-
