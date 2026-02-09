@@ -77,6 +77,19 @@ scripts/ops/attendance-smoke-api.sh
 Note:
 - The smoke script calls `/api/auth/refresh-token` first (best-effort) to reduce expired-token flakiness.
 
+For "stability PASS" (strict gates twice consecutively) with evidence folders:
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+API_BASE="http://<HOST>:<PORT>/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
 ## Gate 3: Permission Provisioning (Role Bundles)
 
 ### Option A: UI

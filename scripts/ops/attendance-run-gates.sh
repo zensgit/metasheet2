@@ -80,7 +80,9 @@ info "WEB_URL=${WEB_URL}"
 info "OUTPUT_ROOT=${OUTPUT_ROOT}"
 
 function maybe_run_preflight() {
-  local env_file="${ROOT_DIR}/docker/app.env"
+  # Keep "auto" mode ergonomic on dev machines (skip when env file is absent),
+  # but respect a user-specified ENV_FILE override when present.
+  local env_file="${ENV_FILE:-${ROOT_DIR}/docker/app.env}"
   if [[ "$RUN_PREFLIGHT" == "false" ]]; then
     gate_preflight="SKIP"
     return 0

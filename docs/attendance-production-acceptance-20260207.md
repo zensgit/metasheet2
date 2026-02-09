@@ -28,6 +28,16 @@ EXPECT_PRODUCT_MODE="attendance" \
 scripts/ops/attendance-run-gates.sh
 ```
 
+To enforce "stability PASS" (strict gates **twice** consecutively), use:
+
+```bash
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
 Notes:
 
 - Idempotency retries work even when the DB column `attendance_import_batches.idempotency_key` is not present by falling back to `attendance_import_batches.meta.idempotencyKey`.
