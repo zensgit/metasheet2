@@ -15,6 +15,32 @@ function info() {
   echo "[attendance-provision-user] $*" >&2
 }
 
+function refresh_token_if_needed() {
+  # Some environments rotate JWT secrets; a previously issued JWT may become invalid.
+  # Use /auth/refresh-token to obtain a fresh JWT before calling admin-only endpoints.
+  #
+  # IMPORTANT: never print tokens in logs.
+  local result code body next
+  result="$(curl -sS -w '\n%{http_code}' \
+    -X POST "${API_BASE}/auth/refresh-token" \
+    -H "Content-Type: application/json" \
+    --data "{\"token\":\"${AUTH_TOKEN}\"}" || true)"
+  code="${result##*$'\n'}"
+  body="${result%$'\n'*}"
+  if [[ "$code" != "200" ]]; then
+    info "WARN: token refresh failed (HTTP ${code}); using provided token"
+    return 0
+  fi
+  next="$(printf '%s' "$body" | sed -nE 's/.*"token":"([^"]+)".*/\1/p' | head -n 1)"
+  if [[ -n "$next" && ${#next} -gt 20 ]]; then
+    AUTH_TOKEN="$next"
+    info "Token refreshed"
+    return 0
+  fi
+  info "WARN: token refresh response missing token; using provided token"
+  return 0
+}
+
 function usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -38,6 +64,8 @@ API_BASE="${API_BASE%/}"
 if ! command -v curl >/dev/null 2>&1; then
   die "curl is required"
 fi
+
+refresh_token_if_needed
 
 permissions=()
 case "$ROLE" in
@@ -69,4 +97,3 @@ for perm in "${permissions[@]}"; do
 done
 
 info "OK"
-
