@@ -198,6 +198,13 @@ Strict gate notes:
   - Note: Gate 1 preflight is host-only and may show as `SKIP` when the gate runner is executed from a workstation without `docker/app.env`.
   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-110635/`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-110911/`
+  - Latest evidence (2026-02-09): `output/playwright/attendance-prod-acceptance/20260209-163619/`
+  - Latest evidence (2026-02-09): `output/playwright/attendance-prod-acceptance/20260209-164032/`
+
+Provisioning reliability note:
+
+- `scripts/ops/attendance-provision-user.sh` performs a best-effort `POST /api/auth/refresh-token` before calling `POST /api/permissions/grant`.
+  - This prevents flakiness when the environment rotates JWT secrets (a previously issued JWT can become invalid).
   - Additional strict runs (2026-02-09): two more consecutive strict gate runs passed (provisioning logs captured under the first run directory).
   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-123959/`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260209-124300/`
