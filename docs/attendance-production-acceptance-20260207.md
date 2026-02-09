@@ -218,9 +218,16 @@ EXPECT_PRODUCT_MODE="attendance" \
 scripts/ops/attendance-run-gates.sh
 ```
 
-Expected after deploying the idempotency fix in this branch:
-- Gate 2 `API Smoke` passes and logs `idempotency ok`.
+Expected:
+- Gate 2 `API Smoke` passes and logs `idempotency ok` + `export csv ok`.
 
-Evidence (current remote image before deploy):
+Execution record (post-deploy PR `#120`, 2026-02-08):
+- Strict run #1: `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162644/`
+- Strict run #2 (consecutive): `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162845/`
+
+Historical (pre-deploy remote image):
 - Gate 2 `API Smoke`: `FAIL` (idempotency retry required a commitToken)
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162239/gate-api-smoke.log`

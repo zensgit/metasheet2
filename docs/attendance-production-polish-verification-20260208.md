@@ -189,8 +189,12 @@ On the remote environment, the following gates were reported as PASS:
 
 Strict flags (idempotency + export) should be treated as P0 for production.
 
-Current note:
-- `REQUIRE_IDEMPOTENCY=true` failed on the remote image before deploying the idempotency fix in `plugins/plugin-attendance/index.cjs` (retry required a commitToken).
+Strict gate notes:
+
+- `REQUIRE_IDEMPOTENCY=true` + `REQUIRE_IMPORT_EXPORT=true` now passes after deploying PR `#120`.
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162644/`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162845/`
+- Historical (pre-deploy remote image): idempotency retry required a commitToken.
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
 
 Artifacts (example):

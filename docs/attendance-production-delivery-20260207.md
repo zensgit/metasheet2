@@ -67,3 +67,16 @@ If a deploy fails:
 Notes:
 
 - DB migrations are forward-only. This delivery only adds tables; it is safe to keep them during rollback.
+
+## Post-Delivery Backlog (P1/P2)
+
+P1 (1-2 weeks, production hardening):
+- Observability + alerts: import/approve error rate, latency, and failure reason aggregation (Grafana dashboards + Prometheus alerts).
+- Audit trail: who imported/approved/changed rules, and when (admin-visible logs + retention policy).
+- Admin productization: improve User Access UI (batch grant/revoke, templates, and audit traceability).
+- Import performance: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
+- Security: enforce import/export rate limits + optional IP allowlist by default; lock down admin endpoints with stronger guardrails.
+
+P2 (later, feature expansion):
+- Payroll: full salary settlement pipeline (beyond payroll cycles and anomaly batching).
+- Workflow designer hardening: end-to-end permissions, mobile policy, and operational safeguards.
