@@ -866,6 +866,9 @@
                   <button class="attendance__btn" :disabled="auditLogLoading" @click="loadAuditLogs(1)">
                     {{ auditLogLoading ? 'Loading...' : 'Reload logs' }}
                   </button>
+                  <button class="attendance__btn" :disabled="auditLogExporting" @click="exportAuditLogsCsv">
+                    {{ auditLogExporting ? 'Exporting...' : 'Export CSV' }}
+                  </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
@@ -3573,6 +3576,7 @@ const provisionBatchParsed = computed(() => parseUserIdListText(provisionBatchUs
 const provisionBatchIds = computed(() => provisionBatchParsed.value.valid)
 const provisionBatchInvalidIds = computed(() => provisionBatchParsed.value.invalid)
 const auditLogLoading = ref(false)
+const auditLogExporting = ref(false)
 const auditLogs = ref<AttendanceAuditLogItem[]>([])
 const auditLogQuery = ref('')
 const auditLogStatusMessage = ref('')
@@ -5463,6 +5467,45 @@ function clearProvisionBatch() {
 
 function toggleAuditLogMeta(item: AttendanceAuditLogItem) {
   auditLogSelectedId.value = auditLogSelectedId.value === item.id ? '' : item.id
+}
+
+async function exportAuditLogsCsv() {
+  auditLogExporting.value = true
+  try {
+    const params = new URLSearchParams()
+    const q = auditLogQuery.value.trim()
+    if (q) params.set('q', q)
+    // Safety cap (server also enforces).
+    params.set('limit', '5000')
+
+    const response = await apiFetch(`/api/attendance-admin/audit-logs/export.csv?${params.toString()}`, {
+      method: 'GET',
+      headers: { Accept: 'text/csv' },
+    })
+
+    if (response.status === 404) {
+      setAuditLogStatus('Audit log export API not available on this deployment.', 'error')
+      return
+    }
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+
+    const csvText = await response.text()
+    if (!response.ok) {
+      throw new Error(csvText.slice(0, 200) || `Export failed (HTTP ${response.status})`)
+    }
+
+    const now = new Date()
+    const filename = `attendance-audit-logs-${now.toISOString().replace(/[:.]/g, '-')}.csv`
+    downloadCsvText(filename, csvText)
+    setAuditLogStatus('Audit logs exported.')
+  } catch (error: any) {
+    setAuditLogStatus(error?.message || 'Failed to export audit logs', 'error')
+  } finally {
+    auditLogExporting.value = false
+  }
 }
 
 async function loadAuditLogs(page: number) {

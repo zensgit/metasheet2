@@ -39,6 +39,21 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value.trim())
 }
 
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  const text = typeof value === 'string' ? value : typeof value === 'number' ? String(value) : JSON.stringify(value)
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`
+  return text
+}
+
+function parseDateParam(raw: unknown): Date | null {
+  const text = String(raw || '').trim()
+  if (!text) return null
+  const d = new Date(text)
+  if (Number.isNaN(d.getTime())) return null
+  return d
+}
+
 async function ensureAttendanceRoleTemplates(): Promise<void> {
   // Ensure permission codes exist.
   await query(
@@ -298,6 +313,129 @@ export function attendanceAdminRouter(): Router {
       return jsonOk(res, { items: list.rows, page, pageSize, total })
     } catch (error) {
       return jsonError(res, 500, 'AUDIT_LOGS_FAILED', (error as Error)?.message || 'Failed to load audit logs')
+    }
+  })
+
+  r.get('/api/attendance-admin/audit-logs/export.csv', async (req: Request, res: Response) => {
+    try {
+      const q = String(req.query.q || '').trim()
+      const from = parseDateParam(req.query.from)
+      const to = parseDateParam(req.query.to)
+      const rawLimit = Number(req.query.limit ?? 0) || 0
+      const limit = Math.min(Math.max(rawLimit || 5000, 1), 10000)
+
+      const params: unknown[] = []
+      const clauses: string[] = [`resource_type = 'attendance'`]
+
+      if (q) {
+        const term = `%${q}%`
+        params.push(term)
+        const idx = params.length
+        clauses.push(`(
+          action ILIKE $${idx}
+          OR actor_id ILIKE $${idx}
+          OR resource_id ILIKE $${idx}
+          OR route ILIKE $${idx}
+        )`)
+      }
+
+      if (from) {
+        params.push(from.toISOString())
+        const idx = params.length
+        clauses.push(`COALESCE(occurred_at, created_at) >= $${idx}`)
+      }
+
+      if (to) {
+        params.push(to.toISOString())
+        const idx = params.length
+        clauses.push(`COALESCE(occurred_at, created_at) <= $${idx}`)
+      }
+
+      params.push(limit)
+      const limitIdx = params.length
+
+      const where = `WHERE ${clauses.join(' AND ')}`
+      const sql = `
+        SELECT
+          id,
+          actor_id,
+          actor_type,
+          action,
+          resource_type,
+          resource_id,
+          request_id,
+          COALESCE(ip, ip_address) AS ip,
+          user_agent,
+          route,
+          status_code,
+          latency_ms,
+          COALESCE(occurred_at, created_at) AS occurred_at,
+          COALESCE(meta, metadata, '{}'::jsonb) AS meta
+        FROM operation_audit_logs
+        ${where}
+        ORDER BY COALESCE(occurred_at, created_at) DESC
+        LIMIT $${limitIdx}
+      `
+
+      const rows = await query(sql, params)
+
+      const filename = `attendance-audit-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+
+      const header = [
+        'occurredAt',
+        'id',
+        'actorId',
+        'actorType',
+        'action',
+        'route',
+        'statusCode',
+        'latencyMs',
+        'resourceType',
+        'resourceId',
+        'requestId',
+        'ip',
+        'userAgent',
+        'errorCode',
+        'errorMessage',
+        'meta',
+      ].join(',')
+      const lines: string[] = [header]
+
+      for (const row of rows.rows) {
+        const meta = (row as any).meta ?? {}
+        const errorCode = meta?.error?.code ?? ''
+        const errorMessage = meta?.error?.message ?? ''
+        const occurredRaw = (row as any).occurred_at
+        const occurredAt = occurredRaw instanceof Date
+          ? occurredRaw.toISOString()
+          : occurredRaw
+            ? new Date(occurredRaw).toISOString()
+            : ''
+        lines.push([
+          csvCell(occurredAt),
+          csvCell((row as any).id),
+          csvCell((row as any).actor_id),
+          csvCell((row as any).actor_type),
+          csvCell((row as any).action),
+          csvCell((row as any).route),
+          csvCell((row as any).status_code),
+          csvCell((row as any).latency_ms),
+          csvCell((row as any).resource_type),
+          csvCell((row as any).resource_id),
+          csvCell((row as any).request_id),
+          csvCell((row as any).ip),
+          csvCell((row as any).user_agent),
+          csvCell(errorCode),
+          csvCell(errorMessage),
+          csvCell(meta),
+        ].join(','))
+      }
+
+      res.send(lines.join('\n'))
+    } catch (error) {
+      return jsonError(res, 500, 'AUDIT_LOGS_EXPORT_FAILED', (error as Error)?.message || 'Failed to export audit logs')
     }
   })
 

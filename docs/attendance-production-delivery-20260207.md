@@ -94,6 +94,9 @@ P1 (1-2 weeks, production hardening):
   - Attendance audit inserts into `operation_audit_logs` (best-effort, write ops + exports).
   - Retention worker (production-only by default): `packages/core-backend/src/audit/operation-audit-retention.ts`
   - Admin audit API: `GET /api/attendance-admin/audit-logs`
+- Audit logs CSV export (implemented 2026-02-10):
+  - Admin API: `GET /api/attendance-admin/audit-logs/export.csv`
+  - Admin Center UI: `Attendance -> Admin Center -> Audit Logs -> Export CSV`
 - Admin productization (implemented 2026-02-09):
   - Batch role assign/unassign API:
     - `POST /api/attendance-admin/users/batch/roles/assign`
@@ -106,10 +109,14 @@ P1 (1-2 weeks, production hardening):
   - Import scalability flags (preview/commit response-size controls):
     - `previewLimit`, `returnItems`, `itemsLimit`
     - Doc: `docs/attendance-production-import-scalability-20260210.md`
+  - Async commit jobs for large imports (implemented 2026-02-10):
+    - `POST /api/attendance/import/commit-async`
+    - `GET /api/attendance/import/jobs/:id`
+    - Gate (optional): `REQUIRE_IMPORT_ASYNC="true"` for `scripts/ops/attendance-smoke-api.mjs` / strict gates
   - Gate stability hardening:
     - API smoke retries `POST /api/attendance/import/commit` (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token
       when the server responds with `HTTP 5xx` or commit-token errors.
-  - Remaining: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
+  - Remaining: async/streaming preview for large files (10k-100k rows), with timeout/retry strategy.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
   - Optional IP allowlist enforcement (when configured in `attendance.settings`).

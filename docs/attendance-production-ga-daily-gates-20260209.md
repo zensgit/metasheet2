@@ -38,6 +38,7 @@ Expected:
 - `gate-api-smoke.log` contains:
   - `idempotency ok`
   - `export csv ok`
+  - `audit export csv ok`
   - If `REQUIRE_IMPORT_ASYNC="true"`, also contains:
     - `import async idempotency ok`
 
@@ -191,12 +192,25 @@ Validation run with provisioning included:
 - GitHub Actions run: [Attendance Strict Gates (Prod) #21862429047](https://github.com/zensgit/metasheet2/actions/runs/21862429047) (`SUCCESS`)
 - Download:
   - `gh run download 21862429047 -n attendance-strict-gates-prod-21862429047-1 -D output/playwright/ga/21862429047`
-- Evidence directories (downloaded):
-  - `output/playwright/ga/21862429047/20260210-110831-1/`
-  - `output/playwright/ga/21862429047/20260210-110831-2/`
+  - Evidence directories (downloaded):
+    - `output/playwright/ga/21862429047/20260210-110831-1/`
+    - `output/playwright/ga/21862429047/20260210-110831-2/`
   - Provisioning logs are included under:
     - `gate-provision-employee.log`
     - `gate-provision-approver.log`
+
+Local dev verification (feature branch, Step 2/3 hardening):
+
+- Evidence:
+  - `output/playwright/attendance-step2-step3-local/20260210-173017/`
+- Contents:
+  - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
+  - `audit-logs-export.csv` (saved response from `GET /api/attendance-admin/audit-logs/export.csv`)
+
+Notes:
+
+- This run targets a local dev backend, so `/api/auth/me -> features.mode` shows `platform` (not `attendance`).
+- No secrets were stored in the repo; tokens were passed via env at runtime only.
     - `gate-provision-admin.log`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):

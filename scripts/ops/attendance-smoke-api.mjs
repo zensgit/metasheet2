@@ -226,6 +226,26 @@ async function run() {
     const searchItems = userSearch.body?.data?.items
     if (!Array.isArray(searchItems)) die('user search response missing items')
     log(`user search ok: items=${searchItems.length}`)
+
+    // Audit log export should stream CSV (even if it only contains headers).
+    const auditExportUrl = `${apiBase}/attendance-admin/audit-logs/export.csv?limit=50`
+    const auditExportRes = await fetch(auditExportUrl, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
+    })
+    const auditExportText = await auditExportRes.text()
+    if (auditExportRes.status === 404) {
+      if (requireAttendanceAdminApi) die('attendance-admin audit log export missing (404)')
+      log('WARN: attendance-admin audit log export missing (404); skipping audit export check')
+    } else {
+      if (!auditExportRes.ok) {
+        die(`GET /attendance-admin/audit-logs/export.csv failed: HTTP ${auditExportRes.status} ${auditExportText.slice(0, 200)}`)
+      }
+      if (!auditExportText.includes('occurredAt') || !auditExportText.includes('action') || !auditExportText.includes('route')) {
+        die('audit export CSV missing expected headers')
+      }
+      log('audit export csv ok')
+    }
   }
 
   // 2) plugins active
