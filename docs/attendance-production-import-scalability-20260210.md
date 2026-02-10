@@ -119,6 +119,38 @@ Evidence directory:
 
 - `output/playwright/attendance-import-perf/<runId>/perf-summary.json`
 
+## Remote Execution Record (2026-02-10)
+
+Strict gates (2x consecutive): `PASS`
+
+Evidence 1:
+- `output/playwright/attendance-prod-acceptance/20260210-130211/`
+
+Evidence 2:
+- `output/playwright/attendance-prod-acceptance/20260210-130454/`
+
+API smoke log contains: `idempotency ok`, `export csv ok`
+
+Perf baselines:
+
+- 10k commit + export + rollback: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgm7tss-775i34/perf-summary.json`
+  previewMs: `3462`
+  commitMs: `108327`
+  exportMs: `1106`
+  rollbackMs: `327`
+- 50k preview: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmasnj-1bo840/perf-summary.json`
+  previewMs: `5217`
+- 100k preview: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmb8xc-7hkkzr/perf-summary.json`
+  previewMs: `5486`
+
+Notes:
+
+- For `ROWS > 2000`, the perf harness defaults to `previewLimit=200` and `returnItems=false` to avoid huge responses.
+- If 10k+ commits time out through nginx, increase web proxy timeouts (example: `proxy_read_timeout 300s`) and restart the `web` container.
+
 ## Notes / Follow-Up (P1)
 
 The above changes prevent response-size failures. The remaining work for truly large payloads (50k-100k) is:
@@ -126,4 +158,3 @@ The above changes prevent response-size failures. The remaining work for truly l
 - async/streaming preview + commit (job model + polling + paging)
 - bulk upserts (reduce per-row DB work) with consistent locking strategy
 - explicit timeout + retry strategy (nginx + backend) for long commits
-

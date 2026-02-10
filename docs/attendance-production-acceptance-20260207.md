@@ -333,3 +333,48 @@ Historical (pre-deploy remote image):
 - Gate 2 `API Smoke`: `FAIL` (idempotency retry required a commitToken)
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-152606/gate-api-smoke.log`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260208-162239/gate-api-smoke.log`
+
+## Latest Execution Record (2026-02-10) - Strict Gates (post-merge PR #129)
+
+Strict gate command (token placeholder only):
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+RUN_PREFLIGHT="false" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+scripts/ops/attendance-run-gates.sh
+```
+
+Results:
+
+1. Strict run #1: `PASS`
+   Evidence: `output/playwright/attendance-prod-acceptance/20260210-130211/`
+   API smoke log contains: `idempotency ok`, `export csv ok`
+2. Strict run #2 (consecutive): `PASS`
+   Evidence: `output/playwright/attendance-prod-acceptance/20260210-130454/`
+   API smoke log contains: `idempotency ok`, `export csv ok`
+
+Perf baseline (import response-size controls; large import safe defaults):
+
+- 10k commit + export + rollback: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgm7tss-775i34/perf-summary.json`
+  previewMs: `3462`
+  commitMs: `108327`
+  exportMs: `1106`
+  rollbackMs: `327`
+- 50k preview: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmasnj-1bo840/perf-summary.json`
+  previewMs: `5217`
+- 100k preview: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmb8xc-7hkkzr/perf-summary.json`
+  previewMs: `5486`
+
+Notes:
+
+- Gate 1 (Preflight) can be `SKIP` when the gate runner host does not have `docker/app.env`.
+- Perf script defaults to response-size safe flags for `ROWS > 2000`: `previewLimit=200`, `returnItems=false`.
