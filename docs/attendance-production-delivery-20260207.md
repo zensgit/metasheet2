@@ -39,13 +39,22 @@ Out of scope for this delivery:
    - `scripts/ops/attendance-preflight.sh`
 2. Deploy + migrate + restart web:
    - `scripts/ops/deploy-attendance-prod.sh`
+3. If large imports (10k+ rows) return `504 Gateway Time-out` via nginx:
+   - Ensure `docker/nginx.conf` sets `proxy_read_timeout`/`proxy_send_timeout` high enough (example: `300s`), then restart the `web` container.
 
 ### Smoke / Acceptance
+
+- GA daily gate runbook:
+  - `docs/attendance-production-ga-daily-gates-20260209.md`
 
 - Run all gates (recommended):
   - `API_BASE=... AUTH_TOKEN=... scripts/ops/attendance-run-gates.sh`
 - Strict gates twice (stability PASS, recommended for Go/No-Go):
   - `API_BASE=... AUTH_TOKEN=... PROVISION_USER_ID=... scripts/ops/attendance-run-strict-gates-twice.sh`
+- Host metrics sanity (run on production host):
+  - `scripts/ops/attendance-check-metrics.sh`
+- Import perf baseline (rollback enabled, recommended for GA):
+  - `API_BASE=... AUTH_TOKEN=... ROWS=10000 MODE=commit ROLLBACK=true node scripts/ops/attendance-import-perf.mjs`
 - API smoke:
   - `scripts/ops/attendance-smoke-api.sh`
 - Provision user permissions:
@@ -55,6 +64,9 @@ Out of scope for this delivery:
   - `scripts/verify-attendance-production-flow.mjs`
 - Playwright acceptance (attendance-focused shell + mobile gating):
   - `scripts/verify-attendance-full-flow.mjs`
+- GitHub Actions (recommended for daily verification):
+  - Strict gates: `.github/workflows/attendance-strict-gates-prod.yml`
+  - Perf baseline (manual): `.github/workflows/attendance-import-perf-baseline.yml`
 
 ## Rollback
 

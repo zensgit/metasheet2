@@ -15,6 +15,10 @@ Example (remote):
 - Web: `http://<HOST>:<PORT>/attendance`
 - API: `http://<HOST>:<PORT>/api`
 
+GA daily verification reference:
+
+- `docs/attendance-production-ga-daily-gates-20260209.md`
+
 ## Pre-req: Migrations Applied
 
 Required migrations for this iteration:
