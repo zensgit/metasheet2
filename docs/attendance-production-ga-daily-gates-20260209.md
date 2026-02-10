@@ -258,3 +258,25 @@ Perf baseline (10k commit + rollback) improved after PR `#131`:
 - previewMs: `2877`
 - commitMs: `62440`
 - rollbackMs: `207`
+
+## Latest Notes (2026-02-10, Playwright Prod Rate-Limit Flake)
+
+Another workflow run hit a production-expected rate limiter during the **Playwright production flow** (admin import commit):
+
+- GitHub Actions run: [Attendance Strict Gates (Prod) #21870136102](https://github.com/zensgit/metasheet2/actions/runs/21870136102) (`FAILURE`)
+- Failure: `gate-playwright-production-flow.log` saw `HTTP 429 RATE_LIMITED` on `POST /api/attendance/import/commit`.
+- Artifact download:
+  - `gh run download 21870136102 -n attendance-strict-gates-prod-21870136102-1 -D output/playwright/ga/21870136102`
+- Evidence directory (downloaded):
+  - `output/playwright/ga/21870136102/20260210-150337-1/`
+
+Mitigation:
+
+- `scripts/verify-attendance-production-flow.mjs` now retries the import commit step when the server responds with:
+  - `HTTP 429 RATE_LIMITED` (waits `retryAfterMs` + jitter; bounded attempts)
+  - `COMMIT_TOKEN_INVALID` / `COMMIT_TOKEN_REQUIRED` (re-runs preview to refresh `commitToken`)
+
+Workstation verification run: `PASS`
+
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260210-production-flow-rate-limit-retry/`
