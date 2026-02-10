@@ -23,6 +23,7 @@ This is the primary Go/No-Go gate.
 REQUIRE_ATTENDANCE_ADMIN_API="true" \
 REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
+REQUIRE_IMPORT_ASYNC="false" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
 AUTH_TOKEN="<ADMIN_JWT>" \
@@ -37,6 +38,8 @@ Expected:
 - `gate-api-smoke.log` contains:
   - `idempotency ok`
   - `export csv ok`
+  - If `REQUIRE_IMPORT_ASYNC="true"`, also contains:
+    - `import async idempotency ok`
 
 Evidence:
 
@@ -116,6 +119,10 @@ Artifacts:
 
 - Uploaded for 14 days:
   - `output/playwright/attendance-prod-acceptance/**`
+
+Inputs (optional hardening):
+
+- `require_import_async=true` enables the async import commit gate (requires `/api/attendance/import/commit-async` + job polling + rollback).
 
 ### B) Manual Perf Baseline (10k)
 
