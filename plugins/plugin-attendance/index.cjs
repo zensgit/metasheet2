@@ -3580,6 +3580,187 @@ async function resolveWorkContext(options) {
   }
 }
 
+async function loadHolidayMapByDates(db, orgId, workDates) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (!Array.isArray(workDates) || workDates.length === 0) return new Map()
+  try {
+    const rows = await db.query(
+      `SELECT id, org_id, holiday_date, name, is_working_day
+       FROM attendance_holidays
+       WHERE org_id = $1 AND holiday_date = ANY($2::date[])`,
+      [targetOrg, workDates]
+    )
+    const map = new Map()
+    for (const row of rows) {
+      const holiday = mapHolidayRow(row)
+      if (holiday?.date) map.set(holiday.date, holiday)
+    }
+    return map
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return new Map()
+    throw error
+  }
+}
+
+async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate, toDate) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (!Array.isArray(userIds) || userIds.length === 0) return new Map()
+  if (!fromDate || !toDate) return new Map()
+  try {
+    const rows = await db.query(
+      `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+              s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
+              s.working_days AS shift_working_days
+       FROM attendance_shift_assignments a
+       JOIN attendance_shifts s ON s.id = a.shift_id
+       WHERE a.org_id = $1
+         AND a.user_id = ANY($2::text[])
+         AND a.is_active = true
+         AND a.start_date <= $3
+         AND (a.end_date IS NULL OR a.end_date >= $4)
+       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userIds, toDate, fromDate]
+    )
+    const byUser = new Map()
+    for (const row of rows) {
+      const userId = row.user_id
+      if (!userId) continue
+      if (!byUser.has(userId)) byUser.set(userId, [])
+      byUser.get(userId).push({
+        assignment: mapAssignmentRow(row),
+        shift: mapShiftFromAssignmentRow(row),
+      })
+    }
+    return byUser
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return new Map()
+    throw error
+  }
+}
+
+async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDate, toDate) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (!Array.isArray(userIds) || userIds.length === 0) {
+    return { assignmentsByUser: new Map(), shiftsById: new Map() }
+  }
+  if (!fromDate || !toDate) return { assignmentsByUser: new Map(), shiftsById: new Map() }
+  try {
+    const rows = await db.query(
+      `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+              r.name AS rotation_name, r.timezone AS rotation_timezone, r.shift_sequence AS rotation_shift_sequence,
+              r.is_active AS rotation_is_active
+       FROM attendance_rotation_assignments a
+       JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+       WHERE a.org_id = $1
+         AND a.user_id = ANY($2::text[])
+         AND a.is_active = true
+         AND r.is_active = true
+         AND a.start_date <= $3
+         AND (a.end_date IS NULL OR a.end_date >= $4)
+       ORDER BY a.user_id, a.start_date DESC, a.created_at DESC`,
+      [targetOrg, userIds, toDate, fromDate]
+    )
+    const assignmentsByUser = new Map()
+    const shiftIdSet = new Set()
+    for (const row of rows) {
+      const userId = row.user_id
+      if (!userId) continue
+      const rotation = mapRotationRuleFromAssignmentRow(row)
+      const assignment = mapRotationAssignmentRow(row)
+      if (!assignmentsByUser.has(userId)) assignmentsByUser.set(userId, [])
+      assignmentsByUser.get(userId).push({ assignment, rotation })
+      for (const shiftId of rotation.shiftSequence) {
+        if (shiftId) shiftIdSet.add(shiftId)
+      }
+    }
+
+    const shiftsById = new Map()
+    const uuidLike = (value) =>
+      typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    const shiftIds = Array.from(shiftIdSet).filter(uuidLike)
+    if (shiftIds.length) {
+      const shiftRows = await db.query(
+        'SELECT * FROM attendance_shifts WHERE id = ANY($1::uuid[]) AND org_id = $2',
+        [shiftIds, targetOrg]
+      )
+      for (const row of shiftRows) {
+        const shift = mapShiftRow(row)
+        if (shift?.id) shiftsById.set(shift.id, shift)
+      }
+    }
+
+    return { assignmentsByUser, shiftsById }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return { assignmentsByUser: new Map(), shiftsById: new Map() }
+    }
+    throw error
+  }
+}
+
+function resolveShiftAssignmentFromPrefetch(entries, workDate) {
+  if (!Array.isArray(entries) || entries.length === 0) return null
+  for (const entry of entries) {
+    const startDate = entry?.assignment?.startDate
+    const endDate = entry?.assignment?.endDate
+    if (!startDate) continue
+    if (startDate <= workDate && (!endDate || endDate >= workDate)) return entry
+  }
+  return null
+}
+
+function resolveRotationInfoFromPrefetch(entries, workDate, shiftsById) {
+  if (!Array.isArray(entries) || entries.length === 0) return null
+  for (const entry of entries) {
+    const assignment = entry?.assignment
+    const rotation = entry?.rotation
+    const startDate = assignment?.startDate
+    const endDate = assignment?.endDate
+    if (!assignment || !rotation || !startDate) continue
+    if (!(startDate <= workDate && (!endDate || endDate >= workDate))) continue
+    if (!rotation.shiftSequence.length) return null
+    const offset = diffDays(startDate, workDate)
+    if (offset < 0) return null
+    const index = offset % rotation.shiftSequence.length
+    const shiftId = rotation.shiftSequence[index]
+    if (!shiftId) return null
+    const shift = shiftsById?.get(shiftId) ?? null
+    if (!shift) return null
+    return { assignment, rotation, shift }
+  }
+  return null
+}
+
+function resolveWorkContextFromPrefetch(options) {
+  const { orgId, userId, workDate, defaultRule, prefetched } = options
+  if (!prefetched || !workDate) return null
+
+  const holiday = prefetched.holidaysByDate?.get(workDate) ?? null
+  const rotationInfo = userId
+    ? resolveRotationInfoFromPrefetch(prefetched.rotationAssignmentsByUser?.get(userId), workDate, prefetched.rotationShiftsById)
+    : null
+  const assignmentInfo = userId
+    ? resolveShiftAssignmentFromPrefetch(prefetched.shiftAssignmentsByUser?.get(userId), workDate)
+    : null
+  const profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? defaultRule
+  const weekday = getWeekdayFromDateKey(workDate)
+  let isWorkingDay = profile.workingDays.includes(weekday)
+  if (holiday) {
+    isWorkingDay = holiday.isWorkingDay === true
+  }
+  return {
+    rule: profile,
+    assignment: assignmentInfo?.assignment ?? null,
+    rotation: rotationInfo?.rotation ?? null,
+    rotationAssignment: rotationInfo?.assignment ?? null,
+    holiday,
+    isWorkingDay,
+    source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
+  }
+}
+
 async function loadApprovedMinutes(db, orgId, userId, workDate) {
   const rows = await db.query(
     `SELECT request_type,
@@ -3647,13 +3828,18 @@ async function upsertAttendanceRecord(options) {
     overtimeMinutes,
     meta,
     sourceBatchId,
+    existingRow,
     client,
   } = options
 
-  const existing = await client.query(
-    'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
-    [userId, workDate, orgId]
-  )
+  // Allow callers to prefetch + lock rows in bulk (performance) while keeping
+  // this helper backwards compatible.
+  const existing = existingRow
+    ? [existingRow]
+    : await client.query(
+        'SELECT * FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3 FOR UPDATE',
+        [userId, workDate, orgId]
+      )
 
   let firstInAt = existing[0]?.first_in_at ?? null
   let lastOutAt = existing[0]?.last_out_at ?? null
@@ -8336,24 +8522,139 @@ module.exports = {
 		                params
 		              )
 		            }
-		            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
-		              importItemsBuffer.push({
-		                id: randomUUID(),
-		                userId: userId ?? null,
-		                workDate: workDate ?? null,
-		                recordId: recordId ?? null,
-		                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
-		              })
-		              if (importItemsBuffer.length >= IMPORT_ITEMS_CHUNK_SIZE) {
-		                await flushImportItems()
-		              }
-		            }
+			            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
+			              importItemsBuffer.push({
+			                id: randomUUID(),
+			                userId: userId ?? null,
+			                workDate: workDate ?? null,
+			                recordId: recordId ?? null,
+			                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
+			              })
+			              if (importItemsBuffer.length >= IMPORT_ITEMS_CHUNK_SIZE) {
+			                await flushImportItems()
+			              }
+			            }
 
-		            const seenRowKeys = new Set()
-		            for (const row of rows) {
-		              const workDate = row.workDate
-		              const groupKey = resolveAttendanceGroupKey(row)
-		              const rowUserId = resolveRowUserId({
+			            // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
+			            const scopeWorkDates = new Set()
+			            const scopeUserIds = new Set()
+			            for (const row of rows) {
+			              const workDate = row?.workDate
+			              if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+			              const rowUserId = resolveRowUserId({
+			                row,
+			                fallbackUserId: requesterId,
+			                userMap: parsed.data.userMap,
+			                userMapKeyField: parsed.data.userMapKeyField,
+			                userMapSourceFields: parsed.data.userMapSourceFields,
+			              })
+			              if (rowUserId) scopeUserIds.add(rowUserId)
+			            }
+			            const scopeWorkDateList = Array.from(scopeWorkDates)
+			            const scopeUserIdList = Array.from(scopeUserIds)
+			            let scopeFromDate = null
+			            let scopeToDate = null
+			            for (const dateKey of scopeWorkDateList) {
+			              if (!scopeFromDate || dateKey < scopeFromDate) scopeFromDate = dateKey
+			              if (!scopeToDate || dateKey > scopeToDate) scopeToDate = dateKey
+			            }
+			            const prefetchedWorkContext = {
+			              holidaysByDate: await loadHolidayMapByDates(trx, orgId, scopeWorkDateList),
+			              shiftAssignmentsByUser: await loadShiftAssignmentMapForUsersRange(
+			                trx,
+			                orgId,
+			                scopeUserIdList,
+			                scopeFromDate,
+			                scopeToDate
+			              ),
+			              rotationAssignmentsByUser: new Map(),
+			              rotationShiftsById: new Map(),
+			            }
+			            const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
+			              trx,
+			              orgId,
+			              scopeUserIdList,
+			              scopeFromDate,
+			              scopeToDate
+			            )
+			            prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
+			            prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
+
+			            // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
+			            const recordUpsertsBuffer = []
+			            const IMPORT_RECORDS_CHUNK_SIZE = 200
+			            const flushRecordUpserts = async () => {
+			              if (!recordUpsertsBuffer.length) return
+			              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
+			              const chunkUserIds = chunk.map((item) => item.userId)
+			              const chunkWorkDates = chunk.map((item) => item.workDate)
+
+			              const existingRows = await trx.query(
+			                `SELECT ar.*
+			                 FROM attendance_records ar
+			                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
+			                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
+			                 WHERE ar.org_id = $1
+			                 FOR UPDATE`,
+			                [orgId, chunkUserIds, chunkWorkDates]
+			              )
+			              const existingMap = new Map()
+			              for (const row of existingRows) {
+			                existingMap.set(`${row.user_id}:${row.work_date}`, row)
+			              }
+
+			              for (const item of chunk) {
+			                const existingRow = existingMap.get(`${item.userId}:${item.workDate}`) ?? undefined
+			                const record = await upsertAttendanceRecord({
+			                  userId: item.userId,
+			                  orgId,
+			                  workDate: item.workDate,
+			                  timezone: item.timezone,
+			                  rule: item.rule,
+			                  updateFirstInAt: item.updateFirstInAt,
+			                  updateLastOutAt: item.updateLastOutAt,
+			                  mode: item.mode,
+			                  statusOverride: item.statusOverride,
+			                  overrideMetrics: item.overrideMetrics,
+			                  isWorkday: item.isWorkday,
+			                  leaveMinutes: item.leaveMinutes,
+			                  overtimeMinutes: item.overtimeMinutes,
+			                  meta: item.meta,
+			                  sourceBatchId: item.sourceBatchId,
+			                  existingRow,
+			                  client: trx,
+			                })
+
+			                await enqueueImportItem({
+			                  userId: item.userId,
+			                  workDate: item.workDate,
+			                  recordId: record.id,
+			                  previewSnapshot: item.previewSnapshot,
+			                })
+
+			                importedCount += 1
+			                if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
+			                  results.push({
+			                    id: record.id,
+			                    userId: item.userId,
+			                    workDate: item.workDate,
+			                    engine: item.engine,
+			                  })
+			                }
+			              }
+			            }
+			            const enqueueRecordUpsert = async (item) => {
+			              recordUpsertsBuffer.push(item)
+			              if (recordUpsertsBuffer.length >= IMPORT_RECORDS_CHUNK_SIZE) {
+			                await flushRecordUpserts()
+			              }
+			            }
+
+			            const seenRowKeys = new Set()
+			            for (const row of rows) {
+			              const workDate = row.workDate
+			              const groupKey = resolveAttendanceGroupKey(row)
+			              const rowUserId = resolveRowUserId({
                 row,
                 fallbackUserId: requesterId,
                 userMap: parsed.data.userMap,
@@ -8453,18 +8754,24 @@ module.exports = {
                   try {
                     engine = createRuleEngine({ config: activeRuleSetConfig.engine, logger })
                     if (activeRuleSetId) engineCache.set(activeRuleSetId, engine)
-                  } catch (error) {
-                    logger.warn('Attendance rule engine config invalid (rule set)', error)
-                  }
-                }
-              }
-              const context = await resolveWorkContext({
-                db: trx,
-                orgId,
-                userId: rowUserId,
-                workDate,
-                defaultRule: ruleOverride,
-              })
+	                  } catch (error) {
+	                    logger.warn('Attendance rule engine config invalid (rule set)', error)
+	                  }
+	                }
+	              }
+	              const context = resolveWorkContextFromPrefetch({
+	                orgId,
+	                userId: rowUserId,
+	                workDate,
+	                defaultRule: ruleOverride,
+	                prefetched: prefetchedWorkContext,
+	              }) ?? await resolveWorkContext({
+	                db: trx,
+	                orgId,
+	                userId: rowUserId,
+	                workDate,
+	                defaultRule: ruleOverride,
+	              })
               const mapped = applyFieldMappings(row.fields ?? {}, mapping)
               const valueFor = (key) => {
                 if (mapped[key]?.value !== undefined) return mapped[key].value
@@ -8655,81 +8962,64 @@ module.exports = {
                 source: parsed.data.source ?? null,
                 mappingProfileId: parsed.data.mappingProfileId ?? null,
               }
-              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
-                meta = meta ?? {}
-                meta.engine = {
-                  appliedRules: engineResult.appliedRules,
-                  warnings: engineResult.warnings,
-                  reasons: engineResult.reasons,
-                  overrides: engineAdjustment.meta?.overrides ?? null,
-                  base: engineAdjustment.meta?.base ?? null,
-                }
-              }
+	              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
+	                meta = meta ?? {}
+	                meta.engine = {
+	                  appliedRules: engineResult.appliedRules,
+	                  warnings: engineResult.warnings,
+	                  reasons: engineResult.reasons,
+	                  overrides: engineAdjustment.meta?.overrides ?? null,
+	                  base: engineAdjustment.meta?.base ?? null,
+	                }
+	              }
 
-              const record = await upsertAttendanceRecord({
-                userId: rowUserId,
-                orgId,
-                workDate,
-                timezone: context.rule.timezone,
-                rule: context.rule,
-                updateFirstInAt: firstInAt,
-                updateLastOutAt: lastOutAt,
-                mode: parsed.data.mode ?? 'override',
-                statusOverride,
-                overrideMetrics: {
-                  workMinutes: finalMetrics.workMinutes,
-                  lateMinutes: finalMetrics.lateMinutes,
-                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
-                  status: finalMetrics.status,
-                },
-                isWorkday: context.isWorkingDay,
-                leaveMinutes: effectiveLeaveMinutes,
-                overtimeMinutes: effectiveOvertimeMinutes,
-                meta: meta ?? undefined,
-                sourceBatchId: batchId,
-                client: trx,
-              })
-
-              const snapshot = {
-                metrics: {
-                  workMinutes: finalMetrics.workMinutes,
-                  lateMinutes: finalMetrics.lateMinutes,
+	              const snapshot = {
+	                metrics: {
+	                  workMinutes: finalMetrics.workMinutes,
+	                  lateMinutes: finalMetrics.lateMinutes,
                   earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
                   leaveMinutes: effectiveLeaveMinutes,
                   overtimeMinutes: effectiveOvertimeMinutes,
                   status: finalMetrics.status,
                 },
-                policy: meta?.policy ?? null,
-                engine: meta?.engine ?? null,
-              }
+	                policy: meta?.policy ?? null,
+	                engine: meta?.engine ?? null,
+	              }
+	              await enqueueRecordUpsert({
+	                userId: rowUserId,
+	                workDate,
+	                timezone: context.rule.timezone,
+	                rule: context.rule,
+	                updateFirstInAt: firstInAt,
+	                updateLastOutAt: lastOutAt,
+	                mode: parsed.data.mode ?? 'override',
+	                statusOverride,
+	                overrideMetrics: {
+	                  workMinutes: finalMetrics.workMinutes,
+	                  lateMinutes: finalMetrics.lateMinutes,
+	                  earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+	                  status: finalMetrics.status,
+	                },
+	                isWorkday: context.isWorkingDay,
+	                leaveMinutes: effectiveLeaveMinutes,
+	                overtimeMinutes: effectiveOvertimeMinutes,
+	                meta: meta ?? undefined,
+	                sourceBatchId: batchId,
+	                previewSnapshot: snapshot,
+	                engine: engineResult
+	                  ? {
+	                      appliedRules: engineResult.appliedRules,
+	                      warnings: engineResult.warnings,
+	                      reasons: engineResult.reasons,
+	                      overrides: engineAdjustment.meta?.overrides ?? null,
+	                      base: engineAdjustment.meta?.base ?? null,
+	                    }
+	                  : null,
+	              })
+			            }
 
-		              await enqueueImportItem({
-		                userId: rowUserId,
-		                workDate,
-		                recordId: record.id,
-		                previewSnapshot: snapshot,
-		              })
-
-		              importedCount += 1
-		              if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
-		                results.push({
-		                  id: record.id,
-		                  userId: rowUserId,
-		                  workDate,
-		                  engine: engineResult
-		                    ? {
-		                        appliedRules: engineResult.appliedRules,
-		                        warnings: engineResult.warnings,
-		                        reasons: engineResult.reasons,
-		                        overrides: engineAdjustment.meta?.overrides ?? null,
-		                        base: engineAdjustment.meta?.base ?? null,
-		                      }
-		                    : null,
-		                })
-		              }
-		            }
-
-		            await flushImportItems()
+			            await flushRecordUpserts()
+			            await flushImportItems()
 
 		            if (groupSync?.autoAssignMembers && groupMembersToInsert.size) {
 		              const groupMembersAdded = await insertAttendanceGroupMembers(
