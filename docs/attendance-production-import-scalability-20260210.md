@@ -74,6 +74,38 @@ Implementation:
 
 - `/Users/huazhou/Downloads/Github/metasheet2/scripts/ops/attendance-import-perf.mjs`
 
+### 6) Async Commit Jobs (Large Commits)
+
+For very large commits (example: `50k+` rows), we support an **async commit** mode that:
+
+- enqueues a durable job record
+- processes the import out-of-band
+- lets clients poll job progress without holding a long-running HTTP request open
+
+New endpoints:
+
+- `POST /api/attendance/import/commit-async`
+  - Accepts the same payload as `POST /api/attendance/import/commit` (including `commitToken`).
+  - Returns: `{ job: { id, status, progress, total, batchId?, ... }, idempotent?: boolean }`
+  - If `idempotencyKey` is provided and a job already exists for `(orgId, idempotencyKey)`, the API returns the existing job without consuming a new commit token.
+- `GET /api/attendance/import/jobs/:id`
+  - Returns the job record until `status=completed` (includes `batchId`) or `status=failed` (includes `error`).
+
+Storage:
+
+- New table: `attendance_import_jobs`
+- Migration:
+  - `/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/db/migrations/zzzz20260210120000_create_attendance_import_jobs.ts`
+
+Implementation:
+
+- `/Users/huazhou/Downloads/Github/metasheet2/plugins/plugin-attendance/index.cjs`
+
+Web UI:
+
+- When import size is above `IMPORT_ASYNC_ROW_THRESHOLD` (default: `50000`), the UI automatically uses `commit-async` and shows a polling status panel.
+- `/Users/huazhou/Downloads/Github/metasheet2/apps/web/src/views/AttendanceView.vue`
+
 ## Verification
 
 ### A) Back-End Integration Tests
@@ -118,6 +150,26 @@ node scripts/ops/attendance-import-perf.mjs
 Evidence directory:
 
 - `output/playwright/attendance-import-perf/<runId>/perf-summary.json`
+
+### D) Async Commit Baseline (Large Commits)
+
+Token placeholder only (do not paste real tokens into docs):
+
+```bash
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+ROWS="50000" \
+MODE="commit" \
+COMMIT_ASYNC="true" \
+ROLLBACK="true" \
+EXPORT_CSV="false" \
+node scripts/ops/attendance-import-perf.mjs
+```
+
+Expected:
+
+- commit returns `jobId` and completes with `status=completed`
+- `perf-summary.json` includes `commitAsync: true`
 
 ## Remote Execution Record (2026-02-10)
 
@@ -168,10 +220,24 @@ Perf baseline (10k commit + rollback): `PASS`
 - commitMs: `62440` (improved from `108327` in the earlier baseline)
 - rollbackMs: `207`
 
+## Update (2026-02-11): Async Commit Jobs (Local Verification)
+
+Async commit + job polling is now implemented and verified locally (token placeholder only; do not paste secrets into docs):
+
+- 50k commit-async + rollback: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgts55j-o4ky90/perf-summary.json`
+  - previewMs: `4577`
+  - commitMs: `733294`
+  - rollbackMs: `141`
+- Integration tests: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgts55j-o4ky90/integration-tests.log`
+- Web build: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgts55j-o4ky90/web-build.log`
+
 ## Notes / Follow-Up (P1)
 
 The above changes prevent response-size failures. The remaining work for truly large payloads (50k-100k) is:
 
-- async/streaming preview + commit (job model + polling + paging)
+- async/streaming preview (job model + polling + paging). Commit is now supported via `commit-async`, but preview is still synchronous.
 - bulk upserts (reduce per-row DB work) with consistent locking strategy
 - explicit timeout + retry strategy (nginx + backend) for long commits

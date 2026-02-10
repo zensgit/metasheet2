@@ -20,6 +20,7 @@ const mappingProfileIdOverride = String(process.env.MAPPING_PROFILE_ID || '')
 const rows = Math.max(1, Number(process.env.ROWS || 10_000))
 const mode = String(process.env.MODE || 'commit') // preview|commit
 const doRollback = process.env.ROLLBACK !== 'false' // default true
+const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC === 'true'
 
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
@@ -50,6 +51,21 @@ function nowMs() {
   return Number(process.hrtime.bigint() / 1_000_000n)
 }
 
+function decodeJwtPayload(jwt) {
+  if (!jwt || typeof jwt !== 'string') return null
+  const parts = jwt.split('.')
+  if (parts.length < 2) return null
+  const raw = parts[1]
+  const normalized = raw.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = '='.repeat((4 - (normalized.length % 4)) % 4)
+  try {
+    const json = Buffer.from(`${normalized}${pad}`, 'base64').toString('utf8')
+    return json ? JSON.parse(json) : null
+  } catch {
+    return null
+  }
+}
+
 async function writeJson(filePath, data) {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
   await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
@@ -76,6 +92,14 @@ async function refreshAuthToken() {
     }
     const next = body?.data?.token
     if (typeof next === 'string' && next.length > 20) {
+      // Some deployments return a "refreshed" token that lacks user identity claims.
+      // Keep the old token in that case, otherwise downstream /attendance APIs may 401.
+      const claims = decodeJwtPayload(next)
+      const hasUserId = Boolean(claims?.userId || claims?.id || claims?.sub || claims?.user_id)
+      if (!hasUserId) {
+        log('WARN: refreshed token missing user id claim; keeping existing token')
+        return false
+      }
       token = next
       return true
     }
@@ -153,6 +177,25 @@ function makeCsv({ startDate, userId, groupName }) {
   return lines.join('\n')
 }
 
+async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
+  const started = Date.now()
+  while (true) {
+    const job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+    assertOk(job, 'GET /attendance/import/jobs/:id')
+    const data = job.body?.data ?? job.body
+    const status = String(data?.status || '')
+    if (status === 'completed') return data
+    if (status === 'failed') {
+      const msg = data?.error ? String(data.error) : 'job failed'
+      throw new Error(`async commit job failed: ${msg}`)
+    }
+    if (Date.now() - started > timeoutMs) {
+      throw new Error('async commit job timed out')
+    }
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -171,7 +214,12 @@ async function run() {
   const me = await apiFetch('/auth/me', { method: 'GET' })
   assertOk(me, 'GET /auth/me')
   const user = me.body?.data?.user ?? {}
-  const userId = user?.userId || user?.id || user?.user_id
+  let userId = user?.userId || user?.id || user?.user_id
+  if (!userId) {
+    // Some dev token setups return user identity only in JWT payload.
+    const claims = decodeJwtPayload(token)
+    userId = claims?.userId || claims?.id || claims?.sub || claims?.user_id
+  }
   if (!userId) die('GET /auth/me did not return user id')
 
   // Template provides a legal baseline payload.
@@ -254,14 +302,27 @@ async function run() {
 
   // Commit.
   const tCommit0 = nowMs()
-  const commit = await apiFetch('/attendance/import/commit', {
+  const commitEndpoint = commitAsync ? '/attendance/import/commit-async' : '/attendance/import/commit'
+  const commit = await apiFetch(commitEndpoint, {
     method: 'POST',
     body: JSON.stringify({ ...basePayload, commitToken: commitTokenCommit }),
   })
+  assertOk(commit, `POST ${commitEndpoint}`)
+
+  let batchId = null
+  let jobId = null
+  if (commitAsync) {
+    const job = commit.body?.data?.job
+    jobId = job?.id
+    if (!jobId) die('commit-async did not return job.id')
+    const finalJob = await pollImportJob(jobId)
+    batchId = finalJob?.batchId
+    if (!batchId) die('commit-async job did not return batchId')
+  } else {
+    batchId = commit.body?.data?.batchId
+    if (!batchId) die('commit did not return batchId')
+  }
   const tCommit1 = nowMs()
-  assertOk(commit, 'POST /attendance/import/commit')
-  const batchId = commit.body?.data?.batchId
-  if (!batchId) die('commit did not return batchId')
 
   // Optional: verify export still works and capture its latency.
   let exportMs = null
@@ -296,6 +357,8 @@ async function run() {
     apiBase,
     orgId,
     rows,
+    commitAsync,
+    jobId,
     previewMs: tPreview1 - tPreview0,
     commitMs: tCommit1 - tCommit0,
     exportMs,

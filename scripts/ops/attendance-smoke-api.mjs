@@ -22,6 +22,21 @@ function log(message) {
   console.log(`[attendance-smoke-api] ${message}`)
 }
 
+function decodeJwtPayload(jwt) {
+  if (!jwt || typeof jwt !== 'string') return null
+  const parts = jwt.split('.')
+  if (parts.length < 2) return null
+  const raw = parts[1]
+  const normalized = raw.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = '='.repeat((4 - (normalized.length % 4)) % 4)
+  try {
+    const json = Buffer.from(`${normalized}${pad}`, 'base64').toString('utf8')
+    return json ? JSON.parse(json) : null
+  } catch {
+    return null
+  }
+}
+
 async function refreshAuthToken() {
   const url = `${apiBase}/auth/refresh-token`
   try {
@@ -44,6 +59,14 @@ async function refreshAuthToken() {
     }
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
+      // Some deployments return a "refreshed" token that lacks user identity claims.
+      // Keep the old token in that case, otherwise downstream /attendance APIs may 401.
+      const claims = decodeJwtPayload(nextToken)
+      const hasUserId = Boolean(claims?.userId || claims?.id || claims?.sub || claims?.user_id)
+      if (!hasUserId) {
+        log('WARN: refreshed token missing user id claim; keeping existing token')
+        return false
+      }
       token = nextToken
       return true
     }
@@ -131,7 +154,12 @@ async function run() {
   const meData = me.body?.data ?? {}
   const user = meData?.user ?? {}
   const features = meData?.features ?? {}
-  const userId = user?.userId || user?.id || user?.user_id
+  let userId = user?.userId || user?.id || user?.user_id
+  if (!userId) {
+    // Some dev token setups return user identity only in JWT payload.
+    const claims = decodeJwtPayload(token)
+    userId = claims?.userId || claims?.id || claims?.sub || claims?.user_id
+  }
   if (!userId) die('GET /auth/me did not return user.id')
   if (features?.attendance !== true) die('features.attendance is not true (attendance plugin not available)')
   const expectProductMode = normalizeProductMode(expectProductModeRaw)
