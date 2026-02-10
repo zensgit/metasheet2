@@ -124,71 +124,30 @@ async function waitForJsonResponse(page, predicate, { label }) {
   return { response, body, raw }
 }
 
-async function waitForImportCommitSuccess(page) {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      page.off('response', onResponse)
-      reject(new Error('Import commit did not succeed before timeout'))
-    }, timeoutMs)
+function isImportCommitUrl(url) {
+  try {
+    const pathname = new URL(url).pathname
+    return pathname === '/api/attendance/import/commit' || pathname === '/api/attendance/import'
+  } catch {
+    return false
+  }
+}
 
-    async function onResponse(resp) {
-      try {
-        if (settled) return
-        if (resp.request().method() !== 'POST') return
-        const pathname = new URL(resp.url()).pathname
-        if (pathname !== '/api/attendance/import/commit' && pathname !== '/api/attendance/import') return
-
-        const raw = await resp.text()
-        let body = null
-        try {
-          body = raw ? JSON.parse(raw) : null
-        } catch {
-          body = null
-        }
-
-        if (resp.ok() && body && typeof body === 'object' && body.ok !== false) {
-          if (pathname === '/api/attendance/import') {
-            if (!allowLegacyImport) {
-              settled = true
-              clearTimeout(timer)
-              page.off('response', onResponse)
-              reject(new Error('Legacy /api/attendance/import was used. Expected /api/attendance/import/commit in production.'))
-              return
-            }
-            logWarn('Import succeeded via legacy /api/attendance/import endpoint.')
-          }
-          settled = true
-          clearTimeout(timer)
-          page.off('response', onResponse)
-          resolve({ response: resp, body, raw })
-          return
-        }
-
-        const code = body?.error?.code
-        if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
-          logWarn(`Import attempt rejected: ${code}`)
-          return
-        }
-
-        // Non-retryable failures should surface quickly.
-        settled = true
-        clearTimeout(timer)
-        page.off('response', onResponse)
-        reject(new Error(`Import failed: HTTP ${resp.status()} ${raw.slice(0, 200)}`))
-      } catch (error) {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        page.off('response', onResponse)
-        reject(error)
-      }
-    }
-
-    page.on('response', onResponse)
-  })
+async function clickImportAndWaitForCommitResponse(page, importSection) {
+  const responsePromise = page.waitForResponse((resp) => {
+    if (resp.request().method() !== 'POST') return false
+    return isImportCommitUrl(resp.url())
+  }, { timeout: timeoutMs })
+  await importSection.getByRole('button', { name: 'Import' }).click()
+  const response = await responsePromise
+  const raw = await response.text()
+  let body = null
+  try {
+    body = raw ? JSON.parse(raw) : null
+  } catch {
+    body = null
+  }
+  return { response, body, raw }
 }
 
 async function clickAndMaybeContinue(promise, onErrorMessage) {
@@ -422,9 +381,52 @@ async function run() {
   logInfo(`Preview API ok: items=${previewJson.body?.data?.items?.length ?? 0}`)
 
   logInfo('Commit import')
-  const commitResp = waitForImportCommitSuccess(page)
-  await importSection.getByRole('button', { name: 'Import' }).click()
-  const commitJson = await commitResp
+  const maxCommitAttempts = Math.max(1, Number(process.env.IMPORT_COMMIT_ATTEMPTS || 5))
+  let commitJson = null
+  for (let attempt = 1; attempt <= maxCommitAttempts; attempt++) {
+    const { response, body, raw } = await clickImportAndWaitForCommitResponse(page, importSection)
+    const pathname = new URL(response.url()).pathname
+    const ok = response.ok() && body && typeof body === 'object' && body.ok !== false && body.success !== false
+    if (ok) {
+      if (pathname === '/api/attendance/import') {
+        if (!allowLegacyImport) {
+          throw new Error('Legacy /api/attendance/import was used. Expected /api/attendance/import/commit in production.')
+        }
+        logWarn('Import succeeded via legacy /api/attendance/import endpoint.')
+      }
+      commitJson = { response, body, raw }
+      break
+    }
+
+    const code = body?.error?.code
+    const retryAfterMs = Math.max(0, Number(body?.error?.retryAfterMs ?? 0))
+    if (code === 'RATE_LIMITED' || response.status() === 429) {
+      const jitterMs = Math.floor(Math.random() * 120)
+      const waitMs = Math.min((retryAfterMs || 500) + jitterMs, 5000)
+      logWarn(`Import commit rate-limited (attempt ${attempt}/${maxCommitAttempts}); waiting ${waitMs}ms then retrying...`)
+      await page.waitForTimeout(waitMs)
+      continue
+    }
+    if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
+      logWarn(`Import commit rejected: ${code} (attempt ${attempt}/${maxCommitAttempts}); re-running preview to refresh commitToken...`)
+      const previewRetryResp = waitForJsonResponse(
+        page,
+        (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/import/preview'),
+        { label: 'Import preview (retry)' }
+      )
+      await importSection.getByRole('button', { name: 'Preview' }).click()
+      await previewRetryResp
+      await page.waitForTimeout(250)
+      continue
+    }
+
+    throw new Error(`Import failed: HTTP ${response.status()} ${raw.slice(0, 200)}`)
+  }
+
+  if (!commitJson) {
+    throw new Error(`Import commit did not succeed after ${maxCommitAttempts} attempts`)
+  }
+
   logInfo(`Import API ok: imported=${commitJson.body?.data?.imported ?? 0}`)
   if (commitJson.response && new URL(commitJson.response.url()).pathname !== '/api/attendance/import/commit') {
     throw new Error('Import did not use /api/attendance/import/commit. Set ALLOW_LEGACY_IMPORT=1 only for legacy servers.')
