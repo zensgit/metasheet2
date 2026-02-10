@@ -262,6 +262,9 @@ Strict gates were also executed from GitHub Actions (recommended for ongoing ver
 - Run: [#21856529452](https://github.com/zensgit/metasheet2/actions/runs/21856529452) (`SUCCESS`)
 - Artifacts uploaded (14 days):
   - `output/playwright/attendance-prod-acceptance/**`
+  - Downloaded evidence (local; extracted from the workflow artifact):
+    - `output/playwright/ga/21856529452/20260210-080104-1/`
+    - `output/playwright/ga/21856529452/20260210-080104-2/`
 
 Local reproduction (no secrets; token placeholder only):
 

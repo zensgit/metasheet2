@@ -172,6 +172,11 @@ Strict gates workflow passed (remote, strict gates twice + Playwright desktop/mo
 - GitHub Actions run: [Attendance Strict Gates (Prod) #21856529452](https://github.com/zensgit/metasheet2/actions/runs/21856529452) (`SUCCESS`)
 - Artifacts uploaded (14 days):
   - `output/playwright/attendance-prod-acceptance/**`
+  - For local inspection, download the artifact:
+    - `gh run download 21856529452 -n attendance-strict-gates-prod-21856529452-1 -D output/playwright/ga/21856529452`
+    - Evidence directories (downloaded):
+      - `output/playwright/ga/21856529452/20260210-080104-1/`
+      - `output/playwright/ga/21856529452/20260210-080104-2/`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
