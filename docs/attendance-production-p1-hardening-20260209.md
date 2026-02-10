@@ -138,6 +138,16 @@ ROLLBACK="true" \
 node scripts/ops/attendance-import-perf.mjs
 ```
 
+Notes:
+
+- The perf script defaults to safe response-size flags for large `ROWS`:
+  - `previewLimit=200`
+  - `returnItems=false`
+- Override if needed:
+  - `PREVIEW_LIMIT=...`
+  - `RETURN_ITEMS=true|false`
+  - `ITEMS_LIMIT=...`
+
 Evidence:
 
 - `output/playwright/attendance-import-perf/<runId>/perf-summary.json`

@@ -4454,6 +4454,11 @@ module.exports = {
 	      orgId: z.string().optional(),
 	      userId: z.string().optional(),
 	      idempotencyKey: z.string().trim().min(1).max(128).optional(),
+	      // Large imports can overwhelm the UI/response size. These optional flags allow clients to
+	      // request a truncated preview/response while keeping server-side validation/commit intact.
+	      previewLimit: z.number().int().positive().max(1000).optional(),
+	      returnItems: z.boolean().optional(),
+	      itemsLimit: z.number().int().positive().max(1000).optional(),
 	      timezone: z.string().optional(),
 	      ruleSetId: z.string().uuid().optional(),
 	      engine: z.record(z.unknown()).optional(),
@@ -7730,9 +7735,17 @@ module.exports = {
           }
 
           const statusMap = parsed.data.statusMap ?? {}
+          const previewLimit = typeof parsed.data.previewLimit === 'number' ? parsed.data.previewLimit : null
+          const truncated = previewLimit != null && rows.length > previewLimit
+          const previewStats = {
+            rowCount: rows.length,
+            invalid: 0,
+            duplicates: 0,
+          }
           const preview = []
           const seenKeys = new Set()
           for (const row of rows) {
+            const shouldRender = previewLimit == null || preview.length < previewLimit
             const workDate = row.workDate
             const rowUserId = resolveRowUserId({
               row,
@@ -7770,46 +7783,56 @@ module.exports = {
               }
             }
             if (importWarnings.length) {
-              preview.push({
-                userId: rowUserId ?? 'unknown',
-                workDate: workDate ?? '',
-                firstInAt: null,
-                lastOutAt: null,
-                workMinutes: 0,
-                lateMinutes: 0,
-                earlyLeaveMinutes: 0,
-                leaveMinutes: 0,
-                overtimeMinutes: 0,
-                status: 'invalid',
-                isWorkday: undefined,
-                warnings: importWarnings,
-                appliedPolicies: [],
-                userGroups: [],
-              })
+              previewStats.invalid += 1
+              if (shouldRender) {
+                preview.push({
+                  userId: rowUserId ?? 'unknown',
+                  workDate: workDate ?? '',
+                  firstInAt: null,
+                  lastOutAt: null,
+                  workMinutes: 0,
+                  lateMinutes: 0,
+                  earlyLeaveMinutes: 0,
+                  leaveMinutes: 0,
+                  overtimeMinutes: 0,
+                  status: 'invalid',
+                  isWorkday: undefined,
+                  warnings: importWarnings,
+                  appliedPolicies: [],
+                  userGroups: [],
+                })
+              }
               continue
             }
 
             const dedupKey = `${rowUserId}:${workDate}`
             if (seenKeys.has(dedupKey)) {
-              preview.push({
-                userId: rowUserId,
-                workDate,
-                firstInAt: null,
-                lastOutAt: null,
-                workMinutes: 0,
-                lateMinutes: 0,
-                earlyLeaveMinutes: 0,
-                leaveMinutes: 0,
-                overtimeMinutes: 0,
-                status: 'invalid',
-                isWorkday: undefined,
-                warnings: ['Duplicate row for same user/workDate (skipped during commit).'],
-                appliedPolicies: [],
-                userGroups: [],
-              })
+              previewStats.duplicates += 1
+              if (shouldRender) {
+                preview.push({
+                  userId: rowUserId,
+                  workDate,
+                  firstInAt: null,
+                  lastOutAt: null,
+                  workMinutes: 0,
+                  lateMinutes: 0,
+                  earlyLeaveMinutes: 0,
+                  leaveMinutes: 0,
+                  overtimeMinutes: 0,
+                  status: 'invalid',
+                  isWorkday: undefined,
+                  warnings: ['Duplicate row for same user/workDate (skipped during commit).'],
+                  appliedPolicies: [],
+                  userGroups: [],
+                })
+              }
               continue
             }
             seenKeys.add(dedupKey)
+
+            // When previewLimit is set, skip expensive context/engine evaluation after we have
+            // rendered enough sample rows. Stats above still reflect all rows.
+            if (!shouldRender) continue
 
             let activeRuleSetId = parsed.data.ruleSetId ?? null
             let activeRuleSetConfig = ruleSetConfig
@@ -8046,6 +8069,10 @@ module.exports = {
             data: {
               items: preview,
               total: preview.length,
+              rowCount: rows.length,
+              truncated,
+              previewLimit,
+              stats: previewStats,
               mappingUsed: mapping,
               csvWarnings: combinedWarnings,
               groupWarnings,
@@ -8211,7 +8238,12 @@ module.exports = {
           }
 
 	          const statusMap = parsed.data.statusMap ?? {}
+	          const returnItems = parsed.data.returnItems !== false
+	          const itemsLimit = returnItems && typeof parsed.data.itemsLimit === 'number'
+	            ? parsed.data.itemsLimit
+	            : null
 	          const results = []
+	          let importedCount = 0
 	          const skipped = []
 	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
 	          const batchId = randomUUID()
@@ -8678,20 +8710,23 @@ module.exports = {
 		                previewSnapshot: snapshot,
 		              })
 
-		              results.push({
-		                id: record.id,
-		                userId: rowUserId,
-		                workDate,
-                engine: engineResult
-                  ? {
-                      appliedRules: engineResult.appliedRules,
-                      warnings: engineResult.warnings,
-                      reasons: engineResult.reasons,
-                      overrides: engineAdjustment.meta?.overrides ?? null,
-                      base: engineAdjustment.meta?.base ?? null,
-                    }
-                  : null,
-		              })
+		              importedCount += 1
+		              if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
+		                results.push({
+		                  id: record.id,
+		                  userId: rowUserId,
+		                  workDate,
+		                  engine: engineResult
+		                    ? {
+		                        appliedRules: engineResult.appliedRules,
+		                        warnings: engineResult.warnings,
+		                        reasons: engineResult.reasons,
+		                        overrides: engineAdjustment.meta?.overrides ?? null,
+		                        base: engineAdjustment.meta?.base ?? null,
+		                      }
+		                    : null,
+		                })
+		              }
 		            }
 
 		            await flushImportItems()
@@ -8728,8 +8763,9 @@ module.exports = {
             ok: true,
             data: {
               batchId,
-              imported: results.length,
-              items: results,
+              imported: importedCount,
+              items: returnItems ? results : [],
+              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
               skipped,
               csvWarnings: [...csvWarnings, ...groupWarnings],
               groupWarnings,

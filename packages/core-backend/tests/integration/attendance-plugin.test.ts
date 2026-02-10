@@ -803,4 +803,128 @@ describe('Attendance Plugin Integration', () => {
     expect(retryData?.batchId).toBe(batchId)
     expect(retryData?.idempotent).toBe(true)
   })
+
+  it('supports import previewLimit + commit returnItems flags for large imports', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const commitTokenPreview = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitTokenPreview).toBeTruthy()
+
+    const previewPayload = {
+      userId: 'attendance-test',
+      timezone: 'UTC',
+      previewLimit: 1,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+        {
+          workDate: workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+      commitToken: commitTokenPreview,
+    }
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(previewPayload),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewData = (previewRes.body as { data?: any } | undefined)?.data
+    expect(Array.isArray(previewData?.items)).toBe(true)
+    expect(previewData?.items.length).toBe(1)
+    expect(previewData?.rowCount).toBe(2)
+    expect(previewData?.truncated).toBe(true)
+    expect(previewData?.previewLimit).toBe(1)
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitTokenCommit = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitTokenCommit).toBeTruthy()
+
+    const commitPayload = {
+      userId: 'attendance-test',
+      timezone: 'UTC',
+      returnItems: false,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+      commitToken: commitTokenCommit,
+    }
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commitPayload),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    expect(commitData?.imported).toBe(1)
+    expect(Array.isArray(commitData?.items)).toBe(true)
+    expect(commitData?.items.length).toBe(0)
+    expect(typeof commitData?.batchId).toBe('string')
+
+    const batchId = String(commitData?.batchId || '')
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(rollbackRes.status).toBe(200)
+    }
+  })
 })
