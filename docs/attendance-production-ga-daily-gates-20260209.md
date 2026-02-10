@@ -201,11 +201,18 @@ Validation run with provisioning included:
 
 Local dev verification (feature branch, Step 2/3 hardening):
 
-- Evidence:
+- Evidence (API smoke + audit export CSV):
   - `output/playwright/attendance-step2-step3-local/20260210-173017/`
-- Contents:
-  - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
-  - `audit-logs-export.csv` (saved response from `GET /api/attendance-admin/audit-logs/export.csv`)
+  - Contents:
+    - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
+    - `audit-logs-export.csv` (saved response from `GET /api/attendance-admin/audit-logs/export.csv`)
+
+- Evidence (gates + Playwright full flow):
+  - `output/playwright/attendance-prod-acceptance/20260210-174721/`
+  - Contents:
+    - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
+    - `playwright-full-flow-desktop/02-admin.png` (Admin Center snapshot includes Audit Logs actions)
+    - `playwright-full-flow-mobile/02-admin.png` (Mobile policy snapshot)
 
 Notes:
 
