@@ -266,6 +266,13 @@ Strict gates were also executed from GitHub Actions (recommended for ongoing ver
     - `output/playwright/ga/21856529452/20260210-080104-1/`
     - `output/playwright/ga/21856529452/20260210-080104-2/`
 
+Provisioning gate enabled (repo variable `ATTENDANCE_PROVISION_USER_ID`) and re-validated:
+
+- Run: [#21862429047](https://github.com/zensgit/metasheet2/actions/runs/21862429047) (`SUCCESS`)
+- Downloaded evidence:
+  - `output/playwright/ga/21862429047/20260210-110831-1/`
+  - `output/playwright/ga/21862429047/20260210-110831-2/`
+
 Local reproduction (no secrets; token placeholder only):
 
 ```bash

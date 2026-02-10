@@ -178,6 +178,20 @@ Strict gates workflow passed (remote, strict gates twice + Playwright desktop/mo
       - `output/playwright/ga/21856529452/20260210-080104-1/`
       - `output/playwright/ga/21856529452/20260210-080104-2/`
 
+Provisioning gate is now enabled in the GA workflow via repo variable `ATTENDANCE_PROVISION_USER_ID`.
+Validation run with provisioning included:
+
+- GitHub Actions run: [Attendance Strict Gates (Prod) #21862429047](https://github.com/zensgit/metasheet2/actions/runs/21862429047) (`SUCCESS`)
+- Download:
+  - `gh run download 21862429047 -n attendance-strict-gates-prod-21862429047-1 -D output/playwright/ga/21862429047`
+- Evidence directories (downloaded):
+  - `output/playwright/ga/21862429047/20260210-110831-1/`
+  - `output/playwright/ga/21862429047/20260210-110831-2/`
+  - Provisioning logs are included under:
+    - `gate-provision-employee.log`
+    - `gate-provision-approver.log`
+    - `gate-provision-admin.log`
+
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
 - 10k preview PASS:
