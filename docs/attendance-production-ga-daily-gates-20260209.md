@@ -289,3 +289,11 @@ Follow-up strict gates workflow run (post-merge mitigation): `SUCCESS`
 - Evidence directories (downloaded):
   - `output/playwright/ga/21870551973/20260210-151448-1/`
   - `output/playwright/ga/21870551973/20260210-151448-2/`
+
+Workstation 10k perf baseline (commit + rollback): `PASS`
+
+- Evidence:
+  - `output/playwright/attendance-import-perf/attendance-perf-mlgr0m4e-d3110g/perf-summary.json`
+- previewMs: `4418`
+- commitMs: `62018`
+- rollbackMs: `913`
