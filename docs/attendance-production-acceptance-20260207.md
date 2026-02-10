@@ -378,3 +378,43 @@ Notes:
 
 - Gate 1 (Preflight) can be `SKIP` when the gate runner host does not have `docker/app.env`.
 - Perf script defaults to response-size safe flags for `ROWS > 2000`: `previewLimit=200`, `returnItems=false`.
+
+## Latest Execution Record (2026-02-10) - Strict Gates (post-merge PR #131)
+
+Strict gate command (token placeholder only):
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+RUN_PREFLIGHT="false" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+scripts/ops/attendance-run-gates.sh
+```
+
+Results:
+
+1. Strict run #1: `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260210-143245/`
+   - API smoke log contains: `idempotency ok`, `export csv ok`
+2. Strict run #2 (consecutive): `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260210-143523/`
+   - API smoke log contains: `idempotency ok`, `export csv ok`
+
+Perf baseline (post-merge PR `#131` import commit perf):
+
+- 10k commit + rollback: `PASS`
+  - Evidence (downloaded from GA artifact):
+    - `output/playwright/ga/21868374518/attendance-import-perf-21868374518-1/attendance-perf-mlgomass-j77nax/perf-summary.json`
+  - previewMs: `2877`
+  - commitMs: `62440`
+  - rollbackMs: `207`
+
+Notes:
+
+- A prior strict-gates GA run failed due to a transient `HTTP 500` on `POST /api/attendance/import/commit`.
+  To reduce false negatives while still keeping the gate strict, `scripts/ops/attendance-smoke-api.mjs` now retries the commit step
+  (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token when needed.

@@ -151,6 +151,23 @@ Notes:
 - For `ROWS > 2000`, the perf harness defaults to `previewLimit=200` and `returnItems=false` to avoid huge responses.
 - If 10k+ commits time out through nginx, increase web proxy timeouts (example: `proxy_read_timeout 300s`) and restart the `web` container.
 
+## Update (2026-02-10, post-merge PR #131)
+
+Strict gates (2x consecutive): `PASS`
+
+Evidence:
+
+- `output/playwright/attendance-prod-acceptance/20260210-143245/`
+- `output/playwright/attendance-prod-acceptance/20260210-143523/`
+
+Perf baseline (10k commit + rollback): `PASS`
+
+- Evidence (downloaded from GA artifact):
+  - `output/playwright/ga/21868374518/attendance-import-perf-21868374518-1/attendance-perf-mlgomass-j77nax/perf-summary.json`
+- previewMs: `2877`
+- commitMs: `62440` (improved from `108327` in the earlier baseline)
+- rollbackMs: `207`
+
 ## Notes / Follow-Up (P1)
 
 The above changes prevent response-size failures. The remaining work for truly large payloads (50k-100k) is:
