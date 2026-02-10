@@ -114,6 +114,10 @@ function isoMinutesAgo(minutes) {
   return new Date(Date.now() - ms).toISOString()
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -225,10 +229,45 @@ async function run() {
     commitToken: token2,
   }
 
-  const commit = await apiFetch('/attendance/import/commit', {
-    method: 'POST',
-    body: JSON.stringify(commitPayload),
-  })
+  const commitAttemptMax = Math.max(1, Number(process.env.COMMIT_RETRIES || 3))
+  const commitAttemptBaseDelayMs = Number(process.env.COMMIT_RETRY_DELAY_MS || 800)
+
+  let commit = null
+  for (let attempt = 1; attempt <= commitAttemptMax; attempt += 1) {
+    const attemptPayload = { ...commitPayload }
+    if (attempt > 1) {
+      // Prepare a fresh token in case the previous attempt consumed/invalidated it before failing.
+      const prepareRetry = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+      assertOk(prepareRetry, 'POST /attendance/import/prepare (commit retry)')
+      const retryToken = prepareRetry.body?.data?.commitToken
+      if (!retryToken) die('prepare (commit retry) did not return commitToken')
+      attemptPayload.commitToken = retryToken
+    }
+
+    commit = await apiFetch('/attendance/import/commit', {
+      method: 'POST',
+      body: JSON.stringify(attemptPayload),
+    })
+
+    if (commit.res.ok && !(commit.body && typeof commit.body === 'object' && commit.body.ok === false)) {
+      break
+    }
+
+    const code = String(commit.body?.error?.code || '')
+    const retryableTokenError = code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED'
+    const retryableServerError = commit.res.status >= 500
+    if (!retryableTokenError && !retryableServerError) {
+      assertOk(commit, 'POST /attendance/import/commit')
+    }
+
+    if (attempt < commitAttemptMax) {
+      log(`WARN: commit attempt ${attempt}/${commitAttemptMax} failed (HTTP ${commit.res.status} code=${code || 'n/a'}); retrying...`)
+      const delayMs = commitAttemptBaseDelayMs * attempt
+      await sleep(delayMs)
+      continue
+    }
+  }
+
   assertOk(commit, 'POST /attendance/import/commit')
   const batchId = commit.body?.data?.batchId
   if (!batchId) die('commit did not return batchId')
