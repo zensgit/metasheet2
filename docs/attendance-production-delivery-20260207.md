@@ -41,6 +41,8 @@ Out of scope for this delivery:
    - `scripts/ops/deploy-attendance-prod.sh`
 3. If large imports (10k+ rows) return `504 Gateway Time-out` via nginx:
    - Ensure `docker/nginx.conf` sets `proxy_read_timeout`/`proxy_send_timeout` high enough (example: `300s`), then restart the `web` container.
+   - If you deploy via GitHub Actions (`.github/workflows/docker-build.yml`) and the production compose mounts `./docker/nginx.conf`,
+     make sure the deploy host has pulled the latest `main` so the mounted config is up to date.
 
 ### Smoke / Acceptance
 
