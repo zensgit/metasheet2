@@ -163,6 +163,17 @@ Perf baseline notes:
 - 2k preview/commit + rollback passed (examples):
   - `output/playwright/attendance-import-perf/attendance-perf-mlfhy37t-g4n509/perf-summary.json`
   - `output/playwright/attendance-import-perf/attendance-perf-mlfhywc4-6w52wb/perf-summary.json`
-- 10k preview returned `504 Gateway Time-out` through nginx on `http://142.171.239.56:8081/api`.
-  - Fix shipped in repo (requires web deploy): `docker/nginx.conf` increases `/api/` proxy timeouts to `300s`.
-  - After deployment, re-run the 10k baseline.
+- 10k preview returned `504 Gateway Time-out` through nginx on `http://142.171.239.56:8081/api` before the deploy host picked up the updated `docker/nginx.conf`.
+
+## Latest Notes (2026-02-10)
+
+10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
+
+- 10k preview PASS:
+  - Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgars47-l6wd3m/perf-summary.json`
+  - previewMs: `70321`
+- 10k commit + rollback PASS:
+  - Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgatxk0-4yzd5p/perf-summary.json`
+  - previewMs: `76092`
+  - commitMs: `119036`
+  - rollbackMs: `886`
