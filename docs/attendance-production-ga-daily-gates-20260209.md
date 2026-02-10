@@ -202,3 +202,26 @@ Validation run with provisioning included:
   - previewMs: `76092`
   - commitMs: `119036`
   - rollbackMs: `886`
+
+Post-merge PR `#129` (import response-size controls) verification (workstation run; token placeholder only):
+
+- Strict gates twice: `PASS`
+  Evidence 1: `output/playwright/attendance-prod-acceptance/20260210-130211/`
+  Evidence 2: `output/playwright/attendance-prod-acceptance/20260210-130454/`
+  API smoke log contains: `idempotency ok`, `export csv ok`
+- 10k perf baseline (commit + export + rollback): `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgm7tss-775i34/perf-summary.json`
+  previewMs: `3462`
+  commitMs: `108327`
+  exportMs: `1106`
+  rollbackMs: `327`
+- 50k preview baseline: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmasnj-1bo840/perf-summary.json`
+  previewMs: `5217`
+- 100k preview baseline: `PASS`
+  Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgmb8xc-7hkkzr/perf-summary.json`
+  previewMs: `5486`
+
+Notes:
+
+- These perf runs exercise the new "large import" safe defaults to avoid huge responses: `previewLimit=200`, `returnItems=false`.
