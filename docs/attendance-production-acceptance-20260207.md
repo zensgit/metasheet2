@@ -254,6 +254,28 @@ Notes:
 
 - The verifiers refresh JWTs via `POST /api/auth/refresh-token` before running (best-effort).
 
+## Latest Execution Record (2026-02-10) - Strict Gates (GA Workflow)
+
+Strict gates were also executed from GitHub Actions (recommended for ongoing verification):
+
+- Workflow: `Attendance Strict Gates (Prod)`
+- Run: [#21856529452](https://github.com/zensgit/metasheet2/actions/runs/21856529452) (`SUCCESS`)
+- Artifacts uploaded (14 days):
+  - `output/playwright/attendance-prod-acceptance/**`
+
+Local reproduction (no secrets; token placeholder only):
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+RUN_PREFLIGHT="false" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
 ### Strict Gate Run (REQUIRE_IDEMPOTENCY=true)
 
 If you enable strict flags:

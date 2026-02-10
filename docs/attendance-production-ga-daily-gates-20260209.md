@@ -167,6 +167,12 @@ Perf baseline notes:
 
 ## Latest Notes (2026-02-10)
 
+Strict gates workflow passed (remote, strict gates twice + Playwright desktop/mobile):
+
+- GitHub Actions run: [Attendance Strict Gates (Prod) #21856529452](https://github.com/zensgit/metasheet2/actions/runs/21856529452) (`SUCCESS`)
+- Artifacts uploaded (14 days):
+  - `output/playwright/attendance-prod-acceptance/**`
+
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
 - 10k preview PASS:
