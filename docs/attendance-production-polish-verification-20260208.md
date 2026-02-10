@@ -218,6 +218,18 @@ Strict gate notes:
   - Latest evidence (2026-02-09): `output/playwright/attendance-prod-acceptance/20260209-163619/`
   - Latest evidence (2026-02-09): `output/playwright/attendance-prod-acceptance/20260209-164032/`
 
+Post-merge strict gates (2026-02-10): two consecutive strict gate runs passed (including Gate 3 provisioning):
+
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260210-145747-1/`
+  - `output/playwright/attendance-prod-acceptance/20260210-145747-2/`
+
+Playwright production-flow rate limiting resilience (2026-02-10):
+
+- `scripts/verify-attendance-production-flow.mjs` now retries import commit when the API returns `HTTP 429 RATE_LIMITED` (bounded attempts).
+- Verification run: `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260210-production-flow-rate-limit-retry/`
+
 Provisioning reliability note:
 
 - `scripts/ops/attendance-provision-user.sh` performs a best-effort `POST /api/auth/refresh-token` before calling `POST /api/permissions/grant`.

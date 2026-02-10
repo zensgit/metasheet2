@@ -418,3 +418,41 @@ Notes:
 - A prior strict-gates GA run failed due to a transient `HTTP 500` on `POST /api/attendance/import/commit`.
   To reduce false negatives while still keeping the gate strict, `scripts/ops/attendance-smoke-api.mjs` now retries the commit step
   (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token when needed.
+
+## Latest Execution Record (2026-02-10) - Strict Gates (post-merge PR #132)
+
+Strict gates twice (workstation run; token placeholder only):
+
+```bash
+REQUIRE_ATTENDANCE_ADMIN_API="true" \
+REQUIRE_IDEMPOTENCY="true" \
+REQUIRE_IMPORT_EXPORT="true" \
+RUN_PREFLIGHT="false" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
+Results:
+
+1. Strict run #1: `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260210-145747-1/`
+2. Strict run #2 (consecutive): `PASS`
+   - Evidence: `output/playwright/attendance-prod-acceptance/20260210-145747-2/`
+
+Notes:
+
+- Gate 1 (Preflight) shows `SKIP` because this was executed from a workstation (`RUN_PREFLIGHT=false`).
+- Provisioning gate was enabled (`PROVISION_USER_ID` set), and passed in both runs.
+
+## Latest Execution Record (2026-02-10) - Playwright Prod Flow (Rate Limit Retry)
+
+When `ATTENDANCE_RATE_LIMIT_ENABLED=true` (default in production), the admin import commit may return `HTTP 429 RATE_LIMITED`.
+The Playwright production-flow script now retries this commit step (bounded) using `retryAfterMs` from the API response.
+
+Verification run:
+
+- `scripts/verify-attendance-production-flow.mjs`: `PASS`
+  - Evidence: `output/playwright/attendance-prod-acceptance/20260210-production-flow-rate-limit-retry/`
