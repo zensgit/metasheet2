@@ -101,8 +101,11 @@ P1 (1-2 weeks, production hardening):
   - Admin Center UI:
     - Batch Provisioning (multi-UUID input)
     - Audit Logs viewer (search + paging + meta preview)
-- Import performance (partial, implemented 2026-02-09):
+- Import performance (partial, implemented 2026-02-09 and 2026-02-10):
   - Import commit uses buffered bulk inserts for items (reduces DB roundtrips).
+  - Import scalability flags (preview/commit response-size controls):
+    - `previewLimit`, `returnItems`, `itemsLimit`
+    - Doc: `docs/attendance-production-import-scalability-20260210.md`
   - Remaining: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).

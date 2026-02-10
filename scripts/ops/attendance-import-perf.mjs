@@ -30,6 +30,13 @@ const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
 const groupAutoCreate = process.env.GROUP_AUTO_CREATE === 'true'
 const groupAutoAssignMembers = process.env.GROUP_AUTO_ASSIGN !== 'false' // default true
 
+// Large imports should not return huge payloads. Defaults are safe for large ROWS.
+const previewLimitRaw = process.env.PREVIEW_LIMIT
+const previewLimit = previewLimitRaw ? Number(previewLimitRaw) : (rows > 2000 ? 200 : null)
+const returnItems = process.env.RETURN_ITEMS ? process.env.RETURN_ITEMS === 'true' : rows <= 2000
+const itemsLimitRaw = process.env.ITEMS_LIMIT
+const itemsLimit = itemsLimitRaw ? Number(itemsLimitRaw) : 200
+
 function die(message) {
   console.error(`[attendance-import-perf] ERROR: ${message}`)
   process.exit(1)
@@ -196,6 +203,9 @@ async function run() {
     mappingProfileId: resolvedMappingProfileId,
     csvText,
     idempotencyKey: runId,
+    previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
+    returnItems,
+    itemsLimit: Number.isFinite(itemsLimit) && itemsLimit > 0 ? Math.floor(itemsLimit) : undefined,
     groupSync: groupSyncEnabled
       ? { autoCreate: groupAutoCreate, autoAssignMembers: groupAutoAssignMembers }
       : undefined,

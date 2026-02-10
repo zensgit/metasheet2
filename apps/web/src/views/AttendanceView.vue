@@ -4174,6 +4174,44 @@ function buildImportPayload(): Record<string, any> | null {
   return payload
 }
 
+const IMPORT_LARGE_ROW_THRESHOLD = 2000
+const IMPORT_PREVIEW_LIMIT = 200
+const IMPORT_COMMIT_ITEMS_LIMIT = 200
+
+function estimateImportRowCount(payload: Record<string, any>): number | null {
+  if (Array.isArray(payload.rows)) return payload.rows.length
+  if (typeof payload.csvText === 'string') {
+    // Cheap line-count heuristic (avoid splitting large strings).
+    let lines = 0
+    for (let i = 0; i < payload.csvText.length; i++) {
+      if (payload.csvText[i] === '\n') lines += 1
+    }
+    // header + last line (if no trailing newline)
+    return Math.max(0, lines)
+  }
+  return null
+}
+
+function applyImportScalabilityHints(payload: Record<string, any>, options: { mode: 'preview' | 'commit' }) {
+  const rowCountHint = estimateImportRowCount(payload)
+  if (!rowCountHint || rowCountHint <= IMPORT_LARGE_ROW_THRESHOLD) return
+
+  if (options.mode === 'preview') {
+    if (payload.previewLimit === undefined || payload.previewLimit === null) {
+      payload.previewLimit = IMPORT_PREVIEW_LIMIT
+    }
+    return
+  }
+
+  // commit
+  if (payload.returnItems === undefined || payload.returnItems === null) {
+    payload.returnItems = false
+  }
+  if (payload.itemsLimit === undefined || payload.itemsLimit === null) {
+    payload.itemsLimit = IMPORT_COMMIT_ITEMS_LIMIT
+  }
+}
+
 function syncImportModeToPayload() {
   const base = parseJsonConfig(importForm.payload)
   if (!base) return
@@ -4380,6 +4418,7 @@ async function previewImport() {
     setStatus('Invalid JSON payload for import.', 'error')
     return
   }
+  applyImportScalabilityHints(payload, { mode: 'preview' })
   importLoading.value = true
   try {
     const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
@@ -4394,12 +4433,22 @@ async function previewImport() {
       throw new Error(data?.error?.message || 'Failed to preview import')
     }
     importPreview.value = data.data?.items ?? []
+    const rowCount = Number(data.data?.rowCount)
+    const truncated = Boolean(data.data?.truncated)
+    const stats = data.data?.stats && typeof data.data.stats === 'object' ? data.data.stats : null
     const previewWarnings = [
       ...(Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []),
       ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
     ]
     importCsvWarnings.value = Array.from(new Set(previewWarnings))
-    setStatus(`Preview loaded (${importPreview.value.length} rows).`)
+    const shown = importPreview.value.length
+    const invalidCount = stats && Number.isFinite(Number((stats as any).invalid)) ? Number((stats as any).invalid) : 0
+    const dupCount = stats && Number.isFinite(Number((stats as any).duplicates)) ? Number((stats as any).duplicates) : 0
+    const baseMsg = truncated && Number.isFinite(rowCount)
+      ? `Preview loaded (showing ${shown}/${rowCount} rows).`
+      : `Preview loaded (${shown} rows).`
+    const suffix = invalidCount || dupCount ? ` Invalid: ${invalidCount}. Duplicates: ${dupCount}.` : ''
+    setStatus(`${baseMsg}${suffix}`)
     // Token is single-use (consumed by preview); clear it to avoid reusing a stale token.
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
@@ -4416,6 +4465,7 @@ async function runImport() {
     setStatus('Invalid JSON payload for import.', 'error')
     return
   }
+  applyImportScalabilityHints(payload, { mode: 'commit' })
   importLoading.value = true
   try {
     const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
