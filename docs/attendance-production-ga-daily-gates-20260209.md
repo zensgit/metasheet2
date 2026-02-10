@@ -225,3 +225,36 @@ Post-merge PR `#129` (import response-size controls) verification (workstation r
 Notes:
 
 - These perf runs exercise the new "large import" safe defaults to avoid huge responses: `previewLimit=200`, `returnItems=false`.
+
+## Latest Notes (2026-02-10, post-merge PR #131)
+
+Strict gates workflow (remote) encountered a transient failure:
+
+- GitHub Actions run: [Attendance Strict Gates (Prod) #21868349289](https://github.com/zensgit/metasheet2/actions/runs/21868349289) (`FAILURE`)
+- Failure: `gate-api-smoke.log` hit an intermittent `HTTP 500` on `POST /api/attendance/import/commit`.
+- Artifact download:
+  - `gh run download 21868349289 -D output/playwright/ga/21868349289`
+- Evidence directory (downloaded):
+  - `output/playwright/ga/21868349289/attendance-strict-gates-prod-21868349289-1/20260210-141438-1/`
+
+Mitigation (gate stability hardening):
+
+- `scripts/ops/attendance-smoke-api.mjs` now retries the import commit step (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh
+  commit token when the server responds with `HTTP 5xx` or commit-token errors.
+
+Workstation strict gates rerun (2x consecutive): `PASS`
+
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260210-143245/`
+  - `output/playwright/attendance-prod-acceptance/20260210-143523/`
+
+Perf baseline (10k commit + rollback) improved after PR `#131`:
+
+- GitHub Actions run: [Attendance Import Perf Baseline (Manual) #21868374518](https://github.com/zensgit/metasheet2/actions/runs/21868374518) (`SUCCESS`)
+- Artifact download:
+  - `gh run download 21868374518 -D output/playwright/ga/21868374518`
+- Evidence JSON:
+  - `output/playwright/ga/21868374518/attendance-import-perf-21868374518-1/attendance-perf-mlgomass-j77nax/perf-summary.json`
+- previewMs: `2877`
+- commitMs: `62440`
+- rollbackMs: `207`

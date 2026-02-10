@@ -106,6 +106,9 @@ P1 (1-2 weeks, production hardening):
   - Import scalability flags (preview/commit response-size controls):
     - `previewLimit`, `returnItems`, `itemsLimit`
     - Doc: `docs/attendance-production-import-scalability-20260210.md`
+  - Gate stability hardening:
+    - API smoke retries `POST /api/attendance/import/commit` (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token
+      when the server responds with `HTTP 5xx` or commit-token errors.
   - Remaining: async/streaming preview + commit for large files (10k-100k rows), with timeout/retry strategy.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
