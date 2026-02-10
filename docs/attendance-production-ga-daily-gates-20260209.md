@@ -280,3 +280,12 @@ Workstation verification run: `PASS`
 
 - Evidence:
   - `output/playwright/attendance-prod-acceptance/20260210-production-flow-rate-limit-retry/`
+
+Follow-up strict gates workflow run (post-merge mitigation): `SUCCESS`
+
+- GitHub Actions run: [Attendance Strict Gates (Prod) #21870551973](https://github.com/zensgit/metasheet2/actions/runs/21870551973) (`SUCCESS`)
+- Download:
+  - `gh run download 21870551973 -n attendance-strict-gates-prod-21870551973-1 -D output/playwright/ga/21870551973`
+- Evidence directories (downloaded):
+  - `output/playwright/ga/21870551973/20260210-151448-1/`
+  - `output/playwright/ga/21870551973/20260210-151448-2/`
