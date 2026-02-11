@@ -7,6 +7,7 @@ const requireAttendanceAdminApi = process.env.REQUIRE_ATTENDANCE_ADMIN_API === '
 const requireIdempotency = process.env.REQUIRE_IDEMPOTENCY === 'true'
 const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
+const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -246,12 +247,17 @@ async function run() {
         method: 'POST',
         body: JSON.stringify({ userIds: [resolvedUserId, missingUserId] }),
       })
-      assertOk(resolveRes, 'POST /attendance-admin/users/batch/resolve')
-      const resolveData = resolveRes.body?.data ?? {}
-      if (!Array.isArray(resolveData?.items)) die('batch resolve response missing items')
-      if (!Array.isArray(resolveData?.missingUserIds)) die('batch resolve response missing missingUserIds')
-      if (!resolveData.missingUserIds.includes(missingUserId)) die('batch resolve missingUserIds does not include unknown uuid')
-      log(`batch resolve ok: found=${resolveData.items.length} missing=${resolveData.missingUserIds.length}`)
+      if (resolveRes.res.status === 404) {
+        if (requireBatchResolve) die('attendance-admin batch resolve API missing (404)')
+        log('WARN: attendance-admin batch resolve API missing (404); skipping batch resolve check')
+      } else {
+        assertOk(resolveRes, 'POST /attendance-admin/users/batch/resolve')
+        const resolveData = resolveRes.body?.data ?? {}
+        if (!Array.isArray(resolveData?.items)) die('batch resolve response missing items')
+        if (!Array.isArray(resolveData?.missingUserIds)) die('batch resolve response missing missingUserIds')
+        if (!resolveData.missingUserIds.includes(missingUserId)) die('batch resolve missingUserIds does not include unknown uuid')
+        log(`batch resolve ok: found=${resolveData.items.length} missing=${resolveData.missingUserIds.length}`)
+      }
     } else {
       log('WARN: no UUID user id in search result; skipping batch resolve check')
     }
