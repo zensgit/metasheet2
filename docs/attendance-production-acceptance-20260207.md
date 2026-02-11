@@ -510,3 +510,57 @@ Go/No-Go decision (2026-02-11):
 
 - **GO**
 - Reason: strict gates 2x PASS + perf threshold gate PASS after deployment pipeline migration fix.
+
+## Latest Execution Record (2026-02-11) - Final Re-Validation (PR #144)
+
+Goal of this follow-up cycle:
+
+- Remove perf gate flakiness caused by transient `502` during async import job polling.
+- Re-validate strict gates + perf thresholds + daily dashboard after the fix.
+
+Code change:
+
+- PR [#144](https://github.com/zensgit/metasheet2/pull/144)
+- Commit: `faec9a30`
+- Change: `scripts/ops/attendance-import-perf.mjs` now retries transient job-poll responses (`429`, `5xx`) for `GET /api/attendance/import/jobs/:id` until timeout.
+
+Execution timeline (UTC):
+
+1. Baseline failure observed before fix:
+   - Perf run: [#21912578076](https://github.com/zensgit/metasheet2/actions/runs/21912578076) (`FAILURE`)
+   - Symptom: transient `502 Bad Gateway` while polling async import job.
+2. Post-fix perf gate re-run:
+   - Perf run: [#21912709345](https://github.com/zensgit/metasheet2/actions/runs/21912709345) (`SUCCESS`)
+   - Evidence:
+     - `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json`
+   - Result:
+     - `rows=10000`
+     - `previewMs=3013`
+     - `commitMs=60742`
+     - `exportMs=406`
+     - `rollbackMs=129`
+     - `thresholds={preview:100000, commit:150000, export:25000, rollback:8000}`
+     - `regressions=[]`
+3. Strict gates (twice, remote) re-run:
+   - Strict run: [#21912806317](https://github.com/zensgit/metasheet2/actions/runs/21912806317) (`SUCCESS`)
+   - Evidence:
+     - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`
+     - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/`
+   - Gate 2 API smoke logs contain:
+     - `audit export csv ok`
+     - `idempotency ok`
+     - `export csv ok`
+     - `import async idempotency ok`
+   - Gate 4 production flow logs include expected business warning:
+     - `PUNCH_TOO_SOON` (does not fail gate).
+4. Daily dashboard recovery check:
+   - Dashboard run: [#21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) (`SUCCESS`)
+   - Evidence:
+     - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md`
+     - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.json`
+   - Result: `overallStatus=pass` (strict run `21912806317`, perf run `21912709345`).
+
+Go/No-Go decision (2026-02-11, final re-validation):
+
+- **GO (unchanged)**
+- Reason: strict gates twice PASS + tightened perf thresholds PASS + daily dashboard PASS.

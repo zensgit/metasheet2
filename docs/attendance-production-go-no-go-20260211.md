@@ -25,6 +25,34 @@ Perf summary (`#21894377908`):
 - `rollbackMs=114`
 - `regressions=[]`
 
+## Final Re-Validation (2026-02-11, post-closure)
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline (10k, tightened thresholds) | [#21912709345](https://github.com/zensgit/metasheet2/actions/runs/21912709345) | PASS | `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json` |
+| Strict gates twice (async strict) | [#21912806317](https://github.com/zensgit/metasheet2/actions/runs/21912806317) | PASS | `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`, `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/` |
+| Daily dashboard | [#21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) | PASS | `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md` |
+
+Perf summary (`#21912709345`):
+
+- `rows=10000`
+- `previewMs=3013`
+- `commitMs=60742`
+- `exportMs=406`
+- `rollbackMs=129`
+- `regressions=[]`
+
+Thresholds in effect:
+
+- `ATTENDANCE_PERF_MAX_PREVIEW_MS=100000`
+- `ATTENDANCE_PERF_MAX_COMMIT_MS=150000`
+- `ATTENDANCE_PERF_MAX_EXPORT_MS=25000`
+- `ATTENDANCE_PERF_MAX_ROLLBACK_MS=8000`
+
+Remediation included in this re-validation:
+
+- PR [#144](https://github.com/zensgit/metasheet2/pull/144): tolerate transient `429/5xx` on async import job polling to avoid false perf gate failures from brief upstream `502`.
+
 ## Incident and Fix Trace
 
 Initial failures before closure:
@@ -51,7 +79,7 @@ Remediation shipped:
 
 Rationale:
 
-- Strict gates and perf threshold gates are both passing on `main` after migration-enabled deploy.
+- Strict gates and perf threshold gates are both passing on `main` after migration-enabled deploy and transient async poll hardening.
 
 ## Continuous Monitoring (Post-Go)
 
@@ -70,9 +98,19 @@ Rationale:
   - Evidence:
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.md`
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.json`
+- Latest recovery validation:
+  - [Attendance Daily Gate Dashboard #21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.json`
 - Failure drill validation:
   - [Attendance Daily Gate Dashboard #21912261134](https://github.com/zensgit/metasheet2/actions/runs/21912261134) (`FAILURE`, expected)
   - Escalation issue created:
     - [#141](https://github.com/zensgit/metasheet2/issues/141)
   - Evidence:
     - `output/playwright/ga/21912261134/attendance-daily-gate-dashboard.md`
+- Issue channel sync validation:
+  - [Attendance Gate Issue Notify #21912549709](https://github.com/zensgit/metasheet2/actions/runs/21912549709) (`SUCCESS`)
+  - Behavior:
+    - sends notifications when Slack/DingTalk webhook secrets are configured;
+    - with no webhook configured, exits success with warning summary.

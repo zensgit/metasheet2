@@ -523,3 +523,56 @@ Workstation 10k perf baseline (commit + rollback): `PASS`
 - previewMs: `4418`
 - commitMs: `62018`
 - rollbackMs: `913`
+
+## Latest Notes (2026-02-11, Final Re-Validation)
+
+Perf gate transient polling fix and re-validation:
+
+- Incident run (before fix):
+  - [Attendance Import Perf Baseline #21912578076](https://github.com/zensgit/metasheet2/actions/runs/21912578076) (`FAILURE`)
+  - Symptom: transient `502 Bad Gateway` while polling `/api/attendance/import/jobs/:id`.
+- Remediation:
+  - PR [#144](https://github.com/zensgit/metasheet2/pull/144)
+  - `scripts/ops/attendance-import-perf.mjs` now retries transient poll responses (`429`, `5xx`) until timeout.
+- Post-fix validation run:
+  - [Attendance Import Perf Baseline #21912709345](https://github.com/zensgit/metasheet2/actions/runs/21912709345) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json`
+  - Metrics:
+    - `previewMs=3013`
+    - `commitMs=60742`
+    - `exportMs=406`
+    - `rollbackMs=129`
+    - `regressions=[]`
+  - Tightened thresholds applied:
+    - `ATTENDANCE_PERF_MAX_PREVIEW_MS=100000`
+    - `ATTENDANCE_PERF_MAX_COMMIT_MS=150000`
+    - `ATTENDANCE_PERF_MAX_EXPORT_MS=25000`
+    - `ATTENDANCE_PERF_MAX_ROLLBACK_MS=8000`
+
+Strict gates + dashboard final pass:
+
+- Strict gates twice:
+  - [Attendance Strict Gates (Prod) #21912806317](https://github.com/zensgit/metasheet2/actions/runs/21912806317) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`
+    - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/`
+  - API smoke logs contain:
+    - `audit export csv ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+- Dashboard:
+  - [Attendance Daily Gate Dashboard #21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.json`
+  - Result: `overallStatus=pass` (`strictRun=21912806317`, `perfRun=21912709345`)
+
+Issue-to-channel sync workflow validation:
+
+- Run:
+  - [Attendance Gate Issue Notify #21912549709](https://github.com/zensgit/metasheet2/actions/runs/21912549709) (`SUCCESS`)
+- Notes:
+  - Workflow was corrected to avoid unsupported `secrets.*` usage in step-level `if` by checking job `env` values.
+  - With no webhook secrets configured, workflow exits successfully and writes warning summary (expected behavior).
