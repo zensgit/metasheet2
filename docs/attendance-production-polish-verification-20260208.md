@@ -285,3 +285,50 @@ Next-phase development verification (local dev environment) passed:
     - local test logs:
       - `output/playwright/attendance-next-phase/20260211-053920/auth-service-unit.log`
       - `output/playwright/attendance-next-phase/20260211-053920/attendance-integration.log`
+
+## Execution Record (2026-02-11, Remote Re-Validation)
+
+Post-closure remote re-validation passed after transient async polling hardening:
+
+- Code fix:
+  - PR [#144](https://github.com/zensgit/metasheet2/pull/144)
+  - `scripts/ops/attendance-import-perf.mjs` retries transient job poll errors (`429`, `5xx`) for `GET /api/attendance/import/jobs/:id`.
+
+- Perf baseline (10k, tightened thresholds): `PASS`
+  - Run: [Attendance Import Perf Baseline #21912709345](https://github.com/zensgit/metasheet2/actions/runs/21912709345)
+  - Evidence:
+    - `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json`
+  - Result:
+    - `previewMs=3013`
+    - `commitMs=60742`
+    - `exportMs=406`
+    - `rollbackMs=129`
+    - `regressions=[]`
+  - Thresholds in effect:
+    - `MAX_PREVIEW_MS=100000`
+    - `MAX_COMMIT_MS=150000`
+    - `MAX_EXPORT_MS=25000`
+    - `MAX_ROLLBACK_MS=8000`
+
+- Strict gates twice (remote): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21912806317](https://github.com/zensgit/metasheet2/actions/runs/21912806317)
+  - Evidence:
+    - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`
+    - `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/`
+  - Gate 2 API smoke logs contain:
+    - `audit export csv ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+  - Production flow includes expected warning:
+    - `PUNCH_TOO_SOON` (business rule; gate remains PASS).
+
+- Daily dashboard recovery: `PASS`
+  - Run: [Attendance Daily Gate Dashboard #21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814)
+  - Evidence:
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.json`
+  - Result:
+    - `overallStatus=pass`
+    - `strictRun=21912806317`
+    - `perfRun=21912709345`
