@@ -564,3 +564,41 @@ Go/No-Go decision (2026-02-11, final re-validation):
 
 - **GO (unchanged)**
 - Reason: strict gates twice PASS + tightened perf thresholds PASS + daily dashboard PASS.
+
+## Latest Execution Record (2026-02-11, Main Hotfix Re-Validation - PR #147)
+
+Goal of this cycle:
+
+- Re-validate strict production gates on `main` after fixing `attendance-admin` batch resolve SQL typing (`text` vs `uuid`).
+- Enforce `require_batch_resolve=true` in the strict gate run.
+
+Execution timeline (UTC):
+
+1. Deploy after PR `#147` merge:
+   - Build + deploy: [Build and Push Docker Images #21914265724](https://github.com/zensgit/metasheet2/actions/runs/21914265724) (`SUCCESS`)
+2. Strict gates (twice, remote) with batch resolve required:
+   - Run: [Attendance Strict Gates (Prod) #21914381403](https://github.com/zensgit/metasheet2/actions/runs/21914381403) (`SUCCESS`)
+   - Input: `require_batch_resolve=true`
+3. Evidence (downloaded artifact):
+   - `output/playwright/ga/21914381403/20260211-165320-1/`
+   - `output/playwright/ga/21914381403/20260211-165320-2/`
+4. Gate results:
+   - Gate 2 API Smoke: `PASS` (both runs)
+   - Gate 3 Provisioning: `PASS` (both runs)
+   - Gate 4 Playwright Prod: `PASS` (both runs)
+   - Gate 5 Playwright Desktop: `PASS` (both runs)
+   - Gate 6 Playwright Mobile: `PASS` (both runs)
+5. API smoke log assertions (both runs):
+   - `batch resolve ok`
+   - `audit export csv ok`
+   - `idempotency ok`
+   - `export csv ok`
+   - `import async idempotency ok`
+   - `SMOKE PASS`
+6. Expected business warning:
+   - `PUNCH_TOO_SOON` can appear in production-flow logs when punch operations are too close; gate remains `PASS`.
+
+Go/No-Go decision (2026-02-11, post-PR #147):
+
+- **GO (unchanged)**
+- Reason: strict gates twice PASS on `main` with `require_batch_resolve=true`, and evidence is archived.

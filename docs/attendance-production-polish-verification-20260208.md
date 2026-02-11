@@ -332,3 +332,28 @@ Post-closure remote re-validation passed after transient async polling hardening
     - `overallStatus=pass`
     - `strictRun=21912806317`
     - `perfRun=21912709345`
+
+## Execution Record (2026-02-11, Main Strict Re-Validation with Batch Resolve Gate)
+
+Post-hotfix verification after PR `#147` (`attendance-admin` batch resolve SQL type fix) completed on `main`:
+
+- Deploy:
+  - [Build and Push Docker Images #21914265724](https://github.com/zensgit/metasheet2/actions/runs/21914265724): `SUCCESS`
+- Strict gates (twice, remote) with `require_batch_resolve=true`:
+  - [Attendance Strict Gates (Prod) #21914381403](https://github.com/zensgit/metasheet2/actions/runs/21914381403): `SUCCESS`
+- Evidence:
+  - `output/playwright/ga/21914381403/20260211-165320-1/`
+  - `output/playwright/ga/21914381403/20260211-165320-2/`
+- API smoke assertions (both runs):
+  - `batch resolve ok`
+  - `audit export csv ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`
+- Playwright assertions (both runs):
+  - production flow complete
+  - full-flow desktop complete (`features` from `/api/auth/me`)
+  - full-flow mobile complete
+- Known expected warning:
+  - `PUNCH_TOO_SOON` may appear in production flow and does not fail the gate.

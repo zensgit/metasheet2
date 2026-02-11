@@ -130,3 +130,21 @@ P1 (1-2 weeks, production hardening):
 P2 (later, feature expansion):
 - Payroll: full salary settlement pipeline (beyond payroll cycles and anomaly batching).
 - Workflow designer hardening: end-to-end permissions, mobile policy, and operational safeguards.
+
+## Current Production Status (2026-02-11)
+
+Production v1 readiness remains **GO** on `main`.
+
+Latest strict validation:
+
+- Deploy after PR `#147`: [Build and Push Docker Images #21914265724](https://github.com/zensgit/metasheet2/actions/runs/21914265724) (`SUCCESS`)
+- Strict gates (twice) with `require_batch_resolve=true`:
+  - [Attendance Strict Gates (Prod) #21914381403](https://github.com/zensgit/metasheet2/actions/runs/21914381403) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21914381403/20260211-165320-1/`
+    - `output/playwright/ga/21914381403/20260211-165320-2/`
+
+Operational conclusion:
+
+- P0 delivery target is met for attendance-focused production usage.
+- Current residual work is P1 optimization/operability, not a P0 launch blocker.
