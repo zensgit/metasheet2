@@ -52,3 +52,13 @@ Remediation shipped:
 Rationale:
 
 - Strict gates and perf threshold gates are both passing on `main` after migration-enabled deploy.
+
+## Continuous Monitoring (Post-Go)
+
+- Daily dashboard workflow:
+  - `.github/workflows/attendance-daily-gate-dashboard.yml`
+- Dashboard generator:
+  - `scripts/ops/attendance-daily-gate-report.mjs`
+- Escalation behavior:
+  - `P0` strict gate failure -> open/update issue `[Attendance Gate] Daily dashboard alert` and fail workflow.
+  - `P1` perf gate failure/stale runs -> open/update same issue and fail workflow.

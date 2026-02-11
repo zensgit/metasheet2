@@ -1,0 +1,119 @@
+name: Attendance Daily Gate Dashboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to evaluate'
+        required: false
+        default: 'main'
+      lookback_hours:
+        description: 'Max age (hours) for latest completed runs'
+        required: false
+        default: '36'
+  schedule:
+    # Daily after strict/perf scheduled windows.
+    - cron: '30 4 * * *'
+
+concurrency:
+  group: attendance-daily-gate-dashboard
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH: ${{ inputs.branch || 'main' }}
+      LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
+      STRICT_WORKFLOW: attendance-strict-gates-prod.yml
+      PERF_WORKFLOW: attendance-import-perf-baseline.yml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate gate dashboard
+        id: report
+        run: |
+          set -euo pipefail
+          node ./scripts/ops/attendance-daily-gate-report.mjs
+
+      - name: Add markdown to step summary
+        if: always()
+        run: |
+          cat "${{ steps.report.outputs.report_markdown }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dashboard artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-daily-gate-dashboard-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            ${{ steps.report.outputs.report_dir }}/**
+
+      - name: Open/update escalation issue on failure
+        if: steps.report.outputs.report_status != 'pass'
+        uses: actions/github-script@v7
+        env:
+          REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
+          REPORT_STATUS: ${{ steps.report.outputs.report_status }}
+        with:
+          script: |
+            const fs = require('fs')
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const title = '[Attendance Gate] Daily dashboard alert'
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const markdownPath = process.env.REPORT_MARKDOWN
+            const markdown = fs.readFileSync(markdownPath, 'utf8')
+            const body = [
+              'Automated attendance gate escalation.',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              markdown.slice(0, 60000),
+            ].join('\n')
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            })
+
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title)
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body,
+              })
+              core.info(`Updated issue #${existing.number}`)
+            } else {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+            }
+
+      - name: Fail workflow when dashboard status is fail
+        if: steps.report.outputs.report_status != 'pass'
+        run: |
+          echo "Attendance daily gate dashboard failed"
+          exit 1

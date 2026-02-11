@@ -150,6 +150,46 @@ Artifacts:
 - Uploaded for 14 days:
   - `output/playwright/attendance-import-perf/**`
 
+### C) Daily Gate Dashboard (Scheduled + Manual)
+
+Workflow:
+
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+
+Purpose:
+
+- Build a daily dashboard from latest strict/perf workflow runs.
+- Apply escalation rules automatically:
+  - `P0`: strict gate failure
+  - `P1`: perf gate failure or stale run
+- Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` when dashboard status is `FAIL`.
+
+Schedule:
+
+- Daily at `04:30 UTC` (after strict/perf scheduled windows).
+
+Artifacts:
+
+- Uploaded for 30 days:
+  - `output/playwright/attendance-daily-gate-dashboard/**`
+
+Manual local generation (operator workstation):
+
+```bash
+GH_TOKEN="$(gh auth token)" \
+GITHUB_REPOSITORY="zensgit/metasheet2" \
+BRANCH="main" \
+LOOKBACK_HOURS="48" \
+node scripts/ops/attendance-daily-gate-report.mjs
+```
+
+Expected outputs:
+
+- `REPORT_STATUS=pass|fail`
+- `REPORT_DIR=...`
+- `REPORT_MARKDOWN=...`
+- `REPORT_JSON=...`
+
 ## Daily Record Template (Copy/Paste)
 
 Date:
@@ -302,6 +342,16 @@ Production workflow closure (main, after PR #136 + #137):
     - `exportMs=390`
     - `rollbackMs=114`
     - `regressions=[]`
+
+Daily dashboard local verification (2026-02-11):
+
+- Command:
+  - `GH_TOKEN="$(gh auth token)" GITHUB_REPOSITORY="zensgit/metasheet2" BRANCH="main" LOOKBACK_HOURS="48" node scripts/ops/attendance-daily-gate-report.mjs`
+- Result:
+  - `REPORT_STATUS=pass`
+- Evidence:
+  - `output/playwright/attendance-daily-gate-dashboard/20260211-100235/attendance-daily-gate-dashboard.md`
+  - `output/playwright/attendance-daily-gate-dashboard/20260211-100235/attendance-daily-gate-dashboard.json`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
