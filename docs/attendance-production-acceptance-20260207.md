@@ -456,3 +456,57 @@ Verification run:
 
 - `scripts/verify-attendance-production-flow.mjs`: `PASS`
   - Evidence: `output/playwright/attendance-prod-acceptance/20260210-production-flow-rate-limit-retry/`
+
+## Latest Execution Record (2026-02-11) - Production Closure (PR #136 + #137)
+
+Goal of this closure cycle:
+
+- Make async import strict gates the default.
+- Enforce perf thresholds in workflow.
+- Ensure production deploy path applies DB migrations before smoke checks.
+
+Execution timeline (UTC):
+
+1. Initial strict/perf runs on feature branch (before merge) failed:
+   - Strict: [#21894139054](https://github.com/zensgit/metasheet2/actions/runs/21894139054)
+     - Gate 2 failed with missing admin audit export endpoint (`404`).
+     - Evidence: `output/playwright/ga/21894139054/20260211-054336-1/gate-api-smoke.log`
+   - Perf: [#21894142162](https://github.com/zensgit/metasheet2/actions/runs/21894142162)
+     - Failed on `POST /api/attendance/import/commit-async` (`404`).
+2. Merged `#136` and deployed:
+   - Merge commit: `5e80f9a3`
+   - Build+deploy workflow: [#21894196709](https://github.com/zensgit/metasheet2/actions/runs/21894196709) (`SUCCESS`)
+3. Post-merge strict/perf runs still failed due stale DB schema:
+   - Strict: [#21894255303](https://github.com/zensgit/metasheet2/actions/runs/21894255303)
+     - `AUDIT_LOGS_EXPORT_FAILED`: `column "occurred_at" does not exist`
+     - Evidence: `output/playwright/ga/21894255303/20260211-054939-1/gate-api-smoke.log`
+   - Perf: [#21894258310](https://github.com/zensgit/metasheet2/actions/runs/21894258310)
+     - `DB_NOT_READY`: Attendance tables missing for async import job path
+4. Remediation: merged `#137` to run migrations in deploy workflow:
+   - Merge commit: `24b97562`
+   - Build+deploy workflow: [#21894316469](https://github.com/zensgit/metasheet2/actions/runs/21894316469) (`SUCCESS`)
+5. Final verification on `main`:
+   - Strict gates twice: [#21894374032](https://github.com/zensgit/metasheet2/actions/runs/21894374032) (`SUCCESS`)
+     - Evidence:
+       - `output/playwright/ga/21894374032/20260211-055556-1/`
+       - `output/playwright/ga/21894374032/20260211-055556-2/`
+     - Gate 2 API smoke log (both runs) contains:
+       - `audit export csv ok`
+       - `idempotency ok`
+       - `export csv ok`
+       - `import async idempotency ok`
+   - Perf baseline: [#21894377908](https://github.com/zensgit/metasheet2/actions/runs/21894377908) (`SUCCESS`)
+     - Evidence:
+       - `output/playwright/ga/21894377908/attendance-perf-mlhm8esx-abitlr/perf-summary.json`
+     - Result:
+       - `rows=10000`
+       - `previewMs=2919`
+       - `commitMs=66985`
+       - `exportMs=390`
+       - `rollbackMs=114`
+       - `regressions=[]`
+
+Go/No-Go decision (2026-02-11):
+
+- **GO**
+- Reason: strict gates 2x PASS + perf threshold gate PASS after deployment pipeline migration fix.

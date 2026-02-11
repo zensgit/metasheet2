@@ -277,6 +277,32 @@ Automation hardening verification (defaults + perf thresholds):
     - `rollbackMs=76`
     - `regressions=[]`
 
+Production workflow closure (main, after PR #136 + #137):
+
+- Deploy pipeline:
+  - [Build and Push Docker Images #21894316469](https://github.com/zensgit/metasheet2/actions/runs/21894316469) (`SUCCESS`)
+  - Includes migration execution in deploy step.
+- Strict gates twice (async strict default): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21894374032](https://github.com/zensgit/metasheet2/actions/runs/21894374032)
+  - Evidence:
+    - `output/playwright/ga/21894374032/20260211-055556-1/`
+    - `output/playwright/ga/21894374032/20260211-055556-2/`
+  - `gate-api-smoke.log` includes:
+    - `audit export csv ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+- Perf baseline with thresholds (10k, async+export+rollback): `PASS`
+  - Run: [Attendance Import Perf Baseline #21894377908](https://github.com/zensgit/metasheet2/actions/runs/21894377908)
+  - Evidence:
+    - `output/playwright/ga/21894377908/attendance-perf-mlhm8esx-abitlr/perf-summary.json`
+  - Metrics:
+    - `previewMs=2919`
+    - `commitMs=66985`
+    - `exportMs=390`
+    - `rollbackMs=114`
+    - `regressions=[]`
+
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
 - 10k preview PASS:
