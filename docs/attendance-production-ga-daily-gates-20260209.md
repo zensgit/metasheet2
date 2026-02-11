@@ -353,6 +353,18 @@ Daily dashboard local verification (2026-02-11):
   - `output/playwright/attendance-daily-gate-dashboard/20260211-100235/attendance-daily-gate-dashboard.md`
   - `output/playwright/attendance-daily-gate-dashboard/20260211-100235/attendance-daily-gate-dashboard.json`
 
+Daily dashboard workflow verification (main, 2026-02-11):
+
+- Run:
+  - [Attendance Daily Gate Dashboard #21900762111](https://github.com/zensgit/metasheet2/actions/runs/21900762111) (`SUCCESS`)
+- Downloaded artifact evidence:
+  - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.md`
+  - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.json`
+- Result:
+  - `overallStatus=pass`
+  - `strictRun=21894374032`
+  - `perfRun=21894377908`
+
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
 - 10k preview PASS:

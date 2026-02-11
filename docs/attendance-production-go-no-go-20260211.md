@@ -62,3 +62,8 @@ Rationale:
 - Escalation behavior:
   - `P0` strict gate failure -> open/update issue `[Attendance Gate] Daily dashboard alert` and fail workflow.
   - `P1` perf gate failure/stale runs -> open/update same issue and fail workflow.
+- Workflow validation:
+  - [Attendance Daily Gate Dashboard #21900762111](https://github.com/zensgit/metasheet2/actions/runs/21900762111) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.json`
