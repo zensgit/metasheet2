@@ -26,6 +26,9 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}
+      DINGTALK_WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL }}
     steps:
       - name: Prepare message
         id: prep
@@ -66,9 +69,9 @@ jobs:
           echo "issue_url=${{ steps.prep.outputs.issue_url }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notify Slack webhook
-        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL != ''
+        if: steps.prep.outputs.should_notify == 'true' && env.SLACK_WEBHOOK_URL != ''
         env:
-          WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}
+          WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
           MESSAGE: ${{ steps.prep.outputs.message }}
         run: |
           set -euo pipefail
@@ -76,9 +79,9 @@ jobs:
           curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"
 
       - name: Notify DingTalk webhook
-        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL != ''
+        if: steps.prep.outputs.should_notify == 'true' && env.DINGTALK_WEBHOOK_URL != ''
         env:
-          WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL }}
+          WEBHOOK_URL: ${{ env.DINGTALK_WEBHOOK_URL }}
           MESSAGE: ${{ steps.prep.outputs.message }}
         run: |
           set -euo pipefail
@@ -86,7 +89,7 @@ jobs:
           curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"
 
       - name: Warn when no outbound channel configured
-        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL == '' && secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL == ''
+        if: steps.prep.outputs.should_notify == 'true' && env.SLACK_WEBHOOK_URL == '' && env.DINGTALK_WEBHOOK_URL == ''
         run: |
           echo "No channel webhook configured. Set ATTENDANCE_ALERT_SLACK_WEBHOOK_URL and/or ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL."
           echo "No channel webhook configured." >> "$GITHUB_STEP_SUMMARY"
