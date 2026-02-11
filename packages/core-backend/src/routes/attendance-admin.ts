@@ -151,7 +151,7 @@ async function resolveBatchUsers(userIds: string[]): Promise<{
   const found = await query<AttendanceAdminResolvedUser>(
     `SELECT id, email, name, is_active
      FROM users
-     WHERE id = ANY($1::uuid[])`,
+     WHERE id = ANY($1::text[])`,
     [userIds],
   )
 
@@ -556,7 +556,7 @@ export function attendanceAdminRouter(): Router {
 
       const insert = await query<{ user_id: string }>(
         `INSERT INTO user_roles (user_id, role_id)
-         SELECT unnest($1::uuid[]), $2
+         SELECT unnest($1::text[]), $2
          ON CONFLICT DO NOTHING
          RETURNING user_id`,
         [eligibleUserIds, finalRoleId],
@@ -607,7 +607,7 @@ export function attendanceAdminRouter(): Router {
 
       const del = await query<{ user_id: string }>(
         `DELETE FROM user_roles
-         WHERE role_id = $2 AND user_id = ANY($1::uuid[])
+         WHERE role_id = $2 AND user_id = ANY($1::text[])
          RETURNING user_id`,
         [eligibleUserIds, finalRoleId],
       )
