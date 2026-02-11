@@ -193,9 +193,27 @@ function makeCsv({ startDate, userId, groupName }) {
 
 async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
   const started = Date.now()
+  let transientErrors = 0
   while (true) {
     const job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
-    assertOk(job, 'GET /attendance/import/jobs/:id')
+    if (!job.res.ok) {
+      const status = Number(job.res.status || 0)
+      const transient = status === 429 || (status >= 500 && status <= 504)
+      if (transient) {
+        transientErrors += 1
+        log(`WARN: transient job poll error (attempt=${transientErrors} status=${status}); retrying`)
+        if (Date.now() - started > timeoutMs) {
+          throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
+        }
+        await new Promise((r) => setTimeout(r, intervalMs))
+        continue
+      }
+      throw new Error(`GET /attendance/import/jobs/:id failed: HTTP ${status} ${job.raw.slice(0, 200)}`)
+    }
+    if (job.body && typeof job.body === 'object' && (job.body.success === false || job.body.ok === false)) {
+      const message = JSON.stringify(job.body).slice(0, 200)
+      throw new Error(`GET /attendance/import/jobs/:id failed: ${message}`)
+    }
     const data = job.body?.data ?? job.body
     const status = String(data?.status || '')
     if (status === 'completed') return data
