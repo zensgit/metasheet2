@@ -92,4 +92,65 @@ describe('AuthService.verifyToken', () => {
     expect(user?.permissions).toEqual(['spreadsheets:write'])
     expect((user as any).password_hash).toBeUndefined()
   })
+
+  it('accepts legacy id claim when userId is missing', async () => {
+    jwtMocks.verify.mockReturnValue({ id: 'u3', email: 'legacy@x', role: 'user', iat: 0, exp: 0 })
+    poolMocks.query.mockResolvedValue({
+      rows: [{
+        id: 'u3',
+        email: 'legacy@x',
+        name: 'Legacy',
+        role: 'user',
+        permissions: ['attendance:read'],
+        password_hash: 'hash',
+        created_at: new Date(),
+        updated_at: new Date(),
+      }]
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('legacy-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.id).toBe('u3')
+    expect(user?.permissions).toContain('attendance:read')
+  })
+})
+
+describe('AuthService.refreshToken', () => {
+  beforeEach(() => {
+    jwtMocks.verify.mockReset()
+    jwtMocks.sign.mockReset()
+    poolMocks.query.mockReset()
+    rbacMocks.isAdmin.mockReset()
+    rbacMocks.listUserPermissions.mockReset()
+  })
+
+  it('refreshes token when legacy id claim is present', async () => {
+    jwtMocks.verify.mockReturnValue({ id: 'u4', email: 'refresh@x', role: 'admin', iat: 0, exp: 0 })
+    poolMocks.query.mockResolvedValue({
+      rows: [{
+        id: 'u4',
+        email: 'refresh@x',
+        name: 'Refresh User',
+        role: 'admin',
+        permissions: ['attendance:admin'],
+        password_hash: 'hash',
+        created_at: new Date(),
+        updated_at: new Date(),
+      }]
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin'])
+    jwtMocks.sign.mockReturnValue('new-token')
+
+    const auth = new AuthService()
+    const refreshed = await auth.refreshToken('old-token')
+
+    expect(refreshed).toBe('new-token')
+    expect(jwtMocks.sign).toHaveBeenCalledTimes(1)
+    expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ userId: 'u4' })
+  })
 })
