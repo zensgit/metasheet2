@@ -218,7 +218,31 @@ Notes:
 
 - This run targets a local dev backend, so `/api/auth/me -> features.mode` shows `platform` (not `attendance`).
 - No secrets were stored in the repo; tokens were passed via env at runtime only.
-    - `gate-provision-admin.log`
+
+## Latest Notes (2026-02-11)
+
+Local strict gates twice passed (including provisioning + async import gate):
+
+- Strict flags:
+  - `REQUIRE_ATTENDANCE_ADMIN_API=true`
+  - `REQUIRE_IDEMPOTENCY=true`
+  - `REQUIRE_IMPORT_EXPORT=true`
+  - `REQUIRE_IMPORT_ASYNC=true`
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260211-052354-1/`
+  - `output/playwright/attendance-prod-acceptance/20260211-052354-2/`
+- `gate-api-smoke.log` in both runs contains:
+  - `audit export csv ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+
+Integration test evidence (includes audit export CSV API regression check):
+
+- Command:
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+- Evidence:
+  - `output/playwright/attendance-next-phase/20260211-052522/attendance-integration.log`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 

@@ -242,3 +242,29 @@ Provisioning reliability note:
 
 Artifacts (example):
 - `output/playwright/attendance-prod-acceptance/*`
+
+## Execution Record (2026-02-11)
+
+Next-phase development verification (local dev environment) passed:
+
+- Strict gates twice:
+  - Gate 2 API smoke: PASS
+  - Gate 3 provisioning: PASS
+  - Gate 4/5/6 Playwright (production/desktop/mobile): PASS
+  - Strict flags enabled:
+    - `REQUIRE_ATTENDANCE_ADMIN_API=true`
+    - `REQUIRE_IDEMPOTENCY=true`
+    - `REQUIRE_IMPORT_EXPORT=true`
+    - `REQUIRE_IMPORT_ASYNC=true`
+  - Evidence:
+    - `output/playwright/attendance-prod-acceptance/20260211-052354-1/`
+    - `output/playwright/attendance-prod-acceptance/20260211-052354-2/`
+
+- Backend integration tests:
+  - `packages/core-backend/tests/integration/attendance-plugin.test.ts` PASS (5 tests)
+  - Includes regression coverage for:
+    - import idempotency retry without commitToken
+    - async import commit + job polling
+    - attendance admin audit logs CSV export
+  - Evidence:
+    - `output/playwright/attendance-next-phase/20260211-052522/attendance-integration.log`

@@ -930,6 +930,44 @@ describe('Attendance Plugin Integration', () => {
     expect(rollbackRes.status).toBe(200)
   })
 
+  it('exports attendance admin audit logs as CSV', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    // Create one attendance write action to ensure export has runtime data.
+    const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventType: 'check_in' }),
+    })
+    expect([200, 429]).toContain(punchRes.status)
+
+    const exportRes = await requestJson(`${baseUrl}/api/attendance-admin/audit-logs/export.csv?limit=50`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/csv',
+      },
+    })
+    expect(exportRes.status).toBe(200)
+    expect(exportRes.raw.includes('occurredAt')).toBe(true)
+    expect(exportRes.raw.includes('action')).toBe(true)
+    expect(exportRes.raw.includes('route')).toBe(true)
+
+    const [header] = exportRes.raw.split('\n')
+    expect(header).toBe(
+      'occurredAt,id,actorId,actorType,action,route,statusCode,latencyMs,resourceType,resourceId,requestId,ip,userAgent,errorCode,errorMessage,meta'
+    )
+  })
+
   it('supports import previewLimit + commit returnItems flags for large imports', async () => {
     if (!baseUrl) return
 
