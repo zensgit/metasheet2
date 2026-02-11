@@ -72,6 +72,7 @@ Out of scope for this delivery:
 - GitHub Actions (recommended for daily verification):
   - Strict gates: `.github/workflows/attendance-strict-gates-prod.yml`
   - Perf baseline (scheduled + manual): `.github/workflows/attendance-import-perf-baseline.yml`
+  - Daily dashboard + escalation: `.github/workflows/attendance-daily-gate-dashboard.yml`
 
 ## Rollback
 
