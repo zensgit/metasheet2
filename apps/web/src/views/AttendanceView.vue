@@ -803,6 +803,13 @@
                 <h4>Batch Provisioning</h4>
                 <div class="attendance__admin-actions">
                   <button
+                    class="attendance__btn"
+                    :disabled="provisionBatchLoading || provisionBatchPreviewLoading"
+                    @click="previewProvisionBatchUsers"
+                  >
+                    {{ provisionBatchPreviewLoading ? 'Previewing...' : 'Preview users' }}
+                  </button>
+                  <button
                     class="attendance__btn attendance__btn--primary"
                     :disabled="provisionBatchLoading"
                     @click="grantProvisioningRoleBatch"
@@ -856,6 +863,36 @@
                 :class="{ 'attendance__status--error': provisionBatchStatusKind === 'error' }"
               >
                 {{ provisionBatchStatusMessage }}
+              </p>
+              <p v-if="provisionBatchPreviewHasResult" class="attendance__field-hint">
+                Preview: {{ provisionBatchPreviewItems.length }}/{{ provisionBatchPreviewRequested }} found
+                · Missing {{ provisionBatchPreviewMissingIds.length }}
+                · Inactive {{ provisionBatchPreviewInactiveIds.length }}
+              </p>
+              <div v-if="provisionBatchPreviewItems.length > 0" class="attendance__table-wrapper">
+                <table class="attendance__table">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Name</th>
+                      <th>User ID</th>
+                      <th>Active</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in provisionBatchPreviewItems" :key="item.id">
+                      <td>{{ item.email }}</td>
+                      <td>{{ item.name || '--' }}</td>
+                      <td><code>{{ item.id.slice(0, 8) }}</code></td>
+                      <td>{{ item.is_active ? 'yes' : 'no' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-if="provisionBatchPreviewMissingIds.length > 0" class="attendance__field-hint">
+                Missing user IDs:
+                <code>{{ provisionBatchPreviewMissingIds.slice(0, 6).join(', ') }}</code>
+                <template v-if="provisionBatchPreviewMissingIds.length > 6"> ...</template>
               </p>
             </div>
 
@@ -3156,6 +3193,13 @@ interface AttendanceAdminUserProfileSummary {
   name: string | null
 }
 
+interface AttendanceAdminBatchResolveItem {
+  id: string
+  email: string
+  name: string | null
+  is_active: boolean
+}
+
 interface AttendanceAdminRoleTemplate {
   id: ProvisionRole
   roleId: string
@@ -3568,6 +3612,7 @@ const provisionSearchHasNext = computed(() => {
   return provisionSearchPage.value * provisionSearchPageSize < provisionSearchTotal.value
 })
 const provisionBatchLoading = ref(false)
+const provisionBatchPreviewLoading = ref(false)
 const provisionBatchUserIdsText = ref('')
 const provisionBatchRole = ref<ProvisionRole>('employee')
 const provisionBatchStatusMessage = ref('')
@@ -3575,6 +3620,15 @@ const provisionBatchStatusKind = ref<'info' | 'error'>('info')
 const provisionBatchParsed = computed(() => parseUserIdListText(provisionBatchUserIdsText.value))
 const provisionBatchIds = computed(() => provisionBatchParsed.value.valid)
 const provisionBatchInvalidIds = computed(() => provisionBatchParsed.value.invalid)
+const provisionBatchPreviewRequested = ref(0)
+const provisionBatchPreviewItems = ref<AttendanceAdminBatchResolveItem[]>([])
+const provisionBatchPreviewMissingIds = ref<string[]>([])
+const provisionBatchPreviewInactiveIds = ref<string[]>([])
+const provisionBatchPreviewHasResult = computed(() => {
+  return provisionBatchPreviewRequested.value > 0
+    || provisionBatchPreviewItems.value.length > 0
+    || provisionBatchPreviewMissingIds.value.length > 0
+})
 const auditLogLoading = ref(false)
 const auditLogExporting = ref(false)
 const auditLogs = ref<AttendanceAuditLogItem[]>([])
@@ -5046,6 +5100,50 @@ function parseUserIdListText(raw: string): { valid: string[]; invalid: string[] 
   return { valid, invalid }
 }
 
+function applyProvisionBatchResolvePayload(payload: any, requestedUserIds: string[]) {
+  const requested = Number(payload?.requested ?? requestedUserIds.length) || requestedUserIds.length
+  const itemsRaw = Array.isArray(payload?.items) ? payload.items : []
+  const items: AttendanceAdminBatchResolveItem[] = []
+  const seen = new Set<string>()
+
+  for (const raw of itemsRaw) {
+    if (!raw || typeof raw !== 'object') continue
+    const id = String((raw as any).id || '').trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    items.push({
+      id,
+      email: String((raw as any).email || ''),
+      name: (raw as any).name === null || (raw as any).name === undefined ? null : String((raw as any).name),
+      is_active: Boolean((raw as any).is_active),
+    })
+  }
+
+  const fallbackMissing = requestedUserIds.filter((userId) => !seen.has(userId))
+  const missingRaw: string[] = Array.isArray(payload?.missingUserIds)
+    ? payload.missingUserIds.map((v: any) => String(v || '').trim())
+    : fallbackMissing
+  const missing = Array.from(new Set(missingRaw.filter((v) => v.length > 0)))
+
+  const fallbackInactive = items.filter((item) => !item.is_active).map((item) => item.id)
+  const inactiveRaw: string[] = Array.isArray(payload?.inactiveUserIds)
+    ? payload.inactiveUserIds.map((v: any) => String(v || '').trim())
+    : fallbackInactive
+  const inactive = Array.from(new Set(inactiveRaw.filter((v) => v.length > 0)))
+
+  provisionBatchPreviewRequested.value = requested
+  provisionBatchPreviewItems.value = items
+  provisionBatchPreviewMissingIds.value = missing
+  provisionBatchPreviewInactiveIds.value = inactive
+}
+
+function clearProvisionBatchPreview() {
+  provisionBatchPreviewRequested.value = 0
+  provisionBatchPreviewItems.value = []
+  provisionBatchPreviewMissingIds.value = []
+  provisionBatchPreviewInactiveIds.value = []
+}
+
 function normalizeProvisionUserProfile(value: any, fallbackUserId: string): AttendanceAdminUserProfileSummary | null {
   if (!value || typeof value !== 'object') return null
   const id = String(value.id || value.userId || value.user_id || fallbackUserId || '')
@@ -5285,6 +5383,56 @@ async function revokeProvisioningRole() {
   }
 }
 
+async function previewProvisionBatchUsers() {
+  provisionBatchStatusMessage.value = ''
+  const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
+  if (invalid.length) {
+    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    return
+  }
+  if (valid.length === 0) {
+    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    clearProvisionBatchPreview()
+    return
+  }
+
+  provisionBatchPreviewLoading.value = true
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: valid }),
+    })
+
+    if (response.status === 404) {
+      // Backward compatibility: old deployments may not expose this endpoint.
+      clearProvisionBatchPreview()
+      provisionBatchPreviewRequested.value = valid.length
+      setProvisionBatchStatus('Batch preview API not available on this deployment.', 'error')
+      return
+    }
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || 'Failed to preview batch users')
+    }
+
+    applyProvisionBatchResolvePayload(data.data, valid)
+    const found = provisionBatchPreviewItems.value.length
+    const missing = provisionBatchPreviewMissingIds.value.length
+    const inactive = provisionBatchPreviewInactiveIds.value.length
+    const kind = missing > 0 ? 'error' : 'info'
+    setProvisionBatchStatus(`Preview ready: found ${found}/${valid.length}, missing ${missing}, inactive ${inactive}.`, kind)
+  } catch (error: any) {
+    setProvisionBatchStatus(error?.message || 'Failed to preview batch users', 'error')
+  } finally {
+    provisionBatchPreviewLoading.value = false
+  }
+}
+
 async function grantProvisioningRoleBatch() {
   provisionBatchStatusMessage.value = ''
   const role = provisionBatchRole.value
@@ -5313,8 +5461,13 @@ async function grantProvisioningRoleBatch() {
       if (!batch.ok || !batchData?.ok) {
         throw new Error(batchData?.error?.message || 'Failed to batch assign role')
       }
+      applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
-      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${valid.length} user(s).`)
+      const eligible = Number(batchData.data?.eligible ?? (valid.length - provisionBatchPreviewMissingIds.value.length)) || 0
+      const missing = provisionBatchPreviewMissingIds.value.length
+      const inactive = provisionBatchPreviewInactiveIds.value.length
+      const kind = missing > 0 ? 'error' : 'info'
+      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${eligible} eligible user(s). Missing ${missing}, inactive ${inactive}.`, kind)
       return
     }
 
@@ -5400,8 +5553,13 @@ async function revokeProvisioningRoleBatch() {
       if (!batch.ok || !batchData?.ok) {
         throw new Error(batchData?.error?.message || 'Failed to batch remove role')
       }
+      applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
-      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${valid.length} user(s).`)
+      const eligible = Number(batchData.data?.eligible ?? (valid.length - provisionBatchPreviewMissingIds.value.length)) || 0
+      const missing = provisionBatchPreviewMissingIds.value.length
+      const inactive = provisionBatchPreviewInactiveIds.value.length
+      const kind = missing > 0 ? 'error' : 'info'
+      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${eligible} eligible user(s). Missing ${missing}, inactive ${inactive}.`, kind)
       return
     }
 
@@ -5463,6 +5621,8 @@ function clearProvisionBatch() {
   provisionBatchUserIdsText.value = ''
   provisionBatchStatusMessage.value = ''
   provisionBatchStatusKind.value = 'info'
+  provisionBatchPreviewLoading.value = false
+  clearProvisionBatchPreview()
 }
 
 function toggleAuditLogMeta(item: AttendanceAuditLogItem) {
@@ -7904,6 +8064,10 @@ watch(importProfileId, () => {
 
 watch(importMode, () => {
   syncImportModeToPayload()
+})
+
+watch([provisionBatchUserIdsText, provisionBatchRole], () => {
+  clearProvisionBatchPreview()
 })
 </script>
 

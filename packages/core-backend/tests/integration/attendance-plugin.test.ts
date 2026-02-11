@@ -42,6 +42,14 @@ function requestJson(url: string, options: { method?: string; headers?: Record<s
   })
 }
 
+function randomUuidV4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0
+    const v = ch === 'x' ? r : ((r & 0x3) | 0x8)
+    return v.toString(16)
+  })
+}
+
 describe('Attendance Plugin Integration', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
@@ -966,6 +974,103 @@ describe('Attendance Plugin Integration', () => {
     expect(header).toBe(
       'occurredAt,id,actorId,actorType,action,route,statusCode,latencyMs,resourceType,resourceId,requestId,ip,userAgent,errorCode,errorMessage,meta'
     )
+  })
+
+  it('supports batch user resolve and returns missing ids for batch role operations', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const userSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(userSearchRes.status).toBe(200)
+    const items = (userSearchRes.body as { data?: { items?: { id?: string }[] } } | undefined)?.data?.items ?? []
+    const existingUserId = String(items[0]?.id || '')
+    if (!existingUserId) return
+
+    const missingUserId = randomUuidV4()
+
+    const resolveRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/resolve`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [existingUserId, missingUserId],
+      }),
+    })
+    expect(resolveRes.status).toBe(200)
+    const resolveData = (resolveRes.body as {
+      ok?: boolean
+      data?: {
+        requested?: number
+        found?: number
+        missingUserIds?: string[]
+        items?: { id?: string }[]
+      }
+    } | undefined)?.data
+    expect(resolveData?.requested).toBe(2)
+    expect((resolveData?.found ?? 0) >= 1).toBe(true)
+    expect(Array.isArray(resolveData?.missingUserIds)).toBe(true)
+    expect(resolveData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect((resolveData?.items ?? []).some((item) => item.id === existingUserId)).toBe(true)
+
+    const assignRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [existingUserId, missingUserId],
+        template: 'employee',
+      }),
+    })
+    expect(assignRes.status).toBe(200)
+    const assignData = (assignRes.body as {
+      data?: {
+        requested?: number
+        eligible?: number
+        updated?: number
+        missingUserIds?: string[]
+      }
+    } | undefined)?.data
+    expect(assignData?.requested).toBe(2)
+    expect(assignData?.eligible).toBe(1)
+    expect(Array.isArray(assignData?.missingUserIds)).toBe(true)
+    expect(assignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect((assignData?.updated ?? -1) >= 0).toBe(true)
+
+    const unassignRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/unassign`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [existingUserId, missingUserId],
+        template: 'employee',
+      }),
+    })
+    expect(unassignRes.status).toBe(200)
+    const unassignData = (unassignRes.body as {
+      data?: {
+        requested?: number
+        eligible?: number
+        missingUserIds?: string[]
+      }
+    } | undefined)?.data
+    expect(unassignData?.requested).toBe(2)
+    expect(unassignData?.eligible).toBe(1)
+    expect(unassignData?.missingUserIds?.includes(missingUserId)).toBe(true)
   })
 
   it('supports import previewLimit + commit returnItems flags for large imports', async () => {

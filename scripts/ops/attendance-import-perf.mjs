@@ -19,6 +19,7 @@ const mappingProfileIdOverride = String(process.env.MAPPING_PROFILE_ID || '')
 
 const rows = Math.max(1, Number(process.env.ROWS || 10_000))
 const mode = String(process.env.MODE || 'commit') // preview|commit
+const scenario = String(process.env.SCENARIO || `${rows}-${mode}`)
 const doRollback = process.env.ROLLBACK !== 'false' // default true
 const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC === 'true'
 
@@ -233,6 +234,7 @@ async function run() {
   if (!token) die('AUTH_TOKEN is required')
 
   log(`API_BASE=${apiBase}`)
+  log(`scenario=${scenario}`)
   await refreshAuthToken()
 
   const startedAt = new Date().toISOString()
@@ -305,6 +307,7 @@ async function run() {
   if (mode === 'preview') {
     const summary = {
       startedAt,
+      scenario,
       mode,
       apiBase,
       orgId,
@@ -385,6 +388,7 @@ async function run() {
 
   const summary = {
     startedAt,
+    scenario,
     mode,
     apiBase,
     orgId,

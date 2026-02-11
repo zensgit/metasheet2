@@ -113,6 +113,68 @@ async function fetchUserRoleIds(userId: string): Promise<string[]> {
   return rows.map((row) => row.role_id).filter(Boolean)
 }
 
+function normalizeBatchUserIds(rawIds: unknown[]): { userIds: string[]; invalidUserIds: string[] } {
+  const userIds: string[] = []
+  const invalidUserIds: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of rawIds) {
+    const id = String(value || '').trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    if (!isUuid(id)) {
+      invalidUserIds.push(id)
+      continue
+    }
+    userIds.push(id)
+  }
+
+  return { userIds, invalidUserIds }
+}
+
+type AttendanceAdminResolvedUser = {
+  id: string
+  email: string
+  name: string | null
+  is_active: boolean
+}
+
+async function resolveBatchUsers(userIds: string[]): Promise<{
+  items: AttendanceAdminResolvedUser[]
+  missingUserIds: string[]
+  inactiveUserIds: string[]
+}> {
+  if (userIds.length === 0) {
+    return { items: [], missingUserIds: [], inactiveUserIds: [] }
+  }
+
+  const found = await query<AttendanceAdminResolvedUser>(
+    `SELECT id, email, name, is_active
+     FROM users
+     WHERE id = ANY($1::uuid[])`,
+    [userIds],
+  )
+
+  const byId = new Map(found.rows.map((row) => [String(row.id), row]))
+  const items: AttendanceAdminResolvedUser[] = []
+  const missingUserIds: string[] = []
+
+  for (const userId of userIds) {
+    const item = byId.get(userId)
+    if (!item) {
+      missingUserIds.push(userId)
+      continue
+    }
+    items.push(item)
+  }
+
+  const inactiveUserIds = items
+    .filter((item) => item.is_active === false)
+    .map((item) => item.id)
+
+  return { items, missingUserIds, inactiveUserIds }
+}
+
 export function attendanceAdminRouter(): Router {
   const r = Router()
 
@@ -439,34 +501,75 @@ export function attendanceAdminRouter(): Router {
     }
   })
 
+  r.post('/api/attendance-admin/users/batch/resolve', async (req: Request, res: Response) => {
+    try {
+      const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
+      const { userIds, invalidUserIds } = normalizeBatchUserIds(rawIds)
+      if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds is required')
+      if (invalidUserIds.length) {
+        return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
+      }
+
+      const resolved = await resolveBatchUsers(userIds)
+      return jsonOk(res, {
+        requested: userIds.length,
+        found: resolved.items.length,
+        missingUserIds: resolved.missingUserIds,
+        inactiveUserIds: resolved.inactiveUserIds,
+        items: resolved.items,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'BATCH_USER_RESOLVE_FAILED', (error as Error)?.message || 'Failed to resolve users')
+    }
+  })
+
   r.post('/api/attendance-admin/users/batch/roles/assign', async (req: Request, res: Response) => {
     try {
       const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
-      const userIds = rawIds.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+      const { userIds, invalidUserIds } = normalizeBatchUserIds(rawIds)
       if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds is required')
-      const invalid = userIds.filter((id) => !isUuid(id))
-      if (invalid.length) return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}`)
+      if (invalidUserIds.length) {
+        return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
+      }
 
       const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
       const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
+      const resolvedTemplate = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+      const finalRoleId = resolvedTemplate?.roleId || roleId
       if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
 
       await ensureAttendanceRoleTemplates()
+
+      const resolvedUsers = await resolveBatchUsers(userIds)
+      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
+      if (eligibleUserIds.length === 0) {
+        return jsonOk(res, {
+          roleId: finalRoleId,
+          requested: userIds.length,
+          eligible: 0,
+          updated: 0,
+          missingUserIds: resolvedUsers.missingUserIds,
+          inactiveUserIds: resolvedUsers.inactiveUserIds,
+          items: resolvedUsers.items,
+        })
+      }
 
       const insert = await query<{ user_id: string }>(
         `INSERT INTO user_roles (user_id, role_id)
          SELECT unnest($1::uuid[]), $2
          ON CONFLICT DO NOTHING
          RETURNING user_id`,
-        [userIds, finalRoleId],
+        [eligibleUserIds, finalRoleId],
       )
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
+        eligible: eligibleUserIds.length,
         updated: insert.rowCount ?? insert.rows.length,
+        missingUserIds: resolvedUsers.missingUserIds,
+        inactiveUserIds: resolvedUsers.inactiveUserIds,
+        items: resolvedUsers.items,
       })
     } catch (error) {
       return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
@@ -476,10 +579,11 @@ export function attendanceAdminRouter(): Router {
   r.post('/api/attendance-admin/users/batch/roles/unassign', async (req: Request, res: Response) => {
     try {
       const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
-      const userIds = rawIds.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+      const { userIds, invalidUserIds } = normalizeBatchUserIds(rawIds)
       if (userIds.length === 0) return jsonError(res, 400, 'USER_IDS_REQUIRED', 'userIds is required')
-      const invalid = userIds.filter((id) => !isUuid(id))
-      if (invalid.length) return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}`)
+      if (invalidUserIds.length) {
+        return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
+      }
 
       const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
       const roleId = String(req.body?.roleId || '').trim()
@@ -487,17 +591,35 @@ export function attendanceAdminRouter(): Router {
       const finalRoleId = resolved?.roleId || roleId
       if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
 
+      const resolvedUsers = await resolveBatchUsers(userIds)
+      const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
+      if (eligibleUserIds.length === 0) {
+        return jsonOk(res, {
+          roleId: finalRoleId,
+          requested: userIds.length,
+          eligible: 0,
+          updated: 0,
+          missingUserIds: resolvedUsers.missingUserIds,
+          inactiveUserIds: resolvedUsers.inactiveUserIds,
+          items: resolvedUsers.items,
+        })
+      }
+
       const del = await query<{ user_id: string }>(
         `DELETE FROM user_roles
          WHERE role_id = $2 AND user_id = ANY($1::uuid[])
          RETURNING user_id`,
-        [userIds, finalRoleId],
+        [eligibleUserIds, finalRoleId],
       )
 
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
+        eligible: eligibleUserIds.length,
         updated: del.rowCount ?? del.rows.length,
+        missingUserIds: resolvedUsers.missingUserIds,
+        inactiveUserIds: resolvedUsers.inactiveUserIds,
+        items: resolvedUsers.items,
       })
     } catch (error) {
       return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')

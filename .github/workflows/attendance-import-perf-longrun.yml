@@ -1,0 +1,210 @@
+name: Attendance Import Perf Long Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: 'API base (must end with /api)'
+        required: false
+        default: 'http://142.171.239.56:8081/api'
+      branch:
+        description: 'Branch to analyze for trend history'
+        required: false
+        default: 'main'
+      trend_depth:
+        description: 'History depth per scenario for trend report'
+        required: false
+        default: '7'
+      history_download_limit:
+        description: 'How many previous runs to download for trend history'
+        required: false
+        default: '5'
+      fail_on_regression:
+        description: 'Fail trend job when drift/regression warning exists (true/false)'
+        required: false
+        default: 'false'
+  schedule:
+    # Daily at 05:10 UTC.
+    - cron: '10 5 * * *'
+
+concurrency:
+  group: attendance-import-perf-longrun
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  perf-scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: rows10k-commit
+            rows: '10000'
+            mode: 'commit'
+            export_csv: 'true'
+            rollback: 'true'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_PREVIEW_MS || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '100000' }}
+            max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
+            max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
+            max_rollback_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_ROLLBACK_MS || vars.ATTENDANCE_PERF_MAX_ROLLBACK_MS || '8000' }}
+          - id: rows50k-preview
+            rows: '50000'
+            mode: 'preview'
+            export_csv: 'false'
+            rollback: 'false'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_50K_MAX_PREVIEW_MS || '180000' }}
+            max_commit_ms: ''
+            max_export_ms: ''
+            max_rollback_ms: ''
+          - id: rows100k-preview
+            rows: '100000'
+            mode: 'preview'
+            export_csv: 'false'
+            rollback: 'false'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_MAX_PREVIEW_MS || '240000' }}
+            max_commit_ms: ''
+            max_export_ms: ''
+            max_rollback_ms: ''
+    env:
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      COMMIT_ASYNC: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run long-run scenario
+        env:
+          SCENARIO: ${{ matrix.id }}
+          ROWS: ${{ matrix.rows }}
+          MODE: ${{ matrix.mode }}
+          EXPORT_CSV: ${{ matrix.export_csv }}
+          ROLLBACK: ${{ matrix.rollback }}
+          MAX_PREVIEW_MS: ${{ matrix.max_preview_ms }}
+          MAX_COMMIT_MS: ${{ matrix.max_commit_ms }}
+          MAX_EXPORT_MS: ${{ matrix.max_export_ms }}
+          MAX_ROLLBACK_MS: ${{ matrix.max_rollback_ms }}
+          OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
+        run: |
+          set -euo pipefail
+          node ./scripts/ops/attendance-import-perf.mjs
+
+      - name: Capture scenario summary
+        run: |
+          set -euo pipefail
+          SCENARIO_DIR="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"
+          SUMMARY_PATH="$(find "$SCENARIO_DIR" -name 'perf-summary.json' -type f | sort | tail -n1)"
+          if [[ -z "${SUMMARY_PATH}" ]]; then
+            echo "Missing perf-summary.json for ${{ matrix.id }}"
+            exit 1
+          fi
+          mkdir -p output/playwright/attendance-import-perf-longrun/current-flat
+          cp "$SUMMARY_PATH" "output/playwright/attendance-import-perf-longrun/current-flat/rows${{ matrix.rows }}-${{ matrix.mode }}.json"
+
+      - name: Upload scenario artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-longrun-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 21
+          path: |
+            output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/**
+            output/playwright/attendance-import-perf-longrun/current-flat/rows${{ matrix.rows }}-${{ matrix.mode }}.json
+
+  trend-report:
+    needs: perf-scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TARGET_BRANCH: ${{ inputs.branch || 'main' }}
+      HISTORY_DOWNLOAD_LIMIT: ${{ inputs.history_download_limit || '5' }}
+      TREND_DEPTH: ${{ inputs.trend_depth || '7' }}
+      FAIL_ON_REGRESSION: ${{ inputs.fail_on_regression || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download current run artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: attendance-import-perf-longrun-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: output/playwright/attendance-import-perf-longrun/current-merged
+
+      - name: Download historical artifacts
+        run: |
+          set -euo pipefail
+          HISTORY_ROOT="output/playwright/attendance-import-perf-longrun/history"
+          mkdir -p "$HISTORY_ROOT"
+
+          mapfile -t RUN_IDS < <(
+            gh run list \
+              --workflow attendance-import-perf-longrun.yml \
+              --branch "$TARGET_BRANCH" \
+              --limit 20 \
+              --json databaseId,status,conclusion \
+            | jq -r '.[] | select(.status == "completed") | .databaseId'
+          )
+
+          downloaded=0
+          for run_id in "${RUN_IDS[@]}"; do
+            if [[ "$run_id" == "$GITHUB_RUN_ID" ]]; then
+              continue
+            fi
+            gh run download "$run_id" -D "$HISTORY_ROOT/$run_id" || true
+            downloaded=$((downloaded + 1))
+            if [[ "$downloaded" -ge "$HISTORY_DOWNLOAD_LIMIT" ]]; then
+              break
+            fi
+          done
+
+          echo "history_downloaded=${downloaded}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate trend report
+        id: trend
+        env:
+          CURRENT_ROOT: output/playwright/attendance-import-perf-longrun/current-merged
+          HISTORY_ROOT: output/playwright/attendance-import-perf-longrun/history
+          OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/report
+          TREND_DEPTH: ${{ env.TREND_DEPTH }}
+          FAIL_ON_REGRESSION: ${{ env.FAIL_ON_REGRESSION }}
+          REGRESSION_FACTOR: '1.30'
+        run: |
+          set -euo pipefail
+          node ./scripts/ops/attendance-import-perf-trend-report.mjs
+
+      - name: Add trend markdown to summary
+        if: always()
+        run: |
+          cat "${{ steps.trend.outputs.report_markdown }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload trend artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-longrun-trend-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            output/playwright/attendance-import-perf-longrun/report/**
+
+      - name: Fail on trend regression
+        if: steps.trend.outputs.report_status != 'pass'
+        run: |
+          echo "Perf long-run trend report indicates regression"
+          exit 1

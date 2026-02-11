@@ -126,6 +126,18 @@ function makeIdempotencyKey() {
   return `attendance-smoke-${suffix}`
 }
 
+function makeUuidV4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0
+    const v = ch === 'x' ? r : ((r & 0x3) | 0x8)
+    return v.toString(16)
+  })
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim())
+}
+
 function makeCsv(workDate, userId, groupName) {
   // Align with the UI/Playwright script default mapping.
   return [
@@ -226,6 +238,23 @@ async function run() {
     const searchItems = userSearch.body?.data?.items
     if (!Array.isArray(searchItems)) die('user search response missing items')
     log(`user search ok: items=${searchItems.length}`)
+
+    const resolvedUserId = String(searchItems.find((item) => isUuid(item?.id))?.id || '')
+    if (resolvedUserId) {
+      const missingUserId = makeUuidV4()
+      const resolveRes = await apiFetch('/attendance-admin/users/batch/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ userIds: [resolvedUserId, missingUserId] }),
+      })
+      assertOk(resolveRes, 'POST /attendance-admin/users/batch/resolve')
+      const resolveData = resolveRes.body?.data ?? {}
+      if (!Array.isArray(resolveData?.items)) die('batch resolve response missing items')
+      if (!Array.isArray(resolveData?.missingUserIds)) die('batch resolve response missing missingUserIds')
+      if (!resolveData.missingUserIds.includes(missingUserId)) die('batch resolve missingUserIds does not include unknown uuid')
+      log(`batch resolve ok: found=${resolveData.items.length} missing=${resolveData.missingUserIds.length}`)
+    } else {
+      log('WARN: no UUID user id in search result; skipping batch resolve check')
+    }
 
     // Audit log export should stream CSV (even if it only contains headers).
     const auditExportUrl = `${apiBase}/attendance-admin/audit-logs/export.csv?limit=50`
