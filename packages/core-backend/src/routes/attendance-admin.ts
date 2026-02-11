@@ -54,6 +54,99 @@ function parseDateParam(raw: unknown): Date | null {
   return d
 }
 
+type AttendanceAuditFilterInput = {
+  q?: string
+  actionPrefix?: string
+  actorId?: string
+  route?: string
+  errorCode?: string
+  statusClass?: string
+  from?: Date | null
+  to?: Date | null
+}
+
+function normalizeStatusClass(raw: unknown): string | null {
+  const text = String(raw || '').trim().toLowerCase()
+  if (!text) return null
+  if (!/^[2-5]xx$/.test(text)) return null
+  return text
+}
+
+function buildAttendanceAuditWhere(input: AttendanceAuditFilterInput): { where: string; params: unknown[] } {
+  const params: unknown[] = []
+  const clauses: string[] = [`resource_type = 'attendance'`]
+
+  const q = String(input.q || '').trim()
+  if (q) {
+    params.push(`%${q}%`)
+    const idx = params.length
+    clauses.push(`(
+      action ILIKE $${idx}
+      OR actor_id ILIKE $${idx}
+      OR resource_id ILIKE $${idx}
+      OR route ILIKE $${idx}
+      OR (COALESCE(meta, metadata, '{}'::jsonb) -> 'error' ->> 'code') ILIKE $${idx}
+    )`)
+  }
+
+  const actionPrefix = String(input.actionPrefix || '').trim()
+  if (actionPrefix) {
+    params.push(`${actionPrefix}%`)
+    const idx = params.length
+    clauses.push(`action ILIKE $${idx}`)
+  }
+
+  const actorId = String(input.actorId || '').trim()
+  if (actorId) {
+    params.push(`%${actorId}%`)
+    const idx = params.length
+    clauses.push(`actor_id ILIKE $${idx}`)
+  }
+
+  const route = String(input.route || '').trim()
+  if (route) {
+    params.push(`%${route}%`)
+    const idx = params.length
+    clauses.push(`route ILIKE $${idx}`)
+  }
+
+  const errorCode = String(input.errorCode || '').trim()
+  if (errorCode) {
+    params.push(errorCode)
+    const idx = params.length
+    clauses.push(`COALESCE(meta, metadata, '{}'::jsonb) -> 'error' ->> 'code' = $${idx}`)
+  }
+
+  const statusClass = normalizeStatusClass(input.statusClass)
+  if (statusClass) {
+    const lower = Number(statusClass[0]) * 100
+    params.push(lower)
+    const lowerIdx = params.length
+    params.push(lower + 100)
+    const upperIdx = params.length
+    clauses.push(`status_code >= $${lowerIdx} AND status_code < $${upperIdx}`)
+  }
+
+  if (input.from) {
+    params.push(input.from.toISOString())
+    const idx = params.length
+    clauses.push(`COALESCE(occurred_at, created_at) >= $${idx}`)
+  }
+
+  if (input.to) {
+    params.push(input.to.toISOString())
+    const idx = params.length
+    clauses.push(`COALESCE(occurred_at, created_at) <= $${idx}`)
+  }
+
+  return { where: `WHERE ${clauses.join(' AND ')}`, params }
+}
+
+function withLimit<T>(items: T[], limit = 200): { items: T[]; truncated: boolean } {
+  if (items.length <= limit) return { items, truncated: false }
+  return { items: items.slice(0, limit), truncated: true }
+}
+
 async function ensureAttendanceRoleTemplates(): Promise<void> {
   // Ensure permission codes exist.
   await query(
@@ -327,24 +420,28 @@ export function attendanceAdminRouter(): Router {
 
   r.get('/api/attendance-admin/audit-logs', async (req: Request, res: Response) => {
     try {
-      const q = String(req.query.q || '').trim()
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 50,
         maxPageSize: 200,
       })
 
-      const term = q ? `%${q}%` : '%'
-      const where = q
-        ? `WHERE resource_type = 'attendance'
-             AND (
-               action ILIKE $1 OR actor_id ILIKE $1 OR resource_id ILIKE $1 OR route ILIKE $1
-             )`
-        : `WHERE resource_type = 'attendance'`
+      const from = parseDateParam(req.query.from)
+      const to = parseDateParam(req.query.to)
+      const { where, params } = buildAttendanceAuditWhere({
+        q: req.query.q as string | undefined,
+        actionPrefix: req.query.actionPrefix as string | undefined,
+        actorId: req.query.actorId as string | undefined,
+        route: req.query.route as string | undefined,
+        errorCode: req.query.errorCode as string | undefined,
+        statusClass: req.query.statusClass as string | undefined,
+        from,
+        to,
+      })
 
       const count = await query<{ c: number }>(
         `SELECT COUNT(*)::int AS c FROM operation_audit_logs ${where}`,
-        q ? [term] : undefined,
+        params,
       )
       const total = count.rows[0]?.c ?? 0
 
@@ -367,10 +464,9 @@ export function attendanceAdminRouter(): Router {
         FROM operation_audit_logs
         ${where}
         ORDER BY COALESCE(occurred_at, created_at) DESC
-        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
       `
-      const params = q ? [term, pageSize, offset] : [pageSize, offset]
-      const list = await query(listSql, params)
+      const list = await query(listSql, [...params, pageSize, offset])
 
       return jsonOk(res, { items: list.rows, page, pageSize, total })
     } catch (error) {
@@ -380,43 +476,23 @@ export function attendanceAdminRouter(): Router {
 
   r.get('/api/attendance-admin/audit-logs/export.csv', async (req: Request, res: Response) => {
     try {
-      const q = String(req.query.q || '').trim()
       const from = parseDateParam(req.query.from)
       const to = parseDateParam(req.query.to)
       const rawLimit = Number(req.query.limit ?? 0) || 0
       const limit = Math.min(Math.max(rawLimit || 5000, 1), 10000)
 
-      const params: unknown[] = []
-      const clauses: string[] = [`resource_type = 'attendance'`]
+      const { where, params } = buildAttendanceAuditWhere({
+        q: req.query.q as string | undefined,
+        actionPrefix: req.query.actionPrefix as string | undefined,
+        actorId: req.query.actorId as string | undefined,
+        route: req.query.route as string | undefined,
+        errorCode: req.query.errorCode as string | undefined,
+        statusClass: req.query.statusClass as string | undefined,
+        from,
+        to,
+      })
 
-      if (q) {
-        const term = `%${q}%`
-        params.push(term)
-        const idx = params.length
-        clauses.push(`(
-          action ILIKE $${idx}
-          OR actor_id ILIKE $${idx}
-          OR resource_id ILIKE $${idx}
-          OR route ILIKE $${idx}
-        )`)
-      }
-
-      if (from) {
-        params.push(from.toISOString())
-        const idx = params.length
-        clauses.push(`COALESCE(occurred_at, created_at) >= $${idx}`)
-      }
-
-      if (to) {
-        params.push(to.toISOString())
-        const idx = params.length
-        clauses.push(`COALESCE(occurred_at, created_at) <= $${idx}`)
-      }
-
-      params.push(limit)
-      const limitIdx = params.length
-
-      const where = `WHERE ${clauses.join(' AND ')}`
+      const limitIdx = params.length + 1
       const sql = `
         SELECT
           id,
@@ -439,7 +515,7 @@ export function attendanceAdminRouter(): Router {
         LIMIT $${limitIdx}
       `
 
-      const rows = await query(sql, params)
+      const rows = await query(sql, [...params, limit])
 
       const filename = `attendance-audit-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -501,6 +577,46 @@ export function attendanceAdminRouter(): Router {
     }
   })
 
+  r.get('/api/attendance-admin/audit-logs/summary', async (req: Request, res: Response) => {
+    try {
+      const windowMinutesRaw = Number(req.query.windowMinutes ?? 0) || 0
+      const limitRaw = Number(req.query.limit ?? 0) || 0
+      const windowMinutes = Math.min(Math.max(windowMinutesRaw || 60, 5), 7 * 24 * 60)
+      const limit = Math.min(Math.max(limitRaw || 10, 1), 50)
+
+      const actions = await query<{ action: string; total: number }>(
+        `SELECT action, COUNT(*)::int AS total
+         FROM operation_audit_logs
+         WHERE resource_type = 'attendance'
+           AND COALESCE(occurred_at, created_at) >= now() - ($1::int * interval '1 minute')
+         GROUP BY action
+         ORDER BY total DESC
+         LIMIT $2`,
+        [windowMinutes, limit],
+      )
+
+      const errors = await query<{ error_code: string; total: number }>(
+        `SELECT COALESCE(NULLIF(COALESCE(meta, metadata, '{}'::jsonb)->'error'->>'code', ''), 'NONE') AS error_code,
+                COUNT(*)::int AS total
+         FROM operation_audit_logs
+         WHERE resource_type = 'attendance'
+           AND COALESCE(occurred_at, created_at) >= now() - ($1::int * interval '1 minute')
+         GROUP BY error_code
+         ORDER BY total DESC
+         LIMIT $2`,
+        [windowMinutes, limit],
+      )
+
+      return jsonOk(res, {
+        windowMinutes,
+        actions: actions.rows,
+        errors: errors.rows,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'AUDIT_LOGS_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load audit summary')
+    }
+  })
+
   r.post('/api/attendance-admin/users/batch/resolve', async (req: Request, res: Response) => {
     try {
       const rawIds = Array.isArray(req.body?.userIds) ? req.body.userIds : []
@@ -548,6 +664,10 @@ export function attendanceAdminRouter(): Router {
           requested: userIds.length,
           eligible: 0,
           updated: 0,
+          affectedUserIds: [],
+          affectedUserIdsTruncated: false,
+          unchangedUserIds: [],
+          unchangedUserIdsTruncated: false,
           missingUserIds: resolvedUsers.missingUserIds,
           inactiveUserIds: resolvedUsers.inactiveUserIds,
           items: resolvedUsers.items,
@@ -562,11 +682,23 @@ export function attendanceAdminRouter(): Router {
         [eligibleUserIds, finalRoleId],
       )
 
+      const affectedUserIdsRaw = insert.rows
+        .map((row) => String(row.user_id || '').trim())
+        .filter(Boolean)
+      const affectedSet = new Set(affectedUserIdsRaw)
+      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const affectedUserIds = withLimit(affectedUserIdsRaw)
+      const unchangedUserIds = withLimit(unchangedUserIdsRaw)
+
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
         eligible: eligibleUserIds.length,
         updated: insert.rowCount ?? insert.rows.length,
+        affectedUserIds: affectedUserIds.items,
+        affectedUserIdsTruncated: affectedUserIds.truncated,
+        unchangedUserIds: unchangedUserIds.items,
+        unchangedUserIdsTruncated: unchangedUserIds.truncated,
         missingUserIds: resolvedUsers.missingUserIds,
         inactiveUserIds: resolvedUsers.inactiveUserIds,
         items: resolvedUsers.items,
@@ -599,6 +731,10 @@ export function attendanceAdminRouter(): Router {
           requested: userIds.length,
           eligible: 0,
           updated: 0,
+          affectedUserIds: [],
+          affectedUserIdsTruncated: false,
+          unchangedUserIds: [],
+          unchangedUserIdsTruncated: false,
           missingUserIds: resolvedUsers.missingUserIds,
           inactiveUserIds: resolvedUsers.inactiveUserIds,
           items: resolvedUsers.items,
@@ -612,11 +748,23 @@ export function attendanceAdminRouter(): Router {
         [eligibleUserIds, finalRoleId],
       )
 
+      const affectedUserIdsRaw = del.rows
+        .map((row) => String(row.user_id || '').trim())
+        .filter(Boolean)
+      const affectedSet = new Set(affectedUserIdsRaw)
+      const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
+      const affectedUserIds = withLimit(affectedUserIdsRaw)
+      const unchangedUserIds = withLimit(unchangedUserIdsRaw)
+
       return jsonOk(res, {
         roleId: finalRoleId,
         requested: userIds.length,
         eligible: eligibleUserIds.length,
         updated: del.rowCount ?? del.rows.length,
+        affectedUserIds: affectedUserIds.items,
+        affectedUserIdsTruncated: affectedUserIds.truncated,
+        unchangedUserIds: unchangedUserIds.items,
+        unchangedUserIdsTruncated: unchangedUserIds.truncated,
         missingUserIds: resolvedUsers.missingUserIds,
         inactiveUserIds: resolvedUsers.inactiveUserIds,
         items: resolvedUsers.items,

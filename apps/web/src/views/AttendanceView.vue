@@ -894,13 +894,23 @@
                 <code>{{ provisionBatchPreviewMissingIds.slice(0, 6).join(', ') }}</code>
                 <template v-if="provisionBatchPreviewMissingIds.length > 6"> ...</template>
               </p>
+              <p v-if="provisionBatchAffectedIds.length > 0" class="attendance__field-hint">
+                Affected user IDs:
+                <code>{{ provisionBatchAffectedIds.slice(0, 6).join(', ') }}</code>
+                <template v-if="provisionBatchAffectedIds.length > 6"> ...</template>
+              </p>
+              <p v-if="provisionBatchUnchangedIds.length > 0" class="attendance__field-hint">
+                Unchanged user IDs:
+                <code>{{ provisionBatchUnchangedIds.slice(0, 6).join(', ') }}</code>
+                <template v-if="provisionBatchUnchangedIds.length > 6"> ...</template>
+              </p>
             </div>
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
                 <h4>Audit Logs</h4>
                 <div class="attendance__admin-actions">
-                  <button class="attendance__btn" :disabled="auditLogLoading" @click="loadAuditLogs(1)">
+                  <button class="attendance__btn" :disabled="auditLogLoading || auditSummaryLoading" @click="reloadAuditLogs">
                     {{ auditLogLoading ? 'Loading...' : 'Reload logs' }}
                   </button>
                   <button class="attendance__btn" :disabled="auditLogExporting" @click="exportAuditLogsCsv">
@@ -919,6 +929,55 @@
                     @keydown.enter.prevent="loadAuditLogs(1)"
                   />
                 </label>
+                <label class="attendance__field" for="attendance-audit-action-prefix">
+                  <span>Action prefix</span>
+                  <input
+                    id="attendance-audit-action-prefix"
+                    v-model="auditLogActionPrefix"
+                    type="text"
+                    placeholder="attendance_http:POST:/api/attendance-admin"
+                    @keydown.enter.prevent="loadAuditLogs(1)"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-audit-status-class">
+                  <span>Status class</span>
+                  <select
+                    id="attendance-audit-status-class"
+                    v-model="auditLogStatusClass"
+                  >
+                    <option value="">All</option>
+                    <option value="2xx">2xx</option>
+                    <option value="3xx">3xx</option>
+                    <option value="4xx">4xx</option>
+                    <option value="5xx">5xx</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-audit-error-code">
+                  <span>Error code</span>
+                  <input
+                    id="attendance-audit-error-code"
+                    v-model="auditLogErrorCode"
+                    type="text"
+                    placeholder="RATE_LIMITED"
+                    @keydown.enter.prevent="loadAuditLogs(1)"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-audit-from">
+                  <span>From</span>
+                  <input
+                    id="attendance-audit-from"
+                    v-model="auditLogFrom"
+                    type="datetime-local"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-audit-to">
+                  <span>To</span>
+                  <input
+                    id="attendance-audit-to"
+                    v-model="auditLogTo"
+                    type="datetime-local"
+                  />
+                </label>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn" :disabled="auditLogLoading || auditLogPage <= 1" @click="loadAuditLogs(auditLogPage - 1)">
@@ -934,6 +993,37 @@
                 <span v-if="auditLogTotal" class="attendance__field-hint">
                   Page {{ auditLogPage }} / {{ auditLogTotalPages }} · {{ auditLogTotal }} row(s)
                 </span>
+              </div>
+              <div class="attendance__admin-grid">
+                <div class="attendance__field attendance__field--full">
+                  <div class="attendance__requests-header">
+                    <span>Audit summary (last 60m)</span>
+                    <button class="attendance__btn" :disabled="auditSummaryLoading" @click="loadAuditSummary">
+                      {{ auditSummaryLoading ? 'Loading...' : 'Reload summary' }}
+                    </button>
+                  </div>
+                  <div class="attendance__table-wrapper" v-if="auditSummaryActions.length || auditSummaryErrors.length">
+                    <table class="attendance__table">
+                      <thead>
+                        <tr>
+                          <th>Top actions</th>
+                          <th>Count</th>
+                          <th>Top error codes</th>
+                          <th>Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="idx in auditSummaryRowCount" :key="`audit-summary-${idx}`">
+                          <td>{{ auditSummaryActions[idx - 1]?.key || '--' }}</td>
+                          <td>{{ auditSummaryActions[idx - 1]?.total ?? '--' }}</td>
+                          <td>{{ auditSummaryErrors[idx - 1]?.key || '--' }}</td>
+                          <td>{{ auditSummaryErrors[idx - 1]?.total ?? '--' }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="attendance__empty">No summary data.</div>
+                </div>
               </div>
               <p
                 v-if="auditLogStatusMessage"
@@ -1750,6 +1840,28 @@
                 <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
                   {{ importLoading ? 'Importing...' : 'Import' }}
                 </button>
+              </div>
+              <div
+                v-if="importPreviewTask"
+                class="attendance__status"
+                :class="{ 'attendance__status--error': importPreviewTask.status === 'failed' }"
+              >
+                <div class="attendance__requests-header">
+                  <span>{{ importPreviewTask.mode === 'chunked' ? 'Chunked preview task' : 'Preview task' }}</span>
+                  <button class="attendance__btn" type="button" @click="clearImportPreviewTask">
+                    Clear
+                  </button>
+                </div>
+                <div>
+                  Status: <strong>{{ importPreviewTask.status }}</strong>
+                  <template v-if="importPreviewTask.mode === 'chunked'">
+                    · Chunks {{ importPreviewTask.completedChunks }} / {{ importPreviewTask.totalChunks }}
+                  </template>
+                </div>
+                <div v-if="importPreviewTask.totalRows">
+                  Progress: {{ importPreviewTask.processedRows }} / {{ importPreviewTask.totalRows }}
+                </div>
+                <div v-if="importPreviewTask.message">{{ importPreviewTask.message }}</div>
               </div>
               <div
                 v-if="importAsyncJob"
@@ -3224,6 +3336,11 @@ interface AttendanceAuditLogItem {
   meta: Record<string, any>
 }
 
+interface AttendanceAuditSummaryRow {
+  key: string
+  total: number
+}
+
 interface AttendanceSettings {
   autoAbsence?: {
     enabled?: boolean
@@ -3452,6 +3569,16 @@ interface AttendanceImportJob {
   updatedAt?: string | null
 }
 
+interface AttendanceImportPreviewTask {
+  mode: 'single' | 'chunked'
+  status: 'running' | 'completed' | 'failed'
+  totalRows: number
+  processedRows: number
+  totalChunks: number
+  completedChunks: number
+  message?: string | null
+}
+
 interface AttendanceReconcileResult {
   summary?: Record<string, any>
   warnings?: string[]
@@ -3624,6 +3751,8 @@ const provisionBatchPreviewRequested = ref(0)
 const provisionBatchPreviewItems = ref<AttendanceAdminBatchResolveItem[]>([])
 const provisionBatchPreviewMissingIds = ref<string[]>([])
 const provisionBatchPreviewInactiveIds = ref<string[]>([])
+const provisionBatchAffectedIds = ref<string[]>([])
+const provisionBatchUnchangedIds = ref<string[]>([])
 const provisionBatchPreviewHasResult = computed(() => {
   return provisionBatchPreviewRequested.value > 0
     || provisionBatchPreviewItems.value.length > 0
@@ -3633,6 +3762,11 @@ const auditLogLoading = ref(false)
 const auditLogExporting = ref(false)
 const auditLogs = ref<AttendanceAuditLogItem[]>([])
 const auditLogQuery = ref('')
+const auditLogActionPrefix = ref('')
+const auditLogStatusClass = ref('')
+const auditLogErrorCode = ref('')
+const auditLogFrom = ref('')
+const auditLogTo = ref('')
 const auditLogStatusMessage = ref('')
 const auditLogStatusKind = ref<'info' | 'error'>('info')
 const auditLogPage = ref(1)
@@ -3640,6 +3774,10 @@ const auditLogTotal = ref(0)
 const auditLogPageSize = 50
 const auditLogTotalPages = computed(() => Math.max(1, Math.ceil(auditLogTotal.value / auditLogPageSize)))
 const auditLogSelectedId = ref('')
+const auditSummaryLoading = ref(false)
+const auditSummaryActions = ref<AttendanceAuditSummaryRow[]>([])
+const auditSummaryErrors = ref<AttendanceAuditSummaryRow[]>([])
+const auditSummaryRowCount = computed(() => Math.max(auditSummaryActions.value.length, auditSummaryErrors.value.length))
 const holidaySyncLastRun = ref<AttendanceSettings['holidaySync'] extends { lastRun?: infer T } ? T | null : any>(null)
 const ruleLoading = ref(false)
 const shiftLoading = ref(false)
@@ -3707,6 +3845,7 @@ const importBatchItems = ref<AttendanceImportItem[]>([])
 const importBatchSelectedId = ref('')
 const importBatchSnapshot = ref<Record<string, any> | null>(null)
 const importCsvWarnings = ref<string[]>([])
+const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
 const importAsyncPolling = ref(false)
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
@@ -4274,6 +4413,8 @@ function buildImportPayload(): Record<string, any> | null {
 const IMPORT_LARGE_ROW_THRESHOLD = 2000
 const IMPORT_PREVIEW_LIMIT = 200
 const IMPORT_COMMIT_ITEMS_LIMIT = 200
+const IMPORT_PREVIEW_CHUNK_THRESHOLD = 10_000
+const IMPORT_PREVIEW_CHUNK_SIZE = 5000
 const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_POLL_INTERVAL_MS = 2000
 const IMPORT_ASYNC_POLL_TIMEOUT_MS = 30 * 60 * 1000
@@ -4312,6 +4453,130 @@ function applyImportScalabilityHints(payload: Record<string, any>, options: { mo
   }
 }
 
+interface ImportPreviewChunkPlan {
+  totalRows: number
+  chunkCount: number
+  sampleLimit: number
+  buildPayload: (chunkIndex: number, remainingSample: number) => Record<string, any>
+}
+
+function normalizePreviewSampleLimit(rawLimit: unknown): number {
+  const value = Number(rawLimit)
+  if (!Number.isFinite(value)) return IMPORT_PREVIEW_LIMIT
+  return Math.min(Math.max(Math.trunc(value), 1), 1000)
+}
+
+function splitCsvRecords(csvText: string): string[] {
+  if (!csvText) return []
+  const records: string[] = []
+  let start = 0
+  let inQuotes = false
+
+  for (let i = 0; i < csvText.length; i++) {
+    const ch = csvText[i]
+    if (ch === '"') {
+      if (inQuotes && csvText[i + 1] === '"') {
+        i += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+      continue
+    }
+    if (ch === '\n' && !inQuotes) {
+      const raw = csvText.slice(start, i)
+      const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+      records.push(line)
+      start = i + 1
+    }
+  }
+
+  if (start <= csvText.length) {
+    const raw = csvText.slice(start)
+    if (raw.length > 0) {
+      const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+      records.push(line)
+    }
+  }
+
+  if (records.length > 0 && records[0].charCodeAt(0) === 0xfeff) {
+    records[0] = records[0].slice(1)
+  }
+  return records.filter((line, index) => !(index === records.length - 1 && line.trim() === ''))
+}
+
+function buildChunkedImportPreviewPlan(payload: Record<string, any>): ImportPreviewChunkPlan | null {
+  const sampleLimit = normalizePreviewSampleLimit(payload.previewLimit)
+
+  if (Array.isArray(payload.rows) && payload.rows.length >= IMPORT_PREVIEW_CHUNK_THRESHOLD) {
+    const totalRows = payload.rows.length
+    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+    return {
+      totalRows,
+      chunkCount,
+      sampleLimit,
+      buildPayload: (chunkIndex, remainingSample) => {
+        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
+        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        return {
+          ...payload,
+          rows: payload.rows.slice(start, end),
+          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+        }
+      },
+    }
+  }
+
+  if (Array.isArray(payload.entries) && payload.entries.length >= IMPORT_PREVIEW_CHUNK_THRESHOLD) {
+    const totalRows = payload.entries.length
+    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+    return {
+      totalRows,
+      chunkCount,
+      sampleLimit,
+      buildPayload: (chunkIndex, remainingSample) => {
+        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
+        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        return {
+          ...payload,
+          entries: payload.entries.slice(start, end),
+          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+        }
+      },
+    }
+  }
+
+  if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
+    const records = splitCsvRecords(payload.csvText)
+    if (records.length <= 1) return null
+    const header = records[0]
+    const dataRows = records.slice(1)
+    const totalRows = dataRows.length
+    if (totalRows < IMPORT_PREVIEW_CHUNK_THRESHOLD) return null
+    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+
+    return {
+      totalRows,
+      chunkCount,
+      sampleLimit,
+      buildPayload: (chunkIndex, remainingSample) => {
+        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
+        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        const csvText = [header, ...dataRows.slice(start, end)].join('\n')
+        const nextPayload: Record<string, any> = {
+          ...payload,
+          csvText,
+          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+        }
+        delete nextPayload.rows
+        delete nextPayload.entries
+        return nextPayload
+      },
+    }
+  }
+
+  return null
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -4331,6 +4596,7 @@ function payrollTemplateName(templateId?: string | null): string {
 }
 
 async function loadImportTemplate() {
+  clearImportPreviewTask()
   importLoading.value = true
   try {
     const response = await apiFetch('/api/attendance/import/template')
@@ -4516,7 +4782,113 @@ async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {})
   }
 }
 
+let importPreviewTaskSeq = 0
+
+function clearImportPreviewTask() {
+  importPreviewTaskSeq += 1
+  importPreviewTask.value = null
+}
+
+async function runChunkedImportPreview(payload: Record<string, any>, plan: ImportPreviewChunkPlan): Promise<void> {
+  const seq = ++importPreviewTaskSeq
+  importPreviewTask.value = {
+    mode: 'chunked',
+    status: 'running',
+    totalRows: plan.totalRows,
+    processedRows: 0,
+    totalChunks: plan.chunkCount,
+    completedChunks: 0,
+    message: null,
+  }
+
+  const aggregatedItems: AttendanceImportPreviewItem[] = []
+  let totalRowCount = 0
+  let invalidCount = 0
+  let duplicateCount = 0
+  const warningSet = new Set<string>()
+
+  for (let chunkIndex = 0; chunkIndex < plan.chunkCount; chunkIndex += 1) {
+    if (seq !== importPreviewTaskSeq) {
+      throw new Error('Preview task canceled')
+    }
+
+    const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
+    const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    if (!tokenOk) throw new Error('Failed to prepare import token')
+    if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
+
+    const response = await apiFetch('/api/attendance/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(chunkPayload),
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || `Failed to preview chunk ${chunkIndex + 1}/${plan.chunkCount}`)
+    }
+
+    const chunkItems = Array.isArray(data.data?.items) ? data.data.items as AttendanceImportPreviewItem[] : []
+    const rowCount = Number(data.data?.rowCount)
+    const stats = data.data?.stats && typeof data.data.stats === 'object' ? data.data.stats : null
+    const chunkWarnings = [
+      ...(Array.isArray(data.data?.csvWarnings) ? data.data.csvWarnings : []),
+      ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
+    ]
+
+    totalRowCount += Number.isFinite(rowCount) ? rowCount : 0
+    if (stats && Number.isFinite(Number((stats as any).invalid))) {
+      invalidCount += Number((stats as any).invalid)
+    }
+    if (stats && Number.isFinite(Number((stats as any).duplicates))) {
+      duplicateCount += Number((stats as any).duplicates)
+    }
+
+    for (const warning of chunkWarnings) {
+      warningSet.add(String(warning))
+    }
+
+    if (aggregatedItems.length < plan.sampleLimit && chunkItems.length > 0) {
+      const remains = plan.sampleLimit - aggregatedItems.length
+      aggregatedItems.push(...chunkItems.slice(0, remains))
+    }
+
+    // Token is single-use and consumed by preview.
+    importCommitToken.value = ''
+    importCommitTokenExpiresAt.value = ''
+
+    if (importPreviewTask.value && seq === importPreviewTaskSeq) {
+      importPreviewTask.value = {
+        ...importPreviewTask.value,
+        processedRows: Math.min(plan.totalRows, (chunkIndex + 1) * IMPORT_PREVIEW_CHUNK_SIZE),
+        completedChunks: chunkIndex + 1,
+      }
+    }
+  }
+
+  if (seq !== importPreviewTaskSeq) {
+    throw new Error('Preview task canceled')
+  }
+
+  importPreview.value = aggregatedItems
+  importCsvWarnings.value = Array.from(warningSet)
+  const shown = aggregatedItems.length
+  const message = `Preview loaded (chunked ${plan.chunkCount} chunks, showing ${shown}/${totalRowCount} rows).`
+  const suffix = invalidCount || duplicateCount ? ` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.` : ''
+  setStatus(`${message}${suffix}`)
+
+  importPreviewTask.value = {
+    mode: 'chunked',
+    status: 'completed',
+    totalRows: plan.totalRows,
+    processedRows: plan.totalRows,
+    totalChunks: plan.chunkCount,
+    completedChunks: plan.chunkCount,
+    message: `Completed in ${plan.chunkCount} chunk(s).`,
+  }
+}
+
 async function previewImport() {
+  clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
     setStatus('Invalid JSON payload for import.', 'error')
@@ -4525,8 +4897,33 @@ async function previewImport() {
   applyImportScalabilityHints(payload, { mode: 'preview' })
   importLoading.value = true
   try {
+    const chunkPlan = buildChunkedImportPreviewPlan(payload)
+    if (chunkPlan) {
+      await runChunkedImportPreview(payload, chunkPlan)
+      return
+    }
+
+    importPreviewTask.value = {
+      mode: 'single',
+      status: 'running',
+      totalRows: estimateImportRowCount(payload) ?? 0,
+      processedRows: 0,
+      totalChunks: 1,
+      completedChunks: 0,
+      message: null,
+    }
+
     const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
-    if (!tokenOk) return
+    if (!tokenOk) {
+      if (importPreviewTask.value) {
+        importPreviewTask.value = {
+          ...importPreviewTask.value,
+          status: 'failed',
+          message: 'Failed to prepare import token',
+        }
+      }
+      return
+    }
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
     const response = await apiFetch('/api/attendance/import/preview', {
       method: 'POST',
@@ -4553,10 +4950,26 @@ async function previewImport() {
       : `Preview loaded (${shown} rows).`
     const suffix = invalidCount || dupCount ? ` Invalid: ${invalidCount}. Duplicates: ${dupCount}.` : ''
     setStatus(`${baseMsg}${suffix}`)
+    importPreviewTask.value = {
+      mode: 'single',
+      status: 'completed',
+      totalRows: Number.isFinite(rowCount) ? rowCount : shown,
+      processedRows: Number.isFinite(rowCount) ? rowCount : shown,
+      totalChunks: 1,
+      completedChunks: 1,
+      message: null,
+    }
     // Token is single-use (consumed by preview); clear it to avoid reusing a stale token.
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
+    if (importPreviewTask.value) {
+      importPreviewTask.value = {
+        ...importPreviewTask.value,
+        status: 'failed',
+        message: (error as Error).message || 'Preview failed',
+      }
+    }
     setStatus((error as Error).message || 'Failed to preview import', 'error')
   } finally {
     importLoading.value = false
@@ -4608,6 +5021,7 @@ function clearImportAsyncJob() {
 }
 
 async function runImport() {
+  clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
     setStatus('Invalid JSON payload for import.', 'error')
@@ -5131,10 +5545,21 @@ function applyProvisionBatchResolvePayload(payload: any, requestedUserIds: strin
     : fallbackInactive
   const inactive = Array.from(new Set(inactiveRaw.filter((v) => v.length > 0)))
 
+  const affectedRaw: string[] = Array.isArray(payload?.affectedUserIds)
+    ? payload.affectedUserIds.map((v: any) => String(v || '').trim())
+    : []
+  const unchangedRaw: string[] = Array.isArray(payload?.unchangedUserIds)
+    ? payload.unchangedUserIds.map((v: any) => String(v || '').trim())
+    : []
+  const affected = Array.from(new Set(affectedRaw.filter((v) => v.length > 0)))
+  const unchanged = Array.from(new Set(unchangedRaw.filter((v) => v.length > 0)))
+
   provisionBatchPreviewRequested.value = requested
   provisionBatchPreviewItems.value = items
   provisionBatchPreviewMissingIds.value = missing
   provisionBatchPreviewInactiveIds.value = inactive
+  provisionBatchAffectedIds.value = affected
+  provisionBatchUnchangedIds.value = unchanged
 }
 
 function clearProvisionBatchPreview() {
@@ -5142,6 +5567,8 @@ function clearProvisionBatchPreview() {
   provisionBatchPreviewItems.value = []
   provisionBatchPreviewMissingIds.value = []
   provisionBatchPreviewInactiveIds.value = []
+  provisionBatchAffectedIds.value = []
+  provisionBatchUnchangedIds.value = []
 }
 
 function normalizeProvisionUserProfile(value: any, fallbackUserId: string): AttendanceAdminUserProfileSummary | null {
@@ -5466,8 +5893,9 @@ async function grantProvisioningRoleBatch() {
       const eligible = Number(batchData.data?.eligible ?? (valid.length - provisionBatchPreviewMissingIds.value.length)) || 0
       const missing = provisionBatchPreviewMissingIds.value.length
       const inactive = provisionBatchPreviewInactiveIds.value.length
+      const unchanged = provisionBatchUnchangedIds.value.length
       const kind = missing > 0 ? 'error' : 'info'
-      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${eligible} eligible user(s). Missing ${missing}, inactive ${inactive}.`, kind)
+      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, kind)
       return
     }
 
@@ -5558,8 +5986,9 @@ async function revokeProvisioningRoleBatch() {
       const eligible = Number(batchData.data?.eligible ?? (valid.length - provisionBatchPreviewMissingIds.value.length)) || 0
       const missing = provisionBatchPreviewMissingIds.value.length
       const inactive = provisionBatchPreviewInactiveIds.value.length
+      const unchanged = provisionBatchUnchangedIds.value.length
       const kind = missing > 0 ? 'error' : 'info'
-      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${eligible} eligible user(s). Missing ${missing}, inactive ${inactive}.`, kind)
+      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, kind)
       return
     }
 
@@ -5629,12 +6058,76 @@ function toggleAuditLogMeta(item: AttendanceAuditLogItem) {
   auditLogSelectedId.value = auditLogSelectedId.value === item.id ? '' : item.id
 }
 
+function appendAuditLogFilters(params: URLSearchParams) {
+  const q = auditLogQuery.value.trim()
+  if (q) params.set('q', q)
+  const actionPrefix = auditLogActionPrefix.value.trim()
+  if (actionPrefix) params.set('actionPrefix', actionPrefix)
+  const statusClass = auditLogStatusClass.value.trim()
+  if (statusClass) params.set('statusClass', statusClass)
+  const errorCode = auditLogErrorCode.value.trim()
+  if (errorCode) params.set('errorCode', errorCode)
+  const from = auditLogFrom.value.trim()
+  if (from) {
+    const fromDate = new Date(from)
+    if (!Number.isNaN(fromDate.getTime())) params.set('from', fromDate.toISOString())
+  }
+  const to = auditLogTo.value.trim()
+  if (to) {
+    const toDate = new Date(to)
+    if (!Number.isNaN(toDate.getTime())) params.set('to', toDate.toISOString())
+  }
+}
+
+async function loadAuditSummary() {
+  auditSummaryLoading.value = true
+  try {
+    const params = new URLSearchParams({
+      windowMinutes: '60',
+      limit: '8',
+    })
+    const response = await apiFetch(`/api/attendance-admin/audit-logs/summary?${params.toString()}`)
+    if (response.status === 404) {
+      auditSummaryActions.value = []
+      auditSummaryErrors.value = []
+      return
+    }
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error(data?.error?.message || 'Failed to load audit summary')
+    }
+
+    const actionsRaw = Array.isArray(data.data?.actions) ? data.data.actions : []
+    const errorsRaw = Array.isArray(data.data?.errors) ? data.data.errors : []
+
+    auditSummaryActions.value = actionsRaw.map((row: any) => ({
+      key: String(row?.action || '--'),
+      total: Number(row?.total ?? 0) || 0,
+    }))
+    auditSummaryErrors.value = errorsRaw.map((row: any) => ({
+      key: String(row?.error_code || '--'),
+      total: Number(row?.total ?? 0) || 0,
+    }))
+  } catch (error: any) {
+    setAuditLogStatus(error?.message || 'Failed to load audit summary', 'error')
+  } finally {
+    auditSummaryLoading.value = false
+  }
+}
+
+function reloadAuditLogs() {
+  void Promise.all([loadAuditLogs(1), loadAuditSummary()])
+}
+
 async function exportAuditLogsCsv() {
   auditLogExporting.value = true
   try {
     const params = new URLSearchParams()
-    const q = auditLogQuery.value.trim()
-    if (q) params.set('q', q)
+    appendAuditLogFilters(params)
     // Safety cap (server also enforces).
     params.set('limit', '5000')
 
@@ -5676,8 +6169,7 @@ async function loadAuditLogs(page: number) {
       page: String(page),
       pageSize: String(auditLogPageSize),
     })
-    const q = auditLogQuery.value.trim()
-    if (q) params.set('q', q)
+    appendAuditLogFilters(params)
     const response = await apiFetch(`/api/attendance-admin/audit-logs?${params.toString()}`)
     if (response.status === 404) {
       auditLogs.value = []
@@ -8006,6 +8498,8 @@ async function loadAdminData() {
   await Promise.all([
     loadSettings(),
     loadProvisionRoleTemplates(),
+    loadAuditLogs(1),
+    loadAuditSummary(),
     loadRule(),
     loadRuleSets(),
     loadRuleTemplates(),

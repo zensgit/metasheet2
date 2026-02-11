@@ -1041,6 +1041,8 @@ describe('Attendance Plugin Integration', () => {
         eligible?: number
         updated?: number
         missingUserIds?: string[]
+        affectedUserIds?: string[]
+        unchangedUserIds?: string[]
       }
     } | undefined)?.data
     expect(assignData?.requested).toBe(2)
@@ -1048,6 +1050,9 @@ describe('Attendance Plugin Integration', () => {
     expect(Array.isArray(assignData?.missingUserIds)).toBe(true)
     expect(assignData?.missingUserIds?.includes(missingUserId)).toBe(true)
     expect((assignData?.updated ?? -1) >= 0).toBe(true)
+    expect(Array.isArray(assignData?.affectedUserIds)).toBe(true)
+    expect(Array.isArray(assignData?.unchangedUserIds)).toBe(true)
+    expect((assignData?.affectedUserIds?.length ?? 0) + (assignData?.unchangedUserIds?.length ?? 0)).toBe(assignData?.eligible)
 
     const unassignRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/unassign`, {
       method: 'POST',
@@ -1066,11 +1071,64 @@ describe('Attendance Plugin Integration', () => {
         requested?: number
         eligible?: number
         missingUserIds?: string[]
+        affectedUserIds?: string[]
+        unchangedUserIds?: string[]
       }
     } | undefined)?.data
     expect(unassignData?.requested).toBe(2)
     expect(unassignData?.eligible).toBe(1)
     expect(unassignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect(Array.isArray(unassignData?.affectedUserIds)).toBe(true)
+    expect(Array.isArray(unassignData?.unchangedUserIds)).toBe(true)
+    expect((unassignData?.affectedUserIds?.length ?? 0) + (unassignData?.unchangedUserIds?.length ?? 0)).toBe(unassignData?.eligible)
+  })
+
+  it('supports attendance admin audit log filters and summary endpoint', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const summaryRes = await requestJson(`${baseUrl}/api/attendance-admin/audit-logs/summary?windowMinutes=120&limit=5`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(summaryRes.status).toBe(200)
+    const summaryData = (summaryRes.body as {
+      ok?: boolean
+      data?: {
+        windowMinutes?: number
+        actions?: unknown[]
+        errors?: unknown[]
+      }
+    } | undefined)?.data
+    expect(summaryData?.windowMinutes).toBe(120)
+    expect(Array.isArray(summaryData?.actions)).toBe(true)
+    expect(Array.isArray(summaryData?.errors)).toBe(true)
+
+    const filterRes = await requestJson(
+      `${baseUrl}/api/attendance-admin/audit-logs?page=1&pageSize=5&statusClass=4xx&actionPrefix=${encodeURIComponent('attendance_http:POST:/api/attendance')}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    )
+    expect(filterRes.status).toBe(200)
+    const filterBody = filterRes.body as {
+      ok?: boolean
+      data?: {
+        items?: Array<{ action?: string; status_code?: number | null }>
+      }
+    } | undefined
+    expect(filterBody?.ok).toBe(true)
+    expect(Array.isArray(filterBody?.data?.items)).toBe(true)
   })
 
   it('supports import previewLimit + commit returnItems flags for large imports', async () => {

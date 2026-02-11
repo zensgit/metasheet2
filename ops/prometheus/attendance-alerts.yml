@@ -21,6 +21,26 @@ groups:
           summary: Attendance import commit is failing
           runbook: Inspect import batch audit logs; verify idempotency behavior; check DB constraints and plugin status.
 
+      - alert: AttendanceImportCommitLatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(attendance_operation_latency_seconds_bucket{operation=~"import_commit|import_commit_async",result="ok"}[5m])) by (le)) > 20
+        for: 10m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance import commit latency p95 is high
+          runbook: Check import job queue backlog, DB write throughput, and large payload patterns.
+
+      - alert: AttendanceApprovalFailures
+        expr: sum(rate(attendance_operation_failures_total{operation=~"request_create|request_approve|request_reject"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance approval operations are failing
+          runbook: Inspect approval flow configuration, permission assignments, and operation_audit_logs error codes.
+
       - alert: AttendanceRateLimitedHigh
         expr: sum(rate(attendance_rate_limited_total[5m])) > 0.2
         for: 10m
@@ -30,4 +50,3 @@ groups:
         annotations:
           summary: Attendance API rate limiting is frequently triggered
           runbook: Confirm allowlist and rate limit settings; check for abusive traffic; adjust ATTENDANCE_RATE_LIMIT_* envs if needed.
-
