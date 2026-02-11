@@ -62,8 +62,17 @@ Rationale:
 - Escalation behavior:
   - `P0` strict gate failure -> open/update issue `[Attendance Gate] Daily dashboard alert` and fail workflow.
   - `P1` perf gate failure/stale runs -> open/update same issue and fail workflow.
+- Channel sync workflow:
+  - `.github/workflows/attendance-gate-issue-notify.yml`
+  - Routes `[Attendance Gate]` issue events to Slack/DingTalk webhooks when configured.
 - Workflow validation:
   - [Attendance Daily Gate Dashboard #21900762111](https://github.com/zensgit/metasheet2/actions/runs/21900762111) (`SUCCESS`)
   - Evidence:
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.md`
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.json`
+- Failure drill validation:
+  - [Attendance Daily Gate Dashboard #21912261134](https://github.com/zensgit/metasheet2/actions/runs/21912261134) (`FAILURE`, expected)
+  - Escalation issue created:
+    - [#141](https://github.com/zensgit/metasheet2/issues/141)
+  - Evidence:
+    - `output/playwright/ga/21912261134/attendance-daily-gate-dashboard.md`

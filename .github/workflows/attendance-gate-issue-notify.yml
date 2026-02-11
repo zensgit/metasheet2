@@ -1,0 +1,92 @@
+name: Attendance Gate Issue Notify
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+  workflow_dispatch:
+    inputs:
+      title:
+        description: 'Issue title for manual notification test'
+        required: false
+        default: '[Attendance Gate] Manual notify test'
+      issue_url:
+        description: 'Issue URL for manual notification test'
+        required: false
+        default: 'https://github.com/zensgit/metasheet2/issues/0'
+      status:
+        description: 'pass/fail status string'
+        required: false
+        default: 'fail'
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prepare message
+        id: prep
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName
+            const isManual = eventName === 'workflow_dispatch'
+            const issueTitle = isManual
+              ? String(core.getInput('title') || '[Attendance Gate] Manual notify test')
+              : String(context.payload.issue?.title || '')
+            const issueUrl = isManual
+              ? String(core.getInput('issue_url') || '')
+              : String(context.payload.issue?.html_url || '')
+            const issueState = isManual
+              ? String(core.getInput('status') || 'fail')
+              : String(context.payload.issue?.state || 'open')
+
+            const shouldNotify = issueTitle.startsWith('[Attendance Gate]')
+            core.setOutput('should_notify', shouldNotify ? 'true' : 'false')
+            core.setOutput('issue_title', issueTitle)
+            core.setOutput('issue_url', issueUrl)
+
+            const lines = [
+              '[Attendance Gate Alert]',
+              `repo: ${context.repo.owner}/${context.repo.repo}`,
+              `event: ${eventName}`,
+              `title: ${issueTitle}`,
+              `state: ${issueState}`,
+              issueUrl ? `url: ${issueUrl}` : '',
+            ].filter(Boolean)
+            core.setOutput('message', lines.join('\n'))
+
+      - name: Summary
+        run: |
+          echo "should_notify=${{ steps.prep.outputs.should_notify }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "issue_title=${{ steps.prep.outputs.issue_title }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "issue_url=${{ steps.prep.outputs.issue_url }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Slack webhook
+        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}
+          MESSAGE: ${{ steps.prep.outputs.message }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg text "$MESSAGE" '{text:$text}')"
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"
+
+      - name: Notify DingTalk webhook
+        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL }}
+          MESSAGE: ${{ steps.prep.outputs.message }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg text "$MESSAGE" '{msgtype:"text", text:{content:$text}}')"
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL"
+
+      - name: Warn when no outbound channel configured
+        if: steps.prep.outputs.should_notify == 'true' && secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL == '' && secrets.ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL == ''
+        run: |
+          echo "No channel webhook configured. Set ATTENDANCE_ALERT_SLACK_WEBHOOK_URL and/or ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL."
+          echo "No channel webhook configured." >> "$GITHUB_STEP_SUMMARY"

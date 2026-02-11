@@ -73,6 +73,8 @@ Out of scope for this delivery:
   - Strict gates: `.github/workflows/attendance-strict-gates-prod.yml`
   - Perf baseline (scheduled + manual): `.github/workflows/attendance-import-perf-baseline.yml`
   - Daily dashboard + escalation: `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - Issue-to-channel sync (Slack/DingTalk): `.github/workflows/attendance-gate-issue-notify.yml`
+    - Secrets (optional, at least one): `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL`, `ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL`
 
 ## Rollback
 
