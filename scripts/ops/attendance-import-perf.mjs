@@ -25,6 +25,10 @@ const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC ===
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
 const exportType = String(process.env.EXPORT_TYPE || 'anomalies')
+const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
+const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
+const maxExportMs = parseOptionalPositiveInt('MAX_EXPORT_MS')
+const maxRollbackMs = parseOptionalPositiveInt('MAX_ROLLBACK_MS')
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -45,6 +49,16 @@ function die(message) {
 
 function log(message) {
   console.log(`[attendance-import-perf] ${message}`)
+}
+
+function parseOptionalPositiveInt(envName) {
+  const raw = process.env[envName]
+  if (!raw || String(raw).trim().length === 0) return null
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) {
+    die(`${envName} must be a positive number when set`)
+  }
+  return Math.floor(value)
 }
 
 function nowMs() {
@@ -370,6 +384,26 @@ async function run() {
       afterCsv: memAfterCsv,
     },
     outputDir: outDir,
+    thresholds: {
+      maxPreviewMs,
+      maxCommitMs,
+      maxExportMs,
+      maxRollbackMs,
+    },
+    regressions: [],
+  }
+
+  if (maxPreviewMs !== null && summary.previewMs > maxPreviewMs) {
+    summary.regressions.push(`previewMs=${summary.previewMs} exceeds maxPreviewMs=${maxPreviewMs}`)
+  }
+  if (maxCommitMs !== null && summary.commitMs > maxCommitMs) {
+    summary.regressions.push(`commitMs=${summary.commitMs} exceeds maxCommitMs=${maxCommitMs}`)
+  }
+  if (maxExportMs !== null && summary.exportMs !== null && summary.exportMs > maxExportMs) {
+    summary.regressions.push(`exportMs=${summary.exportMs} exceeds maxExportMs=${maxExportMs}`)
+  }
+  if (maxRollbackMs !== null && summary.rollbackMs !== null && summary.rollbackMs > maxRollbackMs) {
+    summary.regressions.push(`rollbackMs=${summary.rollbackMs} exceeds maxRollbackMs=${maxRollbackMs}`)
   }
 
   await writeJson(path.join(outDir, 'perf-summary.json'), summary)
@@ -378,6 +412,9 @@ async function run() {
   if (exportMs !== null) log(`export ok: type=${exportType} ms=${exportMs}`)
   if (rolledBack) log(`rollback ok: ms=${rollbackMs}`)
   log(`Wrote: ${path.join(outDir, 'perf-summary.json')}`)
+  if (summary.regressions.length > 0) {
+    throw new Error(`performance threshold regression: ${summary.regressions.join('; ')}`)
+  }
 }
 
 run().catch((error) => {

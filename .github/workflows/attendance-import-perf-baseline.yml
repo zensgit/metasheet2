@@ -1,4 +1,4 @@
-name: Attendance Import Perf Baseline (Manual)
+name: Attendance Import Perf Baseline
 
 on:
   workflow_dispatch:
@@ -15,6 +15,37 @@ on:
         description: 'preview or commit'
         required: false
         default: 'commit'
+      commit_async:
+        description: 'Use /commit-async path (true/false)'
+        required: false
+        default: 'true'
+      export_csv:
+        description: 'Verify export csv latency (true/false)'
+        required: false
+        default: 'true'
+      max_preview_ms:
+        description: 'Fail if preview latency exceeds this value (optional)'
+        required: false
+        default: ''
+      max_commit_ms:
+        description: 'Fail if commit latency exceeds this value (optional)'
+        required: false
+        default: ''
+      max_export_ms:
+        description: 'Fail if export latency exceeds this value (optional)'
+        required: false
+        default: ''
+      max_rollback_ms:
+        description: 'Fail if rollback latency exceeds this value (optional)'
+        required: false
+        default: ''
+  schedule:
+    # Daily at 03:20 UTC (after strict gates job window).
+    - cron: '20 3 * * *'
+
+concurrency:
+  group: attendance-import-perf-baseline
+  cancel-in-progress: true
 
 jobs:
   perf:
@@ -26,7 +57,12 @@ jobs:
       ROWS: ${{ inputs.rows || '10000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
-      EXPORT_CSV: 'false'
+      COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
+      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
+      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
+      MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
+      MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_MAX_ROLLBACK_MS || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,4 +85,3 @@ jobs:
           retention-days: 14
           path: |
             output/playwright/attendance-import-perf/**
-

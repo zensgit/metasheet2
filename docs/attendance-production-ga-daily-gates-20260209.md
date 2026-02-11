@@ -23,7 +23,7 @@ This is the primary Go/No-Go gate.
 REQUIRE_ATTENDANCE_ADMIN_API="true" \
 REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
-REQUIRE_IMPORT_ASYNC="false" \
+REQUIRE_IMPORT_ASYNC="true" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
 AUTH_TOKEN="<ADMIN_JWT>" \
@@ -39,8 +39,7 @@ Expected:
   - `idempotency ok`
   - `export csv ok`
   - `audit export csv ok`
-  - If `REQUIRE_IMPORT_ASYNC="true"`, also contains:
-    - `import async idempotency ok`
+  - `import async idempotency ok`
 
 Evidence:
 
@@ -77,7 +76,8 @@ AUTH_TOKEN="<ADMIN_JWT>" \
 ROWS="10000" \
 MODE="commit" \
 ROLLBACK="true" \
-EXPORT_CSV="false" \
+COMMIT_ASYNC="true" \
+EXPORT_CSV="true" \
 node scripts/ops/attendance-import-perf.mjs
 ```
 
@@ -93,14 +93,16 @@ Recommended thresholds (adjust after 1 week of real traffic data):
 
 - `previewMs <= 120000` for 10k rows
 - `commitMs <= 180000` for 10k rows
+- `exportMs <= 30000` for 10k rows
+- `rollbackMs <= 10000` for 10k rows
 
 Notes:
 
 - By default, this script does **not** enable `groupSync` to avoid creating persistent groups/members.
 - If you see `504 Gateway Time-out` from nginx on preview/commit, ensure the web proxy timeouts are increased:
   - `docker/nginx.conf`: `proxy_read_timeout 300s` (then redeploy/restart web)
-- To also verify export:
-  - `EXPORT_CSV="true" EXPORT_TYPE="anomalies" ... node scripts/ops/attendance-import-perf.mjs`
+- To enforce thresholds in CI/manual runs:
+  - `MAX_PREVIEW_MS=120000 MAX_COMMIT_MS=180000 MAX_EXPORT_MS=30000 MAX_ROLLBACK_MS=10000 ... node scripts/ops/attendance-import-perf.mjs`
 
 ## GitHub Actions (Recommended)
 
@@ -121,11 +123,12 @@ Artifacts:
 - Uploaded for 14 days:
   - `output/playwright/attendance-prod-acceptance/**`
 
-Inputs (optional hardening):
+Inputs:
 
-- `require_import_async=true` enables the async import commit gate (requires `/api/attendance/import/commit-async` + job polling + rollback).
+- `require_import_async` defaults to `true` (recommended).
+- Set `require_import_async=false` only for temporary legacy compatibility checks.
 
-### B) Manual Perf Baseline (10k)
+### B) Perf Baseline (Scheduled + Manual)
 
 Workflow:
 
@@ -134,6 +137,13 @@ Workflow:
 Required secret:
 
 - Secret: `ATTENDANCE_ADMIN_JWT`
+
+Optional repo variables (threshold guardrails):
+
+- `ATTENDANCE_PERF_MAX_PREVIEW_MS`
+- `ATTENDANCE_PERF_MAX_COMMIT_MS`
+- `ATTENDANCE_PERF_MAX_EXPORT_MS`
+- `ATTENDANCE_PERF_MAX_ROLLBACK_MS`
 
 Artifacts:
 
@@ -243,6 +253,29 @@ Integration test evidence (includes audit export CSV API regression check):
   - `pnpm --filter @metasheet/core-backend test:integration:attendance`
 - Evidence:
   - `output/playwright/attendance-next-phase/20260211-052522/attendance-integration.log`
+
+Automation hardening verification (defaults + perf thresholds):
+
+- Strict gates twice with default strictness (no explicit `REQUIRE_IMPORT_ASYNC`):
+  - `PASS`
+  - Evidence:
+    - `output/playwright/attendance-prod-acceptance/20260211-053626-1/`
+    - `output/playwright/attendance-prod-acceptance/20260211-053626-2/`
+  - API smoke logs include:
+    - `audit export csv ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+- Perf baseline with threshold guardrails:
+  - Command profile: `ROWS=500 MODE=commit COMMIT_ASYNC=true EXPORT_CSV=true ROLLBACK=true`
+  - Evidence:
+    - `output/playwright/attendance-import-perf-local/attendance-perf-mlhljnlj-wdmfnl/perf-summary.json`
+  - Result:
+    - `previewMs=11294`
+    - `commitMs=8141`
+    - `exportMs=31`
+    - `rollbackMs=76`
+    - `regressions=[]`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 

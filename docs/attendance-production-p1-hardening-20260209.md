@@ -134,7 +134,13 @@ API_BASE="http://142.171.239.56:8081/api" \
 AUTH_TOKEN="<ADMIN_JWT>" \
 ROWS="10000" \
 MODE="commit" \
+COMMIT_ASYNC="true" \
+EXPORT_CSV="true" \
 ROLLBACK="true" \
+MAX_PREVIEW_MS="120000" \
+MAX_COMMIT_MS="180000" \
+MAX_EXPORT_MS="30000" \
+MAX_ROLLBACK_MS="10000" \
 node scripts/ops/attendance-import-perf.mjs
 ```
 
@@ -147,10 +153,25 @@ Notes:
   - `PREVIEW_LIMIT=...`
   - `RETURN_ITEMS=true|false`
   - `ITEMS_LIMIT=...`
+  - `MAX_PREVIEW_MS`, `MAX_COMMIT_MS`, `MAX_EXPORT_MS`, `MAX_ROLLBACK_MS`
 
 Evidence:
 
 - `output/playwright/attendance-import-perf/<runId>/perf-summary.json`
+
+### 3) CI Gate Hardening (2026-02-11)
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+  - `require_import_async` default switched to `true`.
+- `scripts/ops/attendance-run-strict-gates-twice.sh`
+  - default `REQUIRE_IMPORT_ASYNC=true` to align local strict runs with CI.
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - now supports scheduled run (`03:20 UTC` daily) plus manual dispatch.
+  - supports perf thresholds via repo vars:
+    - `ATTENDANCE_PERF_MAX_PREVIEW_MS`
+    - `ATTENDANCE_PERF_MAX_COMMIT_MS`
+    - `ATTENDANCE_PERF_MAX_EXPORT_MS`
+    - `ATTENDANCE_PERF_MAX_ROLLBACK_MS`
 
 ## Local Observability Stack (Optional)
 
