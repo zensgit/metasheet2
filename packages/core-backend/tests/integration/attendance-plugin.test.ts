@@ -503,6 +503,8 @@ describe('Attendance Plugin Integration', () => {
 
     const anomalyDate = (() => {
       const dt = new Date()
+      // Ensure we don't override the "normal" record we just imported for `workDate`.
+      dt.setUTCDate(dt.getUTCDate() + 1)
       // Pick a weekday so `is_workday` stays true and the anomalies endpoint can surface the record.
       while (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) {
         dt.setUTCDate(dt.getUTCDate() + 1)
@@ -517,6 +519,10 @@ describe('Attendance Plugin Integration', () => {
           workDate: anomalyDate,
           fields: {
             firstInAt: `${anomalyDate}T09:00:00Z`,
+            lastOutAt: `${anomalyDate}T18:00:00Z`,
+            // Force a non-normal status so the anomalies endpoint must surface it even if the default
+            // org rule timezone differs from UTC in a developer DB.
+            status: 'partial',
           },
         },
       ],
@@ -539,8 +545,22 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(anomaliesRes.status).toBe(200)
-    const anomalyItems = (anomaliesRes.body as { data?: { items?: { workDate?: string; status?: string }[] } } | undefined)?.data?.items ?? []
-    expect(anomalyItems.some(item => item.workDate === anomalyDate && item.status === 'partial')).toBe(true)
+    const anomalyData = (anomaliesRes.body as {
+      data?: {
+        items?: { status?: string; suggestedRequestType?: string | null }[]
+        from?: string
+        to?: string
+      }
+    } | undefined)?.data ?? {}
+    const anomalyItems = anomalyData.items ?? []
+    expect(anomalyData.from).toBe(anomalyDate)
+    expect(anomalyData.to).toBe(anomalyDate)
+    expect(anomalyItems.length > 0).toBe(true)
+    expect(anomalyItems.some(item => item.status === 'partial')).toBe(true)
+    const partial = anomalyItems.find(item => item.status === 'partial')
+    if (partial) {
+      expect(partial.suggestedRequestType).toBeTruthy()
+    }
 
     const groupName = `QA Group ${runSuffix}`
     const createGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
@@ -802,6 +822,150 @@ describe('Attendance Plugin Integration', () => {
     const retryData = (retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
     expect(retryData?.batchId).toBe(batchId)
     expect(retryData?.idempotent).toBe(true)
+  })
+
+  it('supports async import commit jobs (commit-async + job polling)', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const idempotencyKey = `integration-async-${Date.now().toString(36)}`
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const commitPayload = {
+      userId: 'attendance-test',
+      idempotencyKey,
+      timezone: 'UTC',
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+      commitToken,
+    }
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commitPayload),
+    })
+    expect(commitRes.status).toBe(200)
+    const job = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
+    const jobId = job?.id
+    expect(typeof jobId).toBe('string')
+
+    // Retry should return the same job without requiring a new commitToken.
+    const { commitToken: _commitToken, ...retryPayload } = commitPayload
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(retryPayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryJob = (retryRes.body as { data?: { job?: any; idempotent?: boolean } } | undefined)?.data
+    expect(retryJob?.job?.id).toBe(jobId)
+    expect(retryJob?.idempotent).toBe(true)
+
+    // Poll job status until completion (fallback path runs in-process in tests).
+    let batchId = ''
+    for (let i = 0; i < 100; i++) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        batchId = String(jobData?.batchId || '')
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(batchId).toBeTruthy()
+
+    const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(rollbackRes.status).toBe(200)
+  })
+
+  it('exports attendance admin audit logs as CSV', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    // Create one attendance write action to ensure export has runtime data.
+    const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventType: 'check_in' }),
+    })
+    expect([200, 429]).toContain(punchRes.status)
+
+    const exportRes = await requestJson(`${baseUrl}/api/attendance-admin/audit-logs/export.csv?limit=50`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/csv',
+      },
+    })
+    expect(exportRes.status).toBe(200)
+    expect(exportRes.raw.includes('occurredAt')).toBe(true)
+    expect(exportRes.raw.includes('action')).toBe(true)
+    expect(exportRes.raw.includes('route')).toBe(true)
+
+    const [header] = exportRes.raw.split('\n')
+    expect(header).toBe(
+      'occurredAt,id,actorId,actorType,action,route,statusCode,latencyMs,resourceType,resourceId,requestId,ip,userAgent,errorCode,errorMessage,meta'
+    )
   })
 
   it('supports import previewLimit + commit returnItems flags for large imports', async () => {

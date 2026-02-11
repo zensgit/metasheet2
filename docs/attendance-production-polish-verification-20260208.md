@@ -242,3 +242,46 @@ Provisioning reliability note:
 
 Artifacts (example):
 - `output/playwright/attendance-prod-acceptance/*`
+
+## Execution Record (2026-02-11)
+
+Next-phase development verification (local dev environment) passed:
+
+- Strict gates twice:
+  - Gate 2 API smoke: PASS
+  - Gate 3 provisioning: PASS
+  - Gate 4/5/6 Playwright (production/desktop/mobile): PASS
+  - Strict flags enabled:
+    - `REQUIRE_ATTENDANCE_ADMIN_API=true`
+    - `REQUIRE_IDEMPOTENCY=true`
+    - `REQUIRE_IMPORT_EXPORT=true`
+    - `REQUIRE_IMPORT_ASYNC=true`
+  - Evidence:
+    - `output/playwright/attendance-prod-acceptance/20260211-052354-1/`
+    - `output/playwright/attendance-prod-acceptance/20260211-052354-2/`
+
+- Backend integration tests:
+  - `packages/core-backend/tests/integration/attendance-plugin.test.ts` PASS (5 tests)
+  - Includes regression coverage for:
+    - import idempotency retry without commitToken
+    - async import commit + job polling
+    - attendance admin audit logs CSV export
+  - Evidence:
+    - `output/playwright/attendance-next-phase/20260211-052522/attendance-integration.log`
+
+- Auth + perf hardening:
+  - `packages/core-backend/src/auth/AuthService.ts`
+    - token verification/refresh now accepts `userId` + legacy `id`/`sub` claims
+  - `packages/core-backend/tests/unit/AuthService.test.ts`
+    - unit tests PASS (legacy `id` claim coverage for `verifyToken` and `refreshToken`)
+  - `scripts/ops/attendance-import-perf.mjs`
+    - supports threshold assertions via `MAX_PREVIEW_MS`, `MAX_COMMIT_MS`, `MAX_EXPORT_MS`, `MAX_ROLLBACK_MS`
+  - Verification:
+    - strict gates twice with default strictness (`REQUIRE_IMPORT_ASYNC` default true): PASS
+      - `output/playwright/attendance-prod-acceptance/20260211-053626-1/`
+      - `output/playwright/attendance-prod-acceptance/20260211-053626-2/`
+    - perf threshold run: PASS
+      - `output/playwright/attendance-import-perf-local/attendance-perf-mlhljnlj-wdmfnl/perf-summary.json`
+    - local test logs:
+      - `output/playwright/attendance-next-phase/20260211-053920/auth-service-unit.log`
+      - `output/playwright/attendance-next-phase/20260211-053920/attendance-integration.log`

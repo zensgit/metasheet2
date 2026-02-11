@@ -23,6 +23,7 @@ This is the primary Go/No-Go gate.
 REQUIRE_ATTENDANCE_ADMIN_API="true" \
 REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
+REQUIRE_IMPORT_ASYNC="true" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
 AUTH_TOKEN="<ADMIN_JWT>" \
@@ -37,6 +38,8 @@ Expected:
 - `gate-api-smoke.log` contains:
   - `idempotency ok`
   - `export csv ok`
+  - `audit export csv ok`
+  - `import async idempotency ok`
 
 Evidence:
 
@@ -73,7 +76,8 @@ AUTH_TOKEN="<ADMIN_JWT>" \
 ROWS="10000" \
 MODE="commit" \
 ROLLBACK="true" \
-EXPORT_CSV="false" \
+COMMIT_ASYNC="true" \
+EXPORT_CSV="true" \
 node scripts/ops/attendance-import-perf.mjs
 ```
 
@@ -89,14 +93,16 @@ Recommended thresholds (adjust after 1 week of real traffic data):
 
 - `previewMs <= 120000` for 10k rows
 - `commitMs <= 180000` for 10k rows
+- `exportMs <= 30000` for 10k rows
+- `rollbackMs <= 10000` for 10k rows
 
 Notes:
 
 - By default, this script does **not** enable `groupSync` to avoid creating persistent groups/members.
 - If you see `504 Gateway Time-out` from nginx on preview/commit, ensure the web proxy timeouts are increased:
   - `docker/nginx.conf`: `proxy_read_timeout 300s` (then redeploy/restart web)
-- To also verify export:
-  - `EXPORT_CSV="true" EXPORT_TYPE="anomalies" ... node scripts/ops/attendance-import-perf.mjs`
+- To enforce thresholds in CI/manual runs:
+  - `MAX_PREVIEW_MS=120000 MAX_COMMIT_MS=180000 MAX_EXPORT_MS=30000 MAX_ROLLBACK_MS=10000 ... node scripts/ops/attendance-import-perf.mjs`
 
 ## GitHub Actions (Recommended)
 
@@ -117,7 +123,12 @@ Artifacts:
 - Uploaded for 14 days:
   - `output/playwright/attendance-prod-acceptance/**`
 
-### B) Manual Perf Baseline (10k)
+Inputs:
+
+- `require_import_async` defaults to `true` (recommended).
+- Set `require_import_async=false` only for temporary legacy compatibility checks.
+
+### B) Perf Baseline (Scheduled + Manual)
 
 Workflow:
 
@@ -126,6 +137,13 @@ Workflow:
 Required secret:
 
 - Secret: `ATTENDANCE_ADMIN_JWT`
+
+Optional repo variables (threshold guardrails):
+
+- `ATTENDANCE_PERF_MAX_PREVIEW_MS`
+- `ATTENDANCE_PERF_MAX_COMMIT_MS`
+- `ATTENDANCE_PERF_MAX_EXPORT_MS`
+- `ATTENDANCE_PERF_MAX_ROLLBACK_MS`
 
 Artifacts:
 
@@ -184,13 +202,80 @@ Validation run with provisioning included:
 - GitHub Actions run: [Attendance Strict Gates (Prod) #21862429047](https://github.com/zensgit/metasheet2/actions/runs/21862429047) (`SUCCESS`)
 - Download:
   - `gh run download 21862429047 -n attendance-strict-gates-prod-21862429047-1 -D output/playwright/ga/21862429047`
-- Evidence directories (downloaded):
-  - `output/playwright/ga/21862429047/20260210-110831-1/`
-  - `output/playwright/ga/21862429047/20260210-110831-2/`
+  - Evidence directories (downloaded):
+    - `output/playwright/ga/21862429047/20260210-110831-1/`
+    - `output/playwright/ga/21862429047/20260210-110831-2/`
   - Provisioning logs are included under:
     - `gate-provision-employee.log`
     - `gate-provision-approver.log`
-    - `gate-provision-admin.log`
+
+Local dev verification (feature branch, Step 2/3 hardening):
+
+- Evidence (API smoke + audit export CSV):
+  - `output/playwright/attendance-step2-step3-local/20260210-173017/`
+  - Contents:
+    - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
+    - `audit-logs-export.csv` (saved response from `GET /api/attendance-admin/audit-logs/export.csv`)
+
+- Evidence (gates + Playwright full flow):
+  - `output/playwright/attendance-prod-acceptance/20260210-174721/`
+  - Contents:
+    - `gate-api-smoke.log` (includes `audit export csv ok` + `import async idempotency ok`)
+    - `playwright-full-flow-desktop/02-admin.png` (Admin Center snapshot includes Audit Logs actions)
+    - `playwright-full-flow-mobile/02-admin.png` (Mobile policy snapshot)
+
+Notes:
+
+- This run targets a local dev backend, so `/api/auth/me -> features.mode` shows `platform` (not `attendance`).
+- No secrets were stored in the repo; tokens were passed via env at runtime only.
+
+## Latest Notes (2026-02-11)
+
+Local strict gates twice passed (including provisioning + async import gate):
+
+- Strict flags:
+  - `REQUIRE_ATTENDANCE_ADMIN_API=true`
+  - `REQUIRE_IDEMPOTENCY=true`
+  - `REQUIRE_IMPORT_EXPORT=true`
+  - `REQUIRE_IMPORT_ASYNC=true`
+- Evidence:
+  - `output/playwright/attendance-prod-acceptance/20260211-052354-1/`
+  - `output/playwright/attendance-prod-acceptance/20260211-052354-2/`
+- `gate-api-smoke.log` in both runs contains:
+  - `audit export csv ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+
+Integration test evidence (includes audit export CSV API regression check):
+
+- Command:
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+- Evidence:
+  - `output/playwright/attendance-next-phase/20260211-052522/attendance-integration.log`
+
+Automation hardening verification (defaults + perf thresholds):
+
+- Strict gates twice with default strictness (no explicit `REQUIRE_IMPORT_ASYNC`):
+  - `PASS`
+  - Evidence:
+    - `output/playwright/attendance-prod-acceptance/20260211-053626-1/`
+    - `output/playwright/attendance-prod-acceptance/20260211-053626-2/`
+  - API smoke logs include:
+    - `audit export csv ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+- Perf baseline with threshold guardrails:
+  - Command profile: `ROWS=500 MODE=commit COMMIT_ASYNC=true EXPORT_CSV=true ROLLBACK=true`
+  - Evidence:
+    - `output/playwright/attendance-import-perf-local/attendance-perf-mlhljnlj-wdmfnl/perf-summary.json`
+  - Result:
+    - `previewMs=11294`
+    - `commitMs=8141`
+    - `exportMs=31`
+    - `rollbackMs=76`
+    - `regressions=[]`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 

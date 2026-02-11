@@ -866,6 +866,9 @@
                   <button class="attendance__btn" :disabled="auditLogLoading" @click="loadAuditLogs(1)">
                     {{ auditLogLoading ? 'Loading...' : 'Reload logs' }}
                   </button>
+                  <button class="attendance__btn" :disabled="auditLogExporting" @click="exportAuditLogsCsv">
+                    {{ auditLogExporting ? 'Exporting...' : 'Export CSV' }}
+                  </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
@@ -1710,6 +1713,27 @@
                 <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
                   {{ importLoading ? 'Importing...' : 'Import' }}
                 </button>
+              </div>
+              <div
+                v-if="importAsyncJob"
+                class="attendance__status"
+                :class="{ 'attendance__status--error': importAsyncJob.status === 'failed' }"
+              >
+                <div class="attendance__requests-header">
+                  <span>Async import job</span>
+                  <button class="attendance__btn" type="button" @click="clearImportAsyncJob">
+                    Clear
+                  </button>
+                </div>
+                <div>
+                  Status: <strong>{{ importAsyncJob.status }}</strong>
+                  <span v-if="importAsyncPolling"> · polling...</span>
+                </div>
+                <div v-if="importAsyncJob.total">
+                  Progress: {{ importAsyncJob.progress }} / {{ importAsyncJob.total }}
+                </div>
+                <div v-if="importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
+                <div v-if="importAsyncJob.error">Error: {{ importAsyncJob.error }}</div>
               </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
                 CSV warnings: {{ importCsvWarnings.join('; ') }}
@@ -3368,6 +3392,22 @@ interface AttendanceImportMappingProfile {
   payloadExample?: Record<string, any>
 }
 
+interface AttendanceImportJob {
+  id: string
+  orgId?: string
+  batchId: string
+  createdBy?: string | null
+  idempotencyKey?: string | null
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string
+  progress: number
+  total: number
+  error?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
 interface AttendanceReconcileResult {
   summary?: Record<string, any>
   warnings?: string[]
@@ -3536,6 +3576,7 @@ const provisionBatchParsed = computed(() => parseUserIdListText(provisionBatchUs
 const provisionBatchIds = computed(() => provisionBatchParsed.value.valid)
 const provisionBatchInvalidIds = computed(() => provisionBatchParsed.value.invalid)
 const auditLogLoading = ref(false)
+const auditLogExporting = ref(false)
 const auditLogs = ref<AttendanceAuditLogItem[]>([])
 const auditLogQuery = ref('')
 const auditLogStatusMessage = ref('')
@@ -3612,6 +3653,8 @@ const importBatchItems = ref<AttendanceImportItem[]>([])
 const importBatchSelectedId = ref('')
 const importBatchSnapshot = ref<Record<string, any> | null>(null)
 const importCsvWarnings = ref<string[]>([])
+const importAsyncJob = ref<AttendanceImportJob | null>(null)
+const importAsyncPolling = ref(false)
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
@@ -4177,6 +4220,9 @@ function buildImportPayload(): Record<string, any> | null {
 const IMPORT_LARGE_ROW_THRESHOLD = 2000
 const IMPORT_PREVIEW_LIMIT = 200
 const IMPORT_COMMIT_ITEMS_LIMIT = 200
+const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
+const IMPORT_ASYNC_POLL_INTERVAL_MS = 2000
+const IMPORT_ASYNC_POLL_TIMEOUT_MS = 30 * 60 * 1000
 
 function estimateImportRowCount(payload: Record<string, any>): number | null {
   if (Array.isArray(payload.rows)) return payload.rows.length
@@ -4210,6 +4256,10 @@ function applyImportScalabilityHints(payload: Record<string, any>, options: { mo
   if (payload.itemsLimit === undefined || payload.itemsLimit === null) {
     payload.itemsLimit = IMPORT_COMMIT_ITEMS_LIMIT
   }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function syncImportModeToPayload() {
@@ -4459,6 +4509,50 @@ async function previewImport() {
   }
 }
 
+let importJobPollSeq = 0
+
+async function fetchImportJob(jobId: string): Promise<AttendanceImportJob> {
+  const response = await apiFetch(`/api/attendance/import/jobs/${encodeURIComponent(jobId)}`)
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data.ok) {
+    throw new Error(data?.error?.message || 'Failed to load import job')
+  }
+  return (data.data ?? data) as AttendanceImportJob
+}
+
+async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
+  const seq = ++importJobPollSeq
+  importAsyncPolling.value = true
+  const startedAt = Date.now()
+  try {
+    while (seq === importJobPollSeq) {
+      const job = await fetchImportJob(jobId)
+      importAsyncJob.value = job
+      if (job.status === 'completed') return job
+      if (job.status === 'failed') {
+        throw new Error(job.error || 'Import job failed')
+      }
+      if (job.status === 'canceled') {
+        throw new Error('Import job canceled')
+      }
+      if (Date.now() - startedAt > IMPORT_ASYNC_POLL_TIMEOUT_MS) {
+        throw new Error('Import job timed out')
+      }
+      await sleep(IMPORT_ASYNC_POLL_INTERVAL_MS)
+    }
+    throw new Error('Import job polling canceled')
+  } finally {
+    if (seq === importJobPollSeq) importAsyncPolling.value = false
+  }
+}
+
+function clearImportAsyncJob() {
+  // Cancel any in-flight polling loop.
+  importJobPollSeq += 1
+  importAsyncPolling.value = false
+  importAsyncJob.value = null
+}
+
 async function runImport() {
   const payload = buildImportPayload()
   if (!payload) {
@@ -4471,6 +4565,61 @@ async function runImport() {
     const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
     if (!tokenOk) return
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
+
+    // Prefer async commit for very large imports to avoid long-running HTTP requests.
+    // Falls back to sync commit when the backend does not support async jobs.
+    importAsyncJob.value = null
+    const rowCountHint = estimateImportRowCount(payload)
+    if (rowCountHint && rowCountHint >= IMPORT_ASYNC_ROW_THRESHOLD) {
+      let asyncResponse = await apiFetch('/api/attendance/import/commit-async', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      let asyncData = await asyncResponse.json().catch(() => ({}))
+      if (!asyncResponse.ok || !asyncData.ok) {
+        const errorCode = asyncData?.error?.code
+        if (asyncResponse.status === 404 || errorCode === 'NOT_FOUND') {
+          asyncResponse = null as any
+        } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
+          importCommitToken.value = ''
+          importCommitTokenExpiresAt.value = ''
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          if (!refreshed || !importCommitToken.value) {
+            throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
+          }
+          payload.commitToken = importCommitToken.value
+          asyncResponse = await apiFetch('/api/attendance/import/commit-async', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          })
+          asyncData = await asyncResponse.json().catch(() => ({}))
+        }
+      }
+
+      if (asyncResponse && asyncResponse.ok && asyncData?.ok) {
+        const job = asyncData.data?.job as AttendanceImportJob | undefined
+        if (!job?.id) {
+          throw new Error('Async import did not return job id')
+        }
+        adminForbidden.value = false
+        importAsyncJob.value = job
+        setStatus(`Import job queued (${job.status}).`)
+
+        const finalJob = await pollImportJob(job.id)
+        const imported = Number(finalJob.progress ?? 0)
+        const total = Number(finalJob.total ?? 0)
+        setStatus(`Imported ${imported} rows (async job).`)
+        if (total && imported !== total) {
+          setStatus(`Imported ${imported}/${total} rows (async job).`)
+        }
+
+        await loadRecords()
+        await loadImportBatches()
+        importCommitToken.value = ''
+        importCommitTokenExpiresAt.value = ''
+        return
+      }
+    }
     const runLegacyImport = async () => {
       const legacyResponse = await apiFetch('/api/attendance/import', {
         method: 'POST',
@@ -5318,6 +5467,45 @@ function clearProvisionBatch() {
 
 function toggleAuditLogMeta(item: AttendanceAuditLogItem) {
   auditLogSelectedId.value = auditLogSelectedId.value === item.id ? '' : item.id
+}
+
+async function exportAuditLogsCsv() {
+  auditLogExporting.value = true
+  try {
+    const params = new URLSearchParams()
+    const q = auditLogQuery.value.trim()
+    if (q) params.set('q', q)
+    // Safety cap (server also enforces).
+    params.set('limit', '5000')
+
+    const response = await apiFetch(`/api/attendance-admin/audit-logs/export.csv?${params.toString()}`, {
+      method: 'GET',
+      headers: { Accept: 'text/csv' },
+    })
+
+    if (response.status === 404) {
+      setAuditLogStatus('Audit log export API not available on this deployment.', 'error')
+      return
+    }
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error('Admin permissions required')
+    }
+
+    const csvText = await response.text()
+    if (!response.ok) {
+      throw new Error(csvText.slice(0, 200) || `Export failed (HTTP ${response.status})`)
+    }
+
+    const now = new Date()
+    const filename = `attendance-audit-logs-${now.toISOString().replace(/[:.]/g, '-')}.csv`
+    downloadCsvText(filename, csvText)
+    setAuditLogStatus('Audit logs exported.')
+  } catch (error: any) {
+    setAuditLogStatus(error?.message || 'Failed to export audit logs', 'error')
+  } finally {
+    auditLogExporting.value = false
+  }
 }
 
 async function loadAuditLogs(page: number) {

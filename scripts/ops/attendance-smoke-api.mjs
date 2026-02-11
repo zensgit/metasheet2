@@ -6,6 +6,7 @@ const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const requireAttendanceAdminApi = process.env.REQUIRE_ATTENDANCE_ADMIN_API === 'true'
 const requireIdempotency = process.env.REQUIRE_IDEMPOTENCY === 'true'
 const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
+const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -20,6 +21,21 @@ function die(message) {
 
 function log(message) {
   console.log(`[attendance-smoke-api] ${message}`)
+}
+
+function decodeJwtPayload(jwt) {
+  if (!jwt || typeof jwt !== 'string') return null
+  const parts = jwt.split('.')
+  if (parts.length < 2) return null
+  const raw = parts[1]
+  const normalized = raw.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = '='.repeat((4 - (normalized.length % 4)) % 4)
+  try {
+    const json = Buffer.from(`${normalized}${pad}`, 'base64').toString('utf8')
+    return json ? JSON.parse(json) : null
+  } catch {
+    return null
+  }
 }
 
 async function refreshAuthToken() {
@@ -44,6 +60,14 @@ async function refreshAuthToken() {
     }
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
+      // Some deployments return a "refreshed" token that lacks user identity claims.
+      // Keep the old token in that case, otherwise downstream /attendance APIs may 401.
+      const claims = decodeJwtPayload(nextToken)
+      const hasUserId = Boolean(claims?.userId || claims?.id || claims?.sub || claims?.user_id)
+      if (!hasUserId) {
+        log('WARN: refreshed token missing user id claim; keeping existing token')
+        return false
+      }
       token = nextToken
       return true
     }
@@ -92,8 +116,9 @@ function toDateOnly(date) {
 }
 
 function makeGroupName() {
-  const suffix = Date.now().toString(36)
-  return `Smoke Group ${suffix}`
+  // Keep a stable group name so daily gates don't keep creating new groups.
+  // The backend upserts on (org_id, name).
+  return 'Smoke Gate Group'
 }
 
 function makeIdempotencyKey() {
@@ -118,6 +143,40 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = {}) {
+  const startedAt = Date.now()
+  let lastLogAt = 0
+  while (true) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`import job timed out after ${timeoutMs}ms: jobId=${jobId}`)
+    }
+
+    const jobRes = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+    assertOk(jobRes, 'GET /attendance/import/jobs/:id')
+    const job = jobRes.body?.data ?? null
+    if (!job || typeof job !== 'object') throw new Error('import job response missing data')
+    const status = String(job.status || '')
+    const progress = Number(job.progress ?? 0) || 0
+    const total = Number(job.total ?? 0) || 0
+
+    const now = Date.now()
+    if (now - lastLogAt >= 5000) {
+      lastLogAt = now
+      log(`import job: status=${status || 'n/a'} progress=${progress}/${total}`)
+    }
+
+    if (status === 'failed') {
+      const code = String(job?.error?.code || '')
+      const message = String(job?.error?.message || '')
+      throw new Error(`import job failed: jobId=${jobId} code=${code || 'n/a'} message=${message || 'n/a'}`)
+    }
+
+    if (status === 'completed') return job
+
+    await sleep(intervalMs)
+  }
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -131,7 +190,12 @@ async function run() {
   const meData = me.body?.data ?? {}
   const user = meData?.user ?? {}
   const features = meData?.features ?? {}
-  const userId = user?.userId || user?.id || user?.user_id
+  let userId = user?.userId || user?.id || user?.user_id
+  if (!userId) {
+    // Some dev token setups return user identity only in JWT payload.
+    const claims = decodeJwtPayload(token)
+    userId = claims?.userId || claims?.id || claims?.sub || claims?.user_id
+  }
   if (!userId) die('GET /auth/me did not return user.id')
   if (features?.attendance !== true) die('features.attendance is not true (attendance plugin not available)')
   const expectProductMode = normalizeProductMode(expectProductModeRaw)
@@ -162,6 +226,26 @@ async function run() {
     const searchItems = userSearch.body?.data?.items
     if (!Array.isArray(searchItems)) die('user search response missing items')
     log(`user search ok: items=${searchItems.length}`)
+
+    // Audit log export should stream CSV (even if it only contains headers).
+    const auditExportUrl = `${apiBase}/attendance-admin/audit-logs/export.csv?limit=50`
+    const auditExportRes = await fetch(auditExportUrl, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
+    })
+    const auditExportText = await auditExportRes.text()
+    if (auditExportRes.status === 404) {
+      if (requireAttendanceAdminApi) die('attendance-admin audit log export missing (404)')
+      log('WARN: attendance-admin audit log export missing (404); skipping audit export check')
+    } else {
+      if (!auditExportRes.ok) {
+        die(`GET /attendance-admin/audit-logs/export.csv failed: HTTP ${auditExportRes.status} ${auditExportText.slice(0, 200)}`)
+      }
+      if (!auditExportText.includes('occurredAt') || !auditExportText.includes('action') || !auditExportText.includes('route')) {
+        die('audit export CSV missing expected headers')
+      }
+      log('audit export csv ok')
+    }
   }
 
   // 2) plugins active
@@ -308,6 +392,78 @@ async function run() {
       die('export CSV missing expected headers')
     }
     log('export csv ok')
+  }
+
+  // 6.3) async commit gate (optional): validates job enqueue + poll + rollback + idempotency.
+  if (requireImportAsync) {
+    const prepareAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    assertOk(prepareAsync, 'POST /attendance/import/prepare (commit-async)')
+    const asyncToken = prepareAsync.body?.data?.commitToken
+    if (!asyncToken) die('prepare (commit-async) did not return commitToken')
+
+    const workDateAsync = toDateOnly(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
+    const idempotencyKeyAsync = `${idempotencyKey}-async`
+    const csvTextAsync = makeCsv(workDateAsync, userId, groupName)
+
+    const asyncPayload = {
+      ...payloadExample,
+      orgId,
+      userId,
+      timezone: payloadExample.timezone || defaultTimezone,
+      mappingProfileId: 'dingtalk_csv_daily_summary',
+      csvText: csvTextAsync,
+      idempotencyKey: idempotencyKeyAsync,
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: true,
+      },
+      commitToken: asyncToken,
+    }
+
+    const commitAsync = await apiFetch('/attendance/import/commit-async', {
+      method: 'POST',
+      body: JSON.stringify(asyncPayload),
+    })
+    if (commitAsync.res.status === 404) die('async commit endpoint missing (404)')
+    assertOk(commitAsync, 'POST /attendance/import/commit-async')
+    const job = commitAsync.body?.data?.job
+    const jobId = job?.id
+    const asyncBatchId = job?.batchId
+    if (!jobId) die('async commit did not return job.id')
+    if (!asyncBatchId) die('async commit did not return job.batchId')
+    log(`async commit enqueued: jobId=${jobId} batchId=${asyncBatchId}`)
+
+    const jobDone = await pollImportJob(jobId, {
+      timeoutMs: Math.max(30000, Number(process.env.IMPORT_ASYNC_POLL_TIMEOUT_MS || 180000)),
+      intervalMs: Math.max(500, Number(process.env.IMPORT_ASYNC_POLL_INTERVAL_MS || 1000)),
+    })
+    if (String(jobDone.batchId || '') !== String(asyncBatchId)) {
+      die(`async job batchId mismatch: expected=${asyncBatchId} got=${String(jobDone.batchId || '')}`)
+    }
+
+    const asyncItemsRes = await apiFetch(`/attendance/import/batches/${asyncBatchId}/items?pageSize=50`, { method: 'GET' })
+    assertOk(asyncItemsRes, 'GET /attendance/import/batches/:id/items (async)')
+    const asyncItems = asyncItemsRes.body?.data?.items
+    if (!Array.isArray(asyncItems) || asyncItems.length === 0) die('async batch items returned 0 rows')
+    log(`async batch items ok: rows=${asyncItems.length}`)
+
+    const asyncRollback = await apiFetch(`/attendance/import/rollback/${asyncBatchId}`, { method: 'POST', body: '{}' })
+    assertOk(asyncRollback, 'POST /attendance/import/rollback/:id (async)')
+    log('async rollback ok')
+
+    // Idempotency retry: same key should return same job without a commit token.
+    const asyncRetryPayload = { ...asyncPayload }
+    delete asyncRetryPayload.commitToken
+    const commitAsyncRetry = await apiFetch('/attendance/import/commit-async', {
+      method: 'POST',
+      body: JSON.stringify(asyncRetryPayload),
+    })
+    assertOk(commitAsyncRetry, 'POST /attendance/import/commit-async (idempotency retry)')
+    const retryJob = commitAsyncRetry.body?.data?.job
+    if (!retryJob?.id) die('async idempotency retry did not return job.id')
+    if (retryJob.id !== jobId) die(`async idempotency retry returned different job.id: ${String(retryJob.id)}`)
+    if (commitAsyncRetry.body?.data?.idempotent !== true) die('async idempotency retry missing idempotent=true')
+    log('import async idempotency ok')
   }
 
   // 7) batch items exist

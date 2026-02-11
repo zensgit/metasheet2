@@ -110,10 +110,15 @@ export class AuthService {
   async verifyToken(token: string): Promise<User | null> {
     try {
       // 验证token格式和签名
-      const payload = jwt.verify(token, this.config.jwtSecret) as TokenPayload
+      const payload = jwt.verify(token, this.config.jwtSecret) as TokenPayload & { id?: string; sub?: string }
+      const userId = this.resolveTokenUserId(payload)
+      if (!userId) {
+        this.logger.warn('Token verification failed: missing user identity claim')
+        return null
+      }
 
       // 从数据库获取最新用户信息
-      const user = await this.getUserById(payload.userId)
+      const user = await this.getUserById(userId)
       if (!user) {
         return null
       }
@@ -427,10 +432,15 @@ export class AuthService {
   async refreshToken(oldToken: string): Promise<string | null> {
     try {
       // 验证旧token（忽略过期）
-      const payload = jwt.verify(oldToken, this.config.jwtSecret, { ignoreExpiration: true }) as TokenPayload
+      const payload = jwt.verify(oldToken, this.config.jwtSecret, { ignoreExpiration: true }) as TokenPayload & { id?: string; sub?: string }
+      const userId = this.resolveTokenUserId(payload)
+      if (!userId) {
+        this.logger.warn('Token refresh failed: missing user identity claim')
+        return null
+      }
 
       // 获取用户最新信息
-      const user = await this.getUserById(payload.userId)
+      const user = await this.getUserById(userId)
       if (!user || user.role === 'disabled') {
         return null
       }
@@ -441,6 +451,13 @@ export class AuthService {
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
       return null
     }
+  }
+
+  private resolveTokenUserId(payload: TokenPayload & { id?: string; sub?: string }): string | null {
+    const value = payload.userId || payload.id || payload.sub
+    if (typeof value !== 'string') return null
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
   }
 }
 
