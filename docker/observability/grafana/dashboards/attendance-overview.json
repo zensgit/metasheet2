@@ -22,7 +22,7 @@
     {
       "type": "timeseries",
       "title": "Attendance API Errors (rate)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         { "expr": "sum(rate(attendance_api_errors_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
       ],
@@ -32,7 +32,7 @@
     {
       "type": "timeseries",
       "title": "Attendance Rate Limited (rate)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         { "expr": "sum(rate(attendance_rate_limited_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
       ],
@@ -41,11 +41,37 @@
     },
     {
       "type": "timeseries",
-      "title": "Import Commit Errors (rate)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
+      "title": "Import Commit Latency p95 (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
-          "expr": "sum(rate(attendance_api_errors_total{job=\"$job\",route=\"/api/attendance/import/commit\"}[5m]))",
+          "expr": "histogram_quantile(0.95, sum(rate(attendance_operation_latency_seconds_bucket{job=\"$job\",operation=~\"import_commit|import_commit_async\",result=\"ok\"}[5m])) by (le))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Approval Latency p95 (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(attendance_operation_latency_seconds_bucket{job=\"$job\",operation=~\"request_create|request_approve|request_reject\",result=\"ok\"}[5m])) by (le))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Import & Approval Failures (rate by operation)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(attendance_operation_failures_total{job=\"$job\",operation=~\"import_preview|import_commit|import_commit_async|request_create|request_approve|request_reject\"}[5m])) by (operation)",
           "datasource": "${DS_PROM}"
         }
       ],
@@ -54,8 +80,23 @@
     },
     {
       "type": "table",
+      "title": "Top Failure Reasons (5m rate)",
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "expr": "topk(12, sum(rate(attendance_operation_failures_total{job=\"$job\",operation=~\"import_preview|import_commit|import_commit_async|request_create|request_approve|request_reject\"}[5m])) by (operation, reason))",
+          "datasource": "${DS_PROM}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "table",
       "title": "Top Error Routes (5m rate)",
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 26 },
       "targets": [
         {
           "expr": "topk(10, sum(rate(attendance_api_errors_total{job=\"$job\"}[5m])) by (route))",
@@ -90,4 +131,3 @@
   "uid": "attendance-overview",
   "version": 1
 }
-

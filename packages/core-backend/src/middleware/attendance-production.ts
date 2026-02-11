@@ -2,7 +2,13 @@ import type { Request, Response, NextFunction, RequestHandler } from 'express'
 import { Logger, getLogContext } from '../core/logger'
 import { query } from '../db/pg'
 import { TokenBucketRateLimiter } from '../integration/rate-limiting/token-bucket'
-import { attendanceApiErrorsTotal, attendanceRateLimitedTotal } from '../metrics/attendance-metrics'
+import {
+  attendanceApiErrorsTotal,
+  attendanceOperationFailuresTotal,
+  attendanceOperationLatencySeconds,
+  attendanceOperationRequestsTotal,
+  attendanceRateLimitedTotal,
+} from '../metrics/attendance-metrics'
 
 type AttendanceSettings = {
   ipAllowlist: string[]
@@ -91,6 +97,38 @@ function normalizeRouteForLabels(pathname: string): string {
       return seg
     })
     .join('/')
+}
+
+function normalizeFailureReason(errorCode: string | null, statusCode: number): string {
+  const source = errorCode && errorCode.trim() ? errorCode : `HTTP_${statusCode}`
+  const normalized = source
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (!normalized) return 'UNKNOWN'
+  return normalized.slice(0, 64)
+}
+
+function statusClassOf(statusCode: number): string {
+  if (!Number.isFinite(statusCode)) return 'unknown'
+  return `${Math.floor(statusCode / 100)}xx`
+}
+
+function resolveAttendanceOperation(req: Request, normalizedRoute: string): string {
+  const method = req.method.toUpperCase()
+  if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview') return 'import_preview'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit') return 'import_commit'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit-async') return 'import_commit_async'
+  if (method === 'GET' && normalizedRoute === '/api/attendance/import/jobs/:id') return 'import_job_poll'
+  if (method === 'GET' && normalizedRoute === '/api/attendance/import/batches/:id/export.csv') return 'import_export_csv'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/requests') return 'request_create'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/requests/:id/approve') return 'request_approve'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/requests/:id/reject') return 'request_reject'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/punch') return 'punch'
+  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/assign') return 'admin_batch_assign'
+  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/unassign') return 'admin_batch_unassign'
+  return 'other'
 }
 
 function shouldAudit(req: Request): boolean {
@@ -191,6 +229,14 @@ export function attendanceAuditMiddleware(): RequestHandler {
 
         const durMs = Number(process.hrtime.bigint() - startNs) / 1e6
         const statusCode = res.statusCode
+        const op = resolveAttendanceOperation(req, normalizedRoute)
+        const requestResult = (statusCode >= 400 || responseOk === false) ? 'error' : 'ok'
+
+        attendanceOperationRequestsTotal.inc({ operation: op, result: requestResult })
+        attendanceOperationLatencySeconds.observe(
+          { operation: op, result: requestResult },
+          Math.max(0, durMs / 1000),
+        )
 
         // Metrics: record only error responses, avoid unbounded series.
         if (statusCode >= 400 || responseOk === false) {
@@ -200,6 +246,11 @@ export function attendanceAuditMiddleware(): RequestHandler {
             method,
             status: String(statusCode),
             error_code: code,
+          })
+          attendanceOperationFailuresTotal.inc({
+            operation: op,
+            reason: normalizeFailureReason(errorCode, statusCode),
+            status_class: statusClassOf(statusCode),
           })
         }
 

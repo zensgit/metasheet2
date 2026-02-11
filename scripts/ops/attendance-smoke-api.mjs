@@ -281,6 +281,18 @@ async function run() {
       }
       log('audit export csv ok')
     }
+
+    const auditSummaryRes = await apiFetch('/attendance-admin/audit-logs/summary?windowMinutes=60&limit=5', { method: 'GET' })
+    if (auditSummaryRes.res.status === 404) {
+      if (requireAttendanceAdminApi) die('attendance-admin audit log summary missing (404)')
+      log('WARN: attendance-admin audit log summary missing (404); skipping summary check')
+    } else {
+      assertOk(auditSummaryRes, 'GET /attendance-admin/audit-logs/summary')
+      const summaryData = auditSummaryRes.body?.data ?? {}
+      if (!Array.isArray(summaryData?.actions)) die('audit summary response missing actions')
+      if (!Array.isArray(summaryData?.errors)) die('audit summary response missing errors')
+      log('audit summary ok')
+    }
   }
 
   // 2) plugins active
