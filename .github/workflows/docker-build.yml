@@ -82,6 +82,8 @@ jobs:
             "git pull --ff-only origin main"
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
+            "# Ensure DB schema is up to date before smoke checks."
+            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js"
             "# Post-deploy smoke checks"
             "for i in {1..10}; do"
               "  if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then"
