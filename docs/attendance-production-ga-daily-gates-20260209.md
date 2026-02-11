@@ -190,6 +190,28 @@ Expected outputs:
 - `REPORT_MARKDOWN=...`
 - `REPORT_JSON=...`
 
+### D) Gate Issue Channel Sync (Slack / DingTalk)
+
+Workflow:
+
+- `.github/workflows/attendance-gate-issue-notify.yml`
+
+Trigger:
+
+- Automatic on issue events: `opened/reopened/edited`
+- Filter: issue title starts with `[Attendance Gate]`
+- Manual test via `workflow_dispatch`
+
+Required secrets (at least one):
+
+- `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL`
+- `ATTENDANCE_ALERT_DINGTALK_WEBHOOK_URL`
+
+Behavior:
+
+- Sends normalized alert text to configured channels.
+- If no webhook secrets are configured, workflow writes warning in summary (no external send).
+
 ## Daily Record Template (Copy/Paste)
 
 Date:
@@ -364,6 +386,37 @@ Daily dashboard workflow verification (main, 2026-02-11):
   - `overallStatus=pass`
   - `strictRun=21894374032`
   - `perfRun=21894377908`
+
+Daily dashboard failure drill verification (main, 2026-02-11):
+
+- Run:
+  - [Attendance Daily Gate Dashboard #21912261134](https://github.com/zensgit/metasheet2/actions/runs/21912261134) (`FAILURE`, expected)
+- Trigger:
+  - `lookback_hours=1` to force stale-run escalation.
+- Expected behavior validated:
+  - workflow creates/updates issue `[Attendance Gate] Daily dashboard alert`
+  - workflow exits with failure (escalation signal)
+- Evidence:
+  - `output/playwright/ga/21912261134/attendance-daily-gate-dashboard.md`
+  - `output/playwright/ga/21912261134/attendance-daily-gate-dashboard.json`
+  - issue: [#141](https://github.com/zensgit/metasheet2/issues/141)
+
+Perf threshold lock + tighten execution (2026-02-11):
+
+- Step 2 (lock baseline vars):
+  - `ATTENDANCE_PERF_MAX_PREVIEW_MS=120000`
+  - `ATTENDANCE_PERF_MAX_COMMIT_MS=180000`
+  - `ATTENDANCE_PERF_MAX_EXPORT_MS=30000`
+  - `ATTENDANCE_PERF_MAX_ROLLBACK_MS=10000`
+- Step 4 (7-day window review + tighten):
+  - Evidence summary:
+    - `output/playwright/attendance-next-phase/20260211-160000-threshold-review/perf-7d-summary.json`
+  - Sample selector: `rows=10000`, `mode=commit`, `window=7d`, `sampleCount=5`
+  - Tightened vars (applied):
+    - `ATTENDANCE_PERF_MAX_PREVIEW_MS=100000`
+    - `ATTENDANCE_PERF_MAX_COMMIT_MS=150000`
+    - `ATTENDANCE_PERF_MAX_EXPORT_MS=25000`
+    - `ATTENDANCE_PERF_MAX_ROLLBACK_MS=8000`
 
 10k perf baseline now passes through nginx after fixing deploy host config sync (deploy now fast-forwards the repo via `git pull --ff-only origin main` before `docker compose up`):
 
