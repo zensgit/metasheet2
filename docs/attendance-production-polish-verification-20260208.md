@@ -357,3 +357,42 @@ Post-hotfix verification after PR `#147` (`attendance-admin` batch resolve SQL t
   - full-flow mobile complete
 - Known expected warning:
   - `PUNCH_TOO_SOON` may appear in production flow and does not fail the gate.
+
+## Execution Record (2026-02-11, Next-Phase 1+2+3 Production Closure)
+
+This cycle verifies the merged next-phase hardening items:
+
+1. Large import preview chunking in Admin Center UI.
+2. Operation-level metrics/alerts for attendance API latency and failure reasons.
+3. Admin audit summary/filter expansion + batch provisioning affected/unchanged visibility.
+
+Merged and deployed:
+
+- PR: [#149](https://github.com/zensgit/metasheet2/pull/149)
+- Build + deploy: [Build and Push Docker Images #21915716951](https://github.com/zensgit/metasheet2/actions/runs/21915716951) (`SUCCESS`)
+
+Strict gate validation:
+
+- Run: [Attendance Strict Gates (Prod) #21916079926](https://github.com/zensgit/metasheet2/actions/runs/21916079926) (`SUCCESS`)
+- Inputs include `require_batch_resolve=true`.
+- Workflow confirms `✅ Strict gates passed twice`.
+
+Evidence (artifact directories):
+
+- `output/playwright/ga/21916079926/20260211-174121-1/`
+- `output/playwright/ga/21916079926/20260211-174121-2/`
+
+Key assertions from `gate-api-smoke.log` in both runs:
+
+- `batch resolve ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Conclusion:
+
+- Next-phase `1+2+3` scope is production-verified and non-regressing.
+- Production readiness remains **GO**.

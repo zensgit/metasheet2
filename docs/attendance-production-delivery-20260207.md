@@ -119,10 +119,25 @@ P1 (1-2 weeks, production hardening):
     - `POST /api/attendance/import/commit-async`
     - `GET /api/attendance/import/jobs/:id`
     - Gate (default strict): `REQUIRE_IMPORT_ASYNC="true"` for `scripts/ops/attendance-smoke-api.mjs` / strict gates
+  - Large preview chunking in Admin Center UI (implemented 2026-02-11):
+    - `apps/web/src/views/AttendanceView.vue`
+    - Splits >10k rows into chunked preview requests to avoid single-request timeout risk.
+  - Admin audit + provisioning operability enhancements (implemented 2026-02-11):
+    - `GET /api/attendance-admin/audit-logs/summary`
+    - `GET /api/attendance-admin/audit-logs` now supports `actionPrefix`, `statusClass`, `errorCode`, `from`, `to`.
+    - Batch role assign/unassign returns `affectedUserIds` and `unchangedUserIds`.
+  - Metrics/alerts expansion (implemented 2026-02-11):
+    - New metrics in `packages/core-backend/src/metrics/attendance-metrics.ts`:
+      - `attendance_operation_requests_total`
+      - `attendance_operation_failures_total`
+      - `attendance_operation_latency_seconds`
+    - Alert rules and dashboard updated:
+      - `ops/prometheus/attendance-alerts.yml`
+      - `docker/observability/grafana/dashboards/attendance-overview.json`
   - Gate stability hardening:
     - API smoke retries `POST /api/attendance/import/commit` (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token
       when the server responds with `HTTP 5xx` or commit-token errors.
-  - Remaining: async/streaming preview for large files (10k-100k rows), with timeout/retry strategy.
+  - Remaining: backend streaming preview for ultra-large files (100k+ rows), with queueing + backpressure controls.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
   - Optional IP allowlist enforcement (when configured in `attendance.settings`).
@@ -144,7 +159,27 @@ Latest strict validation:
     - `output/playwright/ga/21914381403/20260211-165320-1/`
     - `output/playwright/ga/21914381403/20260211-165320-2/`
 
+Latest closure validation after P1 `1+2+3` merge (PR `#149`):
+
+- Deploy after PR `#149`: [Build and Push Docker Images #21915716951](https://github.com/zensgit/metasheet2/actions/runs/21915716951) (`SUCCESS`)
+- Strict gates (twice) with `require_batch_resolve=true`:
+  - [Attendance Strict Gates (Prod) #21916079926](https://github.com/zensgit/metasheet2/actions/runs/21916079926) (`SUCCESS`)
+  - Workflow log confirms:
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence:
+    - `output/playwright/ga/21916079926/20260211-174121-1/`
+    - `output/playwright/ga/21916079926/20260211-174121-2/`
+  - API smoke assertions in both runs:
+    - `batch resolve ok`
+    - `audit summary ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+    - `SMOKE PASS`
+
 Operational conclusion:
 
 - P0 delivery target is met for attendance-focused production usage.
-- Current residual work is P1 optimization/operability, not a P0 launch blocker.
+- P1 `1+2+3` scope is now in place and validated on production strict gates.
+- Current residual work is P2 or larger-scale optimization, not a P0 launch blocker.

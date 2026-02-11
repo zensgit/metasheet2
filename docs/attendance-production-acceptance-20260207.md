@@ -602,3 +602,52 @@ Go/No-Go decision (2026-02-11, post-PR #147):
 
 - **GO (unchanged)**
 - Reason: strict gates twice PASS on `main` with `require_batch_resolve=true`, and evidence is archived.
+
+## Latest Execution Record (2026-02-11, P1 1+2+3 Closure - PR #149)
+
+Goal of this cycle:
+
+- Close next-phase `1+2+3` hardening scope:
+  - large import preview chunking path,
+  - observability metrics/alerts expansion,
+  - admin audit + batch provisioning operability.
+- Re-validate strict production gates twice on `main` with batch-resolve enforcement.
+
+Execution timeline (UTC):
+
+1. Merge and deploy:
+   - PR: [#149](https://github.com/zensgit/metasheet2/pull/149) (`MERGED`)
+   - Build + deploy: [Build and Push Docker Images #21915716951](https://github.com/zensgit/metasheet2/actions/runs/21915716951) (`SUCCESS`)
+2. Strict gates (twice, remote) with `require_batch_resolve=true`:
+   - Run: [Attendance Strict Gates (Prod) #21916079926](https://github.com/zensgit/metasheet2/actions/runs/21916079926) (`SUCCESS`)
+   - Workflow log assertions:
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21916079926/20260211-174121-1/`
+- `output/playwright/ga/21916079926/20260211-174121-2/`
+
+Gate results (both runs):
+
+- Gate 2 API Smoke: `PASS`
+- Gate 3 Provisioning: `PASS`
+- Gate 4 Playwright Prod: `PASS`
+- Gate 5 Playwright Desktop: `PASS`
+- Gate 6 Playwright Mobile: `PASS`
+
+API smoke log assertions (both runs):
+
+- `batch resolve ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Go/No-Go decision (2026-02-11, post-PR #149):
+
+- **GO (unchanged)**
+- Reason: strict gates twice PASS on `main` with `require_batch_resolve=true` after merging next-phase `1+2+3` scope.
