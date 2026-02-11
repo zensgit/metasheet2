@@ -112,6 +112,60 @@ jobs:
               core.info(`Created issue #${created.data.number}`)
             }
 
+      - name: Auto-close escalation issue on recovery
+        if: steps.report.outputs.report_status == 'pass'
+        uses: actions/github-script@v7
+        env:
+          REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
+        with:
+          script: |
+            const fs = require('fs')
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const title = '[Attendance Gate] Daily dashboard alert'
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const markdownPath = process.env.REPORT_MARKDOWN
+            const markdown = markdownPath && fs.existsSync(markdownPath)
+              ? fs.readFileSync(markdownPath, 'utf8')
+              : ''
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            })
+
+            const targets = issues.filter((issue) => !issue.pull_request && issue.title === title)
+            if (targets.length === 0) {
+              core.info('No open escalation issue to close.')
+              return
+            }
+
+            const body = [
+              'Gate recovery detected. Closing escalation issue.',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              markdown ? markdown.slice(0, 60000) : '',
+            ].join('\n')
+
+            for (const issue of targets) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body,
+              })
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                state: 'closed',
+              })
+              core.info(`Closed issue #${issue.number}`)
+            }
+
       - name: Fail workflow when dashboard status is fail
         if: steps.report.outputs.report_status != 'pass'
         run: |
