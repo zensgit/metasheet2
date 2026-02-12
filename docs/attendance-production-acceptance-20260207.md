@@ -739,3 +739,58 @@ Go/No-Go decision (2026-02-12, post-`9f27c004`):
 
 - **GO (unchanged)**
 - Reason: strict gates twice PASS on latest `main` HEAD.
+
+## Latest Execution Record (2026-02-12, Async Preview Gate Closure)
+
+Goal of this cycle:
+
+- Add and validate async preview gate for ultra-large import preview jobs.
+- Keep strict production closure with batch resolve + desktop/mobile Playwright.
+
+Execution timeline (UTC):
+
+1. Feature commit pushed:
+   - `3dd6333b` (`feat(attendance): add async preview jobs and strict gate check`)
+2. First strict run with `require_preview_async=true`:
+   - [Attendance Strict Gates (Prod) #21931993052](https://github.com/zensgit/metasheet2/actions/runs/21931993052) (`FAILURE`)
+   - Failure reason:
+     - `POST /attendance/import/preview-async (idempotency retry): COMMIT_TOKEN_REQUIRED`
+3. Hotfix commit pushed:
+   - `0d3ced69` (`fix(attendance-import): allow preview-async idempotent retries without commitToken`)
+4. Deploy after hotfix:
+   - [Build and Push Docker Images #21932058512](https://github.com/zensgit/metasheet2/actions/runs/21932058512) (`SUCCESS`)
+5. Strict re-run with `require_preview_async=true` + `require_batch_resolve=true`:
+   - [Attendance Strict Gates (Prod) #21932116429](https://github.com/zensgit/metasheet2/actions/runs/21932116429) (`SUCCESS`)
+   - Workflow log assertions:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-1/`
+- `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-2/`
+
+Gate results (both runs):
+
+- Gate 2 API Smoke: `PASS`
+- Gate 3 Provisioning: `PASS`
+- Gate 4 Playwright Prod: `PASS`
+- Gate 5 Playwright Desktop: `PASS`
+- Gate 6 Playwright Mobile: `PASS`
+
+API smoke log assertions (both runs):
+
+- `preview async ok`
+- `batch resolve ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Go/No-Go decision (2026-02-12, async preview closure):
+
+- **GO (unchanged)**
+- Reason: async preview strict gate now passes twice on latest `main`, with full Gate 2-6 PASS.

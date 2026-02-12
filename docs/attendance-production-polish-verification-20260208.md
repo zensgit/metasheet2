@@ -450,3 +450,49 @@ API smoke assertions (both runs):
 Result:
 
 - Production verification remains stable on latest `main` HEAD.
+
+## Execution Record (2026-02-12, Async Preview Strict Gate Verification)
+
+Scope:
+
+- Add async preview queue path:
+  - `POST /api/attendance/import/preview-async`
+  - `GET /api/attendance/import/jobs/:id` with `kind="preview"` + `preview` result
+- Extend strict smoke gate with optional `REQUIRE_PREVIEW_ASYNC=true`.
+
+Validation timeline:
+
+1. Initial strict run with preview async required failed:
+   - [Attendance Strict Gates (Prod) #21931993052](https://github.com/zensgit/metasheet2/actions/runs/21931993052) (`FAILURE`)
+   - Cause: preview async idempotency retry required commit token.
+2. Hotfix:
+   - Commit `0d3ced69`
+   - Change: idempotent retry check now runs before commit-token enforcement in `/api/attendance/import/preview-async`.
+3. Deploy:
+   - [Build and Push Docker Images #21932058512](https://github.com/zensgit/metasheet2/actions/runs/21932058512) (`SUCCESS`)
+4. Strict re-validation (preview async required):
+   - [Attendance Strict Gates (Prod) #21932116429](https://github.com/zensgit/metasheet2/actions/runs/21932116429) (`SUCCESS`)
+   - Workflow confirms:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence:
+
+- `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-1/`
+- `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-2/`
+
+API smoke assertions (both runs):
+
+- `preview async ok`
+- `batch resolve ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Result:
+
+- Async preview gate is production-verified and stable on latest `main`.

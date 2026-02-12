@@ -119,6 +119,10 @@ P1 (1-2 weeks, production hardening):
     - `POST /api/attendance/import/commit-async`
     - `GET /api/attendance/import/jobs/:id`
     - Gate (default strict): `REQUIRE_IMPORT_ASYNC="true"` for `scripts/ops/attendance-smoke-api.mjs` / strict gates
+  - Async preview jobs for ultra-large imports (implemented 2026-02-12):
+    - `POST /api/attendance/import/preview-async`
+    - `GET /api/attendance/import/jobs/:id` returns `kind="preview"` and `preview` result when completed
+    - Gate switch: `REQUIRE_PREVIEW_ASYNC="true"` for `scripts/ops/attendance-smoke-api.mjs` / strict gates
   - Large preview chunking in Admin Center UI (implemented 2026-02-11):
     - `apps/web/src/views/AttendanceView.vue`
     - Splits >10k rows into chunked preview requests to avoid single-request timeout risk.
@@ -137,7 +141,7 @@ P1 (1-2 weeks, production hardening):
   - Gate stability hardening:
     - API smoke retries `POST /api/attendance/import/commit` (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token
       when the server responds with `HTTP 5xx` or commit-token errors.
-  - Remaining: backend streaming preview for ultra-large files (100k+ rows), with queueing + backpressure controls.
+  - Remaining: true streaming CSV parser + chunked persistence for extreme payloads (500k+ rows), to further reduce peak memory.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
   - Optional IP allowlist enforcement (when configured in `attendance.settings`).
@@ -209,6 +213,31 @@ Latest head re-validation on `main` (post-`9f27c004`):
     - `output/playwright/ga/21931376436/attendance-strict-gates-prod-21931376436-1/20260212-023656-1/`
     - `output/playwright/ga/21931376436/attendance-strict-gates-prod-21931376436-1/20260212-023656-2/`
   - API smoke assertions in both runs:
+    - `batch resolve ok`
+    - `audit summary ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+    - `SMOKE PASS`
+
+Async preview hardening validation on latest `main`:
+
+- Feature commits:
+  - `3dd6333b` (`feat(attendance): add async preview jobs and strict gate check`)
+  - `0d3ced69` (`fix(attendance-import): allow preview-async idempotent retries without commitToken`)
+- Deploy after fix:
+  - [Build and Push Docker Images #21932058512](https://github.com/zensgit/metasheet2/actions/runs/21932058512) (`SUCCESS`)
+- Strict gates (twice) with `require_preview_async=true` and `require_batch_resolve=true`:
+  - [Attendance Strict Gates (Prod) #21932116429](https://github.com/zensgit/metasheet2/actions/runs/21932116429) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence:
+    - `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-1/`
+    - `output/playwright/ga/21932116429/attendance-strict-gates-prod-21932116429-1/20260212-031409-2/`
+  - API smoke assertions in both runs:
+    - `preview async ok`
     - `batch resolve ok`
     - `audit summary ok`
     - `idempotency ok`
