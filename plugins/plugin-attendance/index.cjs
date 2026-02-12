@@ -3963,10 +3963,80 @@ async function upsertAttendanceRecord(options) {
         [userId, workDate, orgId]
       )
 
-  let firstInAt = existing[0]?.first_in_at ?? null
-  let lastOutAt = existing[0]?.last_out_at ?? null
-  const existingSourceBatchId = existing[0]?.source_batch_id ?? null
-  const existingMeta = normalizeMetadata(existing[0]?.meta)
+  const values = computeAttendanceRecordUpsertValues({
+    existingRow: existing[0] ?? null,
+    updateFirstInAt,
+    updateLastOutAt,
+    mode,
+    statusOverride,
+    overrideMetrics,
+    isWorkday,
+    meta,
+    sourceBatchId,
+    rule,
+    leaveMinutes,
+    overtimeMinutes,
+  })
+
+  const updated = await client.query(
+    `INSERT INTO attendance_records
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+     ON CONFLICT (user_id, work_date, org_id)
+     DO UPDATE SET
+       org_id = EXCLUDED.org_id,
+       timezone = EXCLUDED.timezone,
+       first_in_at = EXCLUDED.first_in_at,
+       last_out_at = EXCLUDED.last_out_at,
+       work_minutes = EXCLUDED.work_minutes,
+       late_minutes = EXCLUDED.late_minutes,
+       early_leave_minutes = EXCLUDED.early_leave_minutes,
+       status = EXCLUDED.status,
+       is_workday = EXCLUDED.is_workday,
+       meta = EXCLUDED.meta,
+       source_batch_id = EXCLUDED.source_batch_id,
+       updated_at = now()
+     RETURNING *`,
+    [
+      userId,
+      orgId,
+      workDate,
+      timezone,
+      values.firstInAt,
+      values.lastOutAt,
+      values.workMinutes,
+      values.lateMinutes,
+      values.earlyLeaveMinutes,
+      values.status,
+      values.isWorkday,
+      values.metaJson,
+      values.sourceBatchId,
+    ]
+  )
+
+  return updated[0]
+}
+
+function computeAttendanceRecordUpsertValues(options) {
+  const {
+    existingRow,
+    updateFirstInAt,
+    updateLastOutAt,
+    mode,
+    statusOverride,
+    overrideMetrics,
+    isWorkday,
+    meta,
+    sourceBatchId,
+    rule,
+    leaveMinutes,
+    overtimeMinutes,
+  } = options
+
+  let firstInAt = existingRow?.first_in_at ?? null
+  let lastOutAt = existingRow?.last_out_at ?? null
+  const existingSourceBatchId = existingRow?.source_batch_id ?? null
+  const existingMeta = normalizeMetadata(existingRow?.meta)
   const finalMeta = meta && typeof meta === 'object'
     ? { ...existingMeta, ...meta }
     : existingMeta
@@ -4008,10 +4078,53 @@ async function upsertAttendanceRecord(options) {
   }
   const status = statusOverride ?? finalMetrics.status
 
-  const updated = await client.query(
+  return {
+    firstInAt,
+    lastOutAt,
+    workMinutes: finalMetrics.workMinutes,
+    lateMinutes: finalMetrics.lateMinutes,
+    earlyLeaveMinutes: finalMetrics.earlyLeaveMinutes,
+    status,
+    isWorkday: isWorkday !== false,
+    metaJson: JSON.stringify(finalMeta ?? {}),
+    sourceBatchId: finalSourceBatchId,
+  }
+}
+
+async function batchUpsertAttendanceRecords(client, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return new Map()
+
+  const values = rows
+    .map((_, idx) => {
+      const base = idx * 13
+      // meta is jsonb (cast explicitly).
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}::jsonb, $${base + 13}, now())`
+    })
+    .join(', ')
+
+  const params = []
+  for (const row of rows) {
+    params.push(
+      row.userId,
+      row.orgId,
+      row.workDate,
+      row.timezone,
+      row.firstInAt,
+      row.lastOutAt,
+      row.workMinutes,
+      row.lateMinutes,
+      row.earlyLeaveMinutes,
+      row.status,
+      row.isWorkday,
+      row.metaJson,
+      row.sourceBatchId,
+    )
+  }
+
+  const inserted = await client.query(
     `INSERT INTO attendance_records
       (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+     VALUES ${values}
      ON CONFLICT (user_id, work_date, org_id)
      DO UPDATE SET
        org_id = EXCLUDED.org_id,
@@ -4026,25 +4139,17 @@ async function upsertAttendanceRecord(options) {
        meta = EXCLUDED.meta,
        source_batch_id = EXCLUDED.source_batch_id,
        updated_at = now()
-     RETURNING *`,
-    [
-      userId,
-      orgId,
-      workDate,
-      timezone,
-      firstInAt,
-      lastOutAt,
-      finalMetrics.workMinutes,
-      finalMetrics.lateMinutes,
-      finalMetrics.earlyLeaveMinutes,
-      status,
-      isWorkday !== false,
-      JSON.stringify(finalMeta ?? {}),
-      finalSourceBatchId,
-    ]
+     RETURNING id, user_id, work_date`,
+    params
   )
 
-  return updated[0]
+  const map = new Map()
+  for (const row of inserted) {
+    if (!row?.user_id || !row?.work_date) continue
+    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
+    map.set(`${row.user_id}:${workDateKey}`, row)
+  }
+  return map
 }
 
 function getWeekdayFromDateKey(dateKey) {
@@ -5576,18 +5681,18 @@ module.exports = {
 	          })
 	        }
 
-	        // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
-	        const recordUpsertsBuffer = []
-	        const flushRecordUpserts = async () => {
-	          if (!recordUpsertsBuffer.length) return
-	          const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
-	          const chunkUserIds = chunk.map((item) => item.userId)
-	          const chunkWorkDates = chunk.map((item) => item.workDate)
+				            // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
+				            const recordUpsertsBuffer = []
+				            const flushRecordUpserts = async () => {
+				              if (!recordUpsertsBuffer.length) return
+				              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
+				              const chunkUserIds = chunk.map((item) => item.userId)
+				              const chunkWorkDates = chunk.map((item) => normalizeDateOnly(item.workDate) ?? item.workDate)
 
-	          const existingRows = await trx.query(
-	            `SELECT ar.*
-	             FROM attendance_records ar
-	             JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
+				              const existingRows = await trx.query(
+				                `SELECT ar.*
+				                 FROM attendance_records ar
+				                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
 	               ON ar.user_id = t.user_id AND ar.work_date = t.work_date
 	             WHERE ar.org_id = $1
 	             FOR UPDATE`,
@@ -5595,30 +5700,51 @@ module.exports = {
 	          )
 	          const existingMap = new Map()
 	          for (const row of existingRows) {
-	            existingMap.set(`${row.user_id}:${row.work_date}`, row)
+	            const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
+	            existingMap.set(`${row.user_id}:${workDateKey}`, row)
 	          }
 
+	          const upsertRows = []
 	          for (const item of chunk) {
 	            const existingRow = existingMap.get(`${item.userId}:${item.workDate}`) ?? undefined
-	            const record = await upsertAttendanceRecord({
-	              userId: item.userId,
-	              orgId,
-	              workDate: item.workDate,
-	              timezone: item.timezone,
-	              rule: item.rule,
+	            const values = computeAttendanceRecordUpsertValues({
+	              existingRow,
 	              updateFirstInAt: item.updateFirstInAt,
 	              updateLastOutAt: item.updateLastOutAt,
 	              mode: item.mode,
 	              statusOverride: item.statusOverride,
 	              overrideMetrics: item.overrideMetrics,
 	              isWorkday: item.isWorkday,
-	              leaveMinutes: item.leaveMinutes,
-	              overtimeMinutes: item.overtimeMinutes,
 	              meta: item.meta,
 	              sourceBatchId: item.sourceBatchId,
-	              existingRow,
-	              client: trx,
+	              rule: item.rule,
+	              leaveMinutes: item.leaveMinutes,
+	              overtimeMinutes: item.overtimeMinutes,
 	            })
+	            upsertRows.push({
+	              userId: item.userId,
+	              orgId,
+	              workDate: item.workDate,
+	              timezone: item.timezone,
+	              firstInAt: values.firstInAt,
+	              lastOutAt: values.lastOutAt,
+	              workMinutes: values.workMinutes,
+	              lateMinutes: values.lateMinutes,
+	              earlyLeaveMinutes: values.earlyLeaveMinutes,
+	              status: values.status,
+	              isWorkday: values.isWorkday,
+	              metaJson: values.metaJson,
+	              sourceBatchId: values.sourceBatchId,
+	            })
+	          }
+
+	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows)
+
+	          for (const item of chunk) {
+	            const record = upserted.get(`${item.userId}:${item.workDate}`)
+	            if (!record?.id) {
+	              throw new Error(`Attendance record upsert failed for ${item.userId}:${item.workDate}`)
+	            }
 
 	            await enqueueImportItem({
 	              userId: item.userId,
@@ -10022,56 +10148,79 @@ module.exports = {
 			                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
 			                 WHERE ar.org_id = $1
 			                 FOR UPDATE`,
-			                [orgId, chunkUserIds, chunkWorkDates]
-			              )
-			              const existingMap = new Map()
-			              for (const row of existingRows) {
-			                existingMap.set(`${row.user_id}:${row.work_date}`, row)
-			              }
+				                [orgId, chunkUserIds, chunkWorkDates]
+				              )
+				              const existingMap = new Map()
+				              for (const row of existingRows) {
+				                const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
+				                existingMap.set(`${row.user_id}:${workDateKey}`, row)
+				              }
 
-			              for (const item of chunk) {
-			                const existingRow = existingMap.get(`${item.userId}:${item.workDate}`) ?? undefined
-			                const record = await upsertAttendanceRecord({
-			                  userId: item.userId,
-			                  orgId,
-			                  workDate: item.workDate,
-			                  timezone: item.timezone,
-			                  rule: item.rule,
-			                  updateFirstInAt: item.updateFirstInAt,
-			                  updateLastOutAt: item.updateLastOutAt,
-			                  mode: item.mode,
-			                  statusOverride: item.statusOverride,
-			                  overrideMetrics: item.overrideMetrics,
-			                  isWorkday: item.isWorkday,
-			                  leaveMinutes: item.leaveMinutes,
-			                  overtimeMinutes: item.overtimeMinutes,
-			                  meta: item.meta,
-			                  sourceBatchId: item.sourceBatchId,
-			                  existingRow,
-			                  client: trx,
-			                })
+				              const upsertRows = []
+				              for (const item of chunk) {
+				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+				                const existingRow = existingMap.get(`${item.userId}:${workDateKey}`) ?? undefined
+				                const values = computeAttendanceRecordUpsertValues({
+				                  existingRow,
+				                  updateFirstInAt: item.updateFirstInAt,
+				                  updateLastOutAt: item.updateLastOutAt,
+				                  mode: item.mode,
+				                  statusOverride: item.statusOverride,
+				                  overrideMetrics: item.overrideMetrics,
+				                  isWorkday: item.isWorkday,
+				                  meta: item.meta,
+				                  sourceBatchId: item.sourceBatchId,
+				                  rule: item.rule,
+				                  leaveMinutes: item.leaveMinutes,
+				                  overtimeMinutes: item.overtimeMinutes,
+				                })
+				                upsertRows.push({
+				                  userId: item.userId,
+				                  orgId,
+				                  workDate: workDateKey,
+				                  timezone: item.timezone,
+				                  firstInAt: values.firstInAt,
+				                  lastOutAt: values.lastOutAt,
+				                  workMinutes: values.workMinutes,
+				                  lateMinutes: values.lateMinutes,
+				                  earlyLeaveMinutes: values.earlyLeaveMinutes,
+				                  status: values.status,
+				                  isWorkday: values.isWorkday,
+				                  metaJson: values.metaJson,
+				                  sourceBatchId: values.sourceBatchId,
+				                })
+				              }
 
-			                await enqueueImportItem({
-			                  userId: item.userId,
-			                  workDate: item.workDate,
-			                  recordId: record.id,
-			                  previewSnapshot: item.previewSnapshot,
-			                })
+				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows)
 
-			                importedCount += 1
-			                if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
-			                  results.push({
-			                    id: record.id,
-			                    userId: item.userId,
-			                    workDate: item.workDate,
-			                    engine: item.engine,
-			                  })
-			                }
-			              }
-			            }
-			            const enqueueRecordUpsert = async (item) => {
-			              recordUpsertsBuffer.push(item)
-			              if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
+				              for (const item of chunk) {
+				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+				                const record = upserted.get(`${item.userId}:${workDateKey}`)
+				                if (!record?.id) {
+				                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+				                }
+
+				                await enqueueImportItem({
+				                  userId: item.userId,
+				                  workDate: workDateKey,
+				                  recordId: record.id,
+				                  previewSnapshot: item.previewSnapshot,
+				                })
+
+				                importedCount += 1
+				                if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
+				                  results.push({
+				                    id: record.id,
+				                    userId: item.userId,
+				                    workDate: workDateKey,
+				                    engine: item.engine,
+				                  })
+				                }
+				              }
+				            }
+				            const enqueueRecordUpsert = async (item) => {
+				              recordUpsertsBuffer.push(item)
+				              if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
 			                await flushRecordUpserts()
 			              }
 			            }
