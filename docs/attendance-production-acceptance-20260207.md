@@ -1173,3 +1173,42 @@ Go/No-Go decision (2026-02-12, post-`3b85463d`):
 
 - **GO (unchanged)**
 - Reason: strict gates remain stable and 200k import payloads are accepted (no 413).
+
+## Latest Execution Record (2026-02-12, Main HEAD Re-Validation After `90f78a05`)
+
+Goal of this cycle:
+
+- Reduce `200k` import commit latency by caching timezone-related `Intl.DateTimeFormat` helpers used during per-row metric computations.
+- Confirm strict gates remain stable on the production target env.
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `90f78a05` (`perf(attendance): cache timezone formatters in import`)
+2. Deploy workflows:
+   - [Build and Push Docker Images #21944398404](https://github.com/zensgit/metasheet2/actions/runs/21944398404) (`SUCCESS`)
+   - [Deploy to Production #21944398423](https://github.com/zensgit/metasheet2/actions/runs/21944398423) (`SUCCESS`)
+3. Strict gates (twice; workflow_dispatch with `require_batch_resolve=true`):
+   - Run: [Attendance Strict Gates (Prod) #21944498008](https://github.com/zensgit/metasheet2/actions/runs/21944498008) (`SUCCESS`)
+4. Perf baseline (200k, async+rollback, export disabled):
+   - Run: [Attendance Import Perf Baseline #21944618100](https://github.com/zensgit/metasheet2/actions/runs/21944618100) (`SUCCESS`)
+
+Evidence (downloaded artifacts):
+
+- Strict gates:
+  - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-1/`
+  - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-2/`
+- Perf baseline summary:
+  - `output/playwright/ga/21944618100/attendance-import-perf-21944618100-1/attendance-perf-mljdfef2-ithiuu/perf-summary.json`
+
+Perf summary (200k):
+
+- previewMs: `10086`
+- commitMs: `232725`
+- rollbackMs: `1874`
+- Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
+
+Go/No-Go decision (2026-02-12, post-`90f78a05`):
+
+- **GO (unchanged)**
+- Reason: strict gates remain stable and 200k commit latency improved materially.

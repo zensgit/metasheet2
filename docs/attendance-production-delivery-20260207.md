@@ -379,6 +379,31 @@ Latest head re-validation on `main` (post-`3b85463d`):
   - rollbackMs: `2847`
   - Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
 
+Latest head re-validation on `main` (post-`90f78a05`):
+
+- Head commit:
+  - `90f78a05` (`perf(attendance): cache timezone formatters in import`)
+  - Change: cache per-timezone `Intl.DateTimeFormat` instances used during import computations to reduce CPU overhead at `200k+` scale.
+- Deploy workflows:
+  - [Build and Push Docker Images #21944398404](https://github.com/zensgit/metasheet2/actions/runs/21944398404) (`SUCCESS`)
+  - [Deploy to Production #21944398423](https://github.com/zensgit/metasheet2/actions/runs/21944398423) (`SUCCESS`)
+- Strict gates run (explicit full strictness; workflow_dispatch with `require_batch_resolve=true`):
+  - [Attendance Strict Gates (Prod) #21944498008](https://github.com/zensgit/metasheet2/actions/runs/21944498008) (`SUCCESS`)
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-1/`
+    - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-2/`
+- Perf baseline (200k, async+rollback, export disabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21944618100](https://github.com/zensgit/metasheet2/actions/runs/21944618100) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21944618100/attendance-import-perf-21944618100-1/attendance-perf-mljdfef2-ithiuu/perf-summary.json`
+  - previewMs: `10086`
+  - commitMs: `232725`
+  - rollbackMs: `1874`
+  - Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
+- Perf impact (200k commit-async; same env):
+  - Before caching Intl formatters: commitMs `566193`
+  - After caching Intl formatters: commitMs `232725`
+
 Latest head re-validation on `main` (post-`91c21cab`):
 
 - Head commit:

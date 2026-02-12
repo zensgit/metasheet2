@@ -388,6 +388,40 @@ Verification:
   - rollbackMs: `2847`
   - Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
 
+## Update (2026-02-12): Cache Intl Timezone Formatters (Reduce 200k Commit Latency)
+
+Large imports call `parseImportedDateTime()` and `computeMetrics()` per row. Previously, helper functions like `getZonedMinutes()`
+created new `Intl.DateTimeFormat(...)` instances per row, which adds significant CPU overhead at `200k+` scale.
+
+Change shipped:
+
+- Cache per-timezone `Intl.DateTimeFormat` instances used for:
+  - work-date formatting
+  - zoned minute extraction
+  - zoned parts extraction (offset calculations)
+- Replace `buildZonedDate()`'s `toLocaleString()` hack with a `zonedTimeToUtc()` conversion that reuses cached formatters.
+- Implementation: `/Users/huazhou/Downloads/Github/metasheet2/plugins/plugin-attendance/index.cjs`
+
+Verification:
+
+- Remote strict gates (2x; workflow_dispatch with `require_batch_resolve=true`): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21944498008](https://github.com/zensgit/metasheet2/actions/runs/21944498008)
+  - Evidence:
+    - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-1/`
+    - `output/playwright/ga/21944498008/attendance-strict-gates-prod-21944498008-1/20260212-112109-2/`
+- Perf baseline (200k, async+rollback, export disabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21944618100](https://github.com/zensgit/metasheet2/actions/runs/21944618100)
+  - Evidence:
+    - `output/playwright/ga/21944618100/attendance-import-perf-21944618100-1/attendance-perf-mljdfef2-ithiuu/perf-summary.json`
+  - previewMs: `10086`
+  - commitMs: `232725`
+  - rollbackMs: `1874`
+
+Perf impact (200k commit-async; same env):
+
+- Before caching (2026-02-12): commitMs `566193`
+- After caching (2026-02-12): commitMs `232725`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
