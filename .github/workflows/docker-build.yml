@@ -55,7 +55,9 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy backend + web containers
+      - name: Remote deploy (with preflight logs)
+        id: remote_deploy
+        continue-on-error: true
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -70,6 +72,8 @@ jobs:
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          mkdir -p output/deploy
+          deploy_log="output/deploy/deploy.log"
           remote_cmds=(
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
@@ -81,12 +85,19 @@ jobs:
             "git checkout main"
             "git pull --ff-only origin main"
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
+            "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
+            "echo \"=== ATTENDANCE PREFLIGHT END ===\""
+            "echo \"=== DEPLOY START ===\""
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
+            "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
+            "echo \"=== MIGRATE START ===\""
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js"
+            "echo \"=== MIGRATE END ===\""
             "# Post-deploy smoke checks"
+            "echo \"=== SMOKE START ===\""
             "for i in {1..10}; do"
               "  if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then"
             "    break"
@@ -97,13 +108,92 @@ jobs:
             "curl -fsS http://127.0.0.1:8900/health >/dev/null"
             "curl -fsS http://127.0.0.1:8081 >/dev/null"
             "echo \"Smoke: api/plugins=ok health=ok web=ok\""
+            "echo \"=== SMOKE END ===\""
           )
-          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            {
-              echo "### Deploy smoke"
-              echo "- api/plugins: ok"
-              echo "- health: ok"
-              echo "- web: ok"
-            } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$deploy_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "deploy_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "deploy_log=$deploy_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write deploy summary (preflight + runbooks)
+        if: always()
+        env:
+          DEPLOY_RC: ${{ steps.remote_deploy.outputs.deploy_rc }}
+        run: |
+          set -euo pipefail
+          deploy_log="output/deploy/deploy.log"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          echo "## Deploy (Remote)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${DEPLOY_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Remote Preflight" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -f "$deploy_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (deploy.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            preflight_block="$(
+              awk '
+                /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; next }
+                /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0 }
+                printing { print }
+              ' "$deploy_log" | head -n 120
+            )"
+
+            if [[ -z "${preflight_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see deploy.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Last 80 log lines:" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              tail -n 80 "$deploy_log" >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            else
+              status="UNKNOWN"
+              if echo "$preflight_block" | grep -q "Preflight OK"; then
+                status="PASS"
+              elif echo "$preflight_block" | grep -q "\\[attendance-preflight\\] ERROR:"; then
+                status="FAIL"
+              fi
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$preflight_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upload channel troubleshooting: ${repo_url}/blob/main/docs/attendance-production-import-upload-channel-20260212.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deploy artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/deploy/**
+
+      - name: Fail when remote deploy failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_deploy.outputs.deploy_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "deploy_rc missing; failing deploy job." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote deploy failed: rc=$rc" >&2
+            exit 1
           fi
