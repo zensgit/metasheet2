@@ -783,11 +783,42 @@ function buildRowsFromEntries({ entries }) {
   return Array.from(rowsByKey.values())
 }
 
-const ATTENDANCE_IMPORT_CSV_MAX_ROWS = (() => {
-  const raw = Number(process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS ?? 500000)
-  if (!Number.isFinite(raw)) return 500000
-  return Math.max(1000, Math.floor(raw))
-})()
+function resolvePositiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = Number(process.env[name] ?? fallback)
+  if (!Number.isFinite(raw)) return fallback
+  const parsed = Math.floor(raw)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(max, Math.max(min, parsed))
+}
+
+const ATTENDANCE_IMPORT_CSV_MAX_ROWS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_CSV_MAX_ROWS', 500000, {
+  min: 1000,
+})
+
+const ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE', 300, {
+  min: 50,
+  max: 1000,
+})
+
+const ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE', 200, {
+  min: 50,
+  max: 1000,
+})
+
+const ATTENDANCE_IMPORT_PREFETCH_MAX_USERS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_PREFETCH_MAX_USERS', 5000, {
+  min: 100,
+  max: 100000,
+})
+
+const ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES = resolvePositiveIntEnv('ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES', 366, {
+  min: 7,
+  max: 10000,
+})
+
+const ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS', 366, {
+  min: 7,
+  max: 10000,
+})
 
 function iterateCsvRows(csvText, delimiter = ',', onRow) {
   if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
@@ -1073,6 +1104,13 @@ function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
 function ensureCsvRowsWithinLimit(result) {
   if (!result?.limitExceeded) return
   throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${result.maxRows})`)
+}
+
+function releaseImportRowMemory(row) {
+  if (!row || typeof row !== 'object') return
+  if (row.fields && typeof row.fields === 'object') {
+    row.fields = undefined
+  }
 }
 
 function resolveUserMapValue(userMap, key) {
@@ -5438,7 +5476,6 @@ module.exports = {
 	        await trx.query(batchInsert.sql, batchInsert.params)
 
 	        const importItemsBuffer = []
-	        const IMPORT_ITEMS_CHUNK_SIZE = 300
 	        const flushImportItems = async () => {
 	          if (!importItemsBuffer.length) return
 	          const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
@@ -5467,7 +5504,7 @@ module.exports = {
 	            recordId: recordId ?? null,
 	            previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
 	          })
-	          if (importItemsBuffer.length >= IMPORT_ITEMS_CHUNK_SIZE) {
+	          if (importItemsBuffer.length >= ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE) {
 	            await flushImportItems()
 	          }
 	        }
@@ -5495,31 +5532,52 @@ module.exports = {
 	          if (!scopeFromDate || dateKey < scopeFromDate) scopeFromDate = dateKey
 	          if (!scopeToDate || dateKey > scopeToDate) scopeToDate = dateKey
 	        }
+	        const scopeSpanDays = scopeFromDate && scopeToDate ? Math.max(0, diffDays(scopeFromDate, scopeToDate)) + 1 : 0
+	        const shouldPrefetchWorkContext = Boolean(
+	          scopeFromDate
+	          && scopeToDate
+	          && scopeUserIdList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_USERS
+	          && scopeWorkDateList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES
+	          && scopeSpanDays <= ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS
+	        )
 	        const prefetchedWorkContext = {
-	          holidaysByDate: await loadHolidayMapByDates(trx, orgId, scopeWorkDateList),
-	          shiftAssignmentsByUser: await loadShiftAssignmentMapForUsersRange(
+	          holidaysByDate: new Map(),
+	          shiftAssignmentsByUser: new Map(),
+	          rotationAssignmentsByUser: new Map(),
+	          rotationShiftsById: new Map(),
+	        }
+	        if (shouldPrefetchWorkContext) {
+	          prefetchedWorkContext.holidaysByDate = await loadHolidayMapByDates(trx, orgId, scopeWorkDateList)
+	          prefetchedWorkContext.shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(
 	            trx,
 	            orgId,
 	            scopeUserIdList,
 	            scopeFromDate,
 	            scopeToDate
-	          ),
-	          rotationAssignmentsByUser: new Map(),
-	          rotationShiftsById: new Map(),
+	          )
+	          const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
+	            trx,
+	            orgId,
+	            scopeUserIdList,
+	            scopeFromDate,
+	            scopeToDate
+	          )
+	          prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
+	          prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
+	        } else if (scopeUserIdList.length || scopeWorkDateList.length) {
+	          logger.info('Attendance import scope prefetch skipped due to limits', {
+	            orgId,
+	            users: scopeUserIdList.length,
+	            workDates: scopeWorkDateList.length,
+	            spanDays: scopeSpanDays,
+	            maxUsers: ATTENDANCE_IMPORT_PREFETCH_MAX_USERS,
+	            maxWorkDates: ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES,
+	            maxSpanDays: ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS,
+	          })
 	        }
-	        const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
-	          trx,
-	          orgId,
-	          scopeUserIdList,
-	          scopeFromDate,
-	          scopeToDate
-	        )
-	        prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
-	        prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
 
 	        // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
 	        const recordUpsertsBuffer = []
-	        const IMPORT_RECORDS_CHUNK_SIZE = 200
 	        const flushRecordUpserts = async () => {
 	          if (!recordUpsertsBuffer.length) return
 	          const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
@@ -5586,7 +5644,7 @@ module.exports = {
 	        }
 	        const enqueueRecordUpsert = async (item) => {
 	          recordUpsertsBuffer.push(item)
-	          if (recordUpsertsBuffer.length >= IMPORT_RECORDS_CHUNK_SIZE) {
+	          if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
 	            await flushRecordUpserts()
 	          }
 	        }
@@ -5643,6 +5701,7 @@ module.exports = {
 	              workDate: workDate ?? null,
 	              warnings: importWarnings,
 	            })
+	            releaseImportRowMemory(row)
 	            continue
 	          }
 
@@ -5657,6 +5716,7 @@ module.exports = {
 	              previewSnapshot: snapshot,
 	            })
 	            skipped.push({ userId: rowUserId, workDate, warnings })
+	            releaseImportRowMemory(row)
 	            continue
 	          }
 	          seenRowKeys.add(dedupKey)
@@ -5948,6 +6008,7 @@ module.exports = {
 	                }
 	              : null,
 	          })
+	          releaseImportRowMemory(row)
 	        }
 
 	        await flushRecordUpserts()
@@ -9846,7 +9907,6 @@ module.exports = {
 		            await trx.query(batchInsert.sql, batchInsert.params)
 
 		            const importItemsBuffer = []
-		            const IMPORT_ITEMS_CHUNK_SIZE = 300
 		            const flushImportItems = async () => {
 		              if (!importItemsBuffer.length) return
 		              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
@@ -9875,7 +9935,7 @@ module.exports = {
 			                recordId: recordId ?? null,
 			                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
 			              })
-			              if (importItemsBuffer.length >= IMPORT_ITEMS_CHUNK_SIZE) {
+			              if (importItemsBuffer.length >= ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE) {
 			                await flushImportItems()
 			              }
 			            }
@@ -9903,31 +9963,52 @@ module.exports = {
 			              if (!scopeFromDate || dateKey < scopeFromDate) scopeFromDate = dateKey
 			              if (!scopeToDate || dateKey > scopeToDate) scopeToDate = dateKey
 			            }
+			            const scopeSpanDays = scopeFromDate && scopeToDate ? Math.max(0, diffDays(scopeFromDate, scopeToDate)) + 1 : 0
+			            const shouldPrefetchWorkContext = Boolean(
+			              scopeFromDate
+			              && scopeToDate
+			              && scopeUserIdList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_USERS
+			              && scopeWorkDateList.length <= ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES
+			              && scopeSpanDays <= ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS
+			            )
 			            const prefetchedWorkContext = {
-			              holidaysByDate: await loadHolidayMapByDates(trx, orgId, scopeWorkDateList),
-			              shiftAssignmentsByUser: await loadShiftAssignmentMapForUsersRange(
+			              holidaysByDate: new Map(),
+			              shiftAssignmentsByUser: new Map(),
+			              rotationAssignmentsByUser: new Map(),
+			              rotationShiftsById: new Map(),
+			            }
+			            if (shouldPrefetchWorkContext) {
+			              prefetchedWorkContext.holidaysByDate = await loadHolidayMapByDates(trx, orgId, scopeWorkDateList)
+			              prefetchedWorkContext.shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(
 			                trx,
 			                orgId,
 			                scopeUserIdList,
 			                scopeFromDate,
 			                scopeToDate
-			              ),
-			              rotationAssignmentsByUser: new Map(),
-			              rotationShiftsById: new Map(),
+			              )
+			              const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
+			                trx,
+			                orgId,
+			                scopeUserIdList,
+			                scopeFromDate,
+			                scopeToDate
+			              )
+			              prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
+			              prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
+			            } else if (scopeUserIdList.length || scopeWorkDateList.length) {
+			              logger.info('Attendance import scope prefetch skipped due to limits', {
+			                orgId,
+			                users: scopeUserIdList.length,
+			                workDates: scopeWorkDateList.length,
+			                spanDays: scopeSpanDays,
+			                maxUsers: ATTENDANCE_IMPORT_PREFETCH_MAX_USERS,
+			                maxWorkDates: ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES,
+			                maxSpanDays: ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS,
+			              })
 			            }
-			            const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(
-			              trx,
-			              orgId,
-			              scopeUserIdList,
-			              scopeFromDate,
-			              scopeToDate
-			            )
-			            prefetchedWorkContext.rotationAssignmentsByUser = rotationPrefetch.assignmentsByUser
-			            prefetchedWorkContext.rotationShiftsById = rotationPrefetch.shiftsById
 
 			            // Bulk-prefetch existing attendance_records to avoid per-row SELECT ... FOR UPDATE.
 			            const recordUpsertsBuffer = []
-			            const IMPORT_RECORDS_CHUNK_SIZE = 200
 			            const flushRecordUpserts = async () => {
 			              if (!recordUpsertsBuffer.length) return
 			              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
@@ -9990,7 +10071,7 @@ module.exports = {
 			            }
 			            const enqueueRecordUpsert = async (item) => {
 			              recordUpsertsBuffer.push(item)
-			              if (recordUpsertsBuffer.length >= IMPORT_RECORDS_CHUNK_SIZE) {
+			              if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
 			                await flushRecordUpserts()
 			              }
 			            }
@@ -10047,6 +10128,7 @@ module.exports = {
 		                  workDate: workDate ?? null,
 		                  warnings: importWarnings,
 		                })
+		                releaseImportRowMemory(row)
 	                continue
 	              }
 
@@ -10061,6 +10143,7 @@ module.exports = {
 		                  previewSnapshot: snapshot,
 		                })
 		                skipped.push({ userId: rowUserId, workDate, warnings })
+		                releaseImportRowMemory(row)
 		                continue
 		              }
 	              seenRowKeys.add(dedupKey)
@@ -10361,6 +10444,7 @@ module.exports = {
 	                    }
 	                  : null,
 	              })
+	              releaseImportRowMemory(row)
 			            }
 
 			            await flushRecordUpserts()
