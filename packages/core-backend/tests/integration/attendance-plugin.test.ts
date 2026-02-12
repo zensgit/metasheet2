@@ -68,6 +68,8 @@ describe('Attendance Plugin Integration', () => {
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
+    // Keep CSV guardrail deterministic and testable across environments.
+    process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '1000'
 
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -1459,5 +1461,95 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(rollbackRes.status).toBe(200)
     }
+  })
+
+  it('rejects oversized CSV payloads with CSV_TOO_LARGE', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const csvMaxRows = Number(process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS || 1000)
+    const oversizedRowCount = csvMaxRows + 1
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvRows = Array.from({ length: oversizedRowCount }, () => `${workDate},A001,CSV Limit,09:00,18:00,正常`)
+    const csvText = `${csvHeader}\n${csvRows.join('\n')}`
+
+    const csvPayloadBase = {
+      userId: 'attendance-test',
+      csvText,
+      mapping: {
+        columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ],
+      },
+      userMap: {
+        A001: 'attendance-test',
+      },
+      mode: 'override',
+    }
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(400)
+    const previewError = (previewRes.body as { error?: { code?: string } } | undefined)?.error
+    expect(previewError?.code).toBe('CSV_TOO_LARGE')
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken,
+      }),
+    })
+    expect(commitRes.status).toBe(400)
+    const commitError = (commitRes.body as { error?: { code?: string } } | undefined)?.error
+    expect(commitError?.code).toBe('CSV_TOO_LARGE')
   })
 })

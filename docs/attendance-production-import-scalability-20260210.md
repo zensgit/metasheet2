@@ -234,10 +234,33 @@ Async commit + job polling is now implemented and verified locally (token placeh
 - Web build: `PASS`
   Evidence: `output/playwright/attendance-import-perf/attendance-perf-mlgts55j-o4ky90/web-build.log`
 
+## Update (2026-02-12): Streaming-Style CSV Parse + Row Cap Guardrail
+
+The import parser now iterates CSV rows directly (instead of materializing a full intermediate matrix), and adds a server-side CSV size guardrail:
+
+- Runtime guardrail env:
+  - `ATTENDANCE_IMPORT_CSV_MAX_ROWS` (default `500000`, minimum `1000`)
+- Behavior:
+  - Exceeding the guardrail returns `HTTP 400` with `error.code = CSV_TOO_LARGE`.
+  - Guardrail is enforced consistently across `preview`, `commit`, `import`, and async job paths.
+
+Verification:
+
+- Integration tests: `PASS`
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+  - includes `rejects oversized CSV payloads with CSV_TOO_LARGE`
+- Backend build: `PASS`
+  - `pnpm --filter @metasheet/core-backend build`
+- Remote strict gates (2x): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21934527245](https://github.com/zensgit/metasheet2/actions/runs/21934527245)
+  - Evidence:
+    - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-1/`
+    - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-2/`
+
 ## Notes / Follow-Up (P1)
 
-The above changes prevent response-size failures. The remaining work for truly large payloads (50k-100k) is:
+The above changes close the original response-size and synchronous-preview gaps. Remaining work for very large payloads (100k+) is:
 
-- async/streaming preview (job model + polling + paging). Commit is now supported via `commit-async`, but preview is still synchronous.
-- bulk upserts (reduce per-row DB work) with consistent locking strategy
-- explicit timeout + retry strategy (nginx + backend) for long commits
+- chunked DB persistence (and optional COPY fast path) to lower commit latency variance.
+- richer async preview paging UX for very large datasets (multi-page preview browsing).
+- explicit timeout + retry policy tuning (nginx + backend) for long-running imports under load.

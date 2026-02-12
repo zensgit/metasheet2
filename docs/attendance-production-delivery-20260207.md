@@ -143,7 +143,12 @@ P1 (1-2 weeks, production hardening):
       when the server responds with `HTTP 5xx` or commit-token errors.
     - Import commit now acquires a transaction-scoped advisory lock per `(orgId, idempotencyKey)` and performs
       a second idempotency read inside the transaction before insert, reducing duplicate-batch risk under concurrent retries.
-  - Remaining: true streaming CSV parser + chunked persistence for extreme payloads (500k+ rows), to further reduce peak memory.
+  - Additional hardening (implemented 2026-02-12):
+    - Streaming-style CSV row iteration (avoid full parsed matrix allocation).
+    - Server-side CSV row cap guardrail via `ATTENDANCE_IMPORT_CSV_MAX_ROWS` (default `500000`, minimum `1000`).
+    - `CSV_TOO_LARGE` mapped to explicit `HTTP 400` on preview/commit/import endpoints.
+  - Remaining:
+    - Chunked DB persistence for extreme payloads (500k+ rows) and optional COPY-based fast path.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
   - Optional IP allowlist enforcement (when configured in `attendance.settings`).
@@ -310,3 +315,31 @@ Latest head re-validation on `main` (post-`87b12c7a`):
   - `export csv ok`
   - `import async idempotency ok`
   - `SMOKE PASS`
+
+Latest head re-validation on `main` (post-`519251cb`):
+
+- Head commit:
+  - `519251cb` (`perf(attendance-import): reduce csv parse memory and enforce row cap`)
+- Deploy workflow:
+  - [Build and Push Docker Images #21934468090](https://github.com/zensgit/metasheet2/actions/runs/21934468090) (`SUCCESS`, build+deploy)
+- Strict gates run (explicit full strictness):
+  - [Attendance Strict Gates (Prod) #21934527245](https://github.com/zensgit/metasheet2/actions/runs/21934527245) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-1/`
+    - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-2/`
+- API smoke assertions in both runs:
+  - `product mode ok: mode=attendance`
+  - `batch resolve ok`
+  - `preview async ok`
+  - `audit export csv ok`
+  - `audit summary ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`
+- Playwright production flow note:
+  - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.
