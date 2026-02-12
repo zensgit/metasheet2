@@ -8,6 +8,7 @@ const requireIdempotency = process.env.REQUIRE_IDEMPOTENCY === 'true'
 const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
+const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -348,6 +349,59 @@ async function run() {
   const items = preview.body?.data?.items
   if (!Array.isArray(items) || items.length === 0) die('preview returned 0 items')
   log(`preview ok: items=${items.length}`)
+
+  // 5.1) async preview gate (optional): validates preview enqueue + poll + idempotency retry.
+  if (requirePreviewAsync) {
+    const preparePreviewAsync = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    assertOk(preparePreviewAsync, 'POST /attendance/import/prepare (preview-async)')
+    const previewAsyncToken = preparePreviewAsync.body?.data?.commitToken
+    if (!previewAsyncToken) die('prepare (preview-async) did not return commitToken')
+
+    const previewAsyncPayload = {
+      ...previewPayload,
+      idempotencyKey: `${idempotencyKey}-preview-async`,
+      previewLimit: 2,
+      commitToken: previewAsyncToken,
+    }
+    const previewAsyncRes = await apiFetch('/attendance/import/preview-async', {
+      method: 'POST',
+      body: JSON.stringify(previewAsyncPayload),
+    })
+    if (previewAsyncRes.res.status === 404) die('async preview endpoint missing (404)')
+    assertOk(previewAsyncRes, 'POST /attendance/import/preview-async')
+    const previewAsyncJob = previewAsyncRes.body?.data?.job
+    const previewAsyncJobId = previewAsyncJob?.id
+    if (!previewAsyncJobId) die('async preview did not return job.id')
+    log(`async preview enqueued: jobId=${previewAsyncJobId}`)
+
+    const previewAsyncDone = await pollImportJob(previewAsyncJobId, {
+      timeoutMs: Math.max(30000, Number(process.env.PREVIEW_ASYNC_POLL_TIMEOUT_MS || 180000)),
+      intervalMs: Math.max(500, Number(process.env.PREVIEW_ASYNC_POLL_INTERVAL_MS || 1000)),
+    })
+    if (String(previewAsyncDone.kind || '') !== 'preview') die('async preview job kind mismatch')
+    const previewAsyncResult = previewAsyncDone.preview
+    if (!previewAsyncResult || typeof previewAsyncResult !== 'object') die('async preview job missing preview result')
+    if (!Array.isArray(previewAsyncResult.items) || previewAsyncResult.items.length === 0) {
+      die('async preview job returned empty preview items')
+    }
+
+    const previewAsyncRetryPayload = { ...previewAsyncPayload }
+    delete previewAsyncRetryPayload.commitToken
+    const previewAsyncRetry = await apiFetch('/attendance/import/preview-async', {
+      method: 'POST',
+      body: JSON.stringify(previewAsyncRetryPayload),
+    })
+    assertOk(previewAsyncRetry, 'POST /attendance/import/preview-async (idempotency retry)')
+    const previewRetryJob = previewAsyncRetry.body?.data?.job
+    if (!previewRetryJob?.id) die('async preview idempotency retry did not return job.id')
+    if (previewRetryJob.id !== previewAsyncJobId) {
+      die(`async preview idempotency retry returned different job.id: ${String(previewRetryJob.id)}`)
+    }
+    if (previewAsyncRetry.body?.data?.idempotent !== true) {
+      die('async preview idempotency retry missing idempotent=true')
+    }
+    log('preview async ok')
+  }
 
   // 6) prepare token (commit) - preview consumes tokens by design
   const prepare2 = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })

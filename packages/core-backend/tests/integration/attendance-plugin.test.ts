@@ -938,6 +938,114 @@ describe('Attendance Plugin Integration', () => {
     expect(rollbackRes.status).toBe(200)
   })
 
+  it('supports async import preview jobs (preview-async + job polling)', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const idempotencyKey = `integration-preview-async-${Date.now().toString(36)}`
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const previewPayload = {
+      userId: 'attendance-test',
+      idempotencyKey,
+      timezone: 'UTC',
+      previewLimit: 2,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:10:00Z`,
+            lastOutAt: `${workDate}T18:10:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+      commitToken,
+    }
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(previewPayload),
+    })
+    expect(previewRes.status).toBe(200)
+    const job = (previewRes.body as { data?: { job?: any } } | undefined)?.data?.job
+    const jobId = job?.id
+    expect(typeof jobId).toBe('string')
+
+    const { commitToken: _commitToken, ...retryPayload } = previewPayload
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(retryPayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryData = (retryRes.body as { data?: { job?: any; idempotent?: boolean } } | undefined)?.data
+    expect(retryData?.job?.id).toBe(jobId)
+    expect(retryData?.idempotent).toBe(true)
+
+    let finished = false
+    for (let i = 0; i < 100; i++) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        expect(jobData?.kind).toBe('preview')
+        expect(Array.isArray(jobData?.preview?.items)).toBe(true)
+        expect(jobData?.preview?.items?.length).toBeGreaterThan(0)
+        expect(jobData?.preview?.rowCount).toBe(2)
+        finished = true
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'preview job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+
+    expect(finished).toBe(true)
+  })
+
   it('exports attendance admin audit logs as CSV', async () => {
     if (!baseUrl) return
 

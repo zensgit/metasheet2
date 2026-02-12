@@ -118,6 +118,7 @@ function statusClassOf(statusCode: number): string {
 function resolveAttendanceOperation(req: Request, normalizedRoute: string): string {
   const method = req.method.toUpperCase()
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview') return 'import_preview'
+  if (method === 'POST' && normalizedRoute === '/api/attendance/import/preview-async') return 'import_preview_async'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit') return 'import_commit'
   if (method === 'POST' && normalizedRoute === '/api/attendance/import/commit-async') return 'import_commit_async'
   if (method === 'GET' && normalizedRoute === '/api/attendance/import/jobs/:id') return 'import_job_poll'
@@ -337,6 +338,9 @@ function pickLimiter(req: Request): { limiter: TokenBucketRateLimiter; keyPrefix
   }
   if (path === '/api/attendance/import/preview' && req.method === 'POST') {
     return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_preview' }
+  }
+  if (path === '/api/attendance/import/preview-async' && req.method === 'POST') {
+    return { limiter: importPreviewLimiter, keyPrefix: 'attendance_import_preview_async' }
   }
   if (path === '/api/attendance/import/commit' && req.method === 'POST') {
     return { limiter: importCommitLimiter, keyPrefix: 'attendance_import_commit' }

@@ -4708,15 +4708,41 @@ module.exports = {
 	    // ============================================================
 
 	    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
+	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
 	    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
 	    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
 	    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
+	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
+	      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
+	      if (!Number.isFinite(raw)) return 300
+	      return Math.max(1, Math.min(1000, Math.floor(raw)))
+	    })()
+
+	    const normalizePreviewAsyncLimit = (value) => {
+	      const numeric = Number(value)
+	      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
+	      return Math.max(1, Math.min(1000, Math.floor(numeric)))
+	    }
+
+	    const toPreviewJobIdempotencyKey = (idempotencyKey) => {
+	      const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+	      if (!clean) return ''
+	      return `preview:${clean}`.slice(0, 128)
+	    }
 
 	    const sanitizeImportJobPayload = (payload) => {
 	      if (!payload || typeof payload !== 'object') return {}
 	      const next = { ...payload }
+	      const jobType = next.__jobType === 'preview' ? 'preview' : 'commit'
 	      // Never persist single-use tokens in the job payload.
 	      delete next.commitToken
+	      if (jobType === 'preview') {
+	        next.previewLimit = normalizePreviewAsyncLimit(next.previewLimit)
+	        // Keep payload size bounded for durable queue storage.
+	        if (Array.isArray(next.rows) && next.rows.length > 10000 && typeof next.csvText === 'string') delete next.rows
+	        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
+	        return next
+	      }
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
 	      if (Array.isArray(next.rows) && next.rows.length > 5000) delete next.rows
 	      if (Array.isArray(next.entries) && next.entries.length > 20000) delete next.entries
@@ -4725,16 +4751,28 @@ module.exports = {
 
 	    const mapImportJobRow = (row) => {
 	      const payload = normalizeMetadata(row.payload)
+	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
+	      const preview = kind === 'preview' && payload?.previewResult && typeof payload.previewResult === 'object'
+	        ? payload.previewResult
+	        : null
+	      const rawIdempotencyKey = row.idempotency_key ?? payload?.idempotencyKey ?? null
+	      const idempotencyKey = kind === 'preview'
+	        && typeof rawIdempotencyKey === 'string'
+	        && rawIdempotencyKey.startsWith('preview:')
+	        ? rawIdempotencyKey.slice('preview:'.length)
+	        : rawIdempotencyKey
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
 	        batchId: row.batch_id,
 	        createdBy: row.created_by,
-	        idempotencyKey: row.idempotency_key ?? payload?.idempotencyKey ?? null,
+	        idempotencyKey,
+	        kind,
 	        status: row.status ?? 'queued',
 	        progress: Number(row.progress ?? 0),
 	        total: Number(row.total ?? 0),
 	        error: row.error ?? null,
+	        preview,
 	        startedAt: row.started_at ?? null,
 	        finishedAt: row.finished_at ?? null,
 	        createdAt: row.created_at ?? null,
@@ -4840,6 +4878,176 @@ module.exports = {
 	      return 'queued'
 	    }
 
+	    const buildAsyncPreviewResult = ({ payload, requesterId }) => {
+	      const profile = findImportProfile(payload.mappingProfileId)
+	      const requiredFields = profile?.requiredFields ?? []
+	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      let csvWarnings = []
+	      const rows = Array.isArray(payload.rows)
+	        ? payload.rows
+	        : payload.csvText
+	          ? (() => {
+	            const result = buildRowsFromCsv({
+	              csvText: payload.csvText,
+	              csvOptions: payload.csvOptions,
+	            })
+	            csvWarnings = result.warnings
+	            return result.rows
+	          })()
+	          : Array.isArray(payload.entries)
+	            ? buildRowsFromEntries({ entries: payload.entries })
+	            : buildRowsFromDingTalk({
+	              columns: payload.columns,
+	              data: payload.data,
+	              userId: payload.userId ?? requesterId,
+	            })
+	      if (!rows.length) {
+	        throw new Error('No rows to preview')
+	      }
+
+	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
+	      const preview = []
+	      const previewStats = {
+	        rowCount: rows.length,
+	        invalid: 0,
+	        duplicates: 0,
+	      }
+	      const seenKeys = new Set()
+
+	      for (const row of rows) {
+	        const shouldRender = preview.length < previewLimit
+	        const workDate = row.workDate
+	        const rowUserId = resolveRowUserId({
+	          row,
+	          fallbackUserId: payload.userId ?? requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	        })
+	        const warnings = []
+	        if (!rowUserId) warnings.push('Missing userId')
+	        if (!workDate) warnings.push('Missing workDate')
+	        if (requiredFields.length) {
+	          const missingRequired = requiredFields.filter((field) => {
+	            const value = resolveRequiredFieldValue(row, field)
+	            return value === undefined || value === null || value === ''
+	          })
+	          if (missingRequired.length) warnings.push(`Missing required: ${missingRequired.join(', ')}`)
+	        }
+	        if (punchRequiredFields.length && shouldEnforcePunchRequired(row)) {
+	          const missingPunch = punchRequiredFields.filter((field) => {
+	            const value = resolveRequiredFieldValue(row, field)
+	            return value === undefined || value === null || value === ''
+	          })
+	          if (missingPunch.length) warnings.push(`Missing required: ${missingPunch.join(', ')}`)
+	        }
+	        if (warnings.length) {
+	          previewStats.invalid += 1
+	          if (shouldRender) {
+	            preview.push({
+	              userId: rowUserId ?? 'unknown',
+	              workDate: workDate ?? '',
+	              firstInAt: null,
+	              lastOutAt: null,
+	              workMinutes: 0,
+	              lateMinutes: 0,
+	              earlyLeaveMinutes: 0,
+	              leaveMinutes: 0,
+	              overtimeMinutes: 0,
+	              status: 'invalid',
+	              isWorkday: undefined,
+	              warnings,
+	              appliedPolicies: [],
+	              userGroups: [],
+	            })
+	          }
+	          continue
+	        }
+
+	        const dedupKey = `${rowUserId}:${workDate}`
+	        if (seenKeys.has(dedupKey)) {
+	          previewStats.duplicates += 1
+	          if (shouldRender) {
+	            preview.push({
+	              userId: rowUserId,
+	              workDate,
+	              firstInAt: null,
+	              lastOutAt: null,
+	              workMinutes: 0,
+	              lateMinutes: 0,
+	              earlyLeaveMinutes: 0,
+	              leaveMinutes: 0,
+	              overtimeMinutes: 0,
+	              status: 'invalid',
+	              isWorkday: undefined,
+	              warnings: ['Duplicate row for same user/workDate (skipped during commit).'],
+	              appliedPolicies: [],
+	              userGroups: [],
+	            })
+	          }
+	          continue
+	        }
+	        seenKeys.add(dedupKey)
+
+	        if (!shouldRender) continue
+
+	        preview.push({
+	          userId: rowUserId,
+	          workDate,
+	          firstInAt: null,
+	          lastOutAt: null,
+	          workMinutes: 0,
+	          lateMinutes: 0,
+	          earlyLeaveMinutes: 0,
+	          leaveMinutes: 0,
+	          overtimeMinutes: 0,
+	          status: 'normal',
+	          isWorkday: undefined,
+	          warnings: [],
+	          appliedPolicies: [],
+	          userGroups: [],
+	        })
+	      }
+
+	      return {
+	        items: preview,
+	        total: preview.length,
+	        rowCount: rows.length,
+	        truncated: rows.length > previewLimit,
+	        previewLimit,
+	        stats: previewStats,
+	        csvWarnings,
+	        groupWarnings: [],
+	        asyncSimplified: true,
+	      }
+	    }
+
+	    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
+	      const result = buildAsyncPreviewResult({ payload, requesterId })
+	      await db.query(
+	        `UPDATE attendance_import_jobs
+	         SET status = 'completed',
+	             progress = $3,
+	             total = $4,
+	             error = NULL,
+	             payload = $5::jsonb,
+	             finished_at = now(),
+	             updated_at = now()
+	         WHERE id = $1 AND org_id = $2`,
+	        [
+	          rowId,
+	          orgId,
+	          result.rowCount,
+	          result.rowCount,
+	          JSON.stringify({
+	            __jobType: 'preview',
+	            idempotencyKey: payload.idempotencyKey ?? null,
+	            previewResult: result,
+	          }),
+	        ]
+	      )
+	    }
+
 	    const processAsyncImportCommitJob = async ({ jobId }) => {
 	      const rowId = String(jobId || '').trim()
 	      if (!rowId) return
@@ -4851,35 +5059,59 @@ module.exports = {
 	      const orgId = jobRow.org_id ?? DEFAULT_ORG_ID
 	      const batchId = jobRow.batch_id
 	      const requesterId = jobRow.created_by
+	      const payload = normalizeMetadata(jobRow.payload)
+	      const isPreviewJob = payload?.__jobType === 'preview'
 	      const status = normalizeImportJobStatus(jobRow.status)
 	      if (status === 'completed') return
 
-	      // If the batch already exists, treat the job as complete (idempotent re-run).
-	      try {
-	        const batchRows = await db.query(
-	          'SELECT id, status, meta FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
-	          [batchId, orgId]
-	        )
-	        if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
-	          await updateImportJobProgress({
-	            jobId: rowId,
-	            orgId,
-	            status: 'completed',
-	            progress: jobRow.total ?? 0,
-	            total: jobRow.total ?? 0,
-	            error: null,
-	            finishedAt: true,
-	          })
-	          return
+	      if (!isPreviewJob) {
+	        // If the batch already exists, treat the job as complete (idempotent re-run).
+	        try {
+	          const batchRows = await db.query(
+	            'SELECT id, status, meta FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	            [batchId, orgId]
+	          )
+	          if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
+	            await updateImportJobProgress({
+	              jobId: rowId,
+	              orgId,
+	              status: 'completed',
+	              progress: jobRow.total ?? 0,
+	              total: jobRow.total ?? 0,
+	              error: null,
+	              finishedAt: true,
+	            })
+	            return
+	          }
+	        } catch (_error) {
+	          // Ignore and proceed - batch may not exist yet.
 	        }
-	      } catch (_error) {
-	        // Ignore and proceed - batch may not exist yet.
 	      }
 
 	      await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
-
-	      const payload = normalizeMetadata(jobRow.payload)
 	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
+
+	      if (isPreviewJob) {
+	        try {
+	          await processAsyncImportPreviewJob({
+	            rowId,
+	            orgId,
+	            requesterId,
+	            payload,
+	          })
+	        } catch (error) {
+	          const message = String(error?.message ?? error ?? 'Unknown error')
+	          logger.error('Attendance async import preview failed', error)
+	          await updateImportJobProgress({
+	            jobId: rowId,
+	            orgId,
+	            status: 'failed',
+	            error: message,
+	            finishedAt: true,
+	          })
+	        }
+	        return
+	      }
 
 	      let lastProgressWriteAt = 0
 	      let lastProgressValue = -1
@@ -10084,6 +10316,142 @@ module.exports = {
 	          logger.error('Attendance import commit failed', error)
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import attendance' } })
 	        }
+      })
+    )
+
+    // Async preview endpoint for ultra-large imports. Enqueues preview computation and lets clients
+    // poll /api/attendance/import/jobs/:id for completion + preview payload.
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/import/preview-async',
+      withPermission('attendance:admin', async (req, res) => {
+        if (!ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Async preview disabled' } })
+          return
+        }
+
+        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const commitToken = parsed.data.commitToken
+        if (!commitToken && requireImportCommitToken) {
+          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
+          return
+        }
+        if (commitToken) {
+          let tokenOk = false
+          try {
+            tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            logger.error('Attendance import token validation failed (async preview)', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate commit token' } })
+            return
+          }
+          if (!tokenOk && requireImportCommitToken) {
+            res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
+            return
+          }
+          if (!tokenOk && !requireImportCommitToken) {
+            logger.warn('Attendance import preview token invalid; continuing without enforcement.')
+          }
+        }
+
+        const rawIdempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+          ? parsed.data.idempotencyKey.trim()
+          : ''
+        const previewJobIdempotencyKey = toPreviewJobIdempotencyKey(rawIdempotencyKey)
+        if (previewJobIdempotencyKey) {
+          try {
+            const existingJob = await loadImportJobByIdempotencyKey(orgId, previewJobIdempotencyKey)
+            if (existingJob) {
+              res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            // Fall through and attempt to create a job.
+          }
+        }
+
+        try {
+          const jobId = randomUUID()
+          const batchId = randomUUID()
+          const sanitizedPayload = sanitizeImportJobPayload({
+            ...parsed.data,
+            __jobType: 'preview',
+            previewLimit: normalizePreviewAsyncLimit(parsed.data.previewLimit),
+            idempotencyKey: rawIdempotencyKey || undefined,
+          })
+
+          let total = 0
+          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
+          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
+          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
+
+          await db.query(
+            `INSERT INTO attendance_import_jobs
+             (id, org_id, batch_id, created_by, idempotency_key, status, progress, total, payload, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now(), now())`,
+            [
+              jobId,
+              orgId,
+              batchId,
+              requesterId,
+              previewJobIdempotencyKey || null,
+              'queued',
+              0,
+              total,
+              JSON.stringify(sanitizedPayload),
+            ]
+          )
+
+          const jobRow = await loadImportJob(jobId, orgId)
+          if (!jobRow) {
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create preview job' } })
+            return
+          }
+          await enqueueImportJob(jobId)
+          res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          const maybeConstraint = String(error?.constraint ?? '')
+          const isIdempotencyUnique = Boolean(previewJobIdempotencyKey)
+            && String(error?.code ?? '') === '23505'
+            && maybeConstraint.includes('uq_attendance_import_jobs_idempotency')
+          if (isIdempotencyUnique) {
+            try {
+              const existingJob = await loadImportJobByIdempotencyKey(orgId, previewJobIdempotencyKey)
+              if (existingJob) {
+                res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
+                return
+              }
+            } catch (_error) {
+              // Fall through to generic error response.
+            }
+          }
+          logger.error('Attendance import async preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue preview job' } })
+        }
       })
     )
 
