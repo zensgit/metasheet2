@@ -423,3 +423,30 @@ API smoke assertions (both runs):
 Result:
 
 - Production verification remains stable on latest `main`.
+
+## Execution Record (2026-02-12, Main HEAD Re-Validation After `9f27c004`)
+
+After pushing documentation commit `9f27c004`, strict gates were re-run again on latest `main` HEAD:
+
+- Run: [Attendance Strict Gates (Prod) #21931376436](https://github.com/zensgit/metasheet2/actions/runs/21931376436) (`SUCCESS`)
+- Input includes `require_batch_resolve=true`.
+- Workflow confirms `✅ Strict gates passed twice`.
+
+Evidence:
+
+- `output/playwright/ga/21931376436/attendance-strict-gates-prod-21931376436-1/20260212-023656-1/`
+- `output/playwright/ga/21931376436/attendance-strict-gates-prod-21931376436-1/20260212-023656-2/`
+
+API smoke assertions (both runs):
+
+- `batch resolve ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Result:
+
+- Production verification remains stable on latest `main` HEAD.
