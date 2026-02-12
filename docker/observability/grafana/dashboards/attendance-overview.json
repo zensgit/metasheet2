@@ -107,6 +107,26 @@
       ],
       "options": { "showHeader": true },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Import Upload Bytes (rate, bytes/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "targets": [
+        { "expr": "sum(rate(attendance_import_upload_bytes_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Import Upload Rows (rate, rows/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "targets": [
+        { "expr": "sum(rate(attendance_import_upload_rows_total{job=\"$job\"}[5m]))", "datasource": "${DS_PROM}" }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     }
   ],
   "schemaVersion": 38,

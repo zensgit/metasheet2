@@ -84,6 +84,11 @@ Upload channel knobs (all optional; safe defaults):
 - `ATTENDANCE_IMPORT_UPLOAD_CLEANUP_INTERVAL_MS`
   - default: `30m`
 
+Production deploy note:
+
+- `docker-compose.app.yml` now mounts a persistent volume at `/app/uploads/attendance-import` so `csvFileId` uploads survive backend restarts.
+- `docker/nginx.conf` now allows larger bodies only for `/api/attendance/import/upload` (keeps global `client_max_body_size` bounded).
+
 ## Web UI Behavior
 
 In the Attendance Admin import UI:

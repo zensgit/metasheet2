@@ -4,6 +4,8 @@ import { query } from '../db/pg'
 import { TokenBucketRateLimiter } from '../integration/rate-limiting/token-bucket'
 import {
   attendanceApiErrorsTotal,
+  attendanceImportUploadBytesTotal,
+  attendanceImportUploadRowsTotal,
   attendanceOperationFailuresTotal,
   attendanceOperationLatencySeconds,
   attendanceOperationRequestsTotal,
@@ -155,6 +157,8 @@ function pickUserId(req: Request): string | null {
 }
 
 function extractResourceId(req: Request, captured: { batchId?: string; requestId?: string; targetUserId?: string }): string | null {
+  const uploadFileId = (captured as { uploadFileId?: string }).uploadFileId
+  if (uploadFileId) return uploadFileId
   if (captured.batchId) return captured.batchId
   if (captured.requestId) return captured.requestId
   if (captured.targetUserId) return captured.targetUserId
@@ -201,7 +205,7 @@ export function attendanceAuditMiddleware(): RequestHandler {
     let responseOk: boolean | null = null
     let errorCode: string | null = null
     let errorMessage: string | null = null
-    const captured: { batchId?: string; requestId?: string; targetUserId?: string } = {}
+    const captured: { batchId?: string; requestId?: string; targetUserId?: string; uploadFileId?: string; uploadBytes?: number; uploadRows?: number } = {}
 
     const originalJson = res.json.bind(res)
     res.json = (body: unknown) => {
@@ -217,6 +221,9 @@ export function attendanceAuditMiddleware(): RequestHandler {
           const data = obj.data as Record<string, unknown> | undefined
           if (data && typeof data === 'object') {
             if (typeof data.batchId === 'string') captured.batchId = data.batchId
+            if (typeof data.fileId === 'string') captured.uploadFileId = data.fileId
+            if (typeof data.bytes === 'number' && Number.isFinite(data.bytes)) captured.uploadBytes = data.bytes
+            if (typeof data.rowCount === 'number' && Number.isFinite(data.rowCount)) captured.uploadRows = data.rowCount
           }
         }
       } catch {
@@ -239,6 +246,15 @@ export function attendanceAuditMiddleware(): RequestHandler {
           { operation: op, result: requestResult },
           Math.max(0, durMs / 1000),
         )
+
+        if (op === 'import_upload' && requestResult === 'ok') {
+          if (typeof captured.uploadBytes === 'number' && captured.uploadBytes >= 0) {
+            attendanceImportUploadBytesTotal.inc(captured.uploadBytes)
+          }
+          if (typeof captured.uploadRows === 'number' && captured.uploadRows >= 0) {
+            attendanceImportUploadRowsTotal.inc(captured.uploadRows)
+          }
+        }
 
         // Metrics: record only error responses, avoid unbounded series.
         if (statusCode >= 400 || responseOk === false) {

@@ -184,3 +184,20 @@ docker compose -f docker/observability/docker-compose.yml up -d
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (admin/admin)
 - Dashboard: "Attendance Overview"
+
+## Update (2026-02-12): Import Upload Observability
+
+The attendance import CSV upload channel (`/api/attendance/import/upload` + `csvFileId`) now emits dedicated Prometheus counters:
+
+- `attendance_import_upload_bytes_total`
+- `attendance_import_upload_rows_total`
+
+Dashboard update:
+
+- `docker/observability/grafana/dashboards/attendance-overview.json` includes:
+  - "Import Upload Bytes (rate, bytes/s)"
+  - "Import Upload Rows (rate, rows/s)"
+
+Alert update:
+
+- `ops/prometheus/attendance-alerts.yml` includes `AttendanceImportUploadErrors` (upload error rate > 0 for 5m).

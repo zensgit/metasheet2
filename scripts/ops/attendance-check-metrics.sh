@@ -33,6 +33,10 @@ fi
 required=(
   'attendance_api_errors_total'
   'attendance_rate_limited_total'
+  'attendance_operation_requests_total'
+  'attendance_operation_latency_seconds'
+  'attendance_import_upload_bytes_total'
+  'attendance_import_upload_rows_total'
 )
 
 missing=0
@@ -48,4 +52,3 @@ if [[ "$missing" -ne 0 ]]; then
 fi
 
 info "Metrics OK"
-

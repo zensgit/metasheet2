@@ -33,8 +33,20 @@ export const attendanceOperationLatencySeconds = new client.Histogram({
   buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120],
 })
 
+export const attendanceImportUploadBytesTotal = new client.Counter({
+  name: 'attendance_import_upload_bytes_total',
+  help: 'Total bytes uploaded via attendance import upload channel (csvFileId)',
+})
+
+export const attendanceImportUploadRowsTotal = new client.Counter({
+  name: 'attendance_import_upload_rows_total',
+  help: 'Total data rows uploaded via attendance import upload channel (csvFileId)',
+})
+
 registry.registerMetric(attendanceApiErrorsTotal)
 registry.registerMetric(attendanceRateLimitedTotal)
 registry.registerMetric(attendanceOperationRequestsTotal)
 registry.registerMetric(attendanceOperationFailuresTotal)
 registry.registerMetric(attendanceOperationLatencySeconds)
+registry.registerMetric(attendanceImportUploadBytesTotal)
+registry.registerMetric(attendanceImportUploadRowsTotal)

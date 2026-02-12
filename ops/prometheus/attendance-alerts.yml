@@ -21,6 +21,16 @@ groups:
           summary: Attendance import commit is failing
           runbook: Inspect import batch audit logs; verify idempotency behavior; check DB constraints and plugin status.
 
+      - alert: AttendanceImportUploadErrors
+        expr: sum(rate(attendance_api_errors_total{route="/api/attendance/import/upload",method="POST"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: attendance
+        annotations:
+          summary: Attendance import upload is failing
+          runbook: Check backend disk space and ATTENDANCE_IMPORT_UPLOAD_DIR volume; confirm nginx per-route client_max_body_size for /api/attendance/import/upload; inspect operation_audit_logs for EXPIRED/PAYLOAD_TOO_LARGE/INTERNAL_ERROR.
+
       - alert: AttendanceImportCommitLatencyP95High
         expr: histogram_quantile(0.95, sum(rate(attendance_operation_latency_seconds_bucket{operation=~"import_commit|import_commit_async",result="ok"}[5m])) by (le)) > 20
         for: 10m
