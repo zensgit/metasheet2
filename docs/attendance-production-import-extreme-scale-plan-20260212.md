@@ -54,6 +54,22 @@ Notes:
 
 - This run overrides `max_commit_ms=1200000` to avoid treating expected extreme-payload latency as a regression.
 
+## Current Baseline (500k)
+
+Latest `500k` run (commit-async + rollback, export disabled):
+
+- Run: [Attendance Import Perf Baseline #21946247688](https://github.com/zensgit/metasheet2/actions/runs/21946247688) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21946247688/attendance-import-perf-21946247688-1/attendance-perf-mljfazcf-oeeupe/perf-summary.json`
+- previewMs: `17167`
+- commitMs: `594239`
+- rollbackMs: `7192`
+
+Notes:
+
+- This run overrides `max_commit_ms=1800000` to avoid treating expected extreme-payload latency as a regression.
+- At `500k`, the payload approaches the default CSV row cap (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=500000`) and the reverse proxy body limit (`client_max_body_size 50m`).
+
 ## When This Becomes Necessary
 
 We should prioritize the work below if any of these become true:

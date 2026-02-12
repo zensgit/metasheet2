@@ -431,6 +431,15 @@ Additional perf baseline (300k, async+rollback, export disabled): `PASS`
 - commitMs: `350509`
 - rollbackMs: `4451`
 
+Additional perf baseline (500k, async+rollback, export disabled): `PASS`
+
+- Run: [Attendance Import Perf Baseline #21946247688](https://github.com/zensgit/metasheet2/actions/runs/21946247688)
+- Evidence:
+  - `output/playwright/ga/21946247688/attendance-import-perf-21946247688-1/attendance-perf-mljfazcf-oeeupe/perf-summary.json`
+- previewMs: `17167`
+- commitMs: `594239`
+- rollbackMs: `7192`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
