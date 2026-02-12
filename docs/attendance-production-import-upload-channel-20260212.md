@@ -278,6 +278,16 @@ Verification (Remote, GA Evidence):
     - `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-2/`
   - Note: `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, and `export csv ok`.
 
+- Strict gates (2x, post prod host env/preflight fix):
+  - Run: [Attendance Strict Gates (Prod) #21956369650](https://github.com/zensgit/metasheet2/actions/runs/21956369650) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-1/`
+    - `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-2/`
+  - Notes:
+    - production `docker/app.env` had `ATTENDANCE_IMPORT_UPLOAD_DIR=/app/uploads/attendance-import` added (required by preflight).
+    - backend container was recreated to ensure the env var is effective at runtime.
+    - `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, and `export csv ok`.
+
 - Perf baseline (10k, async+export+rollback, `upload_csv=true` default):
   - Run: [Attendance Import Perf Baseline #21954799983](https://github.com/zensgit/metasheet2/actions/runs/21954799983) (`SUCCESS`)
   - Evidence:
