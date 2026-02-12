@@ -141,6 +141,8 @@ P1 (1-2 weeks, production hardening):
   - Gate stability hardening:
     - API smoke retries `POST /api/attendance/import/commit` (bounded; default `COMMIT_RETRIES=3`) by preparing a fresh commit token
       when the server responds with `HTTP 5xx` or commit-token errors.
+    - Import commit now acquires a transaction-scoped advisory lock per `(orgId, idempotencyKey)` and performs
+      a second idempotency read inside the transaction before insert, reducing duplicate-batch risk under concurrent retries.
   - Remaining: true streaming CSV parser + chunked persistence for extreme payloads (500k+ rows), to further reduce peak memory.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).

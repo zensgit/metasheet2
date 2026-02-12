@@ -1681,6 +1681,19 @@ function mapImportBatchRow(row) {
 	  }
 	}
 
+	async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
+	  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+	  if (!clean) return
+	  try {
+	    await client.query(
+	      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+	      [String(orgId ?? ''), clean]
+	    )
+	  } catch (_error) {
+	    // Best-effort: keep functional behavior even if advisory locks are unavailable.
+	  }
+	}
+
 function mapIntegrationRow(row) {
   return {
     id: row.id,
@@ -5273,8 +5286,18 @@ module.exports = {
 	      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
 	      const resolvedBatchId = batchId || randomUUID()
 	      let batchMeta = null
+	      let idempotentInTransaction = null
 
 	      await db.transaction(async (trx) => {
+	        if (cleanIdempotency) {
+	          await acquireImportIdempotencyLock(trx, orgId, cleanIdempotency)
+	          const existing = await loadIdempotentImportBatch(trx, orgId, cleanIdempotency)
+	          if (existing) {
+	            idempotentInTransaction = existing
+	            return
+	          }
+	        }
+
 	        let groupIdMap = null
 	        let groupCreated = 0
 	        if (groupSync) {
@@ -5877,9 +5900,23 @@ module.exports = {
 	            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	            [resolvedBatchId, orgId, JSON.stringify(updatedMeta)]
 	          )
-	          batchMeta = updatedMeta
+		          batchMeta = updatedMeta
+		        }
+		      })
+
+	      if (idempotentInTransaction) {
+	        return {
+	          batchId: idempotentInTransaction.batchId,
+	          imported: idempotentInTransaction.imported,
+	          rowCount: idempotentInTransaction.imported + idempotentInTransaction.skipped,
+	          items: [],
+	          skipped: [],
+	          csvWarnings: [],
+	          groupWarnings: [],
+	          meta: idempotentInTransaction.meta,
+	          idempotent: true,
 	        }
-	      })
+	      }
 
 	      return {
 	        batchId: resolvedBatchId,
@@ -9653,8 +9690,18 @@ module.exports = {
 	          const idempotencyEnabled = Boolean(idempotencyKey) && await hasImportBatchIdempotencyColumn(db)
 	          const batchId = randomUUID()
 	          let batchMeta = null
+	          let idempotentInTransaction = null
 
           await db.transaction(async (trx) => {
+            if (idempotencyKey) {
+              await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
+              const existing = await loadIdempotentImportBatch(trx, orgId, idempotencyKey)
+              if (existing) {
+                idempotentInTransaction = existing
+                return
+              }
+            }
+
             let groupIdMap = null
             let groupCreated = 0
             if (groupSync) {
@@ -10267,6 +10314,23 @@ module.exports = {
               batchMeta = updatedMeta
             }
           })
+
+          if (idempotentInTransaction) {
+            res.json({
+              ok: true,
+              data: {
+                batchId: idempotentInTransaction.batchId,
+                imported: idempotentInTransaction.imported,
+                items: [],
+                skipped: [],
+                csvWarnings: [],
+                groupWarnings: [],
+                meta: idempotentInTransaction.meta,
+                idempotent: true,
+              },
+            })
+            return
+          }
 
           res.json({
             ok: true,

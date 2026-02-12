@@ -542,3 +542,33 @@ Go/No-Go decision (2026-02-12, post-`08a7619e`):
 
 - **GO (unchanged)**
 - Reason: strict gates continue passing twice on latest `main` with async preview + batch resolve checks enabled.
+
+## Execution Record (2026-02-12, Concurrent Idempotency Hardening)
+
+Scope:
+
+- Harden `/api/attendance/import/commit` and async commit path against concurrent retries using the same `idempotencyKey`.
+- Add integration coverage for concurrent commit requests with different commit tokens but identical `idempotencyKey`.
+
+Code changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - added `acquireImportIdempotencyLock()` (transaction-scoped advisory lock using `pg_advisory_xact_lock`).
+  - sync commit and async commit paths now:
+    - acquire advisory lock by `(orgId, idempotencyKey)`;
+    - re-check idempotent batch inside transaction before insert;
+    - return existing batch as `idempotent=true` when a concurrent request already committed.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - added `deduplicates concurrent import commits with the same idempotencyKey`.
+
+Validation:
+
+- Build:
+  - `pnpm --filter @metasheet/core-backend build` (`PASS`)
+- Integration tests:
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance` (`PASS`)
+  - includes new concurrent idempotency case, total `9` tests passed.
+
+Evidence:
+
+- `output/playwright/attendance-next-phase/20260212-concurrent-idempotency/attendance-integration.log`

@@ -832,6 +832,104 @@ describe('Attendance Plugin Integration', () => {
     expect(retryData?.idempotent).toBe(true)
   })
 
+  it('deduplicates concurrent import commits with the same idempotencyKey', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const idempotencyKey = `integration-concurrent-${Date.now().toString(36)}`
+
+    const [prepareARes, prepareBRes] = await Promise.all([
+      requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      }),
+      requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      }),
+    ])
+    expect(prepareARes.status).toBe(200)
+    expect(prepareBRes.status).toBe(200)
+    const commitTokenA = (prepareARes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    const commitTokenB = (prepareBRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitTokenA).toBeTruthy()
+    expect(commitTokenB).toBeTruthy()
+
+    const basePayload = {
+      userId: 'attendance-test',
+      idempotencyKey,
+      timezone: 'UTC',
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+    }
+
+    const [commitARes, commitBRes] = await Promise.all([
+      requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ...basePayload, commitToken: commitTokenA }),
+      }),
+      requestJson(`${baseUrl}/api/attendance/import/commit`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ...basePayload, commitToken: commitTokenB }),
+      }),
+    ])
+
+    expect(commitARes.status).toBe(200)
+    expect(commitBRes.status).toBe(200)
+
+    const commitAData = (commitARes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    const commitBData = (commitBRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    expect(commitAData?.batchId).toBeTruthy()
+    expect(commitBData?.batchId).toBeTruthy()
+    expect(commitAData?.batchId).toBe(commitBData?.batchId)
+    expect([commitAData?.idempotent, commitBData?.idempotent].some(Boolean)).toBe(true)
+
+    // Follow-up retry without commitToken should remain idempotent and return the same batch.
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(basePayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryData = (retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    expect(retryData?.batchId).toBe(commitAData?.batchId)
+    expect(retryData?.idempotent).toBe(true)
+  })
+
   it('supports async import commit jobs (commit-async + job polling)', async () => {
     if (!baseUrl) return
 
