@@ -848,3 +848,52 @@ Go/No-Go decision (2026-02-12, post-`08a7619e`):
 
 - **GO (unchanged)**
 - Reason: latest `main` remains stable under strict gates twice with async preview and batch resolve checks.
+
+## Latest Execution Record (2026-02-12, Main HEAD Re-Validation After `87b12c7a`)
+
+Goal of this cycle:
+
+- Verify concurrent import idempotency hardening on deployed `main` with full strict gate settings.
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `87b12c7a` (`feat(attendance): harden concurrent import idempotency`)
+2. Deploy workflow:
+   - [Build and Push Docker Images #21932907464](https://github.com/zensgit/metasheet2/actions/runs/21932907464) (`SUCCESS`)
+3. Strict gates (twice; explicit full strict settings):
+   - Run: [Attendance Strict Gates (Prod) #21932967682](https://github.com/zensgit/metasheet2/actions/runs/21932967682) (`SUCCESS`)
+   - Workflow log confirms:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21932967682/20260212-035905-1/`
+- `output/playwright/ga/21932967682/20260212-035905-2/`
+
+Gate results (both runs):
+
+- Gate 2 API Smoke: `PASS`
+- Gate 3 Provisioning: `PASS`
+- Gate 4 Playwright Prod: `PASS`
+- Gate 5 Playwright Desktop: `PASS`
+- Gate 6 Playwright Mobile: `PASS`
+
+API smoke assertions (both runs):
+
+- `product mode ok: mode=attendance`
+- `batch resolve ok`
+- `preview async ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Go/No-Go decision (2026-02-12, post-`87b12c7a`):
+
+- **GO (unchanged)**
+- Reason: latest `main` remains stable under full strict gates after concurrent idempotency hardening.

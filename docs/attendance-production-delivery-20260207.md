@@ -284,3 +284,29 @@ Latest head re-validation on `main` (post-`08a7619e`):
   - `export csv ok`
   - `import async idempotency ok`
   - `SMOKE PASS`
+
+Latest head re-validation on `main` (post-`87b12c7a`):
+
+- Head commit:
+  - `87b12c7a` (`feat(attendance): harden concurrent import idempotency`)
+- Deploy workflow:
+  - [Build and Push Docker Images #21932907464](https://github.com/zensgit/metasheet2/actions/runs/21932907464) (`SUCCESS`, build+deploy)
+- Strict gates run (explicit full strictness):
+  - [Attendance Strict Gates (Prod) #21932967682](https://github.com/zensgit/metasheet2/actions/runs/21932967682) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21932967682/20260212-035905-1/`
+    - `output/playwright/ga/21932967682/20260212-035905-2/`
+- API smoke assertions in both runs:
+  - `product mode ok: mode=attendance`
+  - `preview async ok`
+  - `batch resolve ok`
+  - `audit export csv ok`
+  - `audit summary ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`

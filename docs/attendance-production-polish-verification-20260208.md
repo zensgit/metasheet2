@@ -572,3 +572,30 @@ Validation:
 Evidence:
 
 - `output/playwright/attendance-next-phase/20260212-concurrent-idempotency/attendance-integration.log`
+
+Remote strict re-validation (post-deploy):
+
+- Deploy: [Build and Push Docker Images #21932907464](https://github.com/zensgit/metasheet2/actions/runs/21932907464) (`SUCCESS`)
+- Strict gates (twice, full strict):
+  - [Attendance Strict Gates (Prod) #21932967682](https://github.com/zensgit/metasheet2/actions/runs/21932967682) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21932967682/20260212-035905-1/`
+- `output/playwright/ga/21932967682/20260212-035905-2/`
+
+API smoke assertions (both runs):
+
+- `product mode ok: mode=attendance`
+- `batch resolve ok`
+- `preview async ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
