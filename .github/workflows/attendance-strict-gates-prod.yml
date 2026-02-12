@@ -30,7 +30,7 @@ on:
       require_preview_async:
         description: 'Require async import preview gate (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
       require_batch_resolve:
         description: 'Require attendance-admin batch user resolve API (true/false)'
         required: false
@@ -57,7 +57,7 @@ jobs:
       REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
       REQUIRE_IMPORT_EXPORT: ${{ inputs.require_import_export || 'true' }}
       REQUIRE_IMPORT_ASYNC: ${{ inputs.require_import_async || 'true' }}
-      REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'false' }}
+      REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'true' }}
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       HEADLESS: 'true'
     steps:

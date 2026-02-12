@@ -1869,7 +1869,7 @@
                 :class="{ 'attendance__status--error': importAsyncJob.status === 'failed' }"
               >
                 <div class="attendance__requests-header">
-                  <span>Async import job</span>
+                  <span>{{ importAsyncJob.kind === 'preview' ? 'Async preview job' : 'Async import job' }}</span>
                   <button class="attendance__btn" type="button" @click="clearImportAsyncJob">
                     Clear
                   </button>
@@ -1881,7 +1881,10 @@
                 <div v-if="importAsyncJob.total">
                   Progress: {{ importAsyncJob.progress }} / {{ importAsyncJob.total }}
                 </div>
-                <div v-if="importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
+                <div v-if="importAsyncJob.kind !== 'preview' && importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
+                <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
+                  Preview rows: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
+                </div>
                 <div v-if="importAsyncJob.error">Error: {{ importAsyncJob.error }}</div>
               </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
@@ -3559,10 +3562,21 @@ interface AttendanceImportJob {
   batchId: string
   createdBy?: string | null
   idempotencyKey?: string | null
+  kind?: 'commit' | 'preview' | string
   status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string
   progress: number
   total: number
   error?: string | null
+  preview?: {
+    items?: AttendanceImportPreviewItem[]
+    total?: number
+    rowCount?: number
+    truncated?: boolean
+    previewLimit?: number
+    stats?: { rowCount?: number; invalid?: number; duplicates?: number }
+    csvWarnings?: string[]
+    groupWarnings?: string[]
+  } | null
   startedAt?: string | null
   finishedAt?: string | null
   createdAt?: string | null
@@ -4415,6 +4429,7 @@ const IMPORT_PREVIEW_LIMIT = 200
 const IMPORT_COMMIT_ITEMS_LIMIT = 200
 const IMPORT_PREVIEW_CHUNK_THRESHOLD = 10_000
 const IMPORT_PREVIEW_CHUNK_SIZE = 5000
+const IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_POLL_INTERVAL_MS = 2000
 const IMPORT_ASYNC_POLL_TIMEOUT_MS = 30 * 60 * 1000
@@ -4887,8 +4902,104 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
   }
 }
 
+async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint: number): Promise<boolean> {
+  importPreviewTask.value = {
+    mode: 'single',
+    status: 'running',
+    totalRows: rowCountHint,
+    processedRows: 0,
+    totalChunks: 1,
+    completedChunks: 0,
+    message: 'Queued async preview job.',
+  }
+
+  const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+  if (!tokenOk) return true
+  if (importCommitToken.value) payload.commitToken = importCommitToken.value
+
+  let asyncResponse = await apiFetch('/api/attendance/import/preview-async', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  let asyncData = await asyncResponse.json().catch(() => ({}))
+  if (!asyncResponse.ok || !asyncData?.ok) {
+    const errorCode = asyncData?.error?.code
+    if (asyncResponse.status === 404 || errorCode === 'NOT_FOUND') {
+      return false
+    }
+    if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
+      importCommitToken.value = ''
+      importCommitTokenExpiresAt.value = ''
+      const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+      if (!refreshed || !importCommitToken.value) {
+        throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
+      }
+      payload.commitToken = importCommitToken.value
+      asyncResponse = await apiFetch('/api/attendance/import/preview-async', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      asyncData = await asyncResponse.json().catch(() => ({}))
+    }
+  }
+
+  if (!asyncResponse.ok || !asyncData?.ok) {
+    throw new Error(asyncData?.error?.message || 'Failed to queue async preview')
+  }
+
+  const job = asyncData.data?.job as AttendanceImportJob | undefined
+  if (!job?.id) {
+    throw new Error('Async preview did not return job id')
+  }
+
+  adminForbidden.value = false
+  importAsyncJob.value = job
+  setStatus(`Preview job queued (${job.status}).`)
+
+  const finalJob = await pollImportJob(job.id)
+  const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
+  if (!previewData) {
+    throw new Error('Async preview completed without preview payload')
+  }
+
+  const items = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
+  importPreview.value = items
+  const previewWarnings = [
+    ...(Array.isArray(previewData.csvWarnings) ? previewData.csvWarnings : []),
+    ...(Array.isArray(previewData.groupWarnings) ? previewData.groupWarnings : []),
+  ]
+  importCsvWarnings.value = Array.from(new Set(previewWarnings))
+
+  const shown = items.length
+  const rowCount = Number(previewData.rowCount)
+  const truncated = Boolean(previewData.truncated)
+  const stats = previewData.stats && typeof previewData.stats === 'object' ? previewData.stats : null
+  const invalidCount = stats && Number.isFinite(Number((stats as any).invalid)) ? Number((stats as any).invalid) : 0
+  const dupCount = stats && Number.isFinite(Number((stats as any).duplicates)) ? Number((stats as any).duplicates) : 0
+  const baseMsg = truncated && Number.isFinite(rowCount)
+    ? `Preview loaded (async, showing ${shown}/${rowCount} rows).`
+    : `Preview loaded (async ${shown} rows).`
+  const suffix = invalidCount || dupCount ? ` Invalid: ${invalidCount}. Duplicates: ${dupCount}.` : ''
+  setStatus(`${baseMsg}${suffix}`)
+
+  importPreviewTask.value = {
+    mode: 'single',
+    status: 'completed',
+    totalRows: Number.isFinite(rowCount) ? rowCount : shown,
+    processedRows: Number.isFinite(rowCount) ? rowCount : shown,
+    totalChunks: 1,
+    completedChunks: 1,
+    message: `Completed via async preview job (${job.id.slice(0, 8)}...).`,
+  }
+
+  importCommitToken.value = ''
+  importCommitTokenExpiresAt.value = ''
+  return true
+}
+
 async function previewImport() {
   clearImportPreviewTask()
+  clearImportAsyncJob()
   const payload = buildImportPayload()
   if (!payload) {
     setStatus('Invalid JSON payload for import.', 'error')
@@ -4897,6 +5008,12 @@ async function previewImport() {
   applyImportScalabilityHints(payload, { mode: 'preview' })
   importLoading.value = true
   try {
+    const rowCountHint = estimateImportRowCount(payload)
+    if (rowCountHint && rowCountHint >= IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD) {
+      const handledByAsync = await runPreviewImportAsync(payload, rowCountHint)
+      if (handledByAsync) return
+    }
+
     const chunkPlan = buildChunkedImportPreviewPlan(payload)
     if (chunkPlan) {
       await runChunkedImportPreview(payload, chunkPlan)
