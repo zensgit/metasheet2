@@ -196,3 +196,29 @@ Post-deploy re-validation after adding upload observability metrics:
   - commitMs: `16754`
   - exportMs: `443`
   - rollbackMs: `113`
+
+## Strict Gate Coverage (2026-02-12)
+
+We upgraded the strict gate runner to **require** the CSV upload channel when `REQUIRE_IMPORT_UPLOAD=true`:
+
+- `POST /api/attendance/import/upload` is exercised by the API smoke gate.
+- The subsequent preview/commit/idempotency/export checks run with `csvFileId` (not inline `csvText`).
+
+Verification (Remote, GA Evidence):
+
+- Strict gates (2x, `require_import_upload=true`):
+  - Run: [Attendance Strict Gates (Prod) #21954800143](https://github.com/zensgit/metasheet2/actions/runs/21954800143) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-1/`
+    - `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-2/`
+  - Note: `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, and `export csv ok`.
+
+- Perf baseline (10k, async+export+rollback, `upload_csv=true` default):
+  - Run: [Attendance Import Perf Baseline #21954799983](https://github.com/zensgit/metasheet2/actions/runs/21954799983) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21954799983/attendance-import-perf-21954799983-1/attendance-perf-mljo09wu-x27iq5/perf-summary.json`
+  - uploadCsv: `true`
+  - previewMs: `2343`
+  - commitMs: `10686`
+  - exportMs: `349`
+  - rollbackMs: `137`
