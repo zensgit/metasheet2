@@ -324,6 +324,41 @@ Verification:
   - commitMs: `254353`
   - rollbackMs: `901`
 
+## Update (2026-02-12): UNNEST-Based Bulk Writes (Reduce SQL Placeholder Overhead)
+
+To reduce SQL statement size and placeholder count during large commits, bulk writes now use `unnest(...)` arrays by default:
+
+- `attendance_records` upserts (chunked) use array params instead of expanding `13 * chunkSize` placeholders.
+- `attendance_import_items` inserts (chunked) use array params + constants for `(batchId, orgId)` instead of expanding `7 * chunkSize` placeholders.
+
+Runtime switches (optional):
+
+- `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values` (default `unnest`)
+- `ATTENDANCE_IMPORT_ITEMS_INSERT_MODE=unnest|values` (default `unnest`)
+
+Verification:
+
+- Remote strict gates (2x): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21941278046](https://github.com/zensgit/metasheet2/actions/runs/21941278046)
+  - Evidence:
+    - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-1/`
+    - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-2/`
+- Perf baseline (10k, async+export+rollback): `PASS`
+  - Run: [Attendance Import Perf Baseline #21941424853](https://github.com/zensgit/metasheet2/actions/runs/21941424853)
+  - Evidence:
+    - `output/playwright/ga/21941424853/attendance-import-perf-21941424853-1/attendance-perf-mlj9w039-v55261/perf-summary.json`
+  - previewMs: `2854`
+  - commitMs: `26590`
+  - exportMs: `379`
+  - rollbackMs: `139`
+- Perf baseline (100k, async+rollback, export disabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21941478702](https://github.com/zensgit/metasheet2/actions/runs/21941478702)
+  - Evidence:
+    - `output/playwright/ga/21941478702/attendance-import-perf-21941478702-1/attendance-perf-mlj9y3ri-a801np/perf-summary.json`
+  - previewMs: `6657`
+  - commitMs: `257121`
+  - rollbackMs: `1118`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:

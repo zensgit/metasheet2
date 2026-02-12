@@ -10,12 +10,12 @@ For baseline scalability work up to `100k` rows (async commit + rollback), see:
 
 Latest `100k` run (commit-async + rollback, export disabled):
 
-- Run: [Attendance Import Perf Baseline #21940682621](https://github.com/zensgit/metasheet2/actions/runs/21940682621) (`SUCCESS`)
+- Run: [Attendance Import Perf Baseline #21941478702](https://github.com/zensgit/metasheet2/actions/runs/21941478702) (`SUCCESS`)
 - Evidence:
-  - `output/playwright/ga/21940682621/attendance-import-perf-21940682621-1/attendance-perf-mlj92fhi-th1qdz/perf-summary.json`
-- previewMs: `5505`
-- commitMs: `254353`
-- rollbackMs: `901`
+  - `output/playwright/ga/21941478702/attendance-import-perf-21941478702-1/attendance-perf-mlj9y3ri-a801np/perf-summary.json`
+- previewMs: `6657`
+- commitMs: `257121`
+- rollbackMs: `1118`
 
 ## When This Becomes Necessary
 
@@ -46,7 +46,7 @@ Rollout:
 
 - Feature gate via env:
   - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=values|unnest`
-  - default `values` (current)
+  - default `unnest` (shipped; set `values` to revert)
 
 Validation:
 
@@ -54,6 +54,13 @@ Validation:
 - Perf:
   - `10k` baseline must not regress
   - one-off `100k` run on demand for confidence
+
+Status (2026-02-12):
+
+- Shipped in `91c21cab` and validated:
+  - strict gates: [Attendance Strict Gates (Prod) #21941278046](https://github.com/zensgit/metasheet2/actions/runs/21941278046)
+  - perf 10k: [Attendance Import Perf Baseline #21941424853](https://github.com/zensgit/metasheet2/actions/runs/21941424853)
+  - perf 100k: [Attendance Import Perf Baseline #21941478702](https://github.com/zensgit/metasheet2/actions/runs/21941478702)
 
 ### 2) Bulk insert attendance_import_items via UNNEST arrays (no new deps)
 
@@ -66,6 +73,11 @@ Validation:
 
 - strict gates (2x) must still pass (export CSV relies on import items)
 - perf baseline should show reduced commit time variance
+
+Status (2026-02-12):
+
+- Shipped in `91c21cab` under:
+  - `ATTENDANCE_IMPORT_ITEMS_INSERT_MODE=values|unnest` (default `unnest`)
 
 ### 3) COPY-based fast path via temp/staging table (optional; 500k+ only)
 
@@ -102,4 +114,3 @@ Validation:
 - Transaction boundaries: COPY + final upsert should be within a single transaction for correctness.
 - DB locking contention: very large imports can hold row locks longer; async job should remain the default.
 - Evidence discipline: perf artifacts must not include tokens/secrets; only store local paths and GA run links.
-

@@ -353,6 +353,36 @@ Latest head re-validation on `main` (post-`519251cb`):
   - `SMOKE PASS`
 - Playwright production flow note:
   - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.
+
+Latest head re-validation on `main` (post-`91c21cab`):
+
+- Head commit:
+  - `91c21cab` (`perf(attendance-import): reduce SQL placeholder overhead with unnest`)
+- Deploy workflow:
+  - [Build and Push Docker Images #21941181821](https://github.com/zensgit/metasheet2/actions/runs/21941181821) (`SUCCESS`, build+deploy)
+- Strict gates run (explicit full strictness; workflow_dispatch with `require_batch_resolve=true`):
+  - [Attendance Strict Gates (Prod) #21941278046](https://github.com/zensgit/metasheet2/actions/runs/21941278046) (`SUCCESS`)
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-1/`
+    - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-2/`
+- Bulk write defaults (runtime switches optional):
+  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values` (default `unnest`)
+  - `ATTENDANCE_IMPORT_ITEMS_INSERT_MODE=unnest|values` (default `unnest`)
+- Perf baseline (10k, async+export+rollback, thresholds enabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21941424853](https://github.com/zensgit/metasheet2/actions/runs/21941424853) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21941424853/attendance-import-perf-21941424853-1/attendance-perf-mlj9w039-v55261/perf-summary.json`
+  - previewMs: `2854`
+  - commitMs: `26590`
+  - exportMs: `379`
+  - rollbackMs: `139`
+- Perf baseline (100k, async+rollback, export disabled, thresholds enabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21941478702](https://github.com/zensgit/metasheet2/actions/runs/21941478702) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21941478702/attendance-import-perf-21941478702-1/attendance-perf-mlj9y3ri-a801np/perf-summary.json`
+  - previewMs: `6657`
+  - commitMs: `257121`
+  - rollbackMs: `1118`
 - Perf baseline (10k, async+export+rollback, thresholds enabled): `PASS`
   - Run: [Attendance Import Perf Baseline #21939937555](https://github.com/zensgit/metasheet2/actions/runs/21939937555) (`SUCCESS`)
   - Evidence:

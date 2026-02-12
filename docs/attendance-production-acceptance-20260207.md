@@ -1094,3 +1094,43 @@ Go/No-Go decision (2026-02-12, post-`2305b630`):
 
 - **GO (unchanged)**
 - Reason: latest `main` remains stable under full strict gates after batch persistence changes.
+
+## Latest Execution Record (2026-02-12, Main HEAD Re-Validation After `91c21cab`)
+
+Goal of this cycle:
+
+- Validate production strict gates after switching bulk writes to `unnest(...)` arrays (reduces SQL placeholder overhead) for:
+  - `attendance_records` chunked upserts
+  - `attendance_import_items` chunked inserts
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `91c21cab` (`perf(attendance-import): reduce SQL placeholder overhead with unnest`)
+2. Deploy workflow:
+   - [Build and Push Docker Images #21941181821](https://github.com/zensgit/metasheet2/actions/runs/21941181821) (`SUCCESS`)
+3. Strict gates (twice; workflow_dispatch with `require_batch_resolve=true`):
+   - Run: [Attendance Strict Gates (Prod) #21941278046](https://github.com/zensgit/metasheet2/actions/runs/21941278046) (`SUCCESS`)
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-1/`
+- `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-2/`
+
+API smoke assertions (both runs; excerpt from `gate-api-smoke.log`):
+
+- `batch resolve ok`
+- `audit export csv ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Observed business warning (expected, non-blocking):
+
+- `PUNCH_TOO_SOON` may appear in production-flow punching when interval is shorter than policy; this does not fail strict gates.
+
+Go/No-Go decision (2026-02-12, post-`91c21cab`):
+
+- **GO (unchanged)**
+- Reason: latest `main` remains stable under full strict gates after `unnest(...)` bulk write changes.
