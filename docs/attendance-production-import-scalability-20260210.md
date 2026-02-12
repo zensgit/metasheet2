@@ -308,6 +308,14 @@ Verification:
   - Evidence:
     - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-1/`
     - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-2/`
+- Perf baseline (10k, async+export+rollback, thresholds enabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21939937555](https://github.com/zensgit/metasheet2/actions/runs/21939937555)
+  - Evidence:
+    - `output/playwright/ga/21939937555/attendance-import-perf-21939937555-1/attendance-perf-mlj87q05-533e4g/perf-summary.json`
+  - previewMs: `3545`
+  - commitMs: `28011`
+  - exportMs: `452`
+  - rollbackMs: `121`
 
 ## Notes / Follow-Up (P1)
 
