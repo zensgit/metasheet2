@@ -834,6 +834,127 @@ describe('Attendance Plugin Integration', () => {
     expect(retryData?.idempotent).toBe(true)
   })
 
+  it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
+    if (!baseUrl) return
+
+    const userId = `attendance-merge-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const firstLater = `${workDate}T09:05:00Z`
+    const lastEarlier = `${workDate}T17:55:00Z`
+    const firstEarly = `${workDate}T09:00:00Z`
+    const lastLate = `${workDate}T18:00:00Z`
+
+    const prepareARes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareARes.status).toBe(200)
+    const commitTokenA = (prepareARes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitTokenA).toBeTruthy()
+
+    const commitARes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        timezone: 'UTC',
+        rows: [
+          {
+            workDate,
+            fields: {
+              firstInAt: firstLater,
+              lastOutAt: lastEarlier,
+              status: 'normal',
+            },
+          },
+        ],
+        mode: 'override',
+        commitToken: commitTokenA,
+      }),
+    })
+    expect(commitARes.status).toBe(200)
+
+    const prepareBRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareBRes.status).toBe(200)
+    const commitTokenB = (prepareBRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitTokenB).toBeTruthy()
+
+    const commitBRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        timezone: 'UTC',
+        rows: [
+          {
+            workDate,
+            fields: {
+              firstInAt: firstEarly,
+              lastOutAt: lastLate,
+              status: 'normal',
+            },
+          },
+        ],
+        mode: 'merge',
+        commitToken: commitTokenB,
+      }),
+    })
+    expect(commitBRes.status).toBe(200)
+
+    const recordsRes = await requestJson(`${baseUrl}/api/attendance/records?from=${workDate}&to=${workDate}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(recordsRes.status).toBe(200)
+    const recordItems = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    expect(Array.isArray(recordItems)).toBe(true)
+
+    const record = recordItems.find((row) => String(row?.work_date || '').slice(0, 10) === workDate)
+    expect(record).toBeTruthy()
+
+    const normalizeIso = (value: unknown): string => {
+      if (!value) return ''
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString()
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value)
+        if (!Number.isNaN(parsed)) return new Date(parsed).toISOString()
+        const retryParsed = Date.parse(value.replace(' ', 'T'))
+        if (!Number.isNaN(retryParsed)) return new Date(retryParsed).toISOString()
+      }
+      return String(value)
+    }
+
+    const firstInAtIso = normalizeIso(record?.first_in_at)
+    const lastOutAtIso = normalizeIso(record?.last_out_at)
+
+    expect(firstInAtIso.startsWith(`${workDate}T09:00:00`)).toBe(true)
+    expect(lastOutAtIso.startsWith(`${workDate}T18:00:00`)).toBe(true)
+  })
+
   it('deduplicates concurrent import commits with the same idempotencyKey', async () => {
     if (!baseUrl) return
 
