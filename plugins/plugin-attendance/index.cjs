@@ -85,6 +85,27 @@ let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
 
+// Avoid per-row Intl formatter allocations during large imports.
+// Cache failures as `null` so invalid timezones don't repeatedly throw.
+const workDateFormatterCache = new Map()
+const zonedMinutesFormatterCache = new Map()
+const zonedPartsFormatterCache = new Map()
+const timeToMinutesCache = new Map()
+
+function getCachedIntlDateTimeFormat(cache, timeZone, locale, options) {
+  const tz = typeof timeZone === 'string' ? timeZone.trim() : ''
+  if (!tz) return null
+  if (cache.has(tz)) return cache.get(tz)
+  try {
+    const fmt = new Intl.DateTimeFormat(locale, { ...options, timeZone: tz })
+    cache.set(tz, fmt)
+    return fmt
+  } catch {
+    cache.set(tz, null)
+    return null
+  }
+}
+
 const SYSTEM_TEMPLATE_NAMES = new Set(DEFAULT_TEMPLATES.map((tpl) => tpl.name))
 
 const IMPORT_MAPPING_COLUMNS = [
@@ -641,10 +662,12 @@ function buildZonedDate(dateString, timeString, timeZone) {
   const [hour, minute, second] = [timeParts[0], timeParts[1], timeParts[2] ?? 0]
   const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
   if (!timeZone) return utcDate
+  const tz = typeof timeZone === 'string' ? timeZone.trim() : ''
+  if (!tz) return utcDate
   try {
-    const tzDate = new Date(utcDate.toLocaleString('en-US', { timeZone }))
-    const offsetMs = utcDate.getTime() - tzDate.getTime()
-    return new Date(utcDate.getTime() + offsetMs)
+    // Convert a local (zoned) wall-clock time into a UTC timestamp.
+    const utcMs = zonedTimeToUtc({ year, month, day, hour, minute, second }, tz)
+    return new Date(utcMs)
   } catch {
     return utcDate
   }
@@ -1979,28 +2002,34 @@ function mapRotationRuleFromAssignmentRow(row) {
 }
 
 function toWorkDate(value, timeZone) {
+  const formatter = getCachedIntlDateTimeFormat(workDateFormatterCache, timeZone, 'en-CA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  if (!formatter) return value.toISOString().slice(0, 10)
   try {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(value)
+    return formatter.format(value)
   } catch {
     return value.toISOString().slice(0, 10)
   }
 }
 
 function getZonedMinutes(value, timeZone) {
+  const formatter = getCachedIntlDateTimeFormat(zonedMinutesFormatterCache, timeZone, 'en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  if (!formatter) return value.getUTCHours() * 60 + value.getUTCMinutes()
   try {
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone,
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(value)
-    const hour = Number(parts.find(part => part.type === 'hour')?.value ?? '0')
-    const minute = Number(parts.find(part => part.type === 'minute')?.value ?? '0')
+    const text = formatter.format(value)
+    const [hRaw, mRaw] = String(text).split(':')
+    const hour = Number(hRaw)
+    const minute = Number(mRaw)
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+      return value.getUTCHours() * 60 + value.getUTCMinutes()
+    }
     return hour * 60 + minute
   } catch {
     return value.getUTCHours() * 60 + value.getUTCMinutes()
@@ -2009,11 +2038,22 @@ function getZonedMinutes(value, timeZone) {
 
 function parseTimeToMinutes(value, fallback) {
   if (!value) return fallback
-  const [hours, minutes] = value.split(':')
+  const key = typeof value === 'string' ? value.trim() : String(value).trim()
+  if (!key) return fallback
+  if (timeToMinutesCache.has(key)) {
+    const cached = timeToMinutesCache.get(key)
+    return cached === null ? fallback : cached
+  }
+  const [hours, minutes] = key.split(':')
   const h = Number(hours)
   const m = Number(minutes)
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return fallback
-  return h * 60 + m
+  if (!Number.isFinite(h) || !Number.isFinite(m)) {
+    timeToMinutesCache.set(key, null)
+    return fallback
+  }
+  const parsed = h * 60 + m
+  timeToMinutesCache.set(key, parsed)
+  return parsed
 }
 
 function roundMinutes(value, step) {
@@ -2594,8 +2634,7 @@ async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
 }
 
 function getZonedParts(date, timeZone) {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone,
+  const formatter = getCachedIntlDateTimeFormat(zonedPartsFormatterCache, timeZone, 'en-US', {
     hour12: false,
     year: 'numeric',
     month: '2-digit',
@@ -2604,21 +2643,32 @@ function getZonedParts(date, timeZone) {
     minute: '2-digit',
     second: '2-digit',
   })
-  const parts = formatter.formatToParts(date)
-  const values = {}
-  for (const part of parts) {
-    if (part.type !== 'literal') {
-      values[part.type] = part.value
+  if (!formatter) {
+    return {
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      hour: date.getUTCHours(),
+      minute: date.getUTCMinutes(),
+      second: date.getUTCSeconds(),
     }
   }
-  return {
-    year: Number(values.year),
-    month: Number(values.month),
-    day: Number(values.day),
-    hour: Number(values.hour),
-    minute: Number(values.minute),
-    second: Number(values.second),
+  const parts = formatter.formatToParts(date)
+  let year = 0
+  let month = 0
+  let day = 0
+  let hour = 0
+  let minute = 0
+  let second = 0
+  for (const part of parts) {
+    if (part.type === 'year') year = Number(part.value)
+    else if (part.type === 'month') month = Number(part.value)
+    else if (part.type === 'day') day = Number(part.value)
+    else if (part.type === 'hour') hour = Number(part.value)
+    else if (part.type === 'minute') minute = Number(part.value)
+    else if (part.type === 'second') second = Number(part.value)
   }
+  return { year, month, day, hour, minute, second }
 }
 
 function getTimeZoneOffset(date, timeZone) {
