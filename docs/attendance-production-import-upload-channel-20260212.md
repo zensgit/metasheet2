@@ -101,8 +101,15 @@ Implementation:
 
 ### 1) Strict Gates (Post-Deploy)
 
-- Run: [Attendance Strict Gates (Prod) #21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924) (`SUCCESS`)
+- Run: [Attendance Strict Gates (Prod) #21949081591](https://github.com/zensgit/metasheet2/actions/runs/21949081591) (`SUCCESS`)
 - Evidence (downloaded):
+  - `output/playwright/ga/21949081591/20260212-134540-1/`
+  - `output/playwright/ga/21949081591/20260212-134540-2/`
+
+Previous strict-gate re-validation (post upload channel deploy):
+
+- Run: [Attendance Strict Gates (Prod) #21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924) (`SUCCESS`)
+- Evidence:
   - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`
   - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/`
 
@@ -142,4 +149,3 @@ curl -sS -X POST "${API_BASE}/attendance/import/upload?orgId=default&filename=de
 ```
 
 Then place the returned `fileId` into the JSON payload as `csvFileId` and run the existing preview/commit flow.
-

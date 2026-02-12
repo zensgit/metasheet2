@@ -458,10 +458,10 @@ Change shipped:
 Verification:
 
 - Remote strict gates (2x): `PASS`
-  - Run: [Attendance Strict Gates (Prod) #21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924)
+  - Run: [Attendance Strict Gates (Prod) #21949081591](https://github.com/zensgit/metasheet2/actions/runs/21949081591)
   - Evidence:
-    - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`
-    - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/`
+    - `output/playwright/ga/21949081591/20260212-134540-1/`
+    - `output/playwright/ga/21949081591/20260212-134540-2/`
 - Perf baseline (500k, async+export+rollback, upload_csv=true): `PASS`
   - Run: [Attendance Import Perf Baseline #21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024)
   - Evidence:

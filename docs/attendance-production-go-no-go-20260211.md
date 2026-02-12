@@ -123,6 +123,7 @@ This record does not change the `GO` decision above; it captures a production re
 |---|---|---|---|
 | Build + deploy (csv upload channel) | [#21948146767](https://github.com/zensgit/metasheet2/actions/runs/21948146767) | PASS | GitHub Actions run logs |
 | Strict gates twice (async strict) | [#21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924) | PASS | `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`, `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/` |
+| Strict gates twice (post rate-limit mapping) | [#21949081591](https://github.com/zensgit/metasheet2/actions/runs/21949081591) | PASS | `output/playwright/ga/21949081591/20260212-134540-1/`, `output/playwright/ga/21949081591/20260212-134540-2/` |
 | Perf baseline (500k, async+export+rollback, upload_csv=true) | [#21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024) | PASS | `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json` |
 
 Perf summary (`#21948416024`):
