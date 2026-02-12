@@ -950,3 +950,56 @@ Go/No-Go decision (2026-02-12, post-`519251cb`):
 
 - **GO (unchanged)**
 - Reason: latest `main` remains stable under full strict gates after CSV parse memory + row-cap hardening.
+
+## Latest Execution Record (2026-02-12, Main HEAD Re-Validation After `ad28cfe6`)
+
+Goal of this cycle:
+
+- Re-validate full strict production gates on the latest `main` after adding CSV row-cap integration tests and refreshing evidence docs.
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `ad28cfe6` (`test(attendance): cover csv row cap and refresh production evidence`)
+2. Deploy workflow:
+   - [Build and Push Docker Images #21934704705](https://github.com/zensgit/metasheet2/actions/runs/21934704705) (`SUCCESS`)
+3. Strict gates (twice; explicit full strict settings):
+   - Run: [Attendance Strict Gates (Prod) #21934774035](https://github.com/zensgit/metasheet2/actions/runs/21934774035) (`SUCCESS`)
+   - Workflow log confirms:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21934774035/attendance-strict-gates-prod-21934774035-1/20260212-052932-1/`
+- `output/playwright/ga/21934774035/attendance-strict-gates-prod-21934774035-1/20260212-052932-2/`
+
+Gate results (both runs):
+
+- Gate 2 API Smoke: `PASS`
+- Gate 3 Provisioning: `PASS`
+- Gate 4 Playwright Prod: `PASS`
+- Gate 5 Playwright Desktop: `PASS`
+- Gate 6 Playwright Mobile: `PASS`
+
+API smoke assertions (both runs):
+
+- `product mode ok: mode=attendance`
+- `batch resolve ok`
+- `preview async ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Observed business warning (expected, non-blocking):
+
+- `PUNCH_TOO_SOON` appears in production-flow punching when interval is shorter than policy; this does not fail the strict gates.
+
+Go/No-Go decision (2026-02-12, post-`ad28cfe6`):
+
+- **GO (unchanged)**
+- Reason: latest `main` remains stable under full strict gates after tests/docs refresh.
