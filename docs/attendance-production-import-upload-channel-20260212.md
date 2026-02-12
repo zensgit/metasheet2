@@ -288,6 +288,15 @@ Verification (Remote, GA Evidence):
     - backend container was recreated to ensure the env var is effective at runtime.
     - `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, and `export csv ok`.
 
+- Strict gates (2x, post deploy workflow remote preflight):
+  - Run: [Attendance Strict Gates (Prod) #21956821613](https://github.com/zensgit/metasheet2/actions/runs/21956821613) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-1/`
+    - `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-2/`
+  - Notes:
+    - deploy workflow now runs `scripts/ops/attendance-preflight.sh` on the deploy host before recreating containers.
+    - `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, and `export csv ok`.
+
 - Perf baseline (10k, async+export+rollback, `upload_csv=true` default):
   - Run: [Attendance Import Perf Baseline #21954799983](https://github.com/zensgit/metasheet2/actions/runs/21954799983) (`SUCCESS`)
   - Evidence:
