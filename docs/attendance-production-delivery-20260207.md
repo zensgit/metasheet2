@@ -147,8 +147,18 @@ P1 (1-2 weeks, production hardening):
     - Streaming-style CSV row iteration (avoid full parsed matrix allocation).
     - Server-side CSV row cap guardrail via `ATTENDANCE_IMPORT_CSV_MAX_ROWS` (default `500000`, minimum `1000`).
     - `CSV_TOO_LARGE` mapped to explicit `HTTP 400` on preview/commit/import endpoints.
+  - Import persistence tuning (implemented 2026-02-12):
+    - Import chunk sizes are now env-tunable:
+      - `ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE` (default `300`, range `50-1000`)
+      - `ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE` (default `200`, range `50-1000`)
+    - Work-context prefetch now has safety caps for ultra-large scopes:
+      - `ATTENDANCE_IMPORT_PREFETCH_MAX_USERS` (default `5000`)
+      - `ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES` (default `366`)
+      - `ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS` (default `366`)
+    - Import loops release processed row field payloads early to reduce heap pressure during large commits.
   - Remaining:
-    - Chunked DB persistence for extreme payloads (500k+ rows) and optional COPY-based fast path.
+    - COPY-based fast path / staging-table pipeline for extreme payloads (500k+ rows).
+    - Perf baseline refresh for 100k+ commit imports under the new tuning knobs.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
   - Optional IP allowlist enforcement (when configured in `attendance.settings`).
@@ -369,3 +379,31 @@ Latest head re-validation on `main` (post-`ad28cfe6`):
   - `export csv ok`
   - `import async idempotency ok`
   - `SMOKE PASS`
+
+Latest head re-validation on `main` (post-`250dbaab`):
+
+- Head commit:
+  - `250dbaab` (`perf(attendance-import): tune chunking and cap prefetch scope`)
+- Deploy workflow:
+  - [Build and Push Docker Images #21935222964](https://github.com/zensgit/metasheet2/actions/runs/21935222964) (`SUCCESS`, build+deploy)
+- Strict gates run (explicit full strictness):
+  - [Attendance Strict Gates (Prod) #21935284365](https://github.com/zensgit/metasheet2/actions/runs/21935284365) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-1/`
+    - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-2/`
+- API smoke assertions in both runs:
+  - `product mode ok: mode=attendance`
+  - `batch resolve ok`
+  - `preview async ok`
+  - `audit export csv ok`
+  - `audit summary ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`
+- Playwright production flow note:
+  - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.

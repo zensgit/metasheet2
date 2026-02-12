@@ -257,10 +257,37 @@ Verification:
     - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-1/`
     - `output/playwright/ga/21934527245/attendance-strict-gates-prod-21934527245-1/20260212-051738-2/`
 
+## Update (2026-02-12): Import Chunk/Prefetch Tuning for 100k+ Stability
+
+To reduce memory pressure and oversized prefetch queries on very large imports, commit pipelines now include tunable chunking and prefetch caps:
+
+- Chunk tuning envs:
+  - `ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE` (default `300`, range `50-1000`)
+  - `ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE` (default `200`, range `50-1000`)
+- Prefetch safety caps:
+  - `ATTENDANCE_IMPORT_PREFETCH_MAX_USERS` (default `5000`)
+  - `ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES` (default `366`)
+  - `ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS` (default `366`)
+- Runtime behavior:
+  - If import scope exceeds any prefetch cap, the service skips bulk prefetch and falls back to per-row work-context resolution.
+  - Processed row field payloads are released early in commit loops to reduce peak heap usage.
+
+Verification:
+
+- Local integration tests: `PASS`
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+- Local backend build: `PASS`
+  - `pnpm --filter @metasheet/core-backend build`
+- Remote strict gates (2x): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21935284365](https://github.com/zensgit/metasheet2/actions/runs/21935284365)
+  - Evidence:
+    - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-1/`
+    - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-2/`
+
 ## Notes / Follow-Up (P1)
 
-The above changes close the original response-size and synchronous-preview gaps. Remaining work for very large payloads (100k+) is:
+The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
 
-- chunked DB persistence (and optional COPY fast path) to lower commit latency variance.
+- COPY-based fast path / staging-table commit pipeline to further reduce latency variance.
 - richer async preview paging UX for very large datasets (multi-page preview browsing).
 - explicit timeout + retry policy tuning (nginx + backend) for long-running imports under load.
