@@ -149,3 +149,29 @@ curl -sS -X POST "${API_BASE}/attendance/import/upload?orgId=default&filename=de
 ```
 
 Then place the returned `fileId` into the JSON payload as `csvFileId` and run the existing preview/commit flow.
+
+## Post-Deploy Ops Validation (2026-02-12)
+
+After enabling:
+
+- persistent upload storage volume (`docker-compose.app.yml`)
+- nginx per-route body-size override (`docker/nginx.conf`)
+
+we re-validated strict gates and a 10k perf baseline with the upload channel enabled.
+
+Strict gates (2x consecutive):
+
+- Run: [Attendance Strict Gates (Prod) #21950374010](https://github.com/zensgit/metasheet2/actions/runs/21950374010) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-1/`
+  - `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-2/`
+
+Perf baseline (10k, async+export+rollback, upload_csv=true):
+
+- Run: [Attendance Import Perf Baseline #21950373978](https://github.com/zensgit/metasheet2/actions/runs/21950373978) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21950373978/attendance-import-perf-21950373978-1/attendance-perf-mljjrtew-l8qyjh/perf-summary.json`
+- previewMs: `2307`
+- commitMs: `12644`
+- exportMs: `575`
+- rollbackMs: `127`
