@@ -316,6 +316,13 @@ Verification:
   - commitMs: `28011`
   - exportMs: `452`
   - rollbackMs: `121`
+- Perf baseline (100k, async+rollback, export disabled, thresholds enabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21940682621](https://github.com/zensgit/metasheet2/actions/runs/21940682621)
+  - Evidence:
+    - `output/playwright/ga/21940682621/attendance-import-perf-21940682621-1/attendance-perf-mlj92fhi-th1qdz/perf-summary.json`
+  - previewMs: `5505`
+  - commitMs: `254353`
+  - rollbackMs: `901`
 
 ## Notes / Follow-Up (P1)
 
@@ -324,3 +331,7 @@ The above changes close the original response-size and synchronous-preview gaps 
 - COPY-based fast path / staging-table commit pipeline to further reduce latency variance.
 - richer async preview paging UX for very large datasets (multi-page preview browsing).
 - explicit timeout + retry policy tuning (nginx + backend) for long-running imports under load.
+
+For the recommended next-stage plan for `300k-500k+` rows, see:
+
+- `docs/attendance-production-import-extreme-scale-plan-20260212.md`

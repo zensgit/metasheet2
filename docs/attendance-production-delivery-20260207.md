@@ -361,6 +361,13 @@ Latest head re-validation on `main` (post-`519251cb`):
   - commitMs: `28011`
   - exportMs: `452`
   - rollbackMs: `121`
+- Perf baseline (100k, async+rollback, export disabled, thresholds enabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21940682621](https://github.com/zensgit/metasheet2/actions/runs/21940682621) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21940682621/attendance-import-perf-21940682621-1/attendance-perf-mlj92fhi-th1qdz/perf-summary.json`
+  - previewMs: `5505`
+  - commitMs: `254353`
+  - rollbackMs: `901`
 
 Latest head re-validation on `main` (post-`ad28cfe6`):
 

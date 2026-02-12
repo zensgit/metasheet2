@@ -1,0 +1,105 @@
+# Attendance Import Extreme Scale Plan (2026-02-12)
+
+This document defines the next-stage work required to keep attendance imports stable for **extreme payloads** (roughly `300k-500k+` rows).
+
+For baseline scalability work up to `100k` rows (async commit + rollback), see:
+
+- `docs/attendance-production-import-scalability-20260210.md`
+
+## Current Baseline (100k)
+
+Latest `100k` run (commit-async + rollback, export disabled):
+
+- Run: [Attendance Import Perf Baseline #21940682621](https://github.com/zensgit/metasheet2/actions/runs/21940682621) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21940682621/attendance-import-perf-21940682621-1/attendance-perf-mlj92fhi-th1qdz/perf-summary.json`
+- previewMs: `5505`
+- commitMs: `254353`
+- rollbackMs: `901`
+
+## When This Becomes Necessary
+
+We should prioritize the work below if any of these become true:
+
+- imports routinely exceed `300k` rows (or a single import can exceed `500k`)
+- async commit jobs approach timeout (`~30min`) under normal load
+- DB shows sustained high CPU due to SQL parse/plan overhead (lots of short multi-row statements)
+
+## Proposed Work (Recommended Order)
+
+### 1) Replace record UPSERT VALUES(...) with UNNEST arrays (no new deps)
+
+Current implementation (`batchUpsertAttendanceRecords`) emits `VALUES ($1...$N)` with `13 * chunkSize` placeholders.
+For large workloads, the statement size and placeholder count can add measurable parse/plan overhead.
+
+Proposal:
+
+- Change the record UPSERT to:
+  - pass `text[]/date[]/timestamptz[]/int[]/boolean[]/jsonb[]/uuid[]` arrays as params
+  - `INSERT ... SELECT ... FROM unnest(...)` instead of expanding many placeholders
+- Keep behavior identical:
+  - same chunk sizes
+  - same `merge/override` semantics computed in JS
+  - same `RETURNING id, user_id, work_date` mapping
+
+Rollout:
+
+- Feature gate via env:
+  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=values|unnest`
+  - default `values` (current)
+
+Validation:
+
+- Existing integration suite (includes merge-mode semantics test)
+- Perf:
+  - `10k` baseline must not regress
+  - one-off `100k` run on demand for confidence
+
+### 2) Bulk insert attendance_import_items via UNNEST arrays (no new deps)
+
+On large commits, `attendance_import_items` is usually the largest write volume. This can be optimized similarly:
+
+- replace multi-row VALUES(...) inserts with an `unnest(...)`-based INSERT per chunk
+- keep export semantics and rollback behavior unchanged
+
+Validation:
+
+- strict gates (2x) must still pass (export CSV relies on import items)
+- perf baseline should show reduced commit time variance
+
+### 3) COPY-based fast path via temp/staging table (optional; 500k+ only)
+
+If `500k+` imports become common, the next leap is a streaming ingest path:
+
+1. Stream computed rows into a temp table via `COPY FROM STDIN`.
+2. Execute set-based:
+   - `INSERT INTO attendance_records (...) SELECT ... FROM temp ... ON CONFLICT (...) DO UPDATE ...`
+3. Insert import items in bulk (either via COPY or unnest insert).
+
+Notes:
+
+- This does not require moving `computeMetrics()` into SQL.
+  We would stage **already-computed** columns (first/last timestamps, minutes, status, meta, sourceBatchId).
+- Implementation depends on access to a raw `pg` client:
+  - easiest via `pg-copy-streams` (new dependency)
+  - requires the plugin runtime to expose the underlying `pg` client/connection for COPY streams
+
+Rollout:
+
+- Keep this path behind a threshold + explicit enable switch:
+  - `ATTENDANCE_IMPORT_COPY_ENABLED=true|false`
+  - `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS=200000` (example)
+- Fallback to the non-COPY path when COPY cannot be used.
+
+Validation:
+
+- Add a dedicated perf workflow for `200k+` (manual trigger only).
+- Keep strict gates unchanged (still run daily).
+
+## Risks / Open Questions
+
+- COPY plumbing: plugin runtime currently uses `db.query(...)` style helpers; may not expose COPY streams.
+- Transaction boundaries: COPY + final upsert should be within a single transaction for correctness.
+- DB locking contention: very large imports can hold row locks longer; async job should remain the default.
+- Evidence discipline: perf artifacts must not include tokens/secrets; only store local paths and GA run links.
+
