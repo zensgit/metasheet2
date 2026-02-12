@@ -44,6 +44,9 @@ Out of scope for this delivery:
    - Ensure `docker/nginx.conf` sets `proxy_read_timeout`/`proxy_send_timeout` high enough (example: `300s`), then restart the `web` container.
    - If you deploy via GitHub Actions (`.github/workflows/docker-build.yml`) and the production compose mounts `./docker/nginx.conf`,
      make sure the deploy host has pulled the latest `main` so the mounted config is up to date.
+4. If large imports (200k+ rows) return `413 Payload Too Large`:
+   - Ensure the backend is on a build that supports per-route import payload limits (shipped on `main` after `3b85463d`).
+   - Optional env (override only when needed): `ATTENDANCE_IMPORT_JSON_LIMIT=50mb` (must be <= reverse proxy `client_max_body_size`).
 
 ### Smoke / Acceptance
 
@@ -353,6 +356,28 @@ Latest head re-validation on `main` (post-`519251cb`):
   - `SMOKE PASS`
 - Playwright production flow note:
   - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.
+
+Latest head re-validation on `main` (post-`3b85463d`):
+
+- Head commit:
+  - `3b85463d` (`fix(attendance-import): allow larger preview payloads`)
+  - Change: add per-route JSON body limit for `/api/attendance/import/*` via `ATTENDANCE_IMPORT_JSON_LIMIT` (default `50mb`) while keeping the global JSON limit at `10mb`.
+- Deploy workflows:
+  - [Build and Push Docker Images #21942979767](https://github.com/zensgit/metasheet2/actions/runs/21942979767) (`SUCCESS`)
+  - [Deploy to Production #21942979808](https://github.com/zensgit/metasheet2/actions/runs/21942979808) (`SUCCESS`)
+- Strict gates run (explicit full strictness; workflow_dispatch with `require_batch_resolve=true`):
+  - [Attendance Strict Gates (Prod) #21943177102](https://github.com/zensgit/metasheet2/actions/runs/21943177102) (`SUCCESS`)
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-1/`
+    - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-2/`
+- Perf baseline (200k, async+rollback, export disabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21943641804](https://github.com/zensgit/metasheet2/actions/runs/21943641804) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21943641804/attendance-import-perf-21943641804-1/attendance-perf-mljcbmew-rsnwho/perf-summary.json`
+  - previewMs: `11251`
+  - commitMs: `566193`
+  - rollbackMs: `2847`
+  - Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
 
 Latest head re-validation on `main` (post-`91c21cab`):
 

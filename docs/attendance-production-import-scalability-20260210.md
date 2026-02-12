@@ -359,6 +359,35 @@ Verification:
   - commitMs: `257121`
   - rollbackMs: `1118`
 
+## Update (2026-02-12): Import JSON Body Limit (Unblock 200k+ CSV Payloads)
+
+The perf harness (and large real-world CSV imports) submit `csvText` inside a JSON body. For `200k` rows this exceeds the global
+`express.json({ limit: '10mb' })` parser limit and can return `HTTP 413 Payload Too Large`.
+
+Change shipped:
+
+- Keep global JSON limit at `10mb` (DoS guard).
+- Add a larger per-route JSON parser for `/api/attendance/import/*`:
+  - Env: `ATTENDANCE_IMPORT_JSON_LIMIT` (default `50mb`).
+  - Adds a lightweight auth-header precheck to avoid parsing unauthenticated large payloads.
+- Implementation: `/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/index.ts`
+
+Verification:
+
+- Remote strict gates (2x; workflow_dispatch with `require_batch_resolve=true`): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21943177102](https://github.com/zensgit/metasheet2/actions/runs/21943177102)
+  - Evidence:
+    - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-1/`
+    - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-2/`
+- Perf baseline (200k, async+rollback, export disabled): `PASS`
+  - Run: [Attendance Import Perf Baseline #21943641804](https://github.com/zensgit/metasheet2/actions/runs/21943641804)
+  - Evidence:
+    - `output/playwright/ga/21943641804/attendance-import-perf-21943641804-1/attendance-perf-mljcbmew-rsnwho/perf-summary.json`
+  - previewMs: `11251`
+  - commitMs: `566193`
+  - rollbackMs: `2847`
+  - Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:

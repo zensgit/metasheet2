@@ -17,6 +17,25 @@ Latest `100k` run (commit-async + rollback, export disabled):
 - commitMs: `257121`
 - rollbackMs: `1118`
 
+## Current Baseline (200k)
+
+Latest `200k` run (commit-async + rollback, export disabled):
+
+- Run: [Attendance Import Perf Baseline #21943641804](https://github.com/zensgit/metasheet2/actions/runs/21943641804) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21943641804/attendance-import-perf-21943641804-1/attendance-perf-mljcbmew-rsnwho/perf-summary.json`
+- previewMs: `11251`
+- commitMs: `566193`
+- rollbackMs: `2847`
+
+Notes:
+
+- This run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
+- `200k` rows require a larger JSON body limit for `/api/attendance/import/*` because `csvText` is sent inside JSON:
+  - Global JSON limit remains `10mb` (DoS guard).
+  - Per-route override: `ATTENDANCE_IMPORT_JSON_LIMIT` (default `50mb`).
+  - Reverse proxy must allow the same or higher body size (nginx `client_max_body_size 50m`).
+
 ## When This Becomes Necessary
 
 We should prioritize the work below if any of these become true:

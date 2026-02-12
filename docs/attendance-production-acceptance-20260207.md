@@ -1134,3 +1134,42 @@ Go/No-Go decision (2026-02-12, post-`91c21cab`):
 
 - **GO (unchanged)**
 - Reason: latest `main` remains stable under full strict gates after `unnest(...)` bulk write changes.
+
+## Latest Execution Record (2026-02-12, Main HEAD Re-Validation After `3b85463d`)
+
+Goal of this cycle:
+
+- Unblock `200k+` CSV imports where `csvText` is submitted in a JSON body (avoid `HTTP 413 Payload Too Large`) while keeping global JSON limits low.
+- Confirm strict gates remain stable on the production target env.
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `3b85463d` (`fix(attendance-import): allow larger preview payloads`)
+2. Deploy workflows:
+   - [Build and Push Docker Images #21942979767](https://github.com/zensgit/metasheet2/actions/runs/21942979767) (`SUCCESS`)
+   - [Deploy to Production #21942979808](https://github.com/zensgit/metasheet2/actions/runs/21942979808) (`SUCCESS`)
+3. Strict gates (twice; workflow_dispatch with `require_batch_resolve=true`):
+   - Run: [Attendance Strict Gates (Prod) #21943177102](https://github.com/zensgit/metasheet2/actions/runs/21943177102) (`SUCCESS`)
+4. Perf baseline (200k, async+rollback, export disabled):
+   - Run: [Attendance Import Perf Baseline #21943641804](https://github.com/zensgit/metasheet2/actions/runs/21943641804) (`SUCCESS`)
+
+Evidence (downloaded artifacts):
+
+- Strict gates:
+  - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-1/`
+  - `output/playwright/ga/21943177102/attendance-strict-gates-prod-21943177102-1/20260212-103927-2/`
+- Perf baseline summary:
+  - `output/playwright/ga/21943641804/attendance-import-perf-21943641804-1/attendance-perf-mljcbmew-rsnwho/perf-summary.json`
+
+Perf summary (200k):
+
+- previewMs: `11251`
+- commitMs: `566193`
+- rollbackMs: `2847`
+- Note: this run overrides `max_commit_ms=900000` to avoid treating expected extreme-payload latency as a regression.
+
+Go/No-Go decision (2026-02-12, post-`3b85463d`):
+
+- **GO (unchanged)**
+- Reason: strict gates remain stable and 200k import payloads are accepted (no 413).
