@@ -42,6 +42,7 @@ Out of scope for this delivery:
    - GitHub Actions deploy path (`.github/workflows/docker-build.yml`) now also runs:
      - `scripts/ops/attendance-preflight.sh` on the deploy host (env/compose/nginx sanity)
      - backend migrations before smoke checks
+     - uploads `deploy.log` artifacts and writes a short preflight summary + runbook links into GitHub Step Summary (even on failure)
 3. If large imports (10k+ rows) return `504 Gateway Time-out` via nginx:
    - Ensure `docker/nginx.conf` sets `proxy_read_timeout`/`proxy_send_timeout` high enough (example: `300s`), then restart the `web` container.
    - If you deploy via GitHub Actions (`.github/workflows/docker-build.yml`) and the production compose mounts `./docker/nginx.conf`,

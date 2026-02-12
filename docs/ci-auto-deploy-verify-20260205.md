@@ -136,3 +136,21 @@ Validation:
 ✅ Legacy key removed  
 ✅ Docker iptables guard added  
 ✅ CI deploy stable after fix
+
+## Update (2026-02-12): Remote Preflight Summary + Deploy Log Artifacts
+
+Deploy job now archives remote deploy logs and surfaces the Attendance preflight result in GitHub Step Summary.
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21958027752](https://github.com/zensgit/metasheet2/actions/runs/21958027752) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21958027752/deploy.log`
+
+Behavior:
+
+- Remote preflight output is wrapped by markers and persisted into `deploy.log`.
+- Step Summary includes:
+  - Preflight PASS/FAIL
+  - A short preflight output snippet
+  - Runbook links
+- `deploy.log` is uploaded as an artifact even if deploy fails (job still ends as `FAIL` when `deploy_rc != 0`).

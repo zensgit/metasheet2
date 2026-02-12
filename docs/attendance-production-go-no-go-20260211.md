@@ -137,6 +137,7 @@ This record does not change the `GO` decision above; it captures a production re
 | Deploy (with remote preflight) | [#21956719862](https://github.com/zensgit/metasheet2/actions/runs/21956719862) | PASS | GitHub Actions run logs |
 | Strict gates twice (post deploy remote preflight) | [#21956821613](https://github.com/zensgit/metasheet2/actions/runs/21956821613) | PASS | `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-1/`, `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-2/` |
 | Perf baseline (10k, upload_csv=true default, post deploy remote preflight) | [#21956821796](https://github.com/zensgit/metasheet2/actions/runs/21956821796) | PASS | `output/playwright/ga/21956821796/attendance-import-perf-21956821796-1/attendance-perf-mljq1ur9-cg0wyh/perf-summary.json` |
+| Deploy (preflight step summary + deploy.log artifact) | [#21958027752](https://github.com/zensgit/metasheet2/actions/runs/21958027752) | PASS | `output/playwright/ga/21958027752/deploy.log` |
 
 Perf summary (`#21948416024`):
 
