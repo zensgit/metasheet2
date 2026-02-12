@@ -418,6 +418,20 @@ export class MetaSheetServer {
       next()
     })
 
+    // Attendance import endpoints accept large `csvText` payloads for bulk runs.
+    // Keep global JSON limits low, and only relax them for the import prefix.
+    const attendanceImportJsonLimit = String(process.env.ATTENDANCE_IMPORT_JSON_LIMIT || '').trim() || '50mb'
+    this.app.use('/api/attendance/import', (req: Request, res: Response, next: NextFunction) => {
+      if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+      const hasAuth = Boolean(req.headers.authorization) || Boolean(req.headers.cookie)
+      if (!hasAuth) {
+        res.status(401).json({ success: false, error: 'Missing authentication' })
+        return
+      }
+      next()
+    })
+    this.app.use('/api/attendance/import', express.json({ limit: attendanceImportJsonLimit }))
+
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
