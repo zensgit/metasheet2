@@ -783,51 +783,81 @@ function buildRowsFromEntries({ entries }) {
   return Array.from(rowsByKey.values())
 }
 
-function parseCsvText(csvText, delimiter = ',') {
-  if (typeof csvText !== 'string' || !csvText.trim()) return []
-  const rows = []
+const ATTENDANCE_IMPORT_CSV_MAX_ROWS = (() => {
+  const raw = Number(process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS ?? 500000)
+  if (!Number.isFinite(raw)) return 500000
+  return Math.max(1000, Math.floor(raw))
+})()
+
+function iterateCsvRows(csvText, delimiter = ',', onRow) {
+  if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
   let row = []
   let field = ''
   let inQuotes = false
-  const text = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i]
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function' ? onRow(row, rowCount) !== false : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  for (let i = 0; i < csvText.length; i += 1) {
+    const ch = csvText[i]
     if (inQuotes) {
-      if (char === '"') {
-        const next = text[i + 1]
+      if (ch === '"') {
+        const next = csvText[i + 1]
         if (next === '"') {
           field += '"'
           i += 1
         } else {
           inQuotes = false
         }
+      } else if (ch === '\r') {
+        if (csvText[i + 1] === '\n') i += 1
+        field += '\n'
       } else {
-        field += char
+        field += ch
       }
       continue
     }
 
-    if (char === '"') {
+    if (ch === '"') {
       inQuotes = true
       continue
     }
-    if (char === delimiter) {
+    if (ch === sep) {
       row.push(field)
       field = ''
       continue
     }
-    if (char === '\n') {
-      row.push(field)
-      field = ''
-      if (row.length > 1 || row[0]?.trim()) rows.push(row)
-      row = []
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && csvText[i + 1] === '\n') i += 1
+      if (!emitRow()) break
       continue
     }
-    field += char
+    field += ch
   }
-  row.push(field)
-  if (row.length > 1 || row[0]?.trim()) rows.push(row)
-  return rows
+
+  if (!stoppedEarly) {
+    emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
 }
 
 function normalizeCsvHeaderValue(value) {
@@ -836,15 +866,22 @@ function normalizeCsvHeaderValue(value) {
   return text
 }
 
-function detectCsvHeaderIndex(rows) {
-  for (let i = 0; i < rows.length; i += 1) {
-    const row = rows[i].map(normalizeCsvHeaderValue).filter(Boolean)
-    if (!row.length) continue
+function detectCsvHeaderIndex(csvText, delimiter) {
+  let detectedIndex = 0
+  let found = false
+  iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
+    const row = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
+    if (!row.length) return true
     const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
     const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-    if (hasName && hasDate) return i
-  }
-  return 0
+    if (hasName && hasDate) {
+      detectedIndex = rowIndex
+      found = true
+      return false
+    }
+    return true
+  })
+  return found ? detectedIndex : 0
 }
 
 function normalizeCsvWorkDate(value) {
@@ -968,22 +1005,38 @@ function shouldEnforcePunchRequired(row) {
   return true
 }
 
-function buildRowsFromCsv({ csvText, csvOptions }) {
+function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
   const delimiter = csvOptions?.delimiter || ','
-  const parsedRows = parseCsvText(csvText, delimiter)
-  if (!parsedRows.length) return { rows: [], warnings: ['CSV empty or unreadable'] }
+  const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
+  const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
+    ? Math.floor(resolvedMaxRowsRaw)
+    : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+  }
 
   const headerRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
     ? Math.max(0, Number(csvOptions.headerRowIndex))
-    : detectCsvHeaderIndex(parsedRows)
-  const header = (parsedRows[headerRowIndex] || []).map(normalizeCsvHeaderValue)
-  if (!header.length) {
-    return { rows: [], warnings: ['CSV header row not found'] }
-  }
+    : detectCsvHeaderIndex(csvText, delimiter)
+
+  let seenRows = 0
+  let header = []
   const rows = []
-  for (let i = headerRowIndex + 1; i < parsedRows.length; i += 1) {
-    const rawRow = parsedRows[i]
-    if (!rawRow) continue
+  let limitExceeded = false
+
+  iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
+    seenRows += 1
+    if (rowIndex < headerRowIndex) return true
+    if (rowIndex === headerRowIndex) {
+      header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rows.length >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
     const fields = {}
     let hasValue = false
     header.forEach((key, index) => {
@@ -992,7 +1045,7 @@ function buildRowsFromCsv({ csvText, csvOptions }) {
       if (value !== '') hasValue = true
       fields[key] = value
     })
-    if (!hasValue) continue
+    if (!hasValue) return true
     const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
     const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
     rows.push({
@@ -1000,8 +1053,26 @@ function buildRowsFromCsv({ csvText, csvOptions }) {
       fields,
       userId: userId ? String(userId).trim() : undefined,
     })
+    return true
+  })
+
+  if (seenRows === 0) {
+    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
   }
-  return { rows, warnings: [] }
+  if (!header.length || header.every((value) => !value)) {
+    return { rows: [], warnings: ['CSV header row not found'], limitExceeded: false, maxRows: resolvedMaxRows }
+  }
+
+  const warnings = []
+  if (limitExceeded) {
+    warnings.push(`CSV exceeds max rows (${resolvedMaxRows}); only the first ${resolvedMaxRows} rows were parsed.`)
+  }
+  return { rows, warnings, limitExceeded, maxRows: resolvedMaxRows }
+}
+
+function ensureCsvRowsWithinLimit(result) {
+  if (!result?.limitExceeded) return
+  throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${result.maxRows})`)
 }
 
 function resolveUserMapValue(userMap, key) {
@@ -4904,6 +4975,7 @@ module.exports = {
 	              csvText: payload.csvText,
 	              csvOptions: payload.csvOptions,
 	            })
+	            ensureCsvRowsWithinLimit(result)
 	            csvWarnings = result.warnings
 	            return result.rows
 	          })()
@@ -5231,6 +5303,7 @@ module.exports = {
 	              csvText: payload.csvText,
 	              csvOptions: payload.csvOptions,
 	            })
+	            ensureCsvRowsWithinLimit(result)
 	            csvWarnings = result.warnings
 	            return result.rows
 	          })()
@@ -9125,6 +9198,7 @@ module.exports = {
                   csvText: parsed.data.csvText,
                   csvOptions: parsed.data.csvOptions,
                 })
+                ensureCsvRowsWithinLimit(result)
                 csvWarnings = result.warnings
                 return result.rows
               })()
@@ -9521,6 +9595,10 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -9628,6 +9706,7 @@ module.exports = {
                   csvText: parsed.data.csvText,
                   csvOptions: parsed.data.csvOptions,
                 })
+                ensureCsvRowsWithinLimit(result)
                 csvWarnings = result.warnings
                 return result.rows
               })()
@@ -10346,6 +10425,10 @@ module.exports = {
             },
           })
 	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
@@ -10494,6 +10577,10 @@ module.exports = {
           await enqueueImportJob(jobId)
           res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -10760,6 +10847,7 @@ module.exports = {
                   csvText: parsed.data.csvText,
                   csvOptions: parsed.data.csvOptions,
                 })
+                ensureCsvRowsWithinLimit(result)
                 csvWarnings = result.warnings
                 return result.rows
               })()
