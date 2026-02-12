@@ -820,6 +820,24 @@ const ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS = resolvePositiveIntEnv('ATTENDAN
   max: 10000,
 })
 
+function resolveEnumEnv(name, fallback, allowed) {
+  const raw = String(process.env[name] ?? '').trim().toLowerCase()
+  if (allowed.includes(raw)) return raw
+  return fallback
+}
+
+const ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = resolveEnumEnv(
+  'ATTENDANCE_IMPORT_RECORD_UPSERT_MODE',
+  'unnest',
+  ['values', 'unnest']
+)
+
+const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
+  'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
+  'unnest',
+  ['values', 'unnest']
+)
+
 function iterateCsvRows(csvText, delimiter = ',', onRow) {
   if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
   const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
@@ -4091,7 +4109,7 @@ function computeAttendanceRecordUpsertValues(options) {
   }
 }
 
-async function batchUpsertAttendanceRecords(client, rows) {
+async function batchUpsertAttendanceRecordsValues(client, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return new Map()
 
   const values = rows
@@ -4150,6 +4168,200 @@ async function batchUpsertAttendanceRecords(client, rows) {
     map.set(`${row.user_id}:${workDateKey}`, row)
   }
   return map
+}
+
+async function batchUpsertAttendanceRecordsUnnest(client, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return new Map()
+
+  const userIds = []
+  const orgIds = []
+  const workDates = []
+  const timezones = []
+  const firstInAts = []
+  const lastOutAts = []
+  const workMinutes = []
+  const lateMinutes = []
+  const earlyLeaveMinutes = []
+  const statuses = []
+  const isWorkdays = []
+  const metaJsons = []
+  const sourceBatchIds = []
+
+  for (const row of rows) {
+    userIds.push(row.userId ?? null)
+    orgIds.push(row.orgId ?? null)
+    workDates.push(row.workDate ?? null)
+    timezones.push(row.timezone ?? null)
+    firstInAts.push(row.firstInAt ?? null)
+    lastOutAts.push(row.lastOutAt ?? null)
+    workMinutes.push(row.workMinutes ?? 0)
+    lateMinutes.push(row.lateMinutes ?? 0)
+    earlyLeaveMinutes.push(row.earlyLeaveMinutes ?? 0)
+    statuses.push(row.status ?? null)
+    isWorkdays.push(row.isWorkday ?? true)
+    metaJsons.push(row.metaJson ?? '{}')
+    sourceBatchIds.push(row.sourceBatchId ?? null)
+  }
+
+  const inserted = await client.query(
+    `INSERT INTO attendance_records
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
+     SELECT
+       t.user_id,
+       t.org_id,
+       t.work_date,
+       t.timezone,
+       t.first_in_at,
+       t.last_out_at,
+       t.work_minutes,
+       t.late_minutes,
+       t.early_leave_minutes,
+       t.status,
+       t.is_workday,
+       t.meta_json::jsonb,
+       t.source_batch_id,
+       now()
+     FROM unnest(
+       $1::text[],
+       $2::text[],
+       $3::date[],
+       $4::text[],
+       $5::timestamptz[],
+       $6::timestamptz[],
+       $7::int[],
+       $8::int[],
+       $9::int[],
+       $10::text[],
+       $11::boolean[],
+       $12::text[],
+       $13::uuid[]
+     ) AS t(
+       user_id,
+       org_id,
+       work_date,
+       timezone,
+       first_in_at,
+       last_out_at,
+       work_minutes,
+       late_minutes,
+       early_leave_minutes,
+       status,
+       is_workday,
+       meta_json,
+       source_batch_id
+     )
+     ON CONFLICT (user_id, work_date, org_id)
+     DO UPDATE SET
+       org_id = EXCLUDED.org_id,
+       timezone = EXCLUDED.timezone,
+       first_in_at = EXCLUDED.first_in_at,
+       last_out_at = EXCLUDED.last_out_at,
+       work_minutes = EXCLUDED.work_minutes,
+       late_minutes = EXCLUDED.late_minutes,
+       early_leave_minutes = EXCLUDED.early_leave_minutes,
+       status = EXCLUDED.status,
+       is_workday = EXCLUDED.is_workday,
+       meta = EXCLUDED.meta,
+       source_batch_id = EXCLUDED.source_batch_id,
+       updated_at = now()
+     RETURNING id, user_id, work_date`,
+    [
+      userIds,
+      orgIds,
+      workDates,
+      timezones,
+      firstInAts,
+      lastOutAts,
+      workMinutes,
+      lateMinutes,
+      earlyLeaveMinutes,
+      statuses,
+      isWorkdays,
+      metaJsons,
+      sourceBatchIds,
+    ]
+  )
+
+  const map = new Map()
+  for (const row of inserted) {
+    if (!row?.user_id || !row?.work_date) continue
+    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
+    map.set(`${row.user_id}:${workDateKey}`, row)
+  }
+  return map
+}
+
+async function batchUpsertAttendanceRecords(client, rows) {
+  if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') {
+    return batchUpsertAttendanceRecordsValues(client, rows)
+  }
+  return batchUpsertAttendanceRecordsUnnest(client, rows)
+}
+
+async function batchInsertAttendanceImportItems(client, { batchId, orgId, items }) {
+  if (!Array.isArray(items) || items.length === 0) return
+
+  if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') {
+    const values = items
+      .map((_, idx) => {
+        const base = idx * 7
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
+      })
+      .join(', ')
+    const params = []
+    for (const item of items) {
+      params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
+    }
+    await client.query(
+      `INSERT INTO attendance_import_items
+       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+       VALUES ${values}`,
+      params
+    )
+    return
+  }
+
+  const ids = []
+  const userIds = []
+  const workDates = []
+  const recordIds = []
+  const snapshots = []
+
+  for (const item of items) {
+    ids.push(item.id ?? null)
+    userIds.push(item.userId ?? null)
+    workDates.push(item.workDate ?? null)
+    recordIds.push(item.recordId ?? null)
+    snapshots.push(item.previewSnapshot ?? '{}')
+  }
+
+  await client.query(
+    `INSERT INTO attendance_import_items
+     (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     SELECT
+       t.id,
+       $6::uuid,
+       $7::text,
+       t.user_id,
+       t.work_date,
+       t.record_id,
+       t.preview_snapshot::jsonb,
+       now()
+     FROM unnest(
+       $1::uuid[],
+       $2::text[],
+       $3::date[],
+       $4::uuid[],
+       $5::text[]
+     ) AS t(
+       id,
+       user_id,
+       work_date,
+       record_id,
+       preview_snapshot
+     )`,
+    [ids, userIds, workDates, recordIds, snapshots, batchId, orgId]
+  )
 }
 
 function getWeekdayFromDateKey(dateKey) {
@@ -5580,30 +5792,19 @@ module.exports = {
 	            }
 	        await trx.query(batchInsert.sql, batchInsert.params)
 
-	        const importItemsBuffer = []
-	        const flushImportItems = async () => {
-	          if (!importItemsBuffer.length) return
-	          const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
-	          const values = chunk
-	            .map((_, idx) => {
-	              const base = idx * 7
-	              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
-	            })
-	            .join(', ')
-	          const params = []
-	          for (const item of chunk) {
-	            params.push(item.id, resolvedBatchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
-	          }
-	          await trx.query(
-	            `INSERT INTO attendance_import_items
-	             (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-	             VALUES ${values}`,
-	            params
-	          )
-	        }
-	        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
-	          importItemsBuffer.push({
-	            id: randomUUID(),
+		        const importItemsBuffer = []
+		        const flushImportItems = async () => {
+		          if (!importItemsBuffer.length) return
+		          const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
+		          await batchInsertAttendanceImportItems(trx, {
+		            batchId: resolvedBatchId,
+		            orgId,
+		            items: chunk,
+		          })
+		        }
+		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
+		          importItemsBuffer.push({
+		            id: randomUUID(),
 	            userId: userId ?? null,
 	            workDate: workDate ?? null,
 	            recordId: recordId ?? null,
@@ -10032,30 +10233,19 @@ module.exports = {
 	                }
 		            await trx.query(batchInsert.sql, batchInsert.params)
 
-		            const importItemsBuffer = []
-		            const flushImportItems = async () => {
-		              if (!importItemsBuffer.length) return
-		              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
-		              const values = chunk
-		                .map((_, idx) => {
-		                  const base = idx * 7
-		                  return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
-		                })
-		                .join(', ')
-		              const params = []
-		              for (const item of chunk) {
-		                params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
-		              }
-		              await trx.query(
-		                `INSERT INTO attendance_import_items
-		                 (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-		                 VALUES ${values}`,
-		                params
-		              )
-		            }
-			            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
-			              importItemsBuffer.push({
-			                id: randomUUID(),
+			            const importItemsBuffer = []
+			            const flushImportItems = async () => {
+			              if (!importItemsBuffer.length) return
+			              const chunk = importItemsBuffer.splice(0, importItemsBuffer.length)
+			              await batchInsertAttendanceImportItems(trx, {
+			                batchId,
+			                orgId,
+			                items: chunk,
+			              })
+			            }
+				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
+				              importItemsBuffer.push({
+				                id: randomUUID(),
 			                userId: userId ?? null,
 			                workDate: workDate ?? null,
 			                recordId: recordId ?? null,
