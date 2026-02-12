@@ -47,6 +47,11 @@ Out of scope for this delivery:
 4. If large imports (200k+ rows) return `413 Payload Too Large`:
    - Ensure the backend is on a build that supports per-route import payload limits (shipped on `main` after `3b85463d`).
    - Optional env (override only when needed): `ATTENDANCE_IMPORT_JSON_LIMIT=50mb` (must be <= reverse proxy `client_max_body_size`).
+5. For extreme-scale imports (200k-500k+ rows), prefer the CSV upload channel (`csvFileId`) instead of embedding `csvText` in JSON:
+   - Ensure `ATTENDANCE_IMPORT_UPLOAD_DIR` is on a persistent volume (see `docker-compose.app.yml`).
+   - Ensure nginx allows a larger body specifically for the upload endpoint:
+     - `location /api/attendance/import/upload { client_max_body_size 120m; }` (see `docker/nginx.conf`)
+   - Runbook: `docs/attendance-production-import-upload-channel-20260212.md`
 
 ### Smoke / Acceptance
 

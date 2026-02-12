@@ -32,6 +32,9 @@ services:
     container_name: metasheet-backend
     env_file:
       - ./docker/app.env
+    volumes:
+      # Persist extreme-scale attendance import uploads (csvFileId channel).
+      - metasheet-attendance-import-data:/app/uploads/attendance-import
     ports:
       - "127.0.0.1:8900:8900"
     depends_on:
@@ -56,4 +59,6 @@ volumes:
   metasheet-postgres-data:
     driver: local
   metasheet-redis-data:
+    driver: local
+  metasheet-attendance-import-data:
     driver: local

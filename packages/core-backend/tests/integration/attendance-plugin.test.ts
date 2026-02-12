@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
+import fs from 'fs/promises'
 import { Pool } from 'pg'
 import http from 'http'
 
@@ -53,6 +54,7 @@ function randomUuidV4(): string {
 describe('Attendance Plugin Integration', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
+  let importUploadDir: string | undefined
 
   beforeAll(async () => {
     const canListen: boolean = await new Promise((resolve) => {
@@ -70,6 +72,11 @@ describe('Attendance Plugin Integration', () => {
     process.env.SKIP_PLUGINS = 'false'
     // Keep CSV guardrail deterministic and testable across environments.
     process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '1000'
+    // Isolate import upload channel state (csvFileId) under a temp directory for integration tests.
+    const repoRoot = path.join(__dirname, '../../../../')
+    importUploadDir = path.join(repoRoot, 'tmp', `attendance-import-upload-${Date.now().toString(36)}`)
+    process.env.ATTENDANCE_IMPORT_UPLOAD_DIR = importUploadDir
+    process.env.ATTENDANCE_IMPORT_UPLOAD_CLEANUP = 'false'
 
     const pool = new Pool({ connectionString: dbUrl })
     try {
@@ -106,7 +113,6 @@ describe('Attendance Plugin Integration', () => {
       await pool.end()
     }
 
-    const repoRoot = path.join(__dirname, '../../../../')
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
     const { MetaSheetServer } = await import('../../src/index')
@@ -124,6 +130,9 @@ describe('Attendance Plugin Integration', () => {
   afterAll(async () => {
     if (server && (server as any).stop) {
       await server.stop()
+    }
+    if (importUploadDir) {
+      await fs.rm(importUploadDir, { recursive: true, force: true })
     }
   })
 
@@ -1672,5 +1681,202 @@ describe('Attendance Plugin Integration', () => {
     expect(commitRes.status).toBe(400)
     const commitError = (commitRes.body as { error?: { code?: string } } | undefined)?.error
     expect(commitError?.code).toBe('CSV_TOO_LARGE')
+  })
+
+  it('supports CSV upload channel (csvFileId) and cleans up after sync commit', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvText = `${csvHeader}\n${workDate},A001,CSV Upload,09:00,18:00,正常\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=integration.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const csvPayloadBase = {
+      orgId,
+      userId: 'attendance-test',
+      timezone: 'UTC',
+      csvFileId: String(fileId || ''),
+      mapping: {
+        columns: [
+          { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+          { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+          { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+          { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+          { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+          { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+        ],
+      },
+      userMap: {
+        A001: 'attendance-test',
+      },
+      mode: 'override',
+    }
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken,
+        // Ensure response stays small even if a future mapping adds extra computed items.
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const batchId = (commitRes.body as { data?: { batchId?: string } } | undefined)?.data?.batchId
+    expect(typeof batchId).toBe('string')
+
+    const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
+    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(rollbackRes.status).toBe(200)
+    }
+  })
+
+  it('returns EXPIRED when csvFileId meta is older than TTL', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvText = `${csvHeader}\n${workDate},A001,CSV Expired,09:00,18:00,正常\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=expired.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    const rawMeta = await fs.readFile(metaPath, 'utf8')
+    const meta = rawMeta ? JSON.parse(rawMeta) : {}
+    meta.createdAt = '1970-01-01T00:00:00.000Z'
+    await fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        userId: 'attendance-test',
+        timezone: 'UTC',
+        csvFileId: String(fileId || ''),
+        mapping: {
+          columns: [
+            { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+            { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+            { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+            { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+            { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+            { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+          ],
+        },
+        userMap: { A001: 'attendance-test' },
+        mode: 'override',
+        commitToken: previewCommitToken,
+      }),
+    })
+
+    expect(previewRes.status).toBe(410)
+    const code = (previewRes.body as { error?: { code?: string } } | undefined)?.error?.code
+    expect(code).toBe('EXPIRED')
   })
 })
