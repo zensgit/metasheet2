@@ -80,6 +80,21 @@ Latest `500k` run (commit-async + rollback, export enabled):
 - exportMs: `16627`
 - rollbackMs: `6877`
 
+Latest `500k` run (commit-async + rollback, export enabled, upload_csv enabled):
+
+- Run: [Attendance Import Perf Baseline #21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json`
+- previewMs: `16290`
+- commitMs: `463804`
+- exportMs: `14491`
+- rollbackMs: `6566`
+
+Notes:
+
+- This run uses the CSV upload channel (`POST /api/attendance/import/upload` + `csvFileId`) to avoid embedding `csvText` in JSON.
+- It validates end-to-end: upload -> preview -> commit-async -> export.csv -> rollback.
+
 ## When This Becomes Necessary
 
 We should prioritize the work below if any of these become true:

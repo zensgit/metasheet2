@@ -114,3 +114,26 @@ Rationale:
   - Behavior:
     - sends notifications when Slack/DingTalk webhook secrets are configured;
     - with no webhook configured, exits success with warning summary.
+
+## Post-Go Validation (2026-02-12): Extreme-Scale Import + CSV Upload Channel
+
+This record does not change the `GO` decision above; it captures a production re-validation after shipping the CSV upload import channel and running an extreme-scale perf baseline.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Build + deploy (csv upload channel) | [#21948146767](https://github.com/zensgit/metasheet2/actions/runs/21948146767) | PASS | GitHub Actions run logs |
+| Strict gates twice (async strict) | [#21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924) | PASS | `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`, `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/` |
+| Perf baseline (500k, async+export+rollback, upload_csv=true) | [#21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024) | PASS | `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json` |
+
+Perf summary (`#21948416024`):
+
+- `rows=500000`
+- `previewMs=16290`
+- `commitMs=463804`
+- `exportMs=14491`
+- `rollbackMs=6566`
+- `regressions=[]`
+
+Related design/ops record:
+
+- `docs/attendance-production-import-upload-channel-20260212.md`

@@ -440,6 +440,41 @@ Additional perf baseline (500k, async+rollback, export disabled): `PASS`
 - commitMs: `594239`
 - rollbackMs: `7192`
 
+## Update (2026-02-12): CSV Upload Channel (Avoid Huge JSON `csvText`)
+
+At `200k+` scale, embedding the CSV as a JSON string (`csvText`) becomes fragile due to reverse-proxy limits and JSON parse overhead.
+
+Change shipped:
+
+- Add an upload channel:
+  - `POST /api/attendance/import/upload` (raw `text/csv` body)
+  - returns `fileId` used as `csvFileId` in the import payload
+- Import payload supports `csvFileId?: uuid` (alternative to `csvText`)
+- Web UI auto-switches to upload when CSV file size is `>= 5MB`
+- Implementation:
+  - backend: `plugins/plugin-attendance/index.cjs`
+  - web: `apps/web/src/views/AttendanceView.vue`
+
+Verification:
+
+- Remote strict gates (2x): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924)
+  - Evidence:
+    - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`
+    - `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/`
+- Perf baseline (500k, async+export+rollback, upload_csv=true): `PASS`
+  - Run: [Attendance Import Perf Baseline #21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024)
+  - Evidence:
+    - `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json`
+  - previewMs: `16290`
+  - commitMs: `463804`
+  - exportMs: `14491`
+  - rollbackMs: `6566`
+
+For the full API/ops details, see:
+
+- `docs/attendance-production-import-upload-channel-20260212.md`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
