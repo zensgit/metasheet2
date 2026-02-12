@@ -128,6 +128,9 @@ This record does not change the `GO` decision above; it captures a production re
 | Build + deploy (persist upload volume + nginx override) | [#21950252123](https://github.com/zensgit/metasheet2/actions/runs/21950252123) | PASS | GitHub Actions run logs |
 | Strict gates twice (post nginx/volume sync) | [#21950374010](https://github.com/zensgit/metasheet2/actions/runs/21950374010) | PASS | `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-1/`, `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-2/` |
 | Perf baseline (10k, async+export+rollback, upload_csv=true) | [#21950373978](https://github.com/zensgit/metasheet2/actions/runs/21950373978) | PASS | `output/playwright/ga/21950373978/attendance-import-perf-21950373978-1/attendance-perf-mljjrtew-l8qyjh/perf-summary.json` |
+| Build + deploy (upload observability metrics) | [#21951397169](https://github.com/zensgit/metasheet2/actions/runs/21951397169) | PASS | GitHub Actions run logs |
+| Strict gates twice (post upload observability) | [#21951515179](https://github.com/zensgit/metasheet2/actions/runs/21951515179) | PASS | `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-1/`, `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-2/` |
+| Perf baseline (10k, async+export+rollback, upload_csv=true, post upload observability) | [#21951515791](https://github.com/zensgit/metasheet2/actions/runs/21951515791) | PASS | `output/playwright/ga/21951515791/attendance-import-perf-21951515791-1/attendance-perf-mljkutd4-b9wc2g/perf-summary.json` |
 
 Perf summary (`#21948416024`):
 

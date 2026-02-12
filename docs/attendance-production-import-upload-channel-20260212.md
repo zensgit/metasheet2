@@ -180,3 +180,19 @@ Perf baseline (10k, async+export+rollback, upload_csv=true):
 - commitMs: `12644`
 - exportMs: `575`
 - rollbackMs: `127`
+
+Post-deploy re-validation after adding upload observability metrics:
+
+- Strict gates (2x):
+  - Run: [Attendance Strict Gates (Prod) #21951515179](https://github.com/zensgit/metasheet2/actions/runs/21951515179) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-1/`
+    - `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-2/`
+- Perf baseline (10k, upload_csv=true):
+  - Run: [Attendance Import Perf Baseline #21951515791](https://github.com/zensgit/metasheet2/actions/runs/21951515791) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21951515791/attendance-import-perf-21951515791-1/attendance-perf-mljkutd4-b9wc2g/perf-summary.json`
+  - previewMs: `1946`
+  - commitMs: `16754`
+  - exportMs: `443`
+  - rollbackMs: `113`
