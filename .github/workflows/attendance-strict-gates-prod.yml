@@ -23,6 +23,10 @@ on:
         description: 'Require import batch export.csv endpoint (true/false)'
         required: false
         default: 'true'
+      require_import_upload:
+        description: 'Require CSV upload channel (/attendance/import/upload + csvFileId) (true/false)'
+        required: false
+        default: 'true'
       require_import_async:
         description: 'Require async import commit gate (true/false)'
         required: false
@@ -56,6 +60,7 @@ jobs:
       REQUIRE_ATTENDANCE_ADMIN_API: ${{ inputs.require_attendance_admin_api || 'true' }}
       REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
       REQUIRE_IMPORT_EXPORT: ${{ inputs.require_import_export || 'true' }}
+      REQUIRE_IMPORT_UPLOAD: ${{ inputs.require_import_upload || 'true' }}
       REQUIRE_IMPORT_ASYNC: ${{ inputs.require_import_async || 'true' }}
       REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'true' }}
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}

@@ -6,6 +6,7 @@ const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const requireAttendanceAdminApi = process.env.REQUIRE_ATTENDANCE_ADMIN_API === 'true'
 const requireIdempotency = process.env.REQUIRE_IDEMPOTENCY === 'true'
 const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
+const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
@@ -89,6 +90,25 @@ async function apiFetch(path, init = {}) {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+    },
+  })
+  const raw = await res.text()
+  let body = null
+  try {
+    body = raw ? JSON.parse(raw) : null
+  } catch {
+    body = null
+  }
+  return { url, res, raw, body }
+}
+
+async function apiFetchRaw(path, init = {}) {
+  const url = `${apiBase}${path}`
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      Authorization: `Bearer ${token}`,
     },
   })
   const raw = await res.text()
@@ -325,13 +345,34 @@ async function run() {
   const idempotencyKey = makeIdempotencyKey()
   const csvText = makeCsv(workDate, userId, groupName)
 
+  let csvFileId = ''
+  if (requireImportUpload) {
+    const query = new URLSearchParams()
+    if (orgId) query.set('orgId', orgId)
+    query.set('filename', `attendance-smoke-${workDate}.csv`)
+    const uploadRes = await apiFetchRaw(`/attendance/import/upload?${query.toString()}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    assertOk(uploadRes, 'POST /attendance/import/upload')
+    if (uploadRes.res.status !== 201) {
+      log(`WARN: import upload returned HTTP ${uploadRes.res.status} (expected 201)`)
+    }
+    csvFileId = String(uploadRes.body?.data?.fileId || uploadRes.body?.data?.id || '')
+    if (!csvFileId) die('import upload did not return fileId')
+    log(`import upload ok: fileId=${csvFileId}`)
+  }
+
   const previewPayload = {
     ...payloadExample,
     orgId,
     userId,
     timezone: payloadExample.timezone || defaultTimezone,
     mappingProfileId: 'dingtalk_csv_daily_summary',
-    csvText,
+    ...(requireImportUpload ? { csvFileId } : { csvText }),
     idempotencyKey,
     groupSync: {
       autoCreate: true,

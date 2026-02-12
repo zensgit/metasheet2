@@ -23,6 +23,7 @@ This is the primary Go/No-Go gate.
 REQUIRE_ATTENDANCE_ADMIN_API="true" \
 REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
+REQUIRE_IMPORT_UPLOAD="true" \
 REQUIRE_IMPORT_ASYNC="true" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
@@ -37,6 +38,7 @@ Expected:
 - Both runs PASS.
 - `gate-api-smoke.log` contains:
   - `idempotency ok`
+  - `import upload ok`
   - `export csv ok`
   - `audit export csv ok`
   - `import async idempotency ok`
