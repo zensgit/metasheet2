@@ -95,20 +95,25 @@ if ! grep -qE "^[[:space:]]*location[[:space:]]+/api/attendance/import/upload[[:
 fi
 upload_body_size="$(
   awk '
-    BEGIN { in=0; level=0; size="" }
+    BEGIN { inside=0; level=0; size="" }
     {
       if ($0 ~ /^[[:space:]]*location[[:space:]]+\/api\/attendance\/import\/upload[[:space:]]*\{/) {
-        in=1
+        inside=1
+        level=0
+        size=""
       }
-      if (in) {
+      if (inside) {
         # Count braces to find the end of the location block.
-        open=gsub(/\{/, "{")
-        close=gsub(/\}/, "}")
-        level += open - close
+        open_count=gsub(/\{/, "{")
+        close_count=gsub(/\}/, "}")
+        level += open_count - close_count
 
         if ($0 ~ /client_max_body_size[[:space:]]+[0-9]+[kKmMgG][[:space:]]*;/) {
-          match($0, /client_max_body_size[[:space:]]+([0-9]+)([kKmMgG])/, a)
-          size = a[1] a[2]
+          tmp=$0
+          sub(/.*client_max_body_size[[:space:]]+/, "", tmp)
+          if (match(tmp, /^[0-9]+[kKmMgG]/)) {
+            size = substr(tmp, RSTART, RLENGTH)
+          }
         }
         if (level <= 0) {
           print size
