@@ -10343,6 +10343,26 @@ module.exports = {
           return
         }
 
+        const rawIdempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+          ? parsed.data.idempotencyKey.trim()
+          : ''
+        const previewJobIdempotencyKey = toPreviewJobIdempotencyKey(rawIdempotencyKey)
+        if (previewJobIdempotencyKey) {
+          try {
+            const existingJob = await loadImportJobByIdempotencyKey(orgId, previewJobIdempotencyKey)
+            if (existingJob) {
+              res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            // Fall through and attempt to create a job.
+          }
+        }
+
         const commitToken = parsed.data.commitToken
         if (!commitToken && requireImportCommitToken) {
           res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
@@ -10367,26 +10387,6 @@ module.exports = {
           }
           if (!tokenOk && !requireImportCommitToken) {
             logger.warn('Attendance import preview token invalid; continuing without enforcement.')
-          }
-        }
-
-        const rawIdempotencyKey = typeof parsed.data.idempotencyKey === 'string'
-          ? parsed.data.idempotencyKey.trim()
-          : ''
-        const previewJobIdempotencyKey = toPreviewJobIdempotencyKey(rawIdempotencyKey)
-        if (previewJobIdempotencyKey) {
-          try {
-            const existingJob = await loadImportJobByIdempotencyKey(orgId, previewJobIdempotencyKey)
-            if (existingJob) {
-              res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
-              return
-            }
-          } catch (error) {
-            if (isDatabaseSchemaError(error)) {
-              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-              return
-            }
-            // Fall through and attempt to create a job.
           }
         }
 
