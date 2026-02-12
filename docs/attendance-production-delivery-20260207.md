@@ -407,3 +407,27 @@ Latest head re-validation on `main` (post-`250dbaab`):
   - `SMOKE PASS`
 - Playwright production flow note:
   - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.
+
+Latest head re-validation on `main` (post-`2305b630`):
+
+- Head commit:
+  - `2305b630` (`perf(attendance-import): batch upsert attendance_records`)
+- Deploy workflow:
+  - [Build and Push Docker Images #21939493555](https://github.com/zensgit/metasheet2/actions/runs/21939493555) (`SUCCESS`, build+deploy)
+- Strict gates run (explicit full strictness; workflow_dispatch with `require_batch_resolve=true`):
+  - [Attendance Strict Gates (Prod) #21939600178](https://github.com/zensgit/metasheet2/actions/runs/21939600178) (`SUCCESS`)
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-1/`
+    - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-2/`
+- API smoke assertions in both runs:
+  - `product mode ok: mode=attendance`
+  - `batch resolve ok`
+  - `preview async ok`
+  - `audit export csv ok`
+  - `audit summary ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`
+- Playwright production flow note:
+  - `PUNCH_TOO_SOON` warning appears as expected business guardrail and does not fail the gate.

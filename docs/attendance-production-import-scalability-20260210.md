@@ -284,6 +284,31 @@ Verification:
     - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-1/`
     - `output/playwright/ga/21935284365/attendance-strict-gates-prod-21935284365-1/20260212-055327-2/`
 
+## Update (2026-02-12): Chunked DB Persistence (Batch UPSERT attendance_records)
+
+For large commits, a major bottleneck was the per-row `upsertAttendanceRecord()` query loop. We now compute upsert values in memory (after a bulk `SELECT ... FOR UPDATE`) and persist a whole chunk in a single multi-row UPSERT:
+
+- New helpers:
+  - `computeAttendanceRecordUpsertValues(...)`
+  - `batchUpsertAttendanceRecords(client, rows)`
+- Applied to both commit paths:
+  - sync: `POST /api/attendance/import/commit`
+  - async: import commit worker (`processAsyncImportCommitJob`)
+
+This reduces DB round-trips and evens out latency variance for `10k+` imports.
+
+Verification:
+
+- Local integration tests: `PASS`
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+- Local backend build: `PASS`
+  - `pnpm --filter @metasheet/core-backend build`
+- Remote strict gates (2x): `PASS`
+  - Run: [Attendance Strict Gates (Prod) #21939600178](https://github.com/zensgit/metasheet2/actions/runs/21939600178)
+  - Evidence:
+    - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-1/`
+    - `output/playwright/ga/21939600178/attendance-strict-gates-prod-21939600178-1/20260212-084738-2/`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
