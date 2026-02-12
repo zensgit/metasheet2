@@ -39,6 +39,21 @@ Notes:
   - Per-route override: `ATTENDANCE_IMPORT_JSON_LIMIT` (default `50mb`).
   - Reverse proxy must allow the same or higher body size (nginx `client_max_body_size 50m`).
 
+## Current Baseline (300k)
+
+Latest `300k` run (commit-async + rollback, export disabled):
+
+- Run: [Attendance Import Perf Baseline #21944960433](https://github.com/zensgit/metasheet2/actions/runs/21944960433) (`SUCCESS`)
+- Evidence:
+  - `output/playwright/ga/21944960433/attendance-import-perf-21944960433-1/attendance-perf-mljdtnov-wh6efv/perf-summary.json`
+- previewMs: `13965`
+- commitMs: `350509`
+- rollbackMs: `4451`
+
+Notes:
+
+- This run overrides `max_commit_ms=1200000` to avoid treating expected extreme-payload latency as a regression.
+
 ## When This Becomes Necessary
 
 We should prioritize the work below if any of these become true:

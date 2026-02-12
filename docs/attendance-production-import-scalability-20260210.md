@@ -422,6 +422,15 @@ Perf impact (200k commit-async; same env):
 - Before caching (2026-02-12): commitMs `566193`
 - After caching (2026-02-12): commitMs `232725`
 
+Additional perf baseline (300k, async+rollback, export disabled): `PASS`
+
+- Run: [Attendance Import Perf Baseline #21944960433](https://github.com/zensgit/metasheet2/actions/runs/21944960433)
+- Evidence:
+  - `output/playwright/ga/21944960433/attendance-import-perf-21944960433-1/attendance-perf-mljdtnov-wh6efv/perf-summary.json`
+- previewMs: `13965`
+- commitMs: `350509`
+- rollbackMs: `4451`
+
 ## Notes / Follow-Up (P1)
 
 The above changes close the original response-size and synchronous-preview gaps and add large-scope safety caps. Remaining work for very large payloads (100k+) is:
