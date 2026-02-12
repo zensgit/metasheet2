@@ -250,3 +250,35 @@ Operational conclusion:
 - P0 delivery target is met for attendance-focused production usage.
 - P1 `1+2+3` scope is now in place and validated on production strict gates.
 - Current residual work is P2 or larger-scale optimization, not a P0 launch blocker.
+
+Latest head re-validation on `main` (post-`08a7619e`):
+
+- Head commit:
+  - `08a7619e` (`feat(attendance): wire async preview into UI and strict gate defaults`)
+- Strict gates run (workflow defaults; `REQUIRE_PREVIEW_ASYNC=true`):
+  - [Attendance Strict Gates (Prod) #21932461116](https://github.com/zensgit/metasheet2/actions/runs/21932461116) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `✅ Strict gates passed twice`
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21932461116/20260212-033153-1/`
+    - `output/playwright/ga/21932461116/20260212-033153-2/`
+- Strict gates run (explicit full strictness; `require_batch_resolve=true`):
+  - [Attendance Strict Gates (Prod) #21932569305](https://github.com/zensgit/metasheet2/actions/runs/21932569305) (`SUCCESS`)
+  - Workflow confirms:
+    - `REQUIRE_PREVIEW_ASYNC: true`
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence (downloaded artifact):
+    - `output/playwright/ga/21932569305/20260212-033753-1/`
+    - `output/playwright/ga/21932569305/20260212-033753-2/`
+- API smoke assertions (both runs, both passes):
+  - `product mode ok: mode=attendance`
+  - `preview async ok`
+  - `batch resolve ok` (for run `#21932569305`)
+  - `audit export csv ok`
+  - `audit summary ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `import async idempotency ok`
+  - `SMOKE PASS`

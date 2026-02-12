@@ -496,3 +496,49 @@ API smoke assertions (both runs):
 Result:
 
 - Async preview gate is production-verified and stable on latest `main`.
+
+## Execution Record (2026-02-12, Main HEAD Re-Validation After `08a7619e`)
+
+Goal of this cycle:
+
+- Re-validate strict production gates after UI integration of async preview path and strict gate defaulting.
+
+Execution timeline (UTC):
+
+1. Main head commit:
+   - `08a7619e` (`feat(attendance): wire async preview into UI and strict gate defaults`)
+2. Strict gates (twice; workflow default strictness):
+   - [Attendance Strict Gates (Prod) #21932461116](https://github.com/zensgit/metasheet2/actions/runs/21932461116) (`SUCCESS`)
+   - Workflow confirms:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `✅ Strict gates passed twice`
+3. Strict gates (twice; explicit full strictness):
+   - [Attendance Strict Gates (Prod) #21932569305](https://github.com/zensgit/metasheet2/actions/runs/21932569305) (`SUCCESS`)
+   - Workflow confirms:
+     - `REQUIRE_PREVIEW_ASYNC: true`
+     - `REQUIRE_BATCH_RESOLVE: true`
+     - `✅ Strict gates passed twice`
+
+Evidence (downloaded artifacts):
+
+- `output/playwright/ga/21932461116/20260212-033153-1/`
+- `output/playwright/ga/21932461116/20260212-033153-2/`
+- `output/playwright/ga/21932569305/20260212-033753-1/`
+- `output/playwright/ga/21932569305/20260212-033753-2/`
+
+API smoke assertions (latest strict run, both passes):
+
+- `product mode ok: mode=attendance`
+- `batch resolve ok`
+- `preview async ok`
+- `audit export csv ok`
+- `audit summary ok`
+- `idempotency ok`
+- `export csv ok`
+- `import async idempotency ok`
+- `SMOKE PASS`
+
+Go/No-Go decision (2026-02-12, post-`08a7619e`):
+
+- **GO (unchanged)**
+- Reason: strict gates continue passing twice on latest `main` with async preview + batch resolve checks enabled.
