@@ -178,6 +178,25 @@ Latest closure validation after P1 `1+2+3` merge (PR `#149`):
     - `import async idempotency ok`
     - `SMOKE PASS`
 
+Post-documentation re-validation on latest `main`:
+
+- Docs commit: `803efa96`
+- Strict gates (twice) with `require_batch_resolve=true`:
+  - [Attendance Strict Gates (Prod) #21931280648](https://github.com/zensgit/metasheet2/actions/runs/21931280648) (`SUCCESS`)
+  - Workflow log confirms:
+    - `REQUIRE_BATCH_RESOLVE: true`
+    - `✅ Strict gates passed twice`
+  - Evidence:
+    - `output/playwright/ga/21931280648/attendance-strict-gates-prod-21931280648-1/20260212-023217-1/`
+    - `output/playwright/ga/21931280648/attendance-strict-gates-prod-21931280648-1/20260212-023217-2/`
+  - API smoke assertions in both runs:
+    - `batch resolve ok`
+    - `audit summary ok`
+    - `idempotency ok`
+    - `export csv ok`
+    - `import async idempotency ok`
+    - `SMOKE PASS`
+
 Operational conclusion:
 
 - P0 delivery target is met for attendance-focused production usage.
