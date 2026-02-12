@@ -89,6 +89,71 @@ Production deploy note:
 - `docker-compose.app.yml` now mounts a persistent volume at `/app/uploads/attendance-import` so `csvFileId` uploads survive backend restarts.
 - `docker/nginx.conf` now allows larger bodies only for `/api/attendance/import/upload` (keeps global `client_max_body_size` bounded).
 
+## Troubleshooting / Runbook
+
+### `413 PAYLOAD_TOO_LARGE` (nginx) or `PAYLOAD_TOO_LARGE` (API)
+
+Symptoms:
+
+- nginx returns `413 Request Entity Too Large` on `POST /api/attendance/import/upload`
+- API returns `413` with error code `PAYLOAD_TOO_LARGE`
+
+Checklist:
+
+1. Confirm nginx has a per-route override for the upload location:
+   - `docker/nginx.conf` must include:
+     - `location /api/attendance/import/upload { client_max_body_size 120m; }`
+2. Confirm backend max bytes:
+   - `ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES` (default `120MB`) must not exceed nginx `client_max_body_size`.
+3. Confirm you are sending the raw body (not multipart):
+   - Use curl `--data-binary @file.csv` and `Content-Type: text/csv`.
+
+### `410 EXPIRED` on preview/commit with `csvFileId`
+
+Cause:
+
+- The uploaded file exceeded the server TTL before it was referenced.
+
+Checklist:
+
+1. Confirm TTL settings:
+   - `ATTENDANCE_IMPORT_UPLOAD_TTL_MS` (default `24h`)
+2. Confirm the backend clock is correct (skew can trigger early expiry).
+3. If you need a shorter TTL, ensure operators understand the expected workflow:
+   - upload -> preview/commit should happen immediately.
+
+### `500 INTERNAL_ERROR` or file-not-found style failures
+
+Common causes:
+
+- The upload directory is not persisted (container restart discards files).
+- Permission issues: backend process cannot write to `ATTENDANCE_IMPORT_UPLOAD_DIR`.
+- Disk is full.
+
+Checklist:
+
+1. Confirm `ATTENDANCE_IMPORT_UPLOAD_DIR` points to the mounted volume path:
+   - Recommended: `ATTENDANCE_IMPORT_UPLOAD_DIR=/app/uploads/attendance-import`
+   - `docker-compose.app.yml` must mount that path for the backend container.
+2. Confirm disk space on the backend host.
+3. Inspect audit trail:
+   - `operation_audit_logs` should include error meta for `route=/api/attendance/import/upload`.
+4. Inspect metrics/dashboard:
+   - `attendance_api_errors_total{route="/api/attendance/import/upload",method="POST"}`
+   - `attendance_import_upload_bytes_total`
+   - `attendance_import_upload_rows_total`
+
+### `403 IP_RESTRICTED`
+
+Cause:
+
+- Attendance IP allowlist is configured and the client IP is not permitted.
+
+Checklist:
+
+1. Update the allowlist in `Attendance -> Admin Center -> Settings -> IP allowlist`.
+2. Re-run the strict gates to confirm.
+
 ## Web UI Behavior
 
 In the Attendance Admin import UI:
