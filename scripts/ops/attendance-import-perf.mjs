@@ -25,6 +25,7 @@ const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC ===
 
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
+const uploadCsv = process.env.UPLOAD_CSV === 'true'
 const exportType = String(process.env.EXPORT_TYPE || 'anomalies')
 const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
@@ -277,13 +278,39 @@ async function run() {
 
   const memAfterCsv = process.memoryUsage()
 
+  let csvFileId = ''
+  if (uploadCsv) {
+    const query = new URLSearchParams()
+    if (orgId) query.set('orgId', orgId)
+    query.set('filename', `attendance-perf-${rows}.csv`)
+    const up = await apiFetchText(`/attendance/import/upload?${query.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv' },
+      body: csvText,
+    })
+    if (!up.res.ok) {
+      throw new Error(`POST /attendance/import/upload failed: HTTP ${up.res.status} ${up.text.slice(0, 200)}`)
+    }
+    let upBody = null
+    try {
+      upBody = up.text ? JSON.parse(up.text) : null
+    } catch {
+      upBody = null
+    }
+    if (!upBody || upBody.ok === false) {
+      throw new Error(`POST /attendance/import/upload failed: ${JSON.stringify(upBody).slice(0, 200)}`)
+    }
+    csvFileId = String(upBody?.data?.fileId || upBody?.data?.id || '')
+    if (!csvFileId) die('POST /attendance/import/upload did not return fileId')
+  }
+
   const basePayload = {
     ...payloadExample,
     orgId,
     userId,
     timezone: payloadExample.timezone || timezone,
     mappingProfileId: resolvedMappingProfileId,
-    csvText,
+    ...(uploadCsv ? { csvFileId } : { csvText }),
     idempotencyKey: runId,
     previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
     returnItems,

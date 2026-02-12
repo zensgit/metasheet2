@@ -23,6 +23,10 @@ on:
         description: 'Verify export csv latency (true/false)'
         required: false
         default: 'true'
+      upload_csv:
+        description: 'Upload CSV via /attendance/import/upload (true/false)'
+        required: false
+        default: 'false'
       max_preview_ms:
         description: 'Fail if preview latency exceeds this value (optional)'
         required: false
@@ -59,6 +63,7 @@ jobs:
       ROLLBACK: 'true'
       COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
+      UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'false' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}

@@ -3892,6 +3892,9 @@ const attendanceGroupOptions = computed(() =>
 )
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
+const importCsvFileId = ref('')
+const importCsvFileRowCountHint = ref<number | null>(null)
+const importCsvFileExpiresAt = ref('')
 const importCsvHeaderRow = ref('')
 const importCsvDelimiter = ref(',')
 const importUserMapFile = ref<File | null>(null)
@@ -4435,6 +4438,14 @@ const IMPORT_ASYNC_POLL_INTERVAL_MS = 2000
 const IMPORT_ASYNC_POLL_TIMEOUT_MS = 30 * 60 * 1000
 
 function estimateImportRowCount(payload: Record<string, any>): number | null {
+  if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim().length > 0) {
+    const id = payload.csvFileId.trim()
+    if (importCsvFileId.value && id === importCsvFileId.value && importCsvFileRowCountHint.value) {
+      return importCsvFileRowCountHint.value
+    }
+    // Force async import path when the payload references a server-side upload.
+    return IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD
+  }
   if (Array.isArray(payload.rows)) return payload.rows.length
   if (typeof payload.csvText === 'string') {
     // Cheap line-count heuristic (avoid splitting large strings).
@@ -4702,6 +4713,9 @@ function handleImportCsvChange(event: Event) {
   const file = target?.files?.[0] ?? null
   importCsvFile.value = file
   importCsvFileName.value = file?.name ?? ''
+  importCsvFileId.value = ''
+  importCsvFileRowCountHint.value = null
+  importCsvFileExpiresAt.value = ''
 }
 
 async function handleImportUserMapChange(event: Event) {
@@ -4731,19 +4745,48 @@ async function handleImportUserMapChange(event: Event) {
   }
 }
 
+const IMPORT_CSV_UPLOAD_THRESHOLD_BYTES = 5 * 1024 * 1024
+
+async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCount: number; bytes: number; expiresAt: string }> {
+  const query = new URLSearchParams()
+  const resolvedOrgId = normalizedOrgId()
+  if (resolvedOrgId) query.set('orgId', resolvedOrgId)
+  if (file?.name) query.set('filename', file.name)
+
+  const response = await apiFetch(`/api/attendance/import/upload?${query.toString()}`, {
+    method: 'POST',
+    body: file,
+    headers: {
+      'Content-Type': file?.type && file.type.toLowerCase().includes('csv') ? file.type : 'text/csv',
+    },
+  })
+
+  const data = await response.json().catch(() => ({} as any))
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.error?.message || `Failed to upload CSV (HTTP ${response.status})`)
+  }
+  const fileId = String(data.data?.fileId || '')
+  if (!fileId) throw new Error('Upload did not return fileId')
+  const rowCount = Number(data.data?.rowCount ?? 0)
+  const bytes = Number(data.data?.bytes ?? 0)
+  const expiresAt = String(data.data?.expiresAt ?? '')
+  return { fileId, rowCount, bytes, expiresAt }
+}
+
 async function applyImportCsvFile() {
   if (!importCsvFile.value) {
     setStatus('Select a CSV file first.', 'error')
     return
   }
   try {
-    const csvText = await importCsvFile.value.text()
+    const file = importCsvFile.value
     const base = parseJsonConfig(importForm.payload) ?? {}
     const next: Record<string, any> = {
       ...base,
       source: base.source ?? 'dingtalk_csv',
-      csvText,
     }
+    const resolvedOrgId = normalizedOrgId()
+    if (resolvedOrgId && !next.orgId) next.orgId = resolvedOrgId
     if (importProfileId.value && !next.mappingProfileId) {
       next.mappingProfileId = importProfileId.value
     }
@@ -4756,8 +4799,27 @@ async function applyImportCsvFile() {
       csvOptions.delimiter = importCsvDelimiter.value
     }
     if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
+
+    const shouldUpload = file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
+    if (shouldUpload) {
+      const uploaded = await uploadImportCsvFile(file)
+      importCsvFileId.value = uploaded.fileId
+      importCsvFileRowCountHint.value = Number.isFinite(uploaded.rowCount) && uploaded.rowCount > 0 ? uploaded.rowCount : null
+      importCsvFileExpiresAt.value = uploaded.expiresAt
+      next.csvFileId = uploaded.fileId
+      delete next.csvText
+      setStatus(`CSV uploaded: ${importCsvFileName.value || 'file'} (${importCsvFileRowCountHint.value ?? 'unknown'} rows).`)
+    } else {
+      const csvText = await file.text()
+      importCsvFileId.value = ''
+      importCsvFileRowCountHint.value = null
+      importCsvFileExpiresAt.value = ''
+      next.csvText = csvText
+      delete next.csvFileId
+      setStatus(`CSV loaded: ${importCsvFileName.value || 'file'}`)
+    }
+
     importForm.payload = JSON.stringify(next, null, 2)
-    setStatus(`CSV loaded: ${importCsvFileName.value || 'file'}`)
   } catch (error) {
     setStatus((error as Error).message || 'Failed to load CSV', 'error')
   }

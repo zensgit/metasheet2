@@ -1,4 +1,9 @@
 const { randomUUID } = require('crypto')
+const fs = require('fs')
+const fsp = require('fs/promises')
+const path = require('path')
+const { Transform } = require('stream')
+const { pipeline } = require('stream/promises')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
@@ -81,6 +86,7 @@ let autoAbsenceInterval = null
 let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
+let importUploadCleanupInterval = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -5170,12 +5176,13 @@ module.exports = {
             value: z.unknown().optional(),
           })).optional(),
         })).optional(),
-      }).optional(),
-      csvText: z.string().optional(),
-      csvOptions: z.object({
-        delimiter: z.string().optional(),
-        headerRowIndex: z.number().int().nonnegative().optional(),
-      }).optional(),
+	      }).optional(),
+	      csvFileId: z.string().uuid().optional(),
+	      csvText: z.string().optional(),
+	      csvOptions: z.object({
+	        delimiter: z.string().optional(),
+	        headerRowIndex: z.number().int().nonnegative().optional(),
+	      }).optional(),
       rows: z.array(importRowSchema).optional(),
       entries: z.array(z.object({
         userId: z.string().optional(),
@@ -5188,13 +5195,209 @@ module.exports = {
         value: z.unknown().optional(),
         meta: z.record(z.unknown()).optional(),
       })).optional(),
-	      statusMap: z.record(z.string()).optional(),
-	      mode: z.enum(['merge', 'override']).optional(),
-	    })
+		      statusMap: z.record(z.string()).optional(),
+		      mode: z.enum(['merge', 'override']).optional(),
+		    })
 
-	    // ============================================================
-	    // Async Import Commit (large payloads)
-	    // ============================================================
+		    // ============================================================
+		    // Import Upload Channel (raw CSV body -> server-side fileId)
+		    // ============================================================
+
+		    const ATTENDANCE_IMPORT_UPLOAD_DIR = String(
+		      process.env.ATTENDANCE_IMPORT_UPLOAD_DIR || path.join(process.cwd(), 'uploads', 'attendance-import')
+		    )
+		    const ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES ?? '')
+		      if (!Number.isFinite(raw) || raw <= 0) return 120 * 1024 * 1024 // 120MB
+		      return Math.max(1, Math.floor(raw))
+		    })()
+		    const ATTENDANCE_IMPORT_UPLOAD_TTL_MS = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_UPLOAD_TTL_MS ?? '')
+		      if (!Number.isFinite(raw) || raw <= 0) return 24 * 60 * 60 * 1000 // 24h
+		      return Math.max(1, Math.floor(raw))
+		    })()
+
+		    const sanitizeImportUploadOrgId = (orgId) => {
+		      const raw = typeof orgId === 'string' && orgId.trim() ? orgId.trim() : DEFAULT_ORG_ID
+		      const safe = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
+		      return safe || DEFAULT_ORG_ID
+		    }
+
+		    const getImportUploadPaths = ({ orgId, fileId }) => {
+		      const safeOrgId = sanitizeImportUploadOrgId(orgId)
+		      const dir = path.join(ATTENDANCE_IMPORT_UPLOAD_DIR, safeOrgId)
+		      return {
+		        dir,
+		        csvPath: path.join(dir, `${fileId}.csv`),
+		        metaPath: path.join(dir, `${fileId}.json`),
+		      }
+		    }
+
+		    const isUuidLike = (value) => {
+		      if (typeof value !== 'string') return false
+		      const text = value.trim()
+		      if (!text) return false
+		      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)
+		    }
+
+		    class ImportUploadMeter extends Transform {
+		      constructor(maxBytes) {
+		        super()
+		        this.maxBytes = maxBytes
+		        this.bytes = 0
+		        this.newlines = 0
+		        this.lastByte = null
+		      }
+
+		      _transform(chunk, _enc, cb) {
+		        try {
+		          if (!chunk || chunk.length === 0) {
+		            cb(null, chunk)
+		            return
+		          }
+		          this.bytes += chunk.length
+		          if (this.bytes > this.maxBytes) {
+		            cb(new HttpError(413, 'PAYLOAD_TOO_LARGE', `Upload exceeds ${this.maxBytes} bytes`))
+		            return
+		          }
+		          for (let i = 0; i < chunk.length; i++) {
+		            if (chunk[i] === 10) this.newlines += 1
+		          }
+		          this.lastByte = chunk[chunk.length - 1]
+		          cb(null, chunk)
+		        } catch (error) {
+		          cb(error)
+		        }
+		      }
+		    }
+
+		    const loadImportUploadMeta = async ({ orgId, fileId }) => {
+		      if (!isUuidLike(fileId)) return null
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      try {
+		        const raw = await fsp.readFile(paths.metaPath, 'utf8')
+		        const parsed = raw ? JSON.parse(raw) : null
+		        if (!parsed || typeof parsed !== 'object') return null
+		        return parsed
+		      } catch {
+		        return null
+		      }
+		    }
+
+		    const isImportUploadExpired = (meta) => {
+		      const createdAt = meta?.createdAt ? Date.parse(String(meta.createdAt)) : NaN
+		      if (!Number.isFinite(createdAt)) return false
+		      return Date.now() - createdAt > ATTENDANCE_IMPORT_UPLOAD_TTL_MS
+		    }
+
+		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		      if (!isUuidLike(fileId)) {
+		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
+		      }
+		      const meta = await loadImportUploadMeta({ orgId, fileId })
+		      if (!meta) {
+		        throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+		      }
+		      if (isImportUploadExpired(meta)) {
+		        throw new HttpError(410, 'EXPIRED', 'Import upload expired')
+		      }
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
+		      return { csvText, meta }
+		    }
+
+		    const deleteImportUpload = async ({ orgId, fileId }) => {
+		      if (!isUuidLike(fileId)) return
+		      const paths = getImportUploadPaths({ orgId, fileId })
+		      await Promise.allSettled([fsp.unlink(paths.csvPath), fsp.unlink(paths.metaPath)])
+		    }
+
+		    // Best-effort cleanup to avoid upload directory growth if users preview but never commit.
+		    const ATTENDANCE_IMPORT_UPLOAD_CLEANUP_ENABLED = process.env.ATTENDANCE_IMPORT_UPLOAD_CLEANUP !== 'false'
+		    const ATTENDANCE_IMPORT_UPLOAD_CLEANUP_INTERVAL_MS = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_UPLOAD_CLEANUP_INTERVAL_MS ?? '')
+		      if (!Number.isFinite(raw) || raw <= 0) return 30 * 60 * 1000 // 30m
+		      return Math.max(60 * 1000, Math.floor(raw))
+		    })()
+		    let importUploadCleanupRunning = false
+
+		    const cleanupExpiredImportUploads = async () => {
+		      if (importUploadCleanupRunning) return
+		      importUploadCleanupRunning = true
+		      try {
+		        const orgDirs = await fsp.readdir(ATTENDANCE_IMPORT_UPLOAD_DIR, { withFileTypes: true }).catch(() => [])
+		        for (const orgDir of orgDirs) {
+		          if (!orgDir.isDirectory()) continue
+		          const orgIdDir = orgDir.name
+		          const dirPath = path.join(ATTENDANCE_IMPORT_UPLOAD_DIR, orgIdDir)
+		          const entries = await fsp.readdir(dirPath, { withFileTypes: true }).catch(() => [])
+		          for (const entry of entries) {
+		            if (!entry.isFile()) continue
+		            if (!entry.name.endsWith('.json')) continue
+		            const fileId = entry.name.slice(0, -'.json'.length)
+		            const meta = await loadImportUploadMeta({ orgId: orgIdDir, fileId })
+		            if (!meta) continue
+		            if (isImportUploadExpired(meta)) {
+		              await deleteImportUpload({ orgId: orgIdDir, fileId })
+		            }
+		          }
+		        }
+		      } finally {
+		        importUploadCleanupRunning = false
+		      }
+		    }
+
+		    const scheduleImportUploadCleanup = () => {
+		      if (!ATTENDANCE_IMPORT_UPLOAD_CLEANUP_ENABLED) return
+		      if (importUploadCleanupInterval) return
+		      cleanupExpiredImportUploads().catch((error) => {
+		        logger.warn('Attendance import upload cleanup failed', error)
+		      })
+		      importUploadCleanupInterval = setInterval(() => {
+		        cleanupExpiredImportUploads().catch((error) => {
+		          logger.warn('Attendance import upload cleanup failed', error)
+		        })
+		      }, ATTENDANCE_IMPORT_UPLOAD_CLEANUP_INTERVAL_MS)
+		    }
+
+		    const clearImportUploadCleanup = () => {
+		      if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)
+		      importUploadCleanupInterval = null
+		    }
+
+		    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+		      let csvWarnings = []
+		      let csvFileId = null
+		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
+		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
+		        csvFileId = payload.csvFileId.trim()
+		        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
+		        ensureCsvRowsWithinLimit(result)
+		        csvWarnings = result.warnings
+		        return { rows: result.rows, csvWarnings, csvFileId }
+		      }
+		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
+		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
+		        ensureCsvRowsWithinLimit(result)
+		        csvWarnings = result.warnings
+		        return { rows: result.rows, csvWarnings, csvFileId }
+		      }
+		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
+		      return {
+		        rows: buildRowsFromDingTalk({
+		          columns: payload.columns,
+		          data: payload.data,
+		          userId: payload.userId ?? fallbackUserId,
+		        }),
+		        csvWarnings,
+		        csvFileId,
+		      }
+		    }
+
+		    // ============================================================
+		    // Async Import Commit (large payloads)
+		    // ============================================================
 
 	    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
 	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
@@ -5219,19 +5422,25 @@ module.exports = {
 	      return `preview:${clean}`.slice(0, 128)
 	    }
 
-	    const sanitizeImportJobPayload = (payload) => {
-	      if (!payload || typeof payload !== 'object') return {}
-	      const next = { ...payload }
-	      const jobType = next.__jobType === 'preview' ? 'preview' : 'commit'
-	      // Never persist single-use tokens in the job payload.
-	      delete next.commitToken
-	      if (jobType === 'preview') {
-	        next.previewLimit = normalizePreviewAsyncLimit(next.previewLimit)
-	        // Keep payload size bounded for durable queue storage.
-	        if (Array.isArray(next.rows) && next.rows.length > 10000 && typeof next.csvText === 'string') delete next.rows
-	        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
-	        return next
-	      }
+		    const sanitizeImportJobPayload = (payload) => {
+		      if (!payload || typeof payload !== 'object') return {}
+		      const next = { ...payload }
+		      const jobType = next.__jobType === 'preview' ? 'preview' : 'commit'
+		      // Never persist single-use tokens in the job payload.
+		      delete next.commitToken
+		      // If a server-side upload reference is present, avoid persisting duplicate CSV payloads.
+		      if (typeof next.csvFileId === 'string' && next.csvFileId.trim()) {
+		        delete next.csvText
+		        delete next.rows
+		        delete next.entries
+		      }
+		      if (jobType === 'preview') {
+		        next.previewLimit = normalizePreviewAsyncLimit(next.previewLimit)
+		        // Keep payload size bounded for durable queue storage.
+		        if (Array.isArray(next.rows) && next.rows.length > 10000 && typeof next.csvText === 'string') delete next.rows
+		        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
+		        return next
+		      }
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
 	      if (Array.isArray(next.rows) && next.rows.length > 5000) delete next.rows
 	      if (Array.isArray(next.entries) && next.entries.length > 20000) delete next.entries
@@ -5367,33 +5576,18 @@ module.exports = {
 	      return 'queued'
 	    }
 
-	    const buildAsyncPreviewResult = ({ payload, requesterId }) => {
-	      const profile = findImportProfile(payload.mappingProfileId)
-	      const requiredFields = profile?.requiredFields ?? []
-	      const punchRequiredFields = profile?.punchRequiredFields ?? []
-	      let csvWarnings = []
-	      const rows = Array.isArray(payload.rows)
-	        ? payload.rows
-	        : payload.csvText
-	          ? (() => {
-	            const result = buildRowsFromCsv({
-	              csvText: payload.csvText,
-	              csvOptions: payload.csvOptions,
-	            })
-	            ensureCsvRowsWithinLimit(result)
-	            csvWarnings = result.warnings
-	            return result.rows
-	          })()
-	          : Array.isArray(payload.entries)
-	            ? buildRowsFromEntries({ entries: payload.entries })
-	            : buildRowsFromDingTalk({
-	              columns: payload.columns,
-	              data: payload.data,
-	              userId: payload.userId ?? requesterId,
-	            })
-	      if (!rows.length) {
-	        throw new Error('No rows to preview')
-	      }
+		    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
+		      const profile = findImportProfile(payload.mappingProfileId)
+		      const requiredFields = profile?.requiredFields ?? []
+		      const punchRequiredFields = profile?.punchRequiredFields ?? []
+		      const { rows, csvWarnings } = await resolveImportRows({
+		        payload,
+		        orgId,
+		        fallbackUserId: payload.userId ?? requesterId,
+		      })
+		      if (!rows.length) {
+		        throw new Error('No rows to preview')
+		      }
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
@@ -5510,13 +5704,13 @@ module.exports = {
 	        groupWarnings: [],
 	        asyncSimplified: true,
 	      }
-	    }
+		    }
 
-	    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
-	      const result = buildAsyncPreviewResult({ payload, requesterId })
-	      await db.query(
-	        `UPDATE attendance_import_jobs
-	         SET status = 'completed',
+		    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
+		      const result = await buildAsyncPreviewResult({ payload, requesterId, orgId })
+		      await db.query(
+		        `UPDATE attendance_import_jobs
+		         SET status = 'completed',
 	             progress = $3,
 	             total = $4,
 	             error = NULL,
@@ -5699,30 +5893,15 @@ module.exports = {
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-	      let csvWarnings = []
-	      const rows = Array.isArray(payload.rows)
-	        ? payload.rows
-	        : payload.csvText
-	          ? (() => {
-	            const result = buildRowsFromCsv({
-	              csvText: payload.csvText,
-	              csvOptions: payload.csvOptions,
-	            })
-	            ensureCsvRowsWithinLimit(result)
-	            csvWarnings = result.warnings
-	            return result.rows
-	          })()
-	          : Array.isArray(payload.entries)
-	            ? buildRowsFromEntries({ entries: payload.entries })
-	            : buildRowsFromDingTalk({
-	              columns: payload.columns,
-	              data: payload.data,
-	              userId: payload.userId ?? requesterId,
-	            })
+		      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+		        payload,
+		        orgId,
+		        fallbackUserId: payload.userId ?? requesterId,
+		      })
 
-	      if (rows.length === 0) {
-	        throw new Error('No rows to import')
-	      }
+		      if (rows.length === 0) {
+		        throw new Error('No rows to import')
+		      }
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
@@ -6411,14 +6590,18 @@ module.exports = {
 	            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	            [resolvedBatchId, orgId, JSON.stringify(updatedMeta)]
 	          )
-		          batchMeta = updatedMeta
-		        }
-		      })
+			          batchMeta = updatedMeta
+			        }
+			      })
 
-	      if (idempotentInTransaction) {
-	        return {
-	          batchId: idempotentInTransaction.batchId,
-	          imported: idempotentInTransaction.imported,
+		      if (csvFileId) {
+		        await deleteImportUpload({ orgId, fileId: csvFileId })
+		      }
+
+		      if (idempotentInTransaction) {
+		        return {
+		          batchId: idempotentInTransaction.batchId,
+		          imported: idempotentInTransaction.imported,
 	          rowCount: idempotentInTransaction.imported + idempotentInTransaction.skipped,
 	          items: [],
 	          skipped: [],
@@ -6904,6 +7087,10 @@ module.exports = {
 	              suggestedRequestType,
 	            }
 	          })
+
+	          if (csvFileId) {
+	            await deleteImportUpload({ orgId, fileId: csvFileId })
+	          }
 
 	          res.json({
 	            ok: true,
@@ -9502,10 +9689,10 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/import/template',
-      withPermission('attendance:admin', async (_req, res) => {
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/template',
+	      withPermission('attendance:admin', async (_req, res) => {
         res.json({
           ok: true,
           data: {
@@ -9525,12 +9712,88 @@ module.exports = {
             },
           },
         })
-      })
-    )
+	      })
+	    )
 
-    context.api.http.addRoute(
-      'POST',
-      '/api/attendance/import/prepare',
+	    // Upload a CSV file (raw body) and receive a server-side csvFileId reference.
+	    // Intended for extreme-scale imports where embedding csvText in JSON hits body limits.
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/import/upload',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const orgId = getOrgId(req)
+	        const requesterId = getUserId(req)
+	        if (!requesterId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+
+	        const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+	        if (contentType.startsWith('multipart/')) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Use raw CSV body (Content-Type: text/csv), not multipart/form-data' } })
+	          return
+	        }
+
+	        const filename = String(req.query?.filename ?? req.query?.name ?? req.headers['x-filename'] ?? 'import.csv')
+	        const fileId = randomUUID()
+	        const paths = getImportUploadPaths({ orgId, fileId })
+	        const createdAt = new Date().toISOString()
+	        const expiresAt = new Date(Date.now() + ATTENDANCE_IMPORT_UPLOAD_TTL_MS).toISOString()
+
+	        try {
+	          await fsp.mkdir(paths.dir, { recursive: true })
+	          const meter = new ImportUploadMeter(ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES)
+	          await pipeline(req, meter, fs.createWriteStream(paths.csvPath))
+
+	          const endedWithNewline = meter.lastByte === 10
+	          const lines = meter.bytes === 0 ? 0 : meter.newlines + (endedWithNewline ? 0 : 1)
+	          const rowCount = Math.max(0, lines - 1) // header row excluded
+
+	          if (rowCount <= 0) {
+	            await deleteImportUpload({ orgId, fileId })
+	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'CSV must include at least 1 data row' } })
+	            return
+	          }
+
+	          const meta = {
+	            fileId,
+	            orgId,
+	            createdBy: requesterId,
+	            filename: filename.slice(0, 200),
+	            contentType: contentType ? contentType.slice(0, 200) : null,
+	            bytes: meter.bytes,
+	            rowCount,
+	            createdAt,
+	            expiresAt,
+	          }
+	          await fsp.writeFile(paths.metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+	          res.status(201).json({
+	            ok: true,
+	            data: {
+	              fileId,
+	              rowCount,
+	              bytes: meter.bytes,
+	              createdAt,
+	              expiresAt,
+	              maxBytes: ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES,
+	            },
+	          })
+	        } catch (error) {
+	          await deleteImportUpload({ orgId, fileId })
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import upload failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to upload CSV' } })
+	        }
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/import/prepare',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
@@ -9627,31 +9890,16 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let csvWarnings = []
-          const rows = Array.isArray(parsed.data.rows)
-            ? parsed.data.rows
-            : parsed.data.csvText
-              ? (() => {
-                const result = buildRowsFromCsv({
-                  csvText: parsed.data.csvText,
-                  csvOptions: parsed.data.csvOptions,
-                })
-                ensureCsvRowsWithinLimit(result)
-                csvWarnings = result.warnings
-                return result.rows
-              })()
-              : Array.isArray(parsed.data.entries)
-                ? buildRowsFromEntries({ entries: parsed.data.entries })
-                : buildRowsFromDingTalk({
-                  columns: parsed.data.columns,
-                  data: parsed.data.data,
-                  userId: parsed.data.userId ?? userId,
-                })
+	          const { rows, csvWarnings } = await resolveImportRows({
+	            payload: parsed.data,
+	            orgId,
+	            fallbackUserId: parsed.data.userId ?? userId,
+	          })
 
-          if (rows.length === 0) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
-            return
-          }
+	          if (rows.length === 0) {
+	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
+	            return
+	          }
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -10135,31 +10383,16 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let csvWarnings = []
-          const rows = Array.isArray(parsed.data.rows)
-            ? parsed.data.rows
-            : parsed.data.csvText
-              ? (() => {
-                const result = buildRowsFromCsv({
-                  csvText: parsed.data.csvText,
-                  csvOptions: parsed.data.csvOptions,
-                })
-                ensureCsvRowsWithinLimit(result)
-                csvWarnings = result.warnings
-                return result.rows
-              })()
-              : Array.isArray(parsed.data.entries)
-                ? buildRowsFromEntries({ entries: parsed.data.entries })
-                : buildRowsFromDingTalk({
-                  columns: parsed.data.columns,
-                  data: parsed.data.data,
-                  userId: parsed.data.userId ?? requesterId,
-                })
+	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	            payload: parsed.data,
+	            orgId,
+	            fallbackUserId: parsed.data.userId ?? requesterId,
+	          })
 
-          if (rows.length === 0) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
-            return
-          }
+	          if (rows.length === 0) {
+	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+	            return
+	          }
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -10864,13 +11097,18 @@ module.exports = {
                 [batchId, orgId, JSON.stringify(updatedMeta)]
               )
               batchMeta = updatedMeta
-            }
-          })
+	            }
+	          })
 
-          if (idempotentInTransaction) {
-            res.json({
-              ok: true,
-              data: {
+	          // Best-effort cleanup: once commit succeeds, the uploaded CSV is no longer needed.
+	          if (csvFileId) {
+	            await deleteImportUpload({ orgId, fileId: csvFileId })
+	          }
+
+	          if (idempotentInTransaction) {
+	            res.json({
+	              ok: true,
+	              data: {
                 batchId: idempotentInTransaction.batchId,
                 imported: idempotentInTransaction.imported,
                 items: [],
@@ -11020,10 +11258,18 @@ module.exports = {
             idempotencyKey: rawIdempotencyKey || undefined,
           })
 
-          let total = 0
-          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
-          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
+	          let total = 0
+	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
+	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
+	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
+	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (meta && isImportUploadExpired(meta)) {
+	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
+	            }
+	            const hint = Number(meta?.rowCount ?? 0)
+	            total = Number.isFinite(hint) && hint > 0 ? hint : 0
+	          }
+	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
 
           await db.query(
             `INSERT INTO attendance_import_jobs
@@ -11156,10 +11402,18 @@ module.exports = {
           const batchId = randomUUID()
           const sanitizedPayload = sanitizeImportJobPayload(parsed.data)
 
-          let total = 0
-          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
-          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
+	          let total = 0
+	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
+	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
+	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
+	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (meta && isImportUploadExpired(meta)) {
+	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
+	            }
+	            const hint = Number(meta?.rowCount ?? 0)
+	            total = Number.isFinite(hint) && hint > 0 ? hint : 0
+	          }
+	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
 
           const status = 'queued'
           await db.query(
@@ -11311,31 +11565,16 @@ module.exports = {
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
 
-          let csvWarnings = []
-          const rows = Array.isArray(parsed.data.rows)
-            ? parsed.data.rows
-            : parsed.data.csvText
-              ? (() => {
-                const result = buildRowsFromCsv({
-                  csvText: parsed.data.csvText,
-                  csvOptions: parsed.data.csvOptions,
-                })
-                ensureCsvRowsWithinLimit(result)
-                csvWarnings = result.warnings
-                return result.rows
-              })()
-              : Array.isArray(parsed.data.entries)
-                ? buildRowsFromEntries({ entries: parsed.data.entries })
-                : buildRowsFromDingTalk({
-                  columns: parsed.data.columns,
-                  data: parsed.data.data,
-                  userId: parsed.data.userId ?? userId,
-                })
+	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	            payload: parsed.data,
+	            orgId,
+	            fallbackUserId: parsed.data.userId ?? userId,
+	          })
 
-          if (rows.length === 0) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
-            return
-          }
+	          if (rows.length === 0) {
+	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+	            return
+	          }
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -14684,19 +14923,22 @@ module.exports = {
       })
     )
 
-    try {
-      await getSettings(db)
-      scheduleAutoAbsence({ db, logger, emit: emitEvent })
-      scheduleHolidaySync({ db, logger, emit: emitEvent })
-    } catch (error) {
-      logger.warn('Attendance settings preload failed', error)
-    }
+	    try {
+	      await getSettings(db)
+	      scheduleAutoAbsence({ db, logger, emit: emitEvent })
+	      scheduleHolidaySync({ db, logger, emit: emitEvent })
+	      scheduleImportUploadCleanup()
+	    } catch (error) {
+	      logger.warn('Attendance settings preload failed', error)
+	    }
 
     logger.info('Attendance plugin activated')
   },
 
-  async deactivate() {
-    clearAutoAbsenceSchedule()
-    clearHolidaySyncSchedule()
-  }
+	  async deactivate() {
+	    clearAutoAbsenceSchedule()
+	    clearHolidaySyncSchedule()
+	    if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)
+	    importUploadCleanupInterval = null
+	  }
 }
