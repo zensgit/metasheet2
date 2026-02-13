@@ -286,3 +286,24 @@ Added a deploy-stage drill and a "Deploy Output (tail)" section in Step Summary 
 - Evidence (local):
   - `output/playwright/ga/21976588135/step-summary.md`
   - `output/playwright/ga/21976588135/deploy.log`
+
+## Update (2026-02-13): Exit Code Meaning + Stage Reasons
+
+Step Summary now also includes:
+
+- remote exit code meaning (maps drill exit codes and flags unknown failures)
+- stage reasoning inline (e.g., "start marker present; end marker missing")
+
+PASS example:
+
+- Run: [#21976718210](https://github.com/zensgit/metasheet2/actions/runs/21976718210) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21976718210/step-summary.md`
+  - `output/playwright/ga/21976718210/deploy.log`
+
+Drill example (`drill_fail_stage=deploy`, exit code `91`):
+
+- Run: [#21976791431](https://github.com/zensgit/metasheet2/actions/runs/21976791431) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21976791431/step-summary.md`
+  - `output/playwright/ga/21976791431/deploy.log`

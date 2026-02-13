@@ -148,6 +148,8 @@ This record does not change the `GO` decision above; it captures a production re
 | Deploy (step summary archived to artifact) | [#21976281725](https://github.com/zensgit/metasheet2/actions/runs/21976281725) | PASS | `output/playwright/ga/21976281725/step-summary.md`, `output/playwright/ga/21976281725/deploy.log` |
 | Deploy (drill stage recorded + step summary artifact) | [#21976355633](https://github.com/zensgit/metasheet2/actions/runs/21976355633) | FAIL (expected) | `output/playwright/ga/21976355633/step-summary.md`, `output/playwright/ga/21976355633/deploy.log` |
 | Deploy (deploy drill + deploy output tail) | [#21976588135](https://github.com/zensgit/metasheet2/actions/runs/21976588135) | FAIL (expected) | `output/playwright/ga/21976588135/step-summary.md`, `output/playwright/ga/21976588135/deploy.log` |
+| Deploy (step summary: exit code meaning + stage reasons) | [#21976718210](https://github.com/zensgit/metasheet2/actions/runs/21976718210) | PASS | `output/playwright/ga/21976718210/step-summary.md`, `output/playwright/ga/21976718210/deploy.log` |
+| Deploy (drill: deploy stage exit code meaning + stage reasons) | [#21976791431](https://github.com/zensgit/metasheet2/actions/runs/21976791431) | FAIL (expected) | `output/playwright/ga/21976791431/step-summary.md`, `output/playwright/ga/21976791431/deploy.log` |
 | Deploy (failure drill: preflight END marker present, expected FAIL) | [#21974005618](https://github.com/zensgit/metasheet2/actions/runs/21974005618) | FAIL (expected) | `output/playwright/ga/21974005618/deploy.log` |
 | Deploy (post-drill restore, expected PASS) | [#21974057204](https://github.com/zensgit/metasheet2/actions/runs/21974057204) | PASS | `output/playwright/ga/21974057204/deploy.log` |
 

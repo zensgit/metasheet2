@@ -45,6 +45,10 @@ Out of scope for this delivery:
      - uploads `deploy.log` artifacts and writes a short preflight summary + runbook links into GitHub Step Summary (even on failure)
      - supports a **diagnostic drill** input for stage failure simulation (manual runs only):
        - `drill_fail_stage=none|deploy|migrate|smoke` (default: `none`)
+       - Drill exit codes (shown in Step Summary):
+         - `deploy`: `91`
+         - `migrate`: `92`
+         - `smoke`: `93`
        - Examples:
          - `gh workflow run docker-build.yml -f drill_fail_stage=deploy`
          - `gh workflow run docker-build.yml -f drill_fail_stage=migrate`
