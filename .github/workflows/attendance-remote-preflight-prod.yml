@@ -57,22 +57,22 @@ jobs:
             "git fetch origin main"
             "git checkout main"
             "git pull --ff-only origin main"
-            "host_sync_rc=$?"
+            'host_sync_rc=$?'
             "set -e"
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
-            "if [[ \"$host_sync_rc\" != \"0\" ]]; then"
-              "  echo \"[attendance-preflight][skip] host sync failed: rc=$host_sync_rc\""
-              "  preflight_rc=\"$host_sync_rc\""
+            'if [[ "$host_sync_rc" != "0" ]]; then'
+              '  echo "[attendance-preflight][skip] host sync failed: rc=$host_sync_rc"'
+              '  preflight_rc="$host_sync_rc"'
             "else"
               "  set +e"
               "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
-              "  preflight_rc=$?"
+              '  preflight_rc=$?'
               "  set -e"
             "fi"
             "echo \"=== ATTENDANCE PREFLIGHT END ===\""
-            "if [[ \"$preflight_rc\" != \"0\" ]]; then exit \"$preflight_rc\"; fi"
+            'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "if [[ \"${DRILL_FAIL}\" == \"true\" ]]; then echo \"[preflight][drill] intentional failure after preflight\"; exit 97; fi"
           )
 
@@ -206,4 +206,3 @@ jobs:
             echo "Remote preflight failed: rc=$rc" >&2
             exit 1
           fi
-
