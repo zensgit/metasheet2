@@ -167,6 +167,9 @@ This record does not change the `GO` decision above; it captures a production re
 | Daily Gate Dashboard (ignores preflight `[DRILL]` runs) | [#21984436363](https://github.com/zensgit/metasheet2/actions/runs/21984436363) | PASS | `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.json` |
 | Daily Gate Dashboard (post host-sync summary update; still ignores drill) | [#21984702152](https://github.com/zensgit/metasheet2/actions/runs/21984702152) | PASS | `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.json` |
 | Daily Gate Dashboard (post remote preflight refresh) | [#21985530489](https://github.com/zensgit/metasheet2/actions/runs/21985530489) | PASS | `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.json` |
+| Strict gates drill (tagged `[DRILL]`, no-op, expected PASS) | [#21989332414](https://github.com/zensgit/metasheet2/actions/runs/21989332414) | PASS | `output/playwright/ga/21989332414/drill/drill.txt` |
+| Perf baseline drill (tagged `[DRILL]`, no-op, expected PASS) | [#21989337598](https://github.com/zensgit/metasheet2/actions/runs/21989337598) | PASS | `output/playwright/ga/21989337598/drill/drill.txt` |
+| Daily Gate Dashboard (ignores strict/perf `[DRILL]` runs) | [#21989379486](https://github.com/zensgit/metasheet2/actions/runs/21989379486) | PASS | `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.json` |
 
 Perf summary (`#21948416024`):
 
