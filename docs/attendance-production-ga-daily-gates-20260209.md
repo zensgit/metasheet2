@@ -173,6 +173,14 @@ Notes:
 
 - This gate cannot be executed from a workstation because the backend metrics endpoint is not exposed through nginx.
 - Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` runs when selecting the latest completed `Host Metrics` gate run.
+- On non-drill failures, this workflow opens/reopens: `[Attendance P1] Host metrics alert` (no paging).
+- Safe drill to validate the FAIL-path issue behavior with a safe override title:
+
+```bash
+gh workflow run attendance-remote-metrics-prod.yml \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Metrics Drill] Host metrics issue test'
+```
 - You can override the target:
   - `METRICS_URL="http://127.0.0.1:8900/metrics/prom" scripts/ops/attendance-check-metrics.sh`
 
@@ -259,6 +267,17 @@ Artifacts:
 
 - Uploaded for 14 days:
   - `output/playwright/attendance-import-perf/**`
+
+P1 tracking issue (no paging): `[Attendance P1] Perf baseline alert` (opened/reopened on failure; commented+closed on recovery).
+
+Drill (expected FAIL; no production API calls; uses a safe override title):
+
+```bash
+gh workflow run attendance-import-perf-baseline.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Perf Drill] Perf baseline issue test'
+```
 
 ### C) Daily Gate Dashboard (Scheduled + Manual)
 
