@@ -1,0 +1,249 @@
+name: Attendance Remote Metrics (Prod)
+
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Remote Metrics (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      drill_fail:
+        description: 'Optional: intentionally fail after metrics for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+  schedule:
+    # Daily at 02:10 UTC (after remote preflight at 02:05 UTC).
+    - cron: '10 2 * * *'
+
+concurrency:
+  group: attendance-remote-metrics-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Remote metrics check (with host sync logs)
+        id: remote_metrics
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DRILL_FAIL="${DRILL_FAIL:-false}"
+
+          mkdir -p output/metrics
+          metrics_log="output/metrics/metrics.log"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "DRILL_FAIL=\"${DRILL_FAIL}\""
+            "cd \"${DEPLOY_PATH}\""
+            "echo \"=== HOST SYNC START ===\""
+            "host_sync_rc=0"
+            "set +e"
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
+            'host_sync_rc=$?'
+            "set -e"
+            'echo \"[host-sync] rc=$host_sync_rc\"'
+            "echo \"=== HOST SYNC END ===\""
+            "echo \"=== ATTENDANCE METRICS START ===\""
+            "metrics_rc=0"
+            'if [[ \"$host_sync_rc\" != \"0\" ]]; then'
+              '  echo \"[attendance-metrics][skip] host sync failed: rc=$host_sync_rc\"'
+              '  metrics_rc=\"$host_sync_rc\"'
+            "else"
+              "  set +e"
+              "  scripts/ops/attendance-check-metrics.sh"
+              '  metrics_rc=$?'
+              "  set -e"
+            "fi"
+            "echo \"=== ATTENDANCE METRICS END ===\""
+            'if [[ \"$metrics_rc\" != \"0\" ]]; then exit \"$metrics_rc\"; fi'
+            "if [[ \"${DRILL_FAIL}\" == \"true\" ]]; then echo \"[metrics][drill] intentional failure after metrics\"; exit 97; fi"
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$metrics_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "metrics_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "metrics_log=$metrics_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary (metrics + runbooks)
+        if: always()
+        env:
+          METRICS_RC: ${{ steps.remote_metrics.outputs.metrics_rc }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+        run: |
+          set -euo pipefail
+          metrics_log="output/metrics/metrics.log"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          artifact_name="attendance-remote-metrics-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          overall="UNKNOWN"
+          if [[ -n "${METRICS_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${METRICS_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
+
+          rc_meaning="unknown"
+          case "${METRICS_RC:-}" in
+            "")
+              rc_meaning="missing"
+              ;;
+            0)
+              rc_meaning="success"
+              ;;
+            97)
+              rc_meaning="drill: intentional failure after metrics"
+              ;;
+            *)
+              rc_meaning="remote failure (see logs)"
+              ;;
+          esac
+
+          echo "## Remote Metrics (Prod)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${METRICS_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$metrics_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (metrics.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            host_sync_block="$(
+              awk '
+                /^=== HOST SYNC START ===$/ { printing=1; next }
+                /^=== HOST SYNC END ===$/ { printing=0 }
+                printing { print }
+              ' "$metrics_log" | head -n 80
+            )"
+
+            if [[ -z "${host_sync_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see metrics.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              host_sync_status="UNKNOWN"
+              if echo "$host_sync_block" | grep -q "\\[host-sync\\] rc=0"; then
+                host_sync_status="PASS"
+              elif echo "$host_sync_block" | grep -q "\\[host-sync\\] rc="; then
+                host_sync_status="FAIL"
+              fi
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${host_sync_status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$host_sync_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Metrics Output" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$metrics_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (metrics.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status="UNKNOWN"
+            if [[ -n "${METRICS_RC:-}" ]]; then
+              if [[ "${METRICS_RC}" == "0" || "${METRICS_RC}" == "97" ]]; then
+                status="PASS"
+              else
+                status="FAIL"
+              fi
+            fi
+
+            metrics_block="$(
+              awk '
+                /^=== ATTENDANCE METRICS START ===$/ { printing=1; next }
+                /^=== ATTENDANCE METRICS END ===$/ { printing=0; after=1; next }
+                printing { print; next }
+                after {
+                  print
+                  count++
+                  if (count >= 20) exit
+                }
+              ' "$metrics_log" | head -n 140
+            )"
+
+            if [[ -z "${metrics_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see metrics.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Last 80 log lines:" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              tail -n 80 "$metrics_log" >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$metrics_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Metrics logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/metrics.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Daily gates handbook: ${repo_url}/blob/main/docs/attendance-production-ga-daily-gates-20260209.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+
+          mkdir -p output/metrics
+          cp "$GITHUB_STEP_SUMMARY" output/metrics/step-summary.md
+
+      - name: Upload metrics artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-remote-metrics-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/metrics/**
+
+      - name: Fail when remote metrics failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_metrics.outputs.metrics_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "metrics_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote metrics failed: rc=$rc" >&2
+            exit 1
+          fi
+

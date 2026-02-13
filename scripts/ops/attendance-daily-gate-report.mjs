@@ -19,6 +19,7 @@ const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim(
 const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')
 const branch = String(process.env.BRANCH || 'main').trim()
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
+const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
@@ -189,7 +190,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, strictGate, perfGate, overallStatus, p0Status, findings }) {
+function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, strictGate, perfGate, overallStatus, p0Status, findings }) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -205,7 +206,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
   lines.push('|---|---|---|---|---|---|---|')
 
-  for (const gate of [preflightGate, strictGate, perfGate]) {
+  for (const gate of [preflightGate, metricsGate, strictGate, perfGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -219,7 +220,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Perf gate failure/stale runs): fix same day, rerun perf baseline with thresholds and record evidence.')
+  lines.push('- `P1` (Host metrics / perf gate failure/stale runs): fix same day, rerun gates with thresholds and record evidence.')
   lines.push('- `P2` (missing evidence metadata only): update docs within 24h.')
   lines.push('')
 
@@ -240,7 +241,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run perf baseline manually when any `P1` finding exists.')
+  lines.push('2. Re-run host metrics or perf baseline manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   return `${lines.join('\n')}\n`
 }
@@ -272,6 +273,7 @@ async function run() {
   info(`repository=${repo} branch=${branch}`)
 
   const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
+  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
 
@@ -279,6 +281,11 @@ async function run() {
   const preflightList = preflightListRaw.filter((run) => !isDrillRun(run))
   if (preflightListRaw.length !== preflightList.length) {
     info(`preflight: filtered drill runs (${preflightListRaw.length - preflightList.length})`)
+  }
+  const metricsListRaw = Array.isArray(metricsRuns?.list) ? metricsRuns.list : []
+  const metricsList = metricsListRaw.filter((run) => !isDrillRun(run))
+  if (metricsListRaw.length !== metricsList.length) {
+    info(`metrics: filtered drill runs (${metricsListRaw.length - metricsList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const strictList = strictListRaw.filter((run) => !isDrillRun(run))
@@ -293,6 +300,8 @@ async function run() {
 
   const preflightLatestAny = preflightList[0] ?? null
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
+  const metricsLatestAny = metricsList[0] ?? null
+  const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
   const strictLatestAny = strictList[0] ?? null
   const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
   const perfLatestAny = perfList[0] ?? null
@@ -306,6 +315,15 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: preflightRuns.error,
+  })
+  const metricsGate = evaluateGate({
+    name: 'Host Metrics',
+    severity: 'P1',
+    latestAny: metricsLatestAny,
+    latestCompleted: metricsLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: metricsRuns.error,
   })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
@@ -326,7 +344,7 @@ async function run() {
     fetchError: perfRuns.error,
   })
 
-  const findings = [...preflightGate.findings, ...strictGate.findings, ...perfGate.findings]
+  const findings = [...preflightGate.findings, ...metricsGate.findings, ...strictGate.findings, ...perfGate.findings]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
   const p0Status = findings.some((f) => f && f.severity === 'P0') ? 'fail' : 'pass'
 
@@ -339,6 +357,7 @@ async function run() {
     overallStatus,
     gates: {
       preflight: preflightGate,
+      metrics: metricsGate,
       strict: strictGate,
       perf: perfGate,
     },
@@ -351,6 +370,7 @@ async function run() {
     branchValue: branch,
     lookbackHoursValue: lookbackHours,
     preflightGate,
+    metricsGate,
     strictGate,
     perfGate,
     overallStatus,
