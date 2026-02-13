@@ -94,6 +94,7 @@ info "Volume src:  ${volume_src}"
 
 compose_dir="$(cd "$(dirname "$COMPOSE_FILE")" && pwd)"
 mountpoint=""
+is_named_volume="false"
 
 if [[ "$volume_src" == /* || "$volume_src" == ./* || "$volume_src" == ../* || "$volume_src" == *"/"* || "$volume_src" == "~/"* ]]; then
   # Bind mount path.
@@ -110,6 +111,8 @@ if [[ "$volume_src" == /* || "$volume_src" == ./* || "$volume_src" == ../* || "$
   mountpoint="$bind_path"
 else
   # Named docker volume.
+  is_named_volume="true"
+  resolved_volume_name="$volume_src"
   inspect_err_1=""
   inspect_err_2=""
   if ! mountpoint="$(docker volume inspect "$volume_src" --format '{{.Mountpoint}}' 2>&1)"; then
@@ -127,6 +130,7 @@ else
       inspect_err_2="$mountpoint"
       mountpoint=""
     else
+      resolved_volume_name="$prefixed_name"
       info "Resolved compose-prefixed volume: ${prefixed_name}"
     fi
   fi
@@ -141,12 +145,35 @@ else
 fi
 
 [[ -n "$mountpoint" ]] || die "Failed to resolve host mountpoint for: ${volume_src}"
-[[ -d "$mountpoint" ]] || die "Resolved mountpoint is not a directory: ${mountpoint}"
 
-info "Resolved mountpoint: ${mountpoint}"
+use_backend_exec="false"
+target_path="$mountpoint"
 
-df_line="$(df -P "$mountpoint" | tail -n 1 || true)"
-[[ -n "$df_line" ]] || die "df failed for mountpoint: ${mountpoint}"
+if [[ "$is_named_volume" == "true" ]] && [[ ! -d "$mountpoint" ]]; then
+  warn "Resolved mountpoint is not accessible as a directory: ${mountpoint} (falling back to docker compose exec into backend)"
+  use_backend_exec="true"
+  target_path="$UPLOAD_DIR"
+fi
+
+if [[ "$use_backend_exec" == "true" ]]; then
+  info "Stats source: docker compose exec backend (${target_path})"
+  info "Resolved volume name: ${resolved_volume_name:-${volume_src}}"
+else
+  [[ -d "$mountpoint" ]] || die "Resolved mountpoint is not a directory: ${mountpoint}"
+  info "Stats source: host path (${target_path})"
+fi
+
+function run_cmd() {
+  local cmd="$1"
+  if [[ "$use_backend_exec" == "true" ]]; then
+    docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd"
+  else
+    bash -c "$cmd"
+  fi
+}
+
+df_line="$(run_cmd "df -P \"${target_path}\" | tail -n 1" || true)"
+[[ -n "$df_line" ]] || die "df failed for path: ${target_path}"
 df_used_pct="$(echo "$df_line" | awk '{print $5}' | tr -d '%' || true)"
 [[ -n "$df_used_pct" ]] || die "Failed to parse df used percent from: ${df_line}"
 if ! is_integer "$df_used_pct"; then
@@ -154,22 +181,22 @@ if ! is_integer "$df_used_pct"; then
 fi
 
 upload_bytes=""
-if du -sb "$mountpoint" >/dev/null 2>&1; then
-  upload_bytes="$(du -sb "$mountpoint" | awk '{print $1}' | tr -d ' ' || true)"
-elif du -sk "$mountpoint" >/dev/null 2>&1; then
-  kb="$(du -sk "$mountpoint" | awk '{print $1}' | tr -d ' ' || true)"
-  [[ -n "$kb" ]] || die "du -sk returned empty output for: ${mountpoint}"
+if run_cmd "du -sb \"${target_path}\" >/dev/null 2>&1"; then
+  upload_bytes="$(run_cmd "du -sb \"${target_path}\" | awk '{print \\$1}' | tr -d ' '" || true)"
+elif run_cmd "du -sk \"${target_path}\" >/dev/null 2>&1"; then
+  kb="$(run_cmd "du -sk \"${target_path}\" | awk '{print \\$1}' | tr -d ' '" || true)"
+  [[ -n "$kb" ]] || die "du -sk returned empty output for: ${target_path}"
   upload_bytes="$((kb * 1024))"
 else
   die "du is not available or unsupported (cannot compute upload dir size)"
 fi
-[[ -n "$upload_bytes" ]] || die "Failed to compute upload bytes for: ${mountpoint}"
+[[ -n "$upload_bytes" ]] || die "Failed to compute upload bytes for: ${target_path}"
 if ! is_integer "$upload_bytes"; then
   die "Computed upload bytes is not an integer: '${upload_bytes}'"
 fi
 
-file_count="$(find "$mountpoint" -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
-[[ -n "$file_count" ]] || die "Failed to compute file count under: ${mountpoint}"
+file_count="$(run_cmd "find \"${target_path}\" -type f 2>/dev/null | wc -l | tr -d ' '" || true)"
+[[ -n "$file_count" ]] || die "Failed to compute file count under: ${target_path}"
 if ! is_integer "$file_count"; then
   die "Computed file count is not an integer: '${file_count}'"
 fi
@@ -177,18 +204,12 @@ fi
 oldest_days=0
 if (( file_count > 0 )); then
   oldest_epoch=""
-  if find "$mountpoint" -maxdepth 0 -printf '' >/dev/null 2>&1; then
-    oldest_epoch="$(
-      find "$mountpoint" -type f -printf '%T@\\n' 2>/dev/null \
-        | awk 'NR==1{min=$1} $1<min{min=$1} END{if (NR>0) print min}'
-    )"
-  elif command -v stat >/dev/null 2>&1; then
-    oldest_epoch="$(
-      find "$mountpoint" -type f -exec stat -c %Y {} + 2>/dev/null \
-        | awk 'NR==1{min=$1} $1<min{min=$1} END{if (NR>0) print min}'
-    )"
+  if run_cmd "find \"${target_path}\" -maxdepth 0 -printf ''" >/dev/null 2>&1; then
+    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -printf '%T@\\n' 2>/dev/null | awk 'NR==1{min=\\$1} \\$1<min{min=\\$1} END{if (NR>0) print min}'" || true)"
+  elif run_cmd "command -v stat >/dev/null 2>&1"; then
+    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -exec stat -c %Y {} + 2>/dev/null | awk 'NR==1{min=\\$1} \\$1<min{min=\\$1} END{if (NR>0) print min}'" || true)"
   fi
-  [[ -n "$oldest_epoch" ]] || die "Failed to compute oldest file mtime under: ${mountpoint}"
+  [[ -n "$oldest_epoch" ]] || die "Failed to compute oldest file mtime under: ${target_path}"
 
   oldest_sec="${oldest_epoch%%.*}"
   now_sec="$(date +%s)"
