@@ -138,6 +138,7 @@ jobs:
         if: always()
         env:
           DEPLOY_RC: ${{ steps.remote_deploy.outputs.deploy_rc }}
+          DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
           set -euo pipefail
           deploy_log="output/deploy/deploy.log"
@@ -157,6 +158,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${DEPLOY_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill fail stage: \`${DRILL_FAIL_STAGE:-none}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${DRILL_FAIL_STAGE:-none}" != "none" ]]; then
+            echo "  - Note: this is a drill run; deploy is expected to fail by design." >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Remote Preflight" >> "$GITHUB_STEP_SUMMARY"
@@ -288,6 +293,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Upload channel troubleshooting: ${repo_url}/blob/main/docs/attendance-production-import-upload-channel-20260212.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+
+          # Archive step summary alongside deploy.log for offline audit/review.
+          mkdir -p output/deploy
+          cp "$GITHUB_STEP_SUMMARY" output/deploy/step-summary.md
 
       - name: Upload deploy artifacts
         if: always()
