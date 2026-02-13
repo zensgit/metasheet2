@@ -22,6 +22,7 @@ const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-r
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
+const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-daily-gate-dashboard').trim()
 
@@ -190,7 +191,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, strictGate, perfGate, overallStatus, p0Status, findings }) {
+function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, strictGate, perfGate, longrunGate, overallStatus, p0Status, findings }) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -206,7 +207,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
   lines.push('|---|---|---|---|---|---|---|')
 
-  for (const gate of [preflightGate, metricsGate, strictGate, perfGate]) {
+  for (const gate of [preflightGate, metricsGate, strictGate, perfGate, longrunGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -241,7 +242,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run host metrics or perf baseline manually when any `P1` finding exists.')
+  lines.push('2. Re-run host metrics / perf baseline / perf long run manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   return `${lines.join('\n')}\n`
 }
@@ -276,6 +277,7 @@ async function run() {
   const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
+  const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = preflightListRaw.filter((run) => !isDrillRun(run))
@@ -297,6 +299,11 @@ async function run() {
   if (perfListRaw.length !== perfList.length) {
     info(`perf: filtered drill runs (${perfListRaw.length - perfList.length})`)
   }
+  const longrunListRaw = Array.isArray(longrunRuns?.list) ? longrunRuns.list : []
+  const longrunList = longrunListRaw.filter((run) => !isDrillRun(run))
+  if (longrunListRaw.length !== longrunList.length) {
+    info(`longrun: filtered drill runs (${longrunListRaw.length - longrunList.length})`)
+  }
 
   const preflightLatestAny = preflightList[0] ?? null
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
@@ -306,6 +313,8 @@ async function run() {
   const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
   const perfLatestAny = perfList[0] ?? null
   const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
+  const longrunLatestAny = longrunList[0] ?? null
+  const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
@@ -344,7 +353,23 @@ async function run() {
     fetchError: perfRuns.error,
   })
 
-  const findings = [...preflightGate.findings, ...metricsGate.findings, ...strictGate.findings, ...perfGate.findings]
+  const longrunGate = evaluateGate({
+    name: 'Perf Long Run',
+    severity: 'P1',
+    latestAny: longrunLatestAny,
+    latestCompleted: longrunLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: longrunRuns.error,
+  })
+
+  const findings = [
+    ...preflightGate.findings,
+    ...metricsGate.findings,
+    ...strictGate.findings,
+    ...perfGate.findings,
+    ...longrunGate.findings,
+  ]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
   const p0Status = findings.some((f) => f && f.severity === 'P0') ? 'fail' : 'pass'
 
@@ -360,6 +385,7 @@ async function run() {
       metrics: metricsGate,
       strict: strictGate,
       perf: perfGate,
+      longrun: longrunGate,
     },
     findings,
   }
@@ -373,6 +399,7 @@ async function run() {
     metricsGate,
     strictGate,
     perfGate,
+    longrunGate,
     overallStatus,
     p0Status,
     findings,
