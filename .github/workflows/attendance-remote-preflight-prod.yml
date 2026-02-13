@@ -56,12 +56,10 @@ jobs:
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
             "set +e"
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1"
-            "git fetch origin main"
-            "git checkout main"
-            "git pull --ff-only origin main"
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
             'host_sync_rc=$?'
             "set -e"
+            'echo "[host-sync] rc=$host_sync_rc"'
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
@@ -129,6 +127,39 @@ jobs:
           echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
+          echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$preflight_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (preflight.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            host_sync_block="$(
+              awk '
+                /^=== HOST SYNC START ===$/ { printing=1; next }
+                /^=== HOST SYNC END ===$/ { printing=0 }
+                printing { print }
+              ' "$preflight_log" | head -n 80
+            )"
+
+            if [[ -z "${host_sync_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see preflight.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              host_sync_status="UNKNOWN"
+              if echo "$host_sync_block" | grep -q "\\[host-sync\\] rc=0"; then
+                host_sync_status="PASS"
+              elif echo "$host_sync_block" | grep -q "\\[host-sync\\] rc="; then
+                host_sync_status="FAIL"
+              fi
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${host_sync_status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$host_sync_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Preflight Output" >> "$GITHUB_STEP_SUMMARY"
           if [[ ! -f "$preflight_log" ]]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
