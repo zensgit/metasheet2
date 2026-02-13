@@ -155,10 +155,32 @@ jobs:
             fi
           fi
 
+          rc_meaning="unknown"
+          case "${DEPLOY_RC:-}" in
+            "")
+              rc_meaning="missing"
+              ;;
+            0)
+              rc_meaning="success"
+              ;;
+            91)
+              rc_meaning="drill: deploy stage (intentional)"
+              ;;
+            92)
+              rc_meaning="drill: migrate stage (intentional)"
+              ;;
+            93)
+              rc_meaning="drill: smoke stage (intentional)"
+              ;;
+            *)
+              rc_meaning="remote failure (see stages/logs)"
+              ;;
+          esac
+
           echo "## Deploy (Remote)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Remote exit code: \`${DEPLOY_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${DEPLOY_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail stage: \`${DRILL_FAIL_STAGE:-none}\`" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${DRILL_FAIL_STAGE:-none}" != "none" ]]; then
             echo "  - Note: this is a drill run; deploy is expected to fail by design." >> "$GITHUB_STEP_SUMMARY"
@@ -221,37 +243,46 @@ jobs:
             }
 
             deploy_stage="UNKNOWN"
+            deploy_reason="start marker missing"
             if has "=== DEPLOY START ==="; then
               deploy_stage="FAIL"
+              deploy_reason="start marker present; end marker missing"
               if has "=== DEPLOY END ==="; then
                 deploy_stage="PASS"
+                deploy_reason="start+end markers present"
               fi
             fi
 
             migrate_stage="UNKNOWN"
+            migrate_reason="start marker missing"
             if has "=== MIGRATE START ==="; then
               migrate_stage="FAIL"
+              migrate_reason="start marker present; end marker missing"
               if has "=== MIGRATE END ==="; then
                 migrate_stage="PASS"
+                migrate_reason="start+end markers present"
               fi
             fi
 
             smoke_stage="UNKNOWN"
+            smoke_reason="start marker missing"
             if has "=== SMOKE START ==="; then
               smoke_stage="FAIL"
+              smoke_reason="start marker present; success line missing"
               if grep -q "Smoke: api/plugins=ok health=ok web=ok" "$deploy_log"; then
                 smoke_stage="PASS"
+                smoke_reason="success line present"
               elif has "=== SMOKE END ==="; then
-                smoke_stage="UNKNOWN"
+                smoke_reason="end marker present; success line missing"
               fi
             fi
 
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### Remote Stages" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Deploy: **${deploy_stage}**" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Migrate: **${migrate_stage}**" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Smoke: **${smoke_stage}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Deploy: **${deploy_stage}** (${deploy_reason})" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Migrate: **${migrate_stage}** (${migrate_reason})" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Smoke: **${smoke_stage}** (${smoke_reason})" >> "$GITHUB_STEP_SUMMARY"
 
             if [[ "${deploy_stage}" != "PASS" && "${deploy_stage}" != "UNKNOWN" ]]; then
               # Deploy failures often contain the most actionable error message near the end.
