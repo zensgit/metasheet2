@@ -230,3 +230,12 @@ Deploy Step Summary now includes:
 - Run: [#21973932069](https://github.com/zensgit/metasheet2/actions/runs/21973932069) (`SUCCESS`)
 - Evidence (local):
   - `output/playwright/ga/21973932069/deploy.log`
+
+## Update (2026-02-13): Step Summary (Remote Stages: Migrate + Smoke)
+
+Deploy Step Summary now also includes a "Remote Stages" section (Deploy/Migrate/Smoke statuses). On failures after preflight, it can surface a short tail of migrate/smoke output to reduce time-to-diagnosis.
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21974371801](https://github.com/zensgit/metasheet2/actions/runs/21974371801) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21974371801/deploy.log`
