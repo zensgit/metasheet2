@@ -10,6 +10,10 @@ on:
         description: 'Optional: intentionally fail after metrics for FAIL-path validation (true/false)'
         required: false
         default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
   schedule:
     # Daily at 02:10 UTC (after remote preflight at 02:05 UTC).
     - cron: '10 2 * * *'
@@ -20,11 +24,14 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   metrics:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      metrics_rc: ${{ steps.remote_metrics.outputs.metrics_rc }}
     steps:
       - name: Remote metrics check (with host sync logs)
         id: remote_metrics
@@ -246,3 +253,128 @@ jobs:
             echo "Remote metrics failed: rc=$rc" >&2
             exit 1
           fi
+
+  issue:
+    name: Metrics Issue Alert (P1)
+    needs: [metrics]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      METRICS_RESULT: ${{ needs.metrics.result }}
+      METRICS_RC: ${{ needs.metrics.outputs.metrics_rc }}
+    steps:
+      - name: Open/update issue on failure (P1, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const metricsResult = String(process.env.METRICS_RESULT || '').trim()
+            const metricsRc = String(process.env.METRICS_RC || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P1] Host metrics alert'
+            const title = titleOverride || defaultTitle
+
+            // Avoid creating drill issues unless explicitly requested via override title.
+            const allowIssueOps = !drillFail || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const artifactName = `attendance-remote-metrics-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const failed = metricsResult === 'failure'
+            const statusLine = `job: metrics=${metricsResult || 'unknown'} rc=${metricsRc || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+
+            const body = [
+              'Automated host metrics tracking issue (P1, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              '',
+              `Artifacts: ${artifactName}`,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            // Recovery: close an existing open issue when the metrics gate passes.
+            if (!match) {
+              core.info('No host metrics issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Host metrics issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Host metrics recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)
