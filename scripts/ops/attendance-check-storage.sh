@@ -182,9 +182,9 @@ fi
 
 upload_bytes=""
 if run_cmd "du -sb \"${target_path}\" >/dev/null 2>&1"; then
-  upload_bytes="$(run_cmd "du -sb \"${target_path}\" | awk '{print \\$1}' | tr -d ' '" || true)"
+  upload_bytes="$(run_cmd "du -sb \"${target_path}\" 2>/dev/null | cut -f1 | tr -d ' '" || true)"
 elif run_cmd "du -sk \"${target_path}\" >/dev/null 2>&1"; then
-  kb="$(run_cmd "du -sk \"${target_path}\" | awk '{print \\$1}' | tr -d ' '" || true)"
+  kb="$(run_cmd "du -sk \"${target_path}\" 2>/dev/null | cut -f1 | tr -d ' '" || true)"
   [[ -n "$kb" ]] || die "du -sk returned empty output for: ${target_path}"
   upload_bytes="$((kb * 1024))"
 else
@@ -205,9 +205,9 @@ oldest_days=0
 if (( file_count > 0 )); then
   oldest_epoch=""
   if run_cmd "find \"${target_path}\" -maxdepth 0 -printf ''" >/dev/null 2>&1; then
-    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -printf '%T@\\n' 2>/dev/null | awk 'NR==1{min=\\$1} \\$1<min{min=\\$1} END{if (NR>0) print min}'" || true)"
+    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -printf '%T@\\n' 2>/dev/null | sort -n | head -n 1" || true)"
   elif run_cmd "command -v stat >/dev/null 2>&1"; then
-    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -exec stat -c %Y {} + 2>/dev/null | awk 'NR==1{min=\\$1} \\$1<min{min=\\$1} END{if (NR>0) print min}'" || true)"
+    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1" || true)"
   fi
   [[ -n "$oldest_epoch" ]] || die "Failed to compute oldest file mtime under: ${target_path}"
 
