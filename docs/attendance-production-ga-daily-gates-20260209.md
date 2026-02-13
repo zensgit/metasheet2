@@ -279,7 +279,46 @@ gh workflow run attendance-import-perf-baseline.yml \
   -f issue_title='[Attendance Perf Drill] Perf baseline issue test'
 ```
 
-### C) Daily Gate Dashboard (Scheduled + Manual)
+### C) Perf Long Run (Trend)
+
+Workflow:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+
+Schedule:
+
+- Daily at `05:10 UTC`
+
+Defaults:
+
+- `upload_csv=true` (recommended; ensures the longrun trend covers the `/attendance/import/upload` channel).
+
+Manual trigger:
+
+```bash
+gh workflow run attendance-import-perf-longrun.yml -f upload_csv=true -f fail_on_regression=false
+```
+
+Artifacts:
+
+- Download (all artifacts for this run):
+  - `gh run download <RUN_ID> -D "output/playwright/ga/<RUN_ID>"`
+- Evidence (local, after download):
+  - `output/playwright/ga/<RUN_ID>/**/attendance-import-perf-longrun-trend.md`
+  - `output/playwright/ga/<RUN_ID>/**/perf-summary.json`
+
+P1 tracking issue (no paging): `[Attendance P1] Perf longrun alert` (opened/reopened on failure; commented+closed on recovery).
+
+Drill (expected FAIL; no production API calls; uses a safe override title):
+
+```bash
+gh workflow run attendance-import-perf-longrun.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Longrun Drill] Perf longrun issue test'
+```
+
+### D) Daily Gate Dashboard (Scheduled + Manual)
 
 Workflow:
 
@@ -331,7 +370,7 @@ gh workflow run attendance-daily-gate-dashboard.yml \
   -f issue_title='[Attendance Gate Drill] Dashboard P0 escalation test'
 ```
 
-### D) Gate Issue Channel Sync (Slack / DingTalk)
+### E) Gate Issue Channel Sync (Slack / DingTalk)
 
 Workflow:
 
