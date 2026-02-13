@@ -173,3 +173,30 @@ Checks observed from the downloaded artifact:
   - `=== SMOKE START/END ===`
 - Smoke completed with expected success line:
   - `Smoke: api/plugins=ok health=ok web=ok`
+
+## Update (2026-02-13): Failure Drill (Expected FAIL)
+
+This drill validates the failure path behavior:
+
+- deploy job ends as `FAIL` (blocks deployment)
+- deploy artifacts still upload
+- Step Summary still contains preflight output + runbook links
+
+Run:
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21973689456](https://github.com/zensgit/metasheet2/actions/runs/21973689456) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21973689456/deploy.log`
+
+Observed failure:
+
+- Preflight failed as expected:
+  - `ATTENDANCE_IMPORT_REQUIRE_TOKEN must be set to '1' in docker/app.env`
+
+### Restore Validation (Expected PASS)
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21973784431](https://github.com/zensgit/metasheet2/actions/runs/21973784431) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21973784431/deploy.log`

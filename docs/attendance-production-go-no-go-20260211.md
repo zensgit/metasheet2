@@ -139,6 +139,8 @@ This record does not change the `GO` decision above; it captures a production re
 | Perf baseline (10k, upload_csv=true default, post deploy remote preflight) | [#21956821796](https://github.com/zensgit/metasheet2/actions/runs/21956821796) | PASS | `output/playwright/ga/21956821796/attendance-import-perf-21956821796-1/attendance-perf-mljq1ur9-cg0wyh/perf-summary.json` |
 | Deploy (preflight step summary + deploy.log artifact) | [#21958027752](https://github.com/zensgit/metasheet2/actions/runs/21958027752) | PASS | `output/playwright/ga/21958027752/deploy.log` |
 | Deploy (workflow_dispatch re-verify preflight summary + artifacts) | [#21972069433](https://github.com/zensgit/metasheet2/actions/runs/21972069433) | PASS | `output/playwright/ga/21972069433/deploy.log` |
+| Deploy (failure drill: require-token misconfig, expected FAIL) | [#21973689456](https://github.com/zensgit/metasheet2/actions/runs/21973689456) | FAIL (expected) | `output/playwright/ga/21973689456/deploy.log` |
+| Deploy (post-drill restore, expected PASS) | [#21973784431](https://github.com/zensgit/metasheet2/actions/runs/21973784431) | PASS | `output/playwright/ga/21973784431/deploy.log` |
 
 Perf summary (`#21948416024`):
 
