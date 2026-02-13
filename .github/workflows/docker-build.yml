@@ -7,6 +7,11 @@ on:
       - 'docs/**'
       - 'output/**'
   workflow_dispatch:
+    inputs:
+      drill_fail_stage:
+        description: 'Optional: intentionally fail deploy at a stage for summary drill (none|migrate|smoke)'
+        required: false
+        default: 'none'
 
 jobs:
   build:
@@ -64,6 +69,7 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -72,12 +78,14 @@ jobs:
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
           remote_cmds=(
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
+            "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
             "cd \"${DEPLOY_PATH}\""
             "# Keep host-mounted config (e.g. docker/nginx.conf) in sync with main."
             "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo \"[deploy][error] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH}\" >&2; exit 1; }"
@@ -99,11 +107,13 @@ jobs:
             "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
             "echo \"=== MIGRATE START ===\""
+            'if [[ "${DRILL_FAIL_STAGE:-none}" == "migrate" ]]; then echo "[deploy][drill] intentional failure at migrate stage"; exit 92; fi'
             "# Important: redirect stdin so docker compose exec can't consume the rest of this bash -s script."
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"
             "echo \"=== MIGRATE END ===\""
             "# Post-deploy smoke checks"
             "echo \"=== SMOKE START ===\""
+            'if [[ "${DRILL_FAIL_STAGE:-none}" == "smoke" ]]; then echo "[deploy][drill] intentional failure at smoke stage"; exit 93; fi'
             "for i in {1..10}; do"
               "  if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then"
             "    break"
