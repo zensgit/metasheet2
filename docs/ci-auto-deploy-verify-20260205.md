@@ -277,3 +277,12 @@ Drill path (stage recorded in summary):
 - Evidence (local):
   - `output/playwright/ga/21976355633/step-summary.md`
   - `output/playwright/ga/21976355633/deploy.log`
+
+## Update (2026-02-13): Deploy Drill + Deploy Output Tail
+
+Added a deploy-stage drill and a "Deploy Output (tail)" section in Step Summary to help diagnose failures during image pull / container recreate.
+
+- Run: [#21976588135](https://github.com/zensgit/metasheet2/actions/runs/21976588135) (`FAILURE`, expected, `drill_fail_stage=deploy`)
+- Evidence (local):
+  - `output/playwright/ga/21976588135/step-summary.md`
+  - `output/playwright/ga/21976588135/deploy.log`
