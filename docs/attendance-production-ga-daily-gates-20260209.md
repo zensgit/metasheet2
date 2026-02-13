@@ -94,6 +94,9 @@ Notes:
 - Drill runs are tagged with `run-name` suffix `[DRILL]`.
 - The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for the `Remote Preflight` gate.
 - If the latest non-drill run becomes stale (lookback window), trigger a normal run (`drill_fail=false`) to refresh the signal.
+- Remote preflight failures will open/reopen the escalation issue titled:
+  - `[Attendance Gate] Daily dashboard alert`
+  - This provides fast notifications without waiting for the scheduled dashboard run.
 
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 
