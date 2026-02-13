@@ -149,6 +149,12 @@ Manual trigger:
 gh workflow run attendance-remote-metrics-prod.yml -f drill_fail=false
 ```
 
+Drill (expected FAIL, validates FAIL-path evidence upload):
+
+```bash
+gh workflow run attendance-remote-metrics-prod.yml -f drill_fail=true
+```
+
 Artifacts:
 
 - Download:
@@ -166,6 +172,7 @@ Expected:
 Notes:
 
 - This gate cannot be executed from a workstation because the backend metrics endpoint is not exposed through nginx.
+- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` runs when selecting the latest completed `Host Metrics` gate run.
 - You can override the target:
   - `METRICS_URL="http://127.0.0.1:8900/metrics/prom" scripts/ops/attendance-check-metrics.sh`
 
