@@ -88,8 +88,10 @@ Rationale:
 - Dashboard generator:
   - `scripts/ops/attendance-daily-gate-report.mjs`
 - Escalation behavior:
-  - `P0` strict gate failure -> open/update issue `[Attendance Gate] Daily dashboard alert` and fail workflow.
-  - `P1` perf gate failure/stale runs -> open/update same issue and fail workflow.
+  - `P0` failure (strict gates / remote preflight) -> open/update issue `[Attendance Gate] Daily dashboard alert` and fail workflow.
+  - `P1` failures -> workflow still fails (visibility), but does not page via `[Attendance Gate]`.
+  - `P1` perf baseline failures are tracked in issue: `[Attendance P1] Perf baseline alert` (no paging).
+  - `P1` host metrics failures are tracked in issue: `[Attendance P1] Host metrics alert` (no paging).
 - Channel sync workflow:
   - `.github/workflows/attendance-gate-issue-notify.yml`
   - Routes `[Attendance Gate]` issue events to Slack/DingTalk webhooks when configured.
@@ -191,3 +193,20 @@ Perf summary (`#21948416024`):
 Related design/ops record:
 
 - `docs/attendance-production-import-upload-channel-20260212.md`
+
+## Post-Go Validation (2026-02-13): P1 Issue Tracking (Perf + Host Metrics)
+
+This record validates that P1 gates create a **non-paging** tracking issue on failure and auto-close it on recovery.
+
+Notes:
+
+- Drill runs use safe `issue_title` overrides so they do not conflict with the real production titles:
+  - `[Attendance P1] Perf baseline alert`
+  - `[Attendance P1] Host metrics alert`
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline drill (P1 issue open, expected FAIL) | [#21992375357](https://github.com/zensgit/metasheet2/actions/runs/21992375357) | FAIL (expected) | `output/playwright/ga/21992375357/drill/drill.txt`, Issue: [#154](https://github.com/zensgit/metasheet2/issues/154) |
+| Perf baseline drill recovery (P1 issue auto-close) | [#21992449283](https://github.com/zensgit/metasheet2/actions/runs/21992449283) | PASS | `output/playwright/ga/21992449283/drill/drill.txt`, Issue: [#154](https://github.com/zensgit/metasheet2/issues/154) |
+| Remote Metrics drill (P1 issue open, expected FAIL) | [#21992814049](https://github.com/zensgit/metasheet2/actions/runs/21992814049) | FAIL (expected) | `output/playwright/ga/21992814049/step-summary.md`, `output/playwright/ga/21992814049/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
+| Remote Metrics recovery (P1 issue auto-close) | [#21992862639](https://github.com/zensgit/metasheet2/actions/runs/21992862639) | PASS | `output/playwright/ga/21992862639/step-summary.md`, `output/playwright/ga/21992862639/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
