@@ -337,6 +337,7 @@ Added a standalone remote preflight workflow for detecting config drift even whe
 - Behavior:
   - sync deploy host repo (`git pull --ff-only origin main`)
   - run `scripts/ops/attendance-preflight.sh` on the deploy host
+  - include host sync output in Step Summary (so git failures are diagnosable without opening raw logs)
   - upload `preflight.log` + `step-summary.md` artifacts (even on failure)
 
 PASS example:

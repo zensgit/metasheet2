@@ -71,6 +71,7 @@ Expected:
 - `SUCCESS`
 - Step Summary includes:
   - PASS/FAIL
+  - host sync output snippet (markers)
   - preflight output snippet (markers)
   - runbook links
 
