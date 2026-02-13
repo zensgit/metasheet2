@@ -41,7 +41,10 @@ required=(
 
 missing=0
 for name in "${required[@]}"; do
-  if ! grep -qE "^${name}([ {])" <<<"$raw"; then
+  # Many Attendance metrics use labels (or histograms with _bucket/_sum/_count),
+  # so the raw sample lines may be absent until the first request is observed.
+  # To verify existence reliably, check HELP/TYPE lines instead of samples.
+  if ! grep -qE "^# (HELP|TYPE) ${name}\\b" <<<"$raw"; then
     echo "[attendance-check-metrics] MISSING: ${name}" >&2
     missing=1
   fi

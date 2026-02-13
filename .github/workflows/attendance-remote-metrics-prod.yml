@@ -59,13 +59,13 @@ jobs:
             "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
             'host_sync_rc=$?'
             "set -e"
-            'echo \"[host-sync] rc=$host_sync_rc\"'
+            'echo "[host-sync] rc=$host_sync_rc"'
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE METRICS START ===\""
             "metrics_rc=0"
-            'if [[ \"$host_sync_rc\" != \"0\" ]]; then'
-              '  echo \"[attendance-metrics][skip] host sync failed: rc=$host_sync_rc\"'
-              '  metrics_rc=\"$host_sync_rc\"'
+            'if [[ "$host_sync_rc" != "0" ]]; then'
+              '  echo "[attendance-metrics][skip] host sync failed: rc=$host_sync_rc"'
+              '  metrics_rc="$host_sync_rc"'
             "else"
               "  set +e"
               "  scripts/ops/attendance-check-metrics.sh"
@@ -73,7 +73,7 @@ jobs:
               "  set -e"
             "fi"
             "echo \"=== ATTENDANCE METRICS END ===\""
-            'if [[ \"$metrics_rc\" != \"0\" ]]; then exit \"$metrics_rc\"; fi'
+            'if [[ "$metrics_rc" != "0" ]]; then exit "$metrics_rc"; fi'
             "if [[ \"${DRILL_FAIL}\" == \"true\" ]]; then echo \"[metrics][drill] intentional failure after metrics\"; exit 97; fi"
           )
 
@@ -246,4 +246,3 @@ jobs:
             echo "Remote metrics failed: rc=$rc" >&2
             exit 1
           fi
-
