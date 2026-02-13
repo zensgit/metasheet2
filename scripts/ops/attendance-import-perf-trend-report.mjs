@@ -120,6 +120,7 @@ function recordFromSummary(summary, sourcePath, sourceType) {
     scenario,
     rows,
     mode,
+    uploadCsv: Boolean(summary?.uploadCsv),
     startedAt,
     previewMs: toNumber(summary?.previewMs),
     commitMs: toNumber(summary?.commitMs),
@@ -178,10 +179,11 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Mode | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Mode | Upload | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | P95 Preview | P95 Commit | Status |')
+  lines.push('|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')

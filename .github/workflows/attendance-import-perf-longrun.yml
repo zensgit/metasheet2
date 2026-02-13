@@ -1,8 +1,27 @@
 name: Attendance Import Perf Long Run
 
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Import Perf Long Run${{ github.event_name == 'workflow_dispatch' && inputs.drill == 'true' && ' [DRILL]' || '' }}
+
 on:
   workflow_dispatch:
     inputs:
+      drill:
+        description: 'Optional: mark run as [DRILL] and skip calling production APIs (true/false)'
+        required: false
+        default: 'false'
+      drill_fail:
+        description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
+      upload_csv:
+        description: 'Upload CSV via /attendance/import/upload (true/false)'
+        required: false
+        default: 'true'
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -34,9 +53,41 @@ concurrency:
 permissions:
   contents: read
   actions: read
+  issues: write
 
 jobs:
+  drill:
+    if: github.event_name == 'workflow_dispatch' && inputs.drill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+    steps:
+      - name: Drill no-op (skip long run)
+        run: |
+          set -euo pipefail
+          DRILL_FAIL="${DRILL_FAIL:-false}"
+          mkdir -p output/playwright/attendance-import-perf-longrun/drill
+          cat > output/playwright/attendance-import-perf-longrun/drill/drill.txt <<'EOF'
+          This is a DRILL run for Attendance Import Perf Long Run.
+          The workflow intentionally skips calling production APIs.
+          EOF
+          if [[ "$DRILL_FAIL" == "true" ]]; then
+            echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
+            exit 97
+          fi
+
+      - name: Upload drill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-longrun-drill-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-import-perf-longrun/drill/**
+
   perf-scenarios:
+    if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -74,6 +125,7 @@ jobs:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       COMMIT_ASYNC: 'true'
+      UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,6 +175,7 @@ jobs:
 
   trend-report:
     needs: perf-scenarios
+    if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -208,3 +261,129 @@ jobs:
         run: |
           echo "Perf long-run trend report indicates regression"
           exit 1
+
+  issue:
+    name: Perf Longrun Issue Alert (P1)
+    needs: [drill, perf-scenarios, trend-report]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL: ${{ github.event.inputs.drill || 'false' }}
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      DRILL_RESULT: ${{ needs.drill.result }}
+      PERF_RESULT: ${{ needs.perf-scenarios.result }}
+      TREND_RESULT: ${{ needs.trend-report.result }}
+    steps:
+      - name: Open/update issue on failure (P1, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drill = String(process.env.DRILL || '').trim() === 'true'
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const drillResult = String(process.env.DRILL_RESULT || '').trim()
+            const perfResult = String(process.env.PERF_RESULT || '').trim()
+            const trendResult = String(process.env.TREND_RESULT || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P1] Perf longrun alert'
+            const title = titleOverride || defaultTitle
+
+            const allowIssueOps = !drill || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+
+            const isBad = (value) => value && value !== 'success' && value !== 'skipped'
+            const failed = drill ? isBad(drillResult) : (isBad(perfResult) || isBad(trendResult))
+            const statusLine = `jobs: perf-scenarios=${perfResult || 'unknown'} trend-report=${trendResult || 'unknown'} drill=${drillResult || 'unknown'}${drill && drillFail ? ' (drill_fail=true)' : ''}`
+
+            const body = [
+              'Automated perf longrun tracking issue (P1, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            // Recovery: close an existing open issue when the longrun gate passes.
+            if (!match) {
+              core.info('No perf longrun issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Perf longrun issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Perf longrun recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)
