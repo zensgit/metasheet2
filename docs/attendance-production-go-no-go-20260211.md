@@ -145,6 +145,8 @@ This record does not change the `GO` decision above; it captures a production re
 | Deploy (step summary: remote stages migrate/smoke) | [#21974371801](https://github.com/zensgit/metasheet2/actions/runs/21974371801) | PASS | `output/playwright/ga/21974371801/deploy.log` |
 | Deploy (drill: intentional migrate failure, expected FAIL) | [#21974887993](https://github.com/zensgit/metasheet2/actions/runs/21974887993) | FAIL (expected) | `output/playwright/ga/21974887993/deploy.log` |
 | Deploy (drill: intentional smoke failure, expected FAIL) | [#21975944250](https://github.com/zensgit/metasheet2/actions/runs/21975944250) | FAIL (expected) | `output/playwright/ga/21975944250/deploy.log` |
+| Deploy (step summary archived to artifact) | [#21976281725](https://github.com/zensgit/metasheet2/actions/runs/21976281725) | PASS | `output/playwright/ga/21976281725/step-summary.md`, `output/playwright/ga/21976281725/deploy.log` |
+| Deploy (drill stage recorded + step summary artifact) | [#21976355633](https://github.com/zensgit/metasheet2/actions/runs/21976355633) | FAIL (expected) | `output/playwright/ga/21976355633/step-summary.md`, `output/playwright/ga/21976355633/deploy.log` |
 | Deploy (failure drill: preflight END marker present, expected FAIL) | [#21974005618](https://github.com/zensgit/metasheet2/actions/runs/21974005618) | FAIL (expected) | `output/playwright/ga/21974005618/deploy.log` |
 | Deploy (post-drill restore, expected PASS) | [#21974057204](https://github.com/zensgit/metasheet2/actions/runs/21974057204) | PASS | `output/playwright/ga/21974057204/deploy.log` |
 

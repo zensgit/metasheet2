@@ -259,3 +259,21 @@ Two `workflow_dispatch` drills validated the "Remote Stages" summary and that fa
   - `output/playwright/ga/21975944250/deploy.log`
 - Expected drill marker:
   - `[deploy][drill] intentional failure at smoke stage`
+
+## Update (2026-02-13): Step Summary Archived As Artifact
+
+Deploy now copies the generated Step Summary content into `output/deploy/step-summary.md`, which is uploaded alongside `deploy.log` (so evidence is reviewable without opening GitHub UI).
+
+PASS path:
+
+- Run: [#21976281725](https://github.com/zensgit/metasheet2/actions/runs/21976281725) (`SUCCESS`, push)
+- Evidence (local):
+  - `output/playwright/ga/21976281725/step-summary.md`
+  - `output/playwright/ga/21976281725/deploy.log`
+
+Drill path (stage recorded in summary):
+
+- Run: [#21976355633](https://github.com/zensgit/metasheet2/actions/runs/21976355633) (`FAILURE`, expected, `drill_fail_stage=smoke`)
+- Evidence (local):
+  - `output/playwright/ga/21976355633/step-summary.md`
+  - `output/playwright/ga/21976355633/deploy.log`
