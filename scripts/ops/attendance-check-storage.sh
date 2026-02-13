@@ -166,7 +166,9 @@ fi
 function run_cmd() {
   local cmd="$1"
   if [[ "$use_backend_exec" == "true" ]]; then
-    docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd"
+    # Important: redirect stdin so docker compose exec can't consume the rest of this bash script
+    # when the caller runs it via "ssh ... bash -s" (stdin carries the remaining script).
+    docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null
   else
     bash -c "$cmd"
   fi
