@@ -210,3 +210,16 @@ Notes:
 | Perf baseline drill recovery (P1 issue auto-close) | [#21992449283](https://github.com/zensgit/metasheet2/actions/runs/21992449283) | PASS | `output/playwright/ga/21992449283/drill/drill.txt`, Issue: [#154](https://github.com/zensgit/metasheet2/issues/154) |
 | Remote Metrics drill (P1 issue open, expected FAIL) | [#21992814049](https://github.com/zensgit/metasheet2/actions/runs/21992814049) | FAIL (expected) | `output/playwright/ga/21992814049/step-summary.md`, `output/playwright/ga/21992814049/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
 | Remote Metrics recovery (P1 issue auto-close) | [#21992862639](https://github.com/zensgit/metasheet2/actions/runs/21992862639) | PASS | `output/playwright/ga/21992862639/step-summary.md`, `output/playwright/ga/21992862639/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
+
+## Post-Go Validation (2026-02-13): Longrun Upload Coverage + P1 Issue Tracking
+
+This record validates:
+
+- The perf longrun workflow defaults to `upload_csv=true` and produces `uploadCsv: true` in perf summaries.
+- Drill runs can validate FAIL/PASS issue behavior without hitting production APIs.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf longrun drill (P1 issue open, expected FAIL) | [#21995454486](https://github.com/zensgit/metasheet2/actions/runs/21995454486) | FAIL (expected) | `output/playwright/ga/21995454486/attendance-import-perf-longrun-drill-21995454486-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf longrun drill recovery (P1 issue auto-close) | [#21995499250](https://github.com/zensgit/metasheet2/actions/runs/21995499250) | PASS | `output/playwright/ga/21995499250/attendance-import-perf-longrun-drill-21995499250-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf longrun (upload_csv=true default) | [#21995544569](https://github.com/zensgit/metasheet2/actions/runs/21995544569) | PASS | `output/playwright/ga/21995544569/attendance-import-perf-longrun-trend-21995544569-1/20260213-170505/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/21995544569/attendance-import-perf-longrun-rows10k-commit-21995544569-1/current/rows10k-commit/attendance-perf-mll50tvt-haeu4u/perf-summary.json` |
