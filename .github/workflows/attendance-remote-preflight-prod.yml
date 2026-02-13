@@ -1,5 +1,8 @@
 name: Attendance Remote Preflight (Prod)
 
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Remote Preflight (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+
 on:
   workflow_dispatch:
     inputs:

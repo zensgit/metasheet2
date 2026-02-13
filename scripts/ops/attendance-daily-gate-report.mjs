@@ -50,6 +50,12 @@ function makeRunId() {
   return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`
 }
 
+function isDrillRun(run) {
+  // Workflows may tag run-name like "... [DRILL]" for expected failure drills.
+  const title = String(run?.display_title || run?.name || '').toUpperCase()
+  return title.includes('[DRILL]')
+}
+
 async function apiGet(pathname) {
   const url = `${apiBase}${pathname}`
   const res = await fetch(url, {
@@ -268,7 +274,11 @@ async function run() {
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
 
-  const preflightList = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
+  const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
+  const preflightList = preflightListRaw.filter((run) => !isDrillRun(run))
+  if (preflightListRaw.length !== preflightList.length) {
+    info(`preflight: filtered drill runs (${preflightListRaw.length - preflightList.length})`)
+  }
   const strictList = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const perfList = Array.isArray(perfRuns?.list) ? perfRuns.list : []
 
