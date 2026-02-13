@@ -86,8 +86,13 @@ jobs:
             "git pull --ff-only origin main"
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
+            "preflight_rc=0"
+            "set +e"
             "COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
+            'preflight_rc=$?'
+            "set -e"
             "echo \"=== ATTENDANCE PREFLIGHT END ===\""
+            'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
@@ -127,9 +132,19 @@ jobs:
           set -euo pipefail
           deploy_log="output/deploy/deploy.log"
           repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          artifact_name="deploy-logs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          overall="UNKNOWN"
+          if [[ -n "${DEPLOY_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${DEPLOY_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
 
           echo "## Deploy (Remote)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${DEPLOY_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -170,6 +185,17 @@ jobs:
               echo '```' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Deploy logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/deploy.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
