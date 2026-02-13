@@ -201,6 +201,24 @@ Observed failure:
 - Evidence (local):
   - `output/playwright/ga/21973784431/deploy.log`
 
+### Repeat Drill (Preflight END Marker On FAIL)
+
+This re-validates that the preflight marker block is always well-formed even when preflight fails.
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21974005618](https://github.com/zensgit/metasheet2/actions/runs/21974005618) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21974005618/deploy.log`
+- Verified:
+  - `=== ATTENDANCE PREFLIGHT END ===` is present even on failure.
+
+### Restore Validation (Expected PASS, Post Marker Hardening)
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21974057204](https://github.com/zensgit/metasheet2/actions/runs/21974057204) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21974057204/deploy.log`
+
 ## Update (2026-02-13): Step Summary (Artifacts + Status Hint)
 
 Deploy Step Summary now includes:
