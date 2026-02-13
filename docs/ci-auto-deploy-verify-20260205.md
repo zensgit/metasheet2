@@ -307,3 +307,17 @@ Drill example (`drill_fail_stage=deploy`, exit code `91`):
 - Evidence (local):
   - `output/playwright/ga/21976791431/step-summary.md`
   - `output/playwright/ga/21976791431/deploy.log`
+
+## Update (2026-02-13): Re-Verify Smoke PASS Criteria (Requires SMOKE END Marker)
+
+Smoke now counts as `PASS` in the Step Summary only when **both** are present in `deploy.log`:
+
+- `Smoke: api/plugins=ok health=ok web=ok`
+- `=== SMOKE END ===`
+
+Verification:
+
+- Run: [#21977059789](https://github.com/zensgit/metasheet2/actions/runs/21977059789) (`SUCCESS`, workflow_dispatch)
+- Evidence (local):
+  - `output/playwright/ga/21977059789/step-summary.md`
+  - `output/playwright/ga/21977059789/deploy.log`
