@@ -134,6 +134,7 @@ jobs:
           repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           artifact_name="deploy-logs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
+          preflight_status="UNKNOWN"
           overall="UNKNOWN"
           if [[ -n "${DEPLOY_RC:-}" ]]; then
             overall="PASS"
@@ -171,7 +172,6 @@ jobs:
               tail -n 80 "$deploy_log" >> "$GITHUB_STEP_SUMMARY" || true
               echo '```' >> "$GITHUB_STEP_SUMMARY"
             else
-              preflight_status="UNKNOWN"
               if echo "$preflight_block" | grep -q "Preflight OK"; then
                 preflight_status="PASS"
               elif echo "$preflight_block" | grep -q "\\[attendance-preflight\\] ERROR:"; then
@@ -187,6 +187,77 @@ jobs:
               if [[ "${overall}" == "FAIL" && "${preflight_status}" == "PASS" ]]; then
                 echo "" >> "$GITHUB_STEP_SUMMARY"
                 echo "- Note: preflight passed; failure happened after preflight (deploy/migrate/smoke). See \`${artifact_name}\`." >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
+
+          if [[ -f "$deploy_log" ]]; then
+            has() { grep -qF "$1" "$deploy_log"; }
+            extract_block() {
+              local start="$1"
+              local end="$2"
+              local max_lines="$3"
+              awk -v start="$start" -v end="$end" '
+                $0 == start { printing=1; next }
+                $0 == end { printing=0 }
+                printing { print }
+              ' "$deploy_log" | head -n "$max_lines"
+            }
+
+            deploy_stage="UNKNOWN"
+            if has "=== DEPLOY START ==="; then
+              deploy_stage="FAIL"
+              if has "=== DEPLOY END ==="; then
+                deploy_stage="PASS"
+              fi
+            fi
+
+            migrate_stage="UNKNOWN"
+            if has "=== MIGRATE START ==="; then
+              migrate_stage="FAIL"
+              if has "=== MIGRATE END ==="; then
+                migrate_stage="PASS"
+              fi
+            fi
+
+            smoke_stage="UNKNOWN"
+            if has "=== SMOKE START ==="; then
+              smoke_stage="FAIL"
+              if grep -q "Smoke: api/plugins=ok health=ok web=ok" "$deploy_log"; then
+                smoke_stage="PASS"
+              elif has "=== SMOKE END ==="; then
+                smoke_stage="UNKNOWN"
+              fi
+            fi
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Remote Stages" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Deploy: **${deploy_stage}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Migrate: **${migrate_stage}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Smoke: **${smoke_stage}**" >> "$GITHUB_STEP_SUMMARY"
+
+            if [[ "${migrate_stage}" != "PASS" && "${migrate_stage}" != "UNKNOWN" ]]; then
+              migrate_block="$(extract_block "=== MIGRATE START ===" "=== MIGRATE END ===" 80 || true)"
+              if [[ -n "${migrate_block}" ]]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "### Migrate Output (tail)" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "$migrate_block" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            if [[ "${smoke_stage}" != "PASS" && "${smoke_stage}" != "UNKNOWN" ]]; then
+              smoke_block="$(extract_block "=== SMOKE START ===" "=== SMOKE END ===" 80 || true)"
+              if [[ -n "${smoke_block}" ]]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "### Smoke Output (tail)" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "$smoke_block" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
           fi
