@@ -239,3 +239,23 @@ Deploy Step Summary now also includes a "Remote Stages" section (Deploy/Migrate/
 - Run: [#21974371801](https://github.com/zensgit/metasheet2/actions/runs/21974371801) (`SUCCESS`)
 - Evidence (local):
   - `output/playwright/ga/21974371801/deploy.log`
+
+## Update (2026-02-13): Stage Failure Drills (Migrate + Smoke)
+
+Two `workflow_dispatch` drills validated the "Remote Stages" summary and that failure-stage tails appear when the corresponding stage fails.
+
+### Drill: migrate failure (expected FAIL)
+
+- Run: [#21974887993](https://github.com/zensgit/metasheet2/actions/runs/21974887993) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21974887993/deploy.log`
+- Expected drill marker:
+  - `[deploy][drill] intentional failure at migrate stage`
+
+### Drill: smoke failure (expected FAIL)
+
+- Run: [#21975944250](https://github.com/zensgit/metasheet2/actions/runs/21975944250) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21975944250/deploy.log`
+- Expected drill marker:
+  - `[deploy][drill] intentional failure at smoke stage`
