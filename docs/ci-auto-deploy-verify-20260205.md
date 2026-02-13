@@ -154,3 +154,22 @@ Behavior:
   - A short preflight output snippet
   - Runbook links
 - `deploy.log` is uploaded as an artifact even if deploy fails (job still ends as `FAIL` when `deploy_rc != 0`).
+
+## Update (2026-02-13): workflow_dispatch Re-Verification
+
+Manual dispatch re-verified the same deploy evidence path on latest `main`.
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21972069433](https://github.com/zensgit/metasheet2/actions/runs/21972069433) (`SUCCESS`, `workflow_dispatch`)
+- Evidence (local):
+  - `output/playwright/ga/21972069433/deploy.log`
+
+Checks observed from the downloaded artifact:
+
+- Marker coverage present:
+  - `=== ATTENDANCE PREFLIGHT START/END ===`
+  - `=== DEPLOY START/END ===`
+  - `=== MIGRATE START/END ===`
+  - `=== SMOKE START/END ===`
+- Smoke completed with expected success line:
+  - `Smoke: api/plugins=ok health=ok web=ok`
