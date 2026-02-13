@@ -10,6 +10,14 @@ on:
         description: 'Optional: mark run as [DRILL] and skip calling production APIs (true/false)'
         required: false
         default: 'false'
+      drill_fail:
+        description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override escalation issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -54,20 +62,31 @@ concurrency:
   group: attendance-strict-gates-prod
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   drill:
     if: github.event_name == 'workflow_dispatch' && inputs.drill == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
     steps:
       - name: Drill no-op (skip strict gates)
         run: |
           set -euo pipefail
+          DRILL_FAIL="${DRILL_FAIL:-false}"
           mkdir -p output/playwright/attendance-prod-acceptance/drill
           cat > output/playwright/attendance-prod-acceptance/drill/drill.txt <<'EOF'
           This is a DRILL run for Attendance Strict Gates (Prod).
           The workflow intentionally skips calling production APIs.
           EOF
+          if [[ "$DRILL_FAIL" == "true" ]]; then
+            echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
+            exit 97
+          fi
 
       - name: Upload drill artifacts
         if: always()
@@ -130,3 +149,93 @@ jobs:
           retention-days: 14
           path: |
             output/playwright/attendance-prod-acceptance/**
+
+  escalate:
+    name: Escalate Issue On Failure (Fast Alert)
+    needs: [drill, strict-gates]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL: ${{ github.event.inputs.drill || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      DRILL_RESULT: ${{ needs.drill.result }}
+      STRICT_RESULT: ${{ needs.strict-gates.result }}
+    steps:
+      - name: Escalate issue when strict gates failed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drill = String(process.env.DRILL || '').trim() === 'true'
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const drillResult = String(process.env.DRILL_RESULT || '').trim()
+            const strictResult = String(process.env.STRICT_RESULT || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const failed = drillResult === 'failure' || strictResult === 'failure'
+            if (!failed) {
+              core.info('No failing job detected; skipping issue escalation.')
+              return
+            }
+
+            const defaultTitle = '[Attendance Gate] Daily dashboard alert'
+            const title = titleOverride || defaultTitle
+            const allowEscalate = !drill || Boolean(titleOverride)
+            if (!allowEscalate) {
+              core.info('Drill run: skipping issue escalation (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const artifactName = `attendance-strict-gates-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const body = [
+              'Automated strict gates escalation.',
+              '',
+              `Run: ${runUrl}`,
+              `jobs: strict=${strictResult || 'unknown'} drill=${drillResult || 'unknown'}${drill && drillFail ? ' (drill_fail=true)' : ''}`,
+              '',
+              `Artifacts: ${artifactName}`,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (match) {
+              if (match.state !== 'open') {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: match.number,
+                  state: 'open',
+                  body,
+                })
+                core.info(`Reopened issue #${match.number}`)
+              } else {
+                core.info(`Escalation issue already open (#${match.number}); not spamming updates.`)
+              }
+              return
+            }
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+            })
+            core.info(`Created issue #${created.data.number}`)
