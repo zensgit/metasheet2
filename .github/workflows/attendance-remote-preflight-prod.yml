@@ -173,12 +173,30 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "- Status: **UNKNOWN** (preflight.log missing)" >> "$GITHUB_STEP_SUMMARY"
           else
+            # Determine PASS/FAIL primarily from the remote exit code to avoid stdout/stderr
+            # ordering flakiness (preflight writes to stderr, markers to stdout).
+            status="UNKNOWN"
+            if [[ -n "${PREFLIGHT_RC:-}" ]]; then
+              if [[ "${PREFLIGHT_RC}" == "0" || "${PREFLIGHT_RC}" == "97" ]]; then
+                status="PASS"
+              else
+                status="FAIL"
+              fi
+            fi
+
             preflight_block="$(
               awk '
                 /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; next }
-                /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0 }
-                printing { print }
-              ' "$preflight_log" | head -n 120
+                /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0; after=1; next }
+                printing { print; next }
+                after {
+                  # Include a small post-block tail to capture "Preflight OK" even when
+                  # stdout/stderr interleaving moves it after the END marker.
+                  print
+                  count++
+                  if (count >= 20) exit
+                }
+              ' "$preflight_log" | head -n 140
             )"
 
             if [[ -z "${preflight_block}" ]]; then
@@ -190,13 +208,6 @@ jobs:
               tail -n 80 "$preflight_log" >> "$GITHUB_STEP_SUMMARY" || true
               echo '```' >> "$GITHUB_STEP_SUMMARY"
             else
-              status="UNKNOWN"
-              if echo "$preflight_block" | grep -q "Preflight OK"; then
-                status="PASS"
-              elif echo "$preflight_block" | grep -q "\\[attendance-preflight\\] ERROR:" || echo "$preflight_block" | grep -q "\\[attendance-preflight\\]\\[skip\\]"; then
-                status="FAIL"
-              fi
-
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
               echo "" >> "$GITHUB_STEP_SUMMARY"
