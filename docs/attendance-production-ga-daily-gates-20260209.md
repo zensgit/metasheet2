@@ -118,6 +118,18 @@ gh workflow run attendance-strict-gates-prod.yml -f drill=true
 gh workflow run attendance-import-perf-baseline.yml -f drill=true
 ```
 
+Strict gates failure fast alert:
+
+- The strict gates workflow escalates `[Attendance Gate] Daily dashboard alert` immediately on failure (non-drill runs), without waiting for the scheduled dashboard.
+- Safe drill (expected FAIL, creates a non-notify issue title):
+
+```bash
+gh workflow run attendance-strict-gates-prod.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Gate Drill] Strict gates escalation test'
+```
+
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 
 Run on the production host (where backend binds to `127.0.0.1:8900`):
