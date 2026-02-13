@@ -110,8 +110,33 @@ if [[ "$volume_src" == /* || "$volume_src" == ./* || "$volume_src" == ../* || "$
   mountpoint="$bind_path"
 else
   # Named docker volume.
-  if ! mountpoint="$(docker volume inspect "$volume_src" --format '{{.Mountpoint}}' 2>/dev/null)"; then
-    die "docker volume inspect failed for '${volume_src}' (ensure deploy user has docker permission)"
+  inspect_err_1=""
+  inspect_err_2=""
+  if ! mountpoint="$(docker volume inspect "$volume_src" --format '{{.Mountpoint}}' 2>&1)"; then
+    inspect_err_1="$mountpoint"
+    mountpoint=""
+  fi
+
+  # Compose usually prefixes named volumes with the project name unless `volumes.<key>.name`
+  # is explicitly set. Fall back to "<project>_<key>" to locate the actual docker volume.
+  prefixed_name=""
+  if [[ -z "$mountpoint" ]]; then
+    project_name="${COMPOSE_PROJECT_NAME:-$(basename "$compose_dir")}"
+    prefixed_name="${project_name}_${volume_src}"
+    if ! mountpoint="$(docker volume inspect "$prefixed_name" --format '{{.Mountpoint}}' 2>&1)"; then
+      inspect_err_2="$mountpoint"
+      mountpoint=""
+    else
+      info "Resolved compose-prefixed volume: ${prefixed_name}"
+    fi
+  fi
+
+  if [[ -z "$mountpoint" ]]; then
+    err="$(echo "${inspect_err_2:-$inspect_err_1}" | tr -d '\r' | head -n 1)"
+    if [[ -n "$prefixed_name" ]]; then
+      die "docker volume inspect failed for '${volume_src}' (also tried '${prefixed_name}'): ${err}"
+    fi
+    die "docker volume inspect failed for '${volume_src}': ${err}"
   fi
 fi
 
