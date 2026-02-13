@@ -189,7 +189,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, strictGate, perfGate, overallStatus, findings }) {
+function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, strictGate, perfGate, overallStatus, p0Status, findings }) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -197,6 +197,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
   lines.push(`Lookback: \`${lookbackHoursValue}h\``)
+  lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
   lines.push('')
   lines.push('## Gate Status')
@@ -327,12 +328,14 @@ async function run() {
 
   const findings = [...preflightGate.findings, ...strictGate.findings, ...perfGate.findings]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
+  const p0Status = findings.some((f) => f && f.severity === 'P0') ? 'fail' : 'pass'
 
   const report = {
     generatedAt,
     repository: repo,
     branch,
     lookbackHours,
+    p0Status,
     overallStatus,
     gates: {
       preflight: preflightGate,
@@ -351,6 +354,7 @@ async function run() {
     strictGate,
     perfGate,
     overallStatus,
+    p0Status,
     findings,
   })
 
@@ -360,6 +364,7 @@ async function run() {
   await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
 
   const outputs = {
+    report_p0_status: p0Status,
     report_status: overallStatus,
     report_dir: outDir,
     report_markdown: markdownPath,
@@ -368,6 +373,7 @@ async function run() {
   await writeGithubOutput(outputs)
 
   console.log(`REPORT_STATUS=${overallStatus}`)
+  console.log(`REPORT_P0_STATUS=${p0Status}`)
   console.log(`REPORT_DIR=${outDir}`)
   console.log(`REPORT_MARKDOWN=${markdownPath}`)
   console.log(`REPORT_JSON=${jsonPath}`)

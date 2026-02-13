@@ -234,7 +234,8 @@ Purpose:
   - `P0`: strict gate failure
   - `P1`: perf gate failure or stale run
 - Remote preflight is also included as a `P0` gate (config drift detection).
-- Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` when dashboard status is `FAIL`.
+- Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
+- P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
 
 Schedule:
 
@@ -258,9 +259,19 @@ node scripts/ops/attendance-daily-gate-report.mjs
 Expected outputs:
 
 - `REPORT_STATUS=pass|fail`
+- `REPORT_P0_STATUS=pass|fail`
 - `REPORT_DIR=...`
 - `REPORT_MARKDOWN=...`
 - `REPORT_JSON=...`
+
+Safe drill (workflow_dispatch) to validate the P0 issue path without triggering outbound notifications:
+
+```bash
+gh workflow run attendance-daily-gate-dashboard.yml \
+  -f branch='nonexistent-branch-for-drill' \
+  -f lookback_hours=48 \
+  -f issue_title='[Attendance Gate Drill] Dashboard P0 escalation test'
+```
 
 ### D) Gate Issue Channel Sync (Slack / DingTalk)
 
