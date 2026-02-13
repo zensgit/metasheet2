@@ -88,6 +88,11 @@ Drill (expected FAIL, validates FAIL-path evidence upload):
 gh workflow run attendance-remote-preflight-prod.yml -f drill_fail=true
 ```
 
+Notes:
+
+- The daily gate dashboard uses the latest completed run conclusion. After running a drill (`drill_fail=true`),
+  trigger a normal run (`drill_fail=false`) to restore a PASS signal.
+
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 
 Run on the production host (where backend binds to `127.0.0.1:8900`):

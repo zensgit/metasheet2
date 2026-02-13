@@ -154,6 +154,10 @@ This record does not change the `GO` decision above; it captures a production re
 | Deploy (post-drill restore, expected PASS) | [#21974057204](https://github.com/zensgit/metasheet2/actions/runs/21974057204) | PASS | `output/playwright/ga/21974057204/deploy.log` |
 | Deploy (workflow_dispatch re-verify: smoke PASS requires SMOKE END marker) | [#21977059789](https://github.com/zensgit/metasheet2/actions/runs/21977059789) | PASS | `output/playwright/ga/21977059789/step-summary.md`, `output/playwright/ga/21977059789/deploy.log` |
 | Deploy (drill: smoke stage, expected FAIL; validates Smoke FAIL detection + artifacts) | [#21977247241](https://github.com/zensgit/metasheet2/actions/runs/21977247241) | FAIL (expected) | `output/playwright/ga/21977247241/step-summary.md`, `output/playwright/ga/21977247241/deploy.log` |
+| Remote Preflight (Prod) | [#21984121413](https://github.com/zensgit/metasheet2/actions/runs/21984121413) | PASS | `output/playwright/ga/21984121413/step-summary.md`, `output/playwright/ga/21984121413/preflight.log` |
+| Remote Preflight drill (expected FAIL) | [#21984026399](https://github.com/zensgit/metasheet2/actions/runs/21984026399) | FAIL (expected) | `output/playwright/ga/21984026399/step-summary.md`, `output/playwright/ga/21984026399/preflight.log` |
+| Daily Gate Dashboard (includes Remote Preflight gate) | [#21984145075](https://github.com/zensgit/metasheet2/actions/runs/21984145075) | PASS | `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (drill-induced FAIL, expected) | [#21984060098](https://github.com/zensgit/metasheet2/actions/runs/21984060098) | FAIL (expected) | `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.json` |
 
 Perf summary (`#21948416024`):
 

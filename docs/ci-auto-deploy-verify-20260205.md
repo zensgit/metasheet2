@@ -328,3 +328,27 @@ Drill verification (expected FAIL, ensures artifacts still upload and summary ma
 - Evidence (local):
   - `output/playwright/ga/21977247241/step-summary.md`
   - `output/playwright/ga/21977247241/deploy.log`
+
+## Update (2026-02-13): Remote Preflight (Prod) Gate + Evidence Artifacts
+
+Added a standalone remote preflight workflow for detecting config drift even when no deploy happens:
+
+- Workflow: `.github/workflows/attendance-remote-preflight-prod.yml`
+- Behavior:
+  - sync deploy host repo (`git pull --ff-only origin main`)
+  - run `scripts/ops/attendance-preflight.sh` on the deploy host
+  - upload `preflight.log` + `step-summary.md` artifacts (even on failure)
+
+PASS example:
+
+- Run: [#21984121413](https://github.com/zensgit/metasheet2/actions/runs/21984121413) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21984121413/step-summary.md`
+  - `output/playwright/ga/21984121413/preflight.log`
+
+Drill example (expected FAIL, validates FAIL-path evidence):
+
+- Run: [#21984026399](https://github.com/zensgit/metasheet2/actions/runs/21984026399) (`FAILURE`, expected, `drill_fail=true`)
+- Evidence (local):
+  - `output/playwright/ga/21984026399/step-summary.md`
+  - `output/playwright/ga/21984026399/preflight.log`
