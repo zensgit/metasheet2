@@ -809,3 +809,30 @@ Issue-to-channel sync workflow validation:
 - Notes:
   - Workflow was corrected to avoid unsupported `secrets.*` usage in step-level `if` by checking job `env` values.
   - With no webhook secrets configured, workflow exits successfully and writes warning summary (expected behavior).
+
+## Latest Notes (2026-02-13)
+
+Remote Storage Health gate validated (upload volume health + drill + dashboard):
+
+- Remote Storage Health (Prod):
+  - [Attendance Remote Storage Health (Prod) #21998389402](https://github.com/zensgit/metasheet2/actions/runs/21998389402) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21998389402/storage.log`
+    - `output/playwright/ga/21998389402/step-summary.md`
+- Drill (expected FAIL, safe title override):
+  - [Attendance Remote Storage Health (Prod) #21998434122](https://github.com/zensgit/metasheet2/actions/runs/21998434122) (`FAILURE`, expected)
+  - Issue: [#158](https://github.com/zensgit/metasheet2/issues/158)
+  - Evidence:
+    - `output/playwright/ga/21998434122/storage.log`
+    - `output/playwright/ga/21998434122/step-summary.md`
+- Drill recovery (auto-close issue):
+  - [Attendance Remote Storage Health (Prod) #21998473905](https://github.com/zensgit/metasheet2/actions/runs/21998473905) (`SUCCESS`)
+  - Issue: [#158](https://github.com/zensgit/metasheet2/issues/158)
+  - Evidence:
+    - `output/playwright/ga/21998473905/storage.log`
+    - `output/playwright/ga/21998473905/step-summary.md`
+- Daily Gate Dashboard includes `Storage Health` (P1):
+  - [Attendance Daily Gate Dashboard #21998506794](https://github.com/zensgit/metasheet2/actions/runs/21998506794) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.json`

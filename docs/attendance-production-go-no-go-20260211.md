@@ -226,3 +226,18 @@ This record validates:
 | Perf longrun (default P1 issue open on failure, expected FAIL) | [#21995762546](https://github.com/zensgit/metasheet2/actions/runs/21995762546) | FAIL (expected) | No artifacts (early failure); Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
 | Perf longrun recovery (default P1 issue auto-close) | [#21995802821](https://github.com/zensgit/metasheet2/actions/runs/21995802821) | PASS | `output/playwright/ga/21995802821/attendance-import-perf-longrun-trend-21995802821-1/20260213-171327/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
 | Daily Gate Dashboard (includes Perf Long Run gate) | [#21996392027](https://github.com/zensgit/metasheet2/actions/runs/21996392027) | PASS | `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.json` |
+
+## Post-Go Validation (2026-02-13): Remote Storage Health Gate
+
+This record validates:
+
+- The production host upload storage (CSV upload channel volume) can be checked remotely and produces auditable artifacts.
+- Drill FAIL/PASS issue behavior works with a safe override title (no paging).
+- Daily Gate Dashboard includes `Storage Health` (P1) and stays `PASS`.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Storage Health (Prod) | [#21998389402](https://github.com/zensgit/metasheet2/actions/runs/21998389402) | PASS | `output/playwright/ga/21998389402/storage.log`, `output/playwright/ga/21998389402/step-summary.md` |
+| Remote Storage Health drill (P1 issue open, expected FAIL) | [#21998434122](https://github.com/zensgit/metasheet2/actions/runs/21998434122) | FAIL (expected) | `output/playwright/ga/21998434122/storage.log`, `output/playwright/ga/21998434122/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
+| Remote Storage Health drill recovery (P1 issue auto-close) | [#21998473905](https://github.com/zensgit/metasheet2/actions/runs/21998473905) | PASS | `output/playwright/ga/21998473905/storage.log`, `output/playwright/ga/21998473905/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
+| Daily Gate Dashboard (includes Storage Health gate) | [#21998506794](https://github.com/zensgit/metasheet2/actions/runs/21998506794) | PASS | `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.json` |
