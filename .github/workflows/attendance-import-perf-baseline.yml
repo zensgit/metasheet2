@@ -10,6 +10,14 @@ on:
         description: 'Optional: mark run as [DRILL] and skip calling production APIs (true/false)'
         required: false
         default: 'false'
+      drill_fail:
+        description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -58,20 +66,31 @@ concurrency:
   group: attendance-import-perf-baseline
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   drill:
     if: github.event_name == 'workflow_dispatch' && inputs.drill == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
     steps:
       - name: Drill no-op (skip perf baseline)
         run: |
           set -euo pipefail
+          DRILL_FAIL="${DRILL_FAIL:-false}"
           mkdir -p output/playwright/attendance-import-perf/drill
           cat > output/playwright/attendance-import-perf/drill/drill.txt <<'EOF'
           This is a DRILL run for Attendance Import Perf Baseline.
           The workflow intentionally skips calling production APIs.
           EOF
+          if [[ "$DRILL_FAIL" == "true" ]]; then
+            echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
+            exit 97
+          fi
 
       - name: Upload drill artifacts
         if: always()
@@ -121,3 +140,129 @@ jobs:
           retention-days: 14
           path: |
             output/playwright/attendance-import-perf/**
+
+  issue:
+    name: Perf Issue Alert (P1)
+    needs: [drill, perf]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL: ${{ github.event.inputs.drill || 'false' }}
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      DRILL_RESULT: ${{ needs.drill.result }}
+      PERF_RESULT: ${{ needs.perf.result }}
+    steps:
+      - name: Open/update issue on failure (P1, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drill = String(process.env.DRILL || '').trim() === 'true'
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const drillResult = String(process.env.DRILL_RESULT || '').trim()
+            const perfResult = String(process.env.PERF_RESULT || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P1] Perf baseline alert'
+            const title = titleOverride || defaultTitle
+
+            const allowIssueOps = !drill || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const artifactName = `attendance-import-perf-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const failed = drillResult === 'failure' || perfResult === 'failure'
+            const statusLine = `jobs: perf=${perfResult || 'unknown'} drill=${drillResult || 'unknown'}${drill && drillFail ? ' (drill_fail=true)' : ''}`
+
+            const body = [
+              'Automated perf baseline tracking issue (P1, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              '',
+              `Artifacts: ${artifactName}`,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            // Recovery: close an existing open issue when the perf gate passes.
+            if (!match) {
+              core.info('No perf baseline issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Perf issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Perf baseline recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)
