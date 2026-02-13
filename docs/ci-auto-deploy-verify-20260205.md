@@ -200,3 +200,15 @@ Observed failure:
 - Run: [#21973784431](https://github.com/zensgit/metasheet2/actions/runs/21973784431) (`SUCCESS`)
 - Evidence (local):
   - `output/playwright/ga/21973784431/deploy.log`
+
+## Update (2026-02-13): Step Summary (Artifacts + Status Hint)
+
+Deploy Step Summary now includes:
+
+- a dedicated **Artifacts** section with the artifact name and a copy/paste `gh run download ...` command
+- a status hint when `Overall=FAIL` but `Preflight=PASS` (failure happened after preflight)
+
+- Workflow: **Build and Push Docker Images**
+- Run: [#21973932069](https://github.com/zensgit/metasheet2/actions/runs/21973932069) (`SUCCESS`)
+- Evidence (local):
+  - `output/playwright/ga/21973932069/deploy.log`

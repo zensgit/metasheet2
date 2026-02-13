@@ -141,6 +141,7 @@ This record does not change the `GO` decision above; it captures a production re
 | Deploy (workflow_dispatch re-verify preflight summary + artifacts) | [#21972069433](https://github.com/zensgit/metasheet2/actions/runs/21972069433) | PASS | `output/playwright/ga/21972069433/deploy.log` |
 | Deploy (failure drill: require-token misconfig, expected FAIL) | [#21973689456](https://github.com/zensgit/metasheet2/actions/runs/21973689456) | FAIL (expected) | `output/playwright/ga/21973689456/deploy.log` |
 | Deploy (post-drill restore, expected PASS) | [#21973784431](https://github.com/zensgit/metasheet2/actions/runs/21973784431) | PASS | `output/playwright/ga/21973784431/deploy.log` |
+| Deploy (step summary: artifact download + mismatch hint) | [#21973932069](https://github.com/zensgit/metasheet2/actions/runs/21973932069) | PASS | `output/playwright/ga/21973932069/deploy.log` |
 
 Perf summary (`#21948416024`):
 
