@@ -171,18 +171,23 @@ jobs:
               tail -n 80 "$deploy_log" >> "$GITHUB_STEP_SUMMARY" || true
               echo '```' >> "$GITHUB_STEP_SUMMARY"
             else
-              status="UNKNOWN"
+              preflight_status="UNKNOWN"
               if echo "$preflight_block" | grep -q "Preflight OK"; then
-                status="PASS"
+                preflight_status="PASS"
               elif echo "$preflight_block" | grep -q "\\[attendance-preflight\\] ERROR:"; then
-                status="FAIL"
+                preflight_status="FAIL"
               fi
               echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${preflight_status}**" >> "$GITHUB_STEP_SUMMARY"
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
               echo "$preflight_block" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+              if [[ "${overall}" == "FAIL" && "${preflight_status}" == "PASS" ]]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "- Note: preflight passed; failure happened after preflight (deploy/migrate/smoke). See \`${artifact_name}\`." >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
           fi
 
