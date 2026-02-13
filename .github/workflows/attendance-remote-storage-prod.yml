@@ -1,0 +1,406 @@
+name: Attendance Remote Storage Health (Prod)
+
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Remote Storage Health (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      drill_fail:
+        description: 'Optional: intentionally fail after storage check for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
+      max_fs_used_pct:
+        description: 'Fail when filesystem usage percent is >= this value (df used_pct)'
+        required: false
+        default: '90'
+      max_upload_dir_gb:
+        description: 'Fail when upload dir size is >= this value (GB)'
+        required: false
+        default: '10'
+      max_oldest_file_days:
+        description: 'Fail when oldest file age is >= this value (days)'
+        required: false
+        default: '14'
+  schedule:
+    # Daily at 02:12 UTC (after remote metrics at 02:10 UTC; before strict gates at 02:15 UTC).
+    - cron: '12 2 * * *'
+
+concurrency:
+  group: attendance-remote-storage-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      storage_rc: ${{ steps.remote_storage.outputs.storage_rc }}
+    steps:
+      - name: Remote storage check (with host sync logs)
+        id: remote_storage
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          MAX_FS_USED_PCT: ${{ github.event.inputs.max_fs_used_pct || '90' }}
+          MAX_UPLOAD_DIR_GB: ${{ github.event.inputs.max_upload_dir_gb || '10' }}
+          MAX_OLDEST_FILE_DAYS: ${{ github.event.inputs.max_oldest_file_days || '14' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DRILL_FAIL="${DRILL_FAIL:-false}"
+
+          MAX_FS_USED_PCT="${MAX_FS_USED_PCT:-90}"
+          MAX_UPLOAD_DIR_GB="${MAX_UPLOAD_DIR_GB:-10}"
+          MAX_OLDEST_FILE_DAYS="${MAX_OLDEST_FILE_DAYS:-14}"
+
+          mkdir -p output/storage
+          storage_log="output/storage/storage.log"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
+            "DRILL_FAIL=\"${DRILL_FAIL}\""
+            "MAX_FS_USED_PCT=\"${MAX_FS_USED_PCT}\""
+            "MAX_UPLOAD_DIR_GB=\"${MAX_UPLOAD_DIR_GB}\""
+            "MAX_OLDEST_FILE_DAYS=\"${MAX_OLDEST_FILE_DAYS}\""
+            "cd \"${DEPLOY_PATH}\""
+            "echo \"=== HOST SYNC START ===\""
+            "host_sync_rc=0"
+            "set +e"
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
+            'host_sync_rc=$?'
+            "set -e"
+            'echo "[host-sync] rc=$host_sync_rc"'
+            "echo \"=== HOST SYNC END ===\""
+            "echo \"=== ATTENDANCE STORAGE START ===\""
+            "storage_rc=0"
+            'if [[ "$host_sync_rc" != "0" ]]; then'
+              '  echo "[attendance-storage][skip] host sync failed: rc=$host_sync_rc"'
+              '  storage_rc="$host_sync_rc"'
+            "else"
+              "  set +e"
+              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FS_USED_PCT=\"${MAX_FS_USED_PCT}\" MAX_UPLOAD_DIR_GB=\"${MAX_UPLOAD_DIR_GB}\" MAX_OLDEST_FILE_DAYS=\"${MAX_OLDEST_FILE_DAYS}\" scripts/ops/attendance-check-storage.sh"
+              '  storage_rc=$?'
+              "  set -e"
+            "fi"
+            "echo \"=== ATTENDANCE STORAGE END ===\""
+            'if [[ "$storage_rc" != "0" ]]; then exit "$storage_rc"; fi'
+            "if [[ \"${DRILL_FAIL}\" == \"true\" ]]; then echo \"[storage][drill] intentional failure after storage check\"; exit 97; fi"
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$storage_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "storage_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "storage_log=$storage_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary (storage + runbooks)
+        if: always()
+        env:
+          STORAGE_RC: ${{ steps.remote_storage.outputs.storage_rc }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+        run: |
+          set -euo pipefail
+          storage_log="output/storage/storage.log"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          artifact_name="attendance-remote-storage-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          overall="UNKNOWN"
+          if [[ -n "${STORAGE_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${STORAGE_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
+
+          rc_meaning="unknown"
+          case "${STORAGE_RC:-}" in
+            "")
+              rc_meaning="missing"
+              ;;
+            0)
+              rc_meaning="success"
+              ;;
+            97)
+              rc_meaning="drill: intentional failure after storage check"
+              ;;
+            *)
+              rc_meaning="remote failure (see logs)"
+              ;;
+          esac
+
+          echo "## Remote Storage Health (Prod)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${STORAGE_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$storage_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (storage.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            host_sync_block="$(
+              awk '
+                /^=== HOST SYNC START ===$/ { printing=1; next }
+                /^=== HOST SYNC END ===$/ { printing=0 }
+                printing { print }
+              ' "$storage_log" | head -n 80
+            )"
+
+            if [[ -z "${host_sync_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see storage.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              host_sync_status="UNKNOWN"
+              if echo "$host_sync_block" | grep -q "\\[host-sync\\] rc=0"; then
+                host_sync_status="PASS"
+              elif echo "$host_sync_block" | grep -q "\\[host-sync\\] rc="; then
+                host_sync_status="FAIL"
+              fi
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${host_sync_status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$host_sync_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Storage Output" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$storage_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (storage.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            status="UNKNOWN"
+            if [[ -n "${STORAGE_RC:-}" ]]; then
+              if [[ "${STORAGE_RC}" == "0" || "${STORAGE_RC}" == "97" ]]; then
+                status="PASS"
+              else
+                status="FAIL"
+              fi
+            fi
+
+            storage_block="$(
+              awk '
+                /^=== ATTENDANCE STORAGE START ===$/ { printing=1; next }
+                /^=== ATTENDANCE STORAGE END ===$/ { printing=0; after=1; next }
+                printing { print; next }
+                after {
+                  print
+                  count++
+                  if (count >= 20) exit
+                }
+              ' "$storage_log" | head -n 140
+            )"
+
+            if [[ -z "${storage_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see storage.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Last 80 log lines:" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              tail -n 80 "$storage_log" >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$storage_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Storage logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/storage.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Daily gates handbook: ${repo_url}/blob/main/docs/attendance-production-ga-daily-gates-20260209.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+
+          mkdir -p output/storage
+          cp "$GITHUB_STEP_SUMMARY" output/storage/step-summary.md
+
+      - name: Upload storage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-remote-storage-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/storage/**
+
+      - name: Fail when remote storage failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_storage.outputs.storage_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "storage_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote storage health check failed: rc=$rc" >&2
+            exit 1
+          fi
+
+  issue:
+    name: Storage Issue Alert (P1)
+    needs: [storage]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      STORAGE_RESULT: ${{ needs.storage.result }}
+      STORAGE_RC: ${{ needs.storage.outputs.storage_rc }}
+    steps:
+      - name: Open/update issue on failure (P1, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const storageResult = String(process.env.STORAGE_RESULT || '').trim()
+            const storageRc = String(process.env.STORAGE_RC || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P1] Storage health alert'
+            const title = titleOverride || defaultTitle
+
+            // Avoid creating drill issues unless explicitly requested via override title.
+            const allowIssueOps = !drillFail || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const artifactName = `attendance-remote-storage-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const failed = storageResult === 'failure'
+            const statusLine = `job: storage=${storageResult || 'unknown'} rc=${storageRc || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+
+            const body = [
+              'Automated storage health tracking issue (P1, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              '',
+              `Artifacts: ${artifactName}`,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            // Recovery: close an existing open issue when the storage gate passes.
+            if (!match) {
+              core.info('No storage health issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Storage health issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Storage health recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)
+

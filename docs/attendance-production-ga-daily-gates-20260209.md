@@ -95,8 +95,10 @@ Notes:
 - The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for:
   - `Remote Preflight`
   - `Host Metrics`
+  - `Storage Health`
   - `Strict Gates`
   - `Perf Baseline`
+  - `Perf Long Run`
 - If the latest non-drill run becomes stale (lookback window), trigger a normal run (`drill_fail=false`) to refresh the signal.
 - Remote preflight failures will open/reopen the escalation issue titled:
   - `[Attendance Gate] Daily dashboard alert`
@@ -183,6 +185,57 @@ gh workflow run attendance-remote-metrics-prod.yml \
 ```
 - You can override the target:
   - `METRICS_URL="http://127.0.0.1:8900/metrics/prom" scripts/ops/attendance-check-metrics.sh`
+
+### 2.5) Remote Storage Health (Prod) (Upload Volume Drift Gate)
+
+This gate checks the health of the upload volume used by the CSV upload channel (`/attendance/import/upload`).
+
+Workflow:
+
+- `.github/workflows/attendance-remote-storage-prod.yml`
+
+Schedule:
+
+- Daily at `02:12 UTC` (between remote metrics at `02:10 UTC` and strict gates at `02:15 UTC`).
+
+Manual trigger:
+
+```bash
+gh workflow run attendance-remote-storage-prod.yml -f drill_fail=false
+```
+
+Optional thresholds (workflow inputs):
+
+- `max_fs_used_pct` (default: `90`)
+- `max_upload_dir_gb` (default: `10`)
+- `max_oldest_file_days` (default: `14`)
+
+Artifacts:
+
+- Download:
+  - `gh run download <RUN_ID> -n "attendance-remote-storage-prod-<RUN_ID>-1" -D "output/playwright/ga/<RUN_ID>"`
+- Evidence (local, after download):
+  - `output/playwright/ga/<RUN_ID>/storage.log`
+  - `output/playwright/ga/<RUN_ID>/step-summary.md`
+
+Expected:
+
+- PASS, and the log contains the computed values:
+  - `df_used_pct=...`
+  - `upload_gb=...`
+  - `oldest_file_days=...`
+
+Notes:
+
+- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` runs when selecting the latest completed `Storage Health` gate run.
+- On non-drill failures, this workflow opens/reopens: `[Attendance P1] Storage health alert` (no paging).
+- Safe drill to validate the FAIL-path issue behavior with a safe override title:
+
+```bash
+gh workflow run attendance-remote-storage-prod.yml \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Storage Drill] Storage issue test'
+```
 
 ### 3) 10k Import Perf Baseline (Rollback Enabled)
 
@@ -326,10 +379,10 @@ Workflow:
 
 Purpose:
 
-- Build a daily dashboard from latest strict/perf/perf-longrun workflow runs.
+- Build a daily dashboard from the latest gate workflow runs (remote + strict + perf).
 - Apply escalation rules automatically:
   - `P0`: strict gate failure
-  - `P1`: perf gate failure/stale run, perf longrun failure/stale run
+  - `P1`: host metrics/storage health/perf baseline/perf longrun failure or stale runs
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.

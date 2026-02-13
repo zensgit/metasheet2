@@ -20,6 +20,7 @@ const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').r
 const branch = String(process.env.BRANCH || 'main').trim()
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
+const storageWorkflow = String(process.env.STORAGE_WORKFLOW || 'attendance-remote-storage-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
@@ -191,7 +192,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, strictGate, perfGate, longrunGate, overallStatus, p0Status, findings }) {
+function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, storageGate, strictGate, perfGate, longrunGate, overallStatus, p0Status, findings }) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -207,7 +208,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
   lines.push('|---|---|---|---|---|---|---|')
 
-  for (const gate of [preflightGate, metricsGate, strictGate, perfGate, longrunGate]) {
+  for (const gate of [preflightGate, metricsGate, storageGate, strictGate, perfGate, longrunGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -275,6 +276,7 @@ async function run() {
 
   const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
   const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
+  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
@@ -288,6 +290,11 @@ async function run() {
   const metricsList = metricsListRaw.filter((run) => !isDrillRun(run))
   if (metricsListRaw.length !== metricsList.length) {
     info(`metrics: filtered drill runs (${metricsListRaw.length - metricsList.length})`)
+  }
+  const storageListRaw = Array.isArray(storageRuns?.list) ? storageRuns.list : []
+  const storageList = storageListRaw.filter((run) => !isDrillRun(run))
+  if (storageListRaw.length !== storageList.length) {
+    info(`storage: filtered drill runs (${storageListRaw.length - storageList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const strictList = strictListRaw.filter((run) => !isDrillRun(run))
@@ -309,6 +316,8 @@ async function run() {
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
   const metricsLatestAny = metricsList[0] ?? null
   const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
+  const storageLatestAny = storageList[0] ?? null
+  const storageLatestCompleted = storageList.find((run) => run?.status === 'completed') ?? null
   const strictLatestAny = strictList[0] ?? null
   const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
   const perfLatestAny = perfList[0] ?? null
@@ -333,6 +342,15 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: metricsRuns.error,
+  })
+  const storageGate = evaluateGate({
+    name: 'Storage Health',
+    severity: 'P1',
+    latestAny: storageLatestAny,
+    latestCompleted: storageLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: storageRuns.error,
   })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
@@ -366,6 +384,7 @@ async function run() {
   const findings = [
     ...preflightGate.findings,
     ...metricsGate.findings,
+    ...storageGate.findings,
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
@@ -383,6 +402,7 @@ async function run() {
     gates: {
       preflight: preflightGate,
       metrics: metricsGate,
+      storage: storageGate,
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
@@ -397,6 +417,7 @@ async function run() {
     lookbackHoursValue: lookbackHours,
     preflightGate,
     metricsGate,
+    storageGate,
     strictGate,
     perfGate,
     longrunGate,

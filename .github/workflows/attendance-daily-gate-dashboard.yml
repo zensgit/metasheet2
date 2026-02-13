@@ -38,6 +38,7 @@ jobs:
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
       PREFLIGHT_WORKFLOW: attendance-remote-preflight-prod.yml
       METRICS_WORKFLOW: attendance-remote-metrics-prod.yml
+      STORAGE_WORKFLOW: attendance-remote-storage-prod.yml
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
