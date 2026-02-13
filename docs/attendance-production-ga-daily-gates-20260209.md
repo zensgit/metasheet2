@@ -94,6 +94,7 @@ Notes:
 - Drill runs are tagged with `run-name` suffix `[DRILL]`.
 - The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for:
   - `Remote Preflight`
+  - `Host Metrics`
   - `Strict Gates`
   - `Perf Baseline`
 - If the latest non-drill run becomes stale (lookback window), trigger a normal run (`drill_fail=false`) to refresh the signal.
@@ -124,6 +125,25 @@ Run on the production host (where backend binds to `127.0.0.1:8900`):
 ```bash
 scripts/ops/attendance-check-metrics.sh
 ```
+
+Remote run (recommended, no workstation access required):
+
+- Workflow: `.github/workflows/attendance-remote-metrics-prod.yml`
+- Schedule: daily at `02:10 UTC`
+
+Manual trigger:
+
+```bash
+gh workflow run attendance-remote-metrics-prod.yml -f drill_fail=false
+```
+
+Artifacts:
+
+- Download:
+  - `gh run download <RUN_ID> -n "attendance-remote-metrics-prod-<RUN_ID>-1" -D "output/playwright/ga/<RUN_ID>"`
+- Evidence (local, after download):
+  - `output/playwright/ga/<RUN_ID>/metrics.log`
+  - `output/playwright/ga/<RUN_ID>/step-summary.md`
 
 Expected:
 
