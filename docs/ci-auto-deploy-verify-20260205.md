@@ -388,3 +388,4 @@ Safe drill verification (expected FAIL, uses a title override that does **not** 
 - Evidence (local):
   - `output/playwright/ga/21985036421/step-summary.md`
   - `output/playwright/ga/21985036421/preflight.log`
+- Issue created (drill, safe title override): [#151](https://github.com/zensgit/metasheet2/issues/151)
