@@ -268,12 +268,19 @@ jobs:
             smoke_reason="start marker missing"
             if has "=== SMOKE START ==="; then
               smoke_stage="FAIL"
-              smoke_reason="start marker present; success line missing"
-              if grep -q "Smoke: api/plugins=ok health=ok web=ok" "$deploy_log"; then
+              smoke_reason="start marker present; end marker missing; success line missing"
+              has_smoke_end="false"
+              if has "=== SMOKE END ==="; then
+                has_smoke_end="true"
+              fi
+              if grep -q "Smoke: api/plugins=ok health=ok web=ok" "$deploy_log" && [[ "$has_smoke_end" == "true" ]]; then
                 smoke_stage="PASS"
-                smoke_reason="success line present"
-              elif has "=== SMOKE END ==="; then
-                smoke_reason="end marker present; success line missing"
+                smoke_reason="end marker present; success line present"
+              elif grep -q "Smoke: api/plugins=ok health=ok web=ok" "$deploy_log" && [[ "$has_smoke_end" != "true" ]]; then
+                smoke_reason="success line present; end marker missing (log truncated or script changed)"
+              elif [[ "$has_smoke_end" == "true" ]]; then
+                smoke_stage="UNKNOWN"
+                smoke_reason="end marker present; success line missing/changed"
               fi
             fi
 
