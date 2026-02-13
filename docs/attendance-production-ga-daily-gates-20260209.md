@@ -97,6 +97,15 @@ Notes:
 - Remote preflight failures will open/reopen the escalation issue titled:
   - `[Attendance Gate] Daily dashboard alert`
   - This provides fast notifications without waiting for the scheduled dashboard run.
+- To validate issue escalation without triggering Slack/DingTalk notifications, run a drill with a safe override title:
+
+```bash
+gh workflow run attendance-remote-preflight-prod.yml \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Gate Drill] Remote preflight issue test'
+```
+
+- The notify workflow only sends outbound notifications when the issue title starts with `[Attendance Gate]`.
 
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 

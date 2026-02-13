@@ -373,3 +373,18 @@ Verification:
   - Evidence (local):
     - `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.md`
     - `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.json`
+
+## Update (2026-02-13): Remote Preflight Failure Escalates Issue (Fast Alert)
+
+Remote preflight failures open/reopen the escalation issue titled:
+
+- `[Attendance Gate] Daily dashboard alert`
+
+This triggers the issue-based notifier workflow (Slack/DingTalk if configured) without waiting for the scheduled dashboard run.
+
+Safe drill verification (expected FAIL, uses a title override that does **not** start with `[Attendance Gate]` to avoid outbound notifications):
+
+- Run: [#21985036421](https://github.com/zensgit/metasheet2/actions/runs/21985036421) (`FAILURE`, expected)
+- Evidence (local):
+  - `output/playwright/ga/21985036421/step-summary.md`
+  - `output/playwright/ga/21985036421/preflight.log`
