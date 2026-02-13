@@ -32,6 +32,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BRANCH: ${{ inputs.branch || 'main' }}
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
+      PREFLIGHT_WORKFLOW: attendance-remote-preflight-prod.yml
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
     steps:

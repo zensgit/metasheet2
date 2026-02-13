@@ -1,0 +1,209 @@
+name: Attendance Remote Preflight (Prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      drill_fail:
+        description: 'Optional: intentionally fail after preflight for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+  schedule:
+    # Daily at 02:05 UTC (before strict gates at 02:15 UTC).
+    - cron: '5 2 * * *'
+
+concurrency:
+  group: attendance-remote-preflight-prod
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Remote preflight (with host sync logs)
+        id: remote_preflight
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DRILL_FAIL="${DRILL_FAIL:-false}"
+
+          mkdir -p output/preflight
+          preflight_log="output/preflight/preflight.log"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
+            "DRILL_FAIL=\"${DRILL_FAIL}\""
+            "cd \"${DEPLOY_PATH}\""
+            "echo \"=== HOST SYNC START ===\""
+            "host_sync_rc=0"
+            "set +e"
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1"
+            "git fetch origin main"
+            "git checkout main"
+            "git pull --ff-only origin main"
+            "host_sync_rc=$?"
+            "set -e"
+            "echo \"=== HOST SYNC END ===\""
+            "echo \"=== ATTENDANCE PREFLIGHT START ===\""
+            "preflight_rc=0"
+            "if [[ \"$host_sync_rc\" != \"0\" ]]; then"
+              "  echo \"[attendance-preflight][skip] host sync failed: rc=$host_sync_rc\""
+              "  preflight_rc=\"$host_sync_rc\""
+            "else"
+              "  set +e"
+              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" NGINX_CONF=\"docker/nginx.conf\" scripts/ops/attendance-preflight.sh"
+              "  preflight_rc=$?"
+              "  set -e"
+            "fi"
+            "echo \"=== ATTENDANCE PREFLIGHT END ===\""
+            "if [[ \"$preflight_rc\" != \"0\" ]]; then exit \"$preflight_rc\"; fi"
+            "if [[ \"${DRILL_FAIL}\" == \"true\" ]]; then echo \"[preflight][drill] intentional failure after preflight\"; exit 97; fi"
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$preflight_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "preflight_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "preflight_log=$preflight_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary (preflight + runbooks)
+        if: always()
+        env:
+          PREFLIGHT_RC: ${{ steps.remote_preflight.outputs.preflight_rc }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+        run: |
+          set -euo pipefail
+          preflight_log="output/preflight/preflight.log"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          artifact_name="attendance-remote-preflight-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          overall="UNKNOWN"
+          if [[ -n "${PREFLIGHT_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${PREFLIGHT_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
+
+          rc_meaning="unknown"
+          case "${PREFLIGHT_RC:-}" in
+            "")
+              rc_meaning="missing"
+              ;;
+            0)
+              rc_meaning="success"
+              ;;
+            97)
+              rc_meaning="drill: intentional failure after preflight"
+              ;;
+            *)
+              rc_meaning="remote failure (see logs)"
+              ;;
+          esac
+
+          echo "## Remote Preflight (Prod)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${PREFLIGHT_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Preflight Output" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f "$preflight_log" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: **UNKNOWN** (preflight.log missing)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            preflight_block="$(
+              awk '
+                /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; next }
+                /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0 }
+                printing { print }
+              ' "$preflight_log" | head -n 120
+            )"
+
+            if [[ -z "${preflight_block}" ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **UNKNOWN** (markers missing, see preflight.log artifact)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Last 80 log lines:" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              tail -n 80 "$preflight_log" >> "$GITHUB_STEP_SUMMARY" || true
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            else
+              status="UNKNOWN"
+              if echo "$preflight_block" | grep -q "Preflight OK"; then
+                status="PASS"
+              elif echo "$preflight_block" | grep -q "\\[attendance-preflight\\] ERROR:" || echo "$preflight_block" | grep -q "\\[attendance-preflight\\]\\[skip\\]"; then
+                status="FAIL"
+              fi
+
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Status: **${status}**" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo "$preflight_block" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Preflight logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/preflight.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upload channel troubleshooting: ${repo_url}/blob/main/docs/attendance-production-import-upload-channel-20260212.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+
+          # Archive step summary alongside preflight.log for offline audit/review.
+          mkdir -p output/preflight
+          cp "$GITHUB_STEP_SUMMARY" output/preflight/step-summary.md
+
+      - name: Upload preflight artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-remote-preflight-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/preflight/**
+
+      - name: Fail when remote preflight failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_preflight.outputs.preflight_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "preflight_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote preflight failed: rc=$rc" >&2
+            exit 1
+          fi
+

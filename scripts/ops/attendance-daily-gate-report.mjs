@@ -18,6 +18,7 @@ const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').tri
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
 const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')
 const branch = String(process.env.BRANCH || 'main').trim()
+const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
@@ -71,6 +72,19 @@ async function apiGet(pathname) {
   return body
 }
 
+async function tryGetWorkflowRuns({ ownerValue, repoValue, workflowFile, branchValue }) {
+  const pathname = `/repos/${ownerValue}/${repoValue}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?branch=${encodeURIComponent(branchValue)}&per_page=20`
+  try {
+    const body = await apiGet(pathname)
+    const list = Array.isArray(body?.workflow_runs) ? body.workflow_runs : []
+    return { list, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: failed to query workflow runs for ${workflowFile}: ${message}`)
+    return { list: [], error: message }
+  }
+}
+
 function ageHours(now, iso) {
   if (!iso) return Number.POSITIVE_INFINITY
   const value = Date.parse(iso)
@@ -101,11 +115,30 @@ function formatRun(run) {
   }
 }
 
-function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue }) {
+function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError }) {
   const findings = []
   let ok = true
   const completed = formatRun(latestCompleted)
   const latest = formatRun(latestAny)
+
+  if (fetchError) {
+    ok = false
+    findings.push({
+      severity,
+      code: 'WORKFLOW_QUERY_FAILED',
+      gate: name,
+      message: `${name}: failed to query workflow runs: ${fetchError}`,
+      runUrl: null,
+    })
+    return {
+      name,
+      severity,
+      ok,
+      latest,
+      completed,
+      findings,
+    }
+  }
 
   if (!latestCompleted) {
     ok = false
@@ -150,7 +183,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, strictGate, perfGate, overallStatus, findings }) {
+function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, strictGate, perfGate, overallStatus, findings }) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -165,7 +198,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
   lines.push('|---|---|---|---|---|---|---|')
 
-  for (const gate of [strictGate, perfGate]) {
+  for (const gate of [preflightGate, strictGate, perfGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -178,7 +211,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('')
   lines.push('## Escalation Rules')
   lines.push('')
-  lines.push('- `P0` (Strict gate failure): immediate production block, rerun strict gate after fix, do not proceed with release actions.')
+  lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
   lines.push('- `P1` (Perf gate failure/stale runs): fix same day, rerun perf baseline with thresholds and record evidence.')
   lines.push('- `P2` (missing evidence metadata only): update docs within 24h.')
   lines.push('')
@@ -199,7 +232,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('')
   lines.push('## Suggested Actions')
   lines.push('')
-  lines.push('1. Re-run strict gate manually when any `P0` finding exists.')
+  lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
   lines.push('2. Re-run perf baseline manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   return `${lines.join('\n')}\n`
@@ -231,17 +264,30 @@ async function run() {
 
   info(`repository=${repo} branch=${branch}`)
 
-  const strictRuns = await apiGet(`/repos/${owner}/${repoName}/actions/workflows/${encodeURIComponent(strictWorkflow)}/runs?branch=${encodeURIComponent(branch)}&per_page=20`)
-  const perfRuns = await apiGet(`/repos/${owner}/${repoName}/actions/workflows/${encodeURIComponent(perfWorkflow)}/runs?branch=${encodeURIComponent(branch)}&per_page=20`)
+  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
+  const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
+  const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
 
-  const strictList = Array.isArray(strictRuns?.workflow_runs) ? strictRuns.workflow_runs : []
-  const perfList = Array.isArray(perfRuns?.workflow_runs) ? perfRuns.workflow_runs : []
+  const preflightList = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
+  const strictList = Array.isArray(strictRuns?.list) ? strictRuns.list : []
+  const perfList = Array.isArray(perfRuns?.list) ? perfRuns.list : []
 
+  const preflightLatestAny = preflightList[0] ?? null
+  const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
   const strictLatestAny = strictList[0] ?? null
   const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
   const perfLatestAny = perfList[0] ?? null
   const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
 
+  const preflightGate = evaluateGate({
+    name: 'Remote Preflight',
+    severity: 'P0',
+    latestAny: preflightLatestAny,
+    latestCompleted: preflightLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: preflightRuns.error,
+  })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
     severity: 'P0',
@@ -249,6 +295,7 @@ async function run() {
     latestCompleted: strictLatestCompleted,
     now,
     lookbackHoursValue: lookbackHours,
+    fetchError: strictRuns.error,
   })
   const perfGate = evaluateGate({
     name: 'Perf Baseline',
@@ -257,9 +304,10 @@ async function run() {
     latestCompleted: perfLatestCompleted,
     now,
     lookbackHoursValue: lookbackHours,
+    fetchError: perfRuns.error,
   })
 
-  const findings = [...strictGate.findings, ...perfGate.findings]
+  const findings = [...preflightGate.findings, ...strictGate.findings, ...perfGate.findings]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
 
   const report = {
@@ -269,6 +317,7 @@ async function run() {
     lookbackHours,
     overallStatus,
     gates: {
+      preflight: preflightGate,
       strict: strictGate,
       perf: perfGate,
     },
@@ -280,6 +329,7 @@ async function run() {
     repoValue: repo,
     branchValue: branch,
     lookbackHoursValue: lookbackHours,
+    preflightGate,
     strictGate,
     perfGate,
     overallStatus,

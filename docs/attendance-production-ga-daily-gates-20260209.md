@@ -48,6 +48,46 @@ Evidence:
 - The runner prints two evidence directories under:
   - `output/playwright/attendance-prod-acceptance/*`
 
+### 1.5) Remote Preflight (Prod) (Config Drift Gate)
+
+This gate detects production config drift even when no deploy occurs.
+
+Workflow:
+
+- `.github/workflows/attendance-remote-preflight-prod.yml`
+
+Schedule:
+
+- Daily at `02:05 UTC` (before strict gates at `02:15 UTC`).
+
+Manual trigger:
+
+```bash
+gh workflow run attendance-remote-preflight-prod.yml -f drill_fail=false
+```
+
+Expected:
+
+- `SUCCESS`
+- Step Summary includes:
+  - PASS/FAIL
+  - preflight output snippet (markers)
+  - runbook links
+
+Artifacts:
+
+- Download:
+  - `gh run download <RUN_ID> -n "attendance-remote-preflight-prod-<RUN_ID>-1" -D "output/playwright/ga/<RUN_ID>"`
+- Evidence (local, after download):
+  - `output/playwright/ga/<RUN_ID>/preflight.log`
+  - `output/playwright/ga/<RUN_ID>/step-summary.md`
+
+Drill (expected FAIL, validates FAIL-path evidence upload):
+
+```bash
+gh workflow run attendance-remote-preflight-prod.yml -f drill_fail=true
+```
+
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 
 Run on the production host (where backend binds to `127.0.0.1:8900`):
@@ -164,6 +204,7 @@ Purpose:
 - Apply escalation rules automatically:
   - `P0`: strict gate failure
   - `P1`: perf gate failure or stale run
+- Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` when dashboard status is `FAIL`.
 
 Schedule:
