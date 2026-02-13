@@ -90,8 +90,9 @@ gh workflow run attendance-remote-preflight-prod.yml -f drill_fail=true
 
 Notes:
 
-- The daily gate dashboard uses the latest completed run conclusion. After running a drill (`drill_fail=true`),
-  trigger a normal run (`drill_fail=false`) to restore a PASS signal.
+- Drill runs are tagged with `run-name` suffix `[DRILL]`.
+- The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for the `Remote Preflight` gate.
+- If the latest non-drill run becomes stale (lookback window), trigger a normal run (`drill_fail=false`) to refresh the signal.
 
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 

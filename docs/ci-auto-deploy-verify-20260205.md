@@ -352,3 +352,23 @@ Drill example (expected FAIL, validates FAIL-path evidence):
 - Evidence (local):
   - `output/playwright/ga/21984026399/step-summary.md`
   - `output/playwright/ga/21984026399/preflight.log`
+
+## Update (2026-02-13): Tag Drill Runs + Daily Dashboard Ignores Them
+
+To avoid `P0` false-alarms during drills:
+
+- `attendance-remote-preflight-prod.yml` tags drill runs with `run-name` suffix: `[DRILL]`
+- `attendance-daily-gate-report.mjs` filters out `[DRILL]` runs when selecting the latest completed `Remote Preflight` run
+
+Verification:
+
+- Drill run (tagged `[DRILL]`, expected FAIL):
+  - Run: [#21984401016](https://github.com/zensgit/metasheet2/actions/runs/21984401016) (`FAILURE`, expected)
+  - Evidence (local):
+    - `output/playwright/ga/21984401016/step-summary.md`
+    - `output/playwright/ga/21984401016/preflight.log`
+- Daily dashboard still PASS (ignores `[DRILL]`):
+  - Run: [#21984436363](https://github.com/zensgit/metasheet2/actions/runs/21984436363) (`SUCCESS`)
+  - Evidence (local):
+    - `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.json`
