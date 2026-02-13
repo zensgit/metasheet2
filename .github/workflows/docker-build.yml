@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       drill_fail_stage:
-        description: 'Optional: intentionally fail deploy at a stage for summary drill (none|migrate|smoke)'
+        description: 'Optional: intentionally fail deploy at a stage for summary drill (none|deploy|migrate|smoke)'
         required: false
         default: 'none'
 
@@ -102,6 +102,7 @@ jobs:
             "echo \"=== ATTENDANCE PREFLIGHT END ===\""
             'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
+            'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
             "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
             "echo \"=== DEPLOY END ===\""
@@ -251,6 +252,24 @@ jobs:
             echo "- Deploy: **${deploy_stage}**" >> "$GITHUB_STEP_SUMMARY"
             echo "- Migrate: **${migrate_stage}**" >> "$GITHUB_STEP_SUMMARY"
             echo "- Smoke: **${smoke_stage}**" >> "$GITHUB_STEP_SUMMARY"
+
+            if [[ "${deploy_stage}" != "PASS" && "${deploy_stage}" != "UNKNOWN" ]]; then
+              # Deploy failures often contain the most actionable error message near the end.
+              deploy_block="$(
+                awk '
+                  $0 == "=== DEPLOY START ===" { printing=1; next }
+                  printing { print }
+                ' "$deploy_log" | tail -n 80
+              )"
+              if [[ -n "${deploy_block}" ]]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "### Deploy Output (tail)" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "$deploy_block" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
 
             if [[ "${migrate_stage}" != "PASS" && "${migrate_stage}" != "UNKNOWN" ]]; then
               migrate_block="$(extract_block "=== MIGRATE START ===" "=== MIGRATE END ===" 80 || true)"
