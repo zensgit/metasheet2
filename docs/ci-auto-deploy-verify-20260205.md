@@ -321,3 +321,10 @@ Verification:
 - Evidence (local):
   - `output/playwright/ga/21977059789/step-summary.md`
   - `output/playwright/ga/21977059789/deploy.log`
+
+Drill verification (expected FAIL, ensures artifacts still upload and summary marks Smoke as FAIL):
+
+- Run: [#21977247241](https://github.com/zensgit/metasheet2/actions/runs/21977247241) (`FAILURE`, expected, `drill_fail_stage=smoke`)
+- Evidence (local):
+  - `output/playwright/ga/21977247241/step-summary.md`
+  - `output/playwright/ga/21977247241/deploy.log`
