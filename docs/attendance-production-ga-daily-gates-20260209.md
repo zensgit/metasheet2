@@ -92,7 +92,10 @@ gh workflow run attendance-remote-preflight-prod.yml -f drill_fail=true
 Notes:
 
 - Drill runs are tagged with `run-name` suffix `[DRILL]`.
-- The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for the `Remote Preflight` gate.
+- The daily gate dashboard ignores `[DRILL]` runs and uses the latest **non-drill** completed run for:
+  - `Remote Preflight`
+  - `Strict Gates`
+  - `Perf Baseline`
 - If the latest non-drill run becomes stale (lookback window), trigger a normal run (`drill_fail=false`) to refresh the signal.
 - Remote preflight failures will open/reopen the escalation issue titled:
   - `[Attendance Gate] Daily dashboard alert`
@@ -106,6 +109,13 @@ gh workflow run attendance-remote-preflight-prod.yml \
 ```
 
 - The notify workflow only sends outbound notifications when the issue title starts with `[Attendance Gate]`.
+
+Strict/perf drill tagging (no production API calls, dashboard ignores these runs):
+
+```bash
+gh workflow run attendance-strict-gates-prod.yml -f drill=true
+gh workflow run attendance-import-perf-baseline.yml -f drill=true
+```
 
 ### 2) Host Metrics Sanity (Ops-only, on production host)
 

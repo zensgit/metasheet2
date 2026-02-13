@@ -279,8 +279,16 @@ async function run() {
   if (preflightListRaw.length !== preflightList.length) {
     info(`preflight: filtered drill runs (${preflightListRaw.length - preflightList.length})`)
   }
-  const strictList = Array.isArray(strictRuns?.list) ? strictRuns.list : []
-  const perfList = Array.isArray(perfRuns?.list) ? perfRuns.list : []
+  const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
+  const strictList = strictListRaw.filter((run) => !isDrillRun(run))
+  if (strictListRaw.length !== strictList.length) {
+    info(`strict: filtered drill runs (${strictListRaw.length - strictList.length})`)
+  }
+  const perfListRaw = Array.isArray(perfRuns?.list) ? perfRuns.list : []
+  const perfList = perfListRaw.filter((run) => !isDrillRun(run))
+  if (perfListRaw.length !== perfList.length) {
+    info(`perf: filtered drill runs (${perfListRaw.length - perfList.length})`)
+  }
 
   const preflightLatestAny = preflightList[0] ?? null
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null

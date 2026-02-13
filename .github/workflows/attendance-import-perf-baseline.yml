@@ -1,8 +1,15 @@
 name: Attendance Import Perf Baseline
 
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Import Perf Baseline${{ github.event_name == 'workflow_dispatch' && inputs.drill == 'true' && ' [DRILL]' || '' }}
+
 on:
   workflow_dispatch:
     inputs:
+      drill:
+        description: 'Optional: mark run as [DRILL] and skip calling production APIs (true/false)'
+        required: false
+        default: 'false'
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -52,7 +59,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  drill:
+    if: github.event_name == 'workflow_dispatch' && inputs.drill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Drill no-op (skip perf baseline)
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-import-perf/drill
+          cat > output/playwright/attendance-import-perf/drill/drill.txt <<'EOF'
+          This is a DRILL run for Attendance Import Perf Baseline.
+          The workflow intentionally skips calling production APIs.
+          EOF
+
+      - name: Upload drill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-import-perf/**
+
   perf:
+    if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
