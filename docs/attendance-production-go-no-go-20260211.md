@@ -311,7 +311,9 @@ This record validates:
 |---|---|---|---|
 | Remote Docker GC (prune attempt; first run disconnected) | [#22014349249](https://github.com/zensgit/metasheet2/actions/runs/22014349249) | FAIL | `output/playwright/ga/22014349249/docker-gc.log`, `output/playwright/ga/22014349249/step-summary.md` |
 | Remote Docker GC (prune already running; shows reclaimed disk) | [#22014433107](https://github.com/zensgit/metasheet2/actions/runs/22014433107) | FAIL | `output/playwright/ga/22014433107/docker-gc.log`, `output/playwright/ga/22014433107/step-summary.md` |
+| Remote Docker GC (prune=true, PASS) | [#22015221785](https://github.com/zensgit/metasheet2/actions/runs/22015221785) | PASS | `output/playwright/ga/22015221785/docker-gc.log`, `output/playwright/ga/22015221785/step-summary.md` |
 | Storage Health recovery (auto-close default issue) | [#22014448225](https://github.com/zensgit/metasheet2/actions/runs/22014448225) | PASS | `output/playwright/ga/22014448225/storage.log`, `output/playwright/ga/22014448225/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Storage Health (post docker GC) | [#22015238312](https://github.com/zensgit/metasheet2/actions/runs/22015238312) | PASS | `output/playwright/ga/22015238312/storage.log`, `output/playwright/ga/22015238312/step-summary.md` |
 | Daily Gate Dashboard (post recovery) | [#22014457079](https://github.com/zensgit/metasheet2/actions/runs/22014457079) | PASS | `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.json` |
 
 Evidence highlights:
