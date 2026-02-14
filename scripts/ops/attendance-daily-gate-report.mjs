@@ -222,7 +222,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Host metrics / perf gate failure/stale runs): fix same day, rerun gates with thresholds and record evidence.')
+  lines.push('- `P1` (Host metrics / storage health / perf gate failure/stale runs): fix same day, rerun gates with thresholds and record evidence.')
   lines.push('- `P2` (missing evidence metadata only): update docs within 24h.')
   lines.push('')
 
@@ -243,7 +243,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run host metrics / perf baseline / perf long run manually when any `P1` finding exists.')
+  lines.push('2. Re-run host metrics / storage health / perf baseline / perf long run manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   return `${lines.join('\n')}\n`
 }
