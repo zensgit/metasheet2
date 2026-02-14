@@ -284,6 +284,7 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Storage Health (debug, expected FAIL; issue unchanged) | [#22014157084](https://github.com/zensgit/metasheet2/actions/runs/22014157084) | FAIL (expected) | `output/playwright/ga/22014157084/storage.log`, `output/playwright/ga/22014157084/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Storage Health (non-debug; failure updates default issue) | [#22014225635](https://github.com/zensgit/metasheet2/actions/runs/22014225635) | FAIL | `output/playwright/ga/22014225635/storage.log`, `output/playwright/ga/22014225635/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
 | Remote Metrics (debug) | [#22014173363](https://github.com/zensgit/metasheet2/actions/runs/22014173363) | PASS | `output/playwright/ga/22014173363/metrics.log`, `output/playwright/ga/22014173363/step-summary.md` |
 | Remote Upload Cleanup (debug, dry-run) | [#22014183752](https://github.com/zensgit/metasheet2/actions/runs/22014183752) | PASS | `output/playwright/ga/22014183752/cleanup.log`, `output/playwright/ga/22014183752/step-summary.md` |
 
@@ -291,3 +292,8 @@ Issue immutability check for #159 (before vs after `#22014157084`):
 
 - `commentCount=2`
 - `updatedAt=2026-02-14T08:08:53Z`
+
+Issue update check for #159 after non-debug failure `#22014225635`:
+
+- `commentCount=3`
+- `updatedAt=2026-02-14T08:26:52Z`
