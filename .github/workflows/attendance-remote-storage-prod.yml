@@ -48,6 +48,11 @@ jobs:
     timeout-minutes: 15
     outputs:
       storage_rc: ${{ steps.remote_storage.outputs.storage_rc }}
+      storage_reason: ${{ steps.remote_storage.outputs.storage_reason }}
+      df_used_pct: ${{ steps.remote_storage.outputs.df_used_pct }}
+      upload_gb: ${{ steps.remote_storage.outputs.upload_gb }}
+      file_count: ${{ steps.remote_storage.outputs.file_count }}
+      oldest_file_days: ${{ steps.remote_storage.outputs.oldest_file_days }}
     steps:
       - name: Remote storage check (with host sync logs)
         id: remote_storage
@@ -125,7 +130,53 @@ jobs:
           printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$storage_log"
           rc=${PIPESTATUS[1]}
           set -e
+
+          df_used_pct="$(
+            (grep -E '\\[attendance-storage\\] df_used_pct=' "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*df_used_pct=([0-9]+).*/\\1/') || true
+          )"
+          upload_gb="$(
+            (grep -E '\\[attendance-storage\\] upload_bytes=' "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*upload_gb=([0-9]+).*/\\1/') || true
+          )"
+          file_count="$(
+            (grep -E '\\[attendance-storage\\] file_count=' "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*file_count=([0-9]+).*/\\1/') || true
+          )"
+          oldest_file_days="$(
+            (grep -E '\\[attendance-storage\\] file_count=' "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*oldest_file_days=([0-9]+).*/\\1/') || true
+          )"
+
+          reason="REMOTE_FAILED"
+          if [[ "$rc" == "0" ]]; then
+            reason="PASS"
+          elif [[ "$rc" == "97" ]]; then
+            reason="DRILL_FAIL"
+          elif [[ "$rc" == "255" ]]; then
+            reason="SSH_FAILED"
+          elif [[ -f "$storage_log" ]] && grep -Fq "[attendance-storage][skip] host sync failed" "$storage_log"; then
+            reason="HOST_SYNC_FAILED"
+          elif [[ -f "$storage_log" ]] && grep -Fq "[attendance-storage] ERROR:" "$storage_log"; then
+            reasons=()
+            if grep -Fq "[attendance-storage] ERROR: filesystem usage too high" "$storage_log"; then
+              reasons+=("FS_USAGE_TOO_HIGH")
+            fi
+            if grep -Fq "[attendance-storage] ERROR: upload dir too large" "$storage_log"; then
+              reasons+=("UPLOAD_DIR_TOO_LARGE")
+            fi
+            if grep -Fq "[attendance-storage] ERROR: oldest file too old" "$storage_log"; then
+              reasons+=("OLDEST_FILE_TOO_OLD")
+            fi
+            if (( ${#reasons[@]} > 0 )); then
+              reason="$(IFS=,; echo "${reasons[*]}")"
+            else
+              reason="CHECK_FAILED"
+            fi
+          fi
+
           echo "storage_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "storage_reason=$reason" >> "$GITHUB_OUTPUT"
+          [[ -n "$df_used_pct" ]] && echo "df_used_pct=$df_used_pct" >> "$GITHUB_OUTPUT"
+          [[ -n "$upload_gb" ]] && echo "upload_gb=$upload_gb" >> "$GITHUB_OUTPUT"
+          [[ -n "$file_count" ]] && echo "file_count=$file_count" >> "$GITHUB_OUTPUT"
+          [[ -n "$oldest_file_days" ]] && echo "oldest_file_days=$oldest_file_days" >> "$GITHUB_OUTPUT"
           echo "storage_log=$storage_log" >> "$GITHUB_OUTPUT"
           exit 0
 
@@ -133,8 +184,16 @@ jobs:
         if: always()
         env:
           STORAGE_RC: ${{ steps.remote_storage.outputs.storage_rc }}
+          STORAGE_REASON: ${{ steps.remote_storage.outputs.storage_reason }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
+          DF_USED_PCT: ${{ steps.remote_storage.outputs.df_used_pct }}
+          UPLOAD_GB: ${{ steps.remote_storage.outputs.upload_gb }}
+          FILE_COUNT: ${{ steps.remote_storage.outputs.file_count }}
+          OLDEST_FILE_DAYS: ${{ steps.remote_storage.outputs.oldest_file_days }}
+          MAX_FS_USED_PCT: ${{ github.event.inputs.max_fs_used_pct || '90' }}
+          MAX_UPLOAD_DIR_GB: ${{ github.event.inputs.max_upload_dir_gb || '10' }}
+          MAX_OLDEST_FILE_DAYS: ${{ github.event.inputs.max_oldest_file_days || '14' }}
         run: |
           set -euo pipefail
           storage_log="output/storage/storage.log"
@@ -169,8 +228,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${STORAGE_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Failure reason: \`${STORAGE_REASON:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Computed: df_used_pct=\`${DF_USED_PCT:-missing}\` (max=\`${MAX_FS_USED_PCT}\`), upload_gb=\`${UPLOAD_GB:-missing}\` (max=\`${MAX_UPLOAD_DIR_GB}\`), oldest_file_days=\`${OLDEST_FILE_DAYS:-missing}\` (max=\`${MAX_OLDEST_FILE_DAYS}\`), file_count=\`${FILE_COUNT:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
@@ -251,6 +312,41 @@ jobs:
             fi
           fi
 
+          if [[ "${overall}" == "FAIL" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Suggested Remediation" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            case "${STORAGE_REASON:-}" in
+              *FS_USAGE_TOO_HIGH*)
+                echo "- Host filesystem usage is high; upload dir size is typically small in this case." >> "$GITHUB_STEP_SUMMARY"
+                echo "- Run remote docker GC (reclaims unused images/caches; does not delete named volumes):" >> "$GITHUB_STEP_SUMMARY"
+                echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+                echo "gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "- Then re-run this gate to confirm recovery." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *UPLOAD_DIR_TOO_LARGE*|*OLDEST_FILE_TOO_OLD*)
+                echo "- Upload directory drift detected; run cleanup dry-run first:" >> "$GITHUB_STEP_SUMMARY"
+                echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+                echo "gh workflow run attendance-remote-upload-cleanup-prod.yml -f delete=false -f confirm_delete=false" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "- If safe, run destructive cleanup (requires explicit confirmation):" >> "$GITHUB_STEP_SUMMARY"
+                echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+                echo "gh workflow run attendance-remote-upload-cleanup-prod.yml -f delete=true -f confirm_delete=true" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              HOST_SYNC_FAILED)
+                echo "- Deploy-host git sync failed. Fix host sync or run with \`skip_host_sync=true\` for debugging." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              SSH_FAILED)
+                echo "- SSH failed (rc=255). Check deploy secrets/host connectivity." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *)
+                echo "- See storage output and artifacts; rerun after fix." >> "$GITHUB_STEP_SUMMARY"
+                ;;
+            esac
+          fi
+
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -305,6 +401,11 @@ jobs:
       SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
       STORAGE_RESULT: ${{ needs.storage.result }}
       STORAGE_RC: ${{ needs.storage.outputs.storage_rc }}
+      STORAGE_REASON: ${{ needs.storage.outputs.storage_reason }}
+      DF_USED_PCT: ${{ needs.storage.outputs.df_used_pct }}
+      UPLOAD_GB: ${{ needs.storage.outputs.upload_gb }}
+      FILE_COUNT: ${{ needs.storage.outputs.file_count }}
+      OLDEST_FILE_DAYS: ${{ needs.storage.outputs.oldest_file_days }}
     steps:
       - name: Open/update issue on failure (P1, no paging)
         uses: actions/github-script@v7
@@ -314,6 +415,11 @@ jobs:
             const skipHostSync = String(process.env.SKIP_HOST_SYNC || '').trim()
             const storageResult = String(process.env.STORAGE_RESULT || '').trim()
             const storageRc = String(process.env.STORAGE_RC || '').trim()
+            const storageReason = String(process.env.STORAGE_REASON || '').trim()
+            const dfUsedPct = String(process.env.DF_USED_PCT || '').trim()
+            const uploadGb = String(process.env.UPLOAD_GB || '').trim()
+            const fileCount = String(process.env.FILE_COUNT || '').trim()
+            const oldestFileDays = String(process.env.OLDEST_FILE_DAYS || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
 
             const defaultTitle = '[Attendance P1] Storage health alert'
@@ -334,13 +440,17 @@ jobs:
             const artifactName = `attendance-remote-storage-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
             const failed = storageResult === 'failure'
-            const statusLine = `job: storage=${storageResult || 'unknown'} rc=${storageRc || 'missing'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+            const statusLine = `job: storage=${storageResult || 'unknown'} rc=${storageRc || 'missing'} reason=${storageReason || 'missing'} df_used_pct=${dfUsedPct || 'missing'} upload_gb=${uploadGb || 'missing'} oldest_file_days=${oldestFileDays || 'missing'} file_count=${fileCount || 'missing'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
 
             const body = [
               'Automated storage health tracking issue (P1, no paging).',
               '',
               `Run: ${runUrl}`,
               statusLine,
+              '',
+              'Suggested remediation:',
+              '- If `reason` includes `FS_USAGE_TOO_HIGH`: run `Attendance Remote Docker GC (Prod)` and rerun `Storage Health`.',
+              '- If `reason` includes `UPLOAD_DIR_TOO_LARGE` or `OLDEST_FILE_TOO_OLD`: run `Remote Upload Cleanup (Prod)` (dry-run first), then rerun `Storage Health`.',
               '',
               `Artifacts: ${artifactName}`,
               '',
