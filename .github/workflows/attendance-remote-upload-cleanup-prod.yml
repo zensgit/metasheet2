@@ -351,13 +351,13 @@ jobs:
                   })
                   core.info(`Reopened issue #${match.number}`)
                 } else {
-                  await github.rest.issues.createComment({
+                  await github.rest.issues.update({
                     owner,
                     repo,
                     issue_number: match.number,
                     body,
                   })
-                  core.info(`Commented on issue #${match.number}`)
+                  core.info(`Updated issue #${match.number}`)
                 }
                 return
               }
