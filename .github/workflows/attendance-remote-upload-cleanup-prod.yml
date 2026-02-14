@@ -139,7 +139,10 @@ jobs:
 
           host_sync_rc="missing"
           if [[ -f "$cleanup_log" ]]; then
-            last_host_sync_rc="$(grep -E '^\\[host-sync\\] rc=' "$cleanup_log" | tail -n 1 | sed -E 's/^\\[host-sync\\] rc=//')"
+            # Do not fail the step when grep has no matches (rc=1) under `set -euo pipefail`.
+            last_host_sync_rc="$(
+              (grep -E '^\[host-sync\] rc=' "$cleanup_log" 2>/dev/null | tail -n 1 | sed -E 's/^\[host-sync\] rc=//') || true
+            )"
             if [[ -n "$last_host_sync_rc" ]]; then
               host_sync_rc="$last_host_sync_rc"
             fi
