@@ -249,6 +249,8 @@ Schedule:
 
 - Weekly dry-run report at `02:20 UTC` (Sunday).
 
+P2 tracking issue (no paging): `[Attendance P2] Upload cleanup alert` (opened/reopened on failure; commented+closed on recovery).
+
 Safety limits (workflow inputs):
 
 - `max_delete_files` (default: `5000`) refuse deletion if stale file count exceeds this threshold
@@ -258,6 +260,7 @@ Manual trigger (dry-run):
 
 ```bash
 gh workflow run attendance-remote-upload-cleanup-prod.yml \
+  -f drill_fail=false \
   -f max_file_age_days=14 \
   -f max_delete_files=5000 \
   -f max_delete_gb=5 \
@@ -265,10 +268,19 @@ gh workflow run attendance-remote-upload-cleanup-prod.yml \
   -f confirm_delete=false
 ```
 
+Drill (expected FAIL; no destructive delete; uses a safe override title):
+
+```bash
+gh workflow run attendance-remote-upload-cleanup-prod.yml \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Cleanup Drill] Upload cleanup issue test'
+```
+
 Manual trigger (destructive, requires explicit confirmation):
 
 ```bash
 gh workflow run attendance-remote-upload-cleanup-prod.yml \
+  -f drill_fail=false \
   -f max_file_age_days=14 \
   -f max_delete_files=5000 \
   -f max_delete_gb=5 \

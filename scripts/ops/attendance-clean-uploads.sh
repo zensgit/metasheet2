@@ -190,10 +190,10 @@ function run_cmd() {
 # Find files with age >= MAX_FILE_AGE_DAYS.
 # GNU find: "-mtime +13" means strictly > 13 days, i.e. >= 14 days.
 mtime_threshold=$((MAX_FILE_AGE_DAYS - 1))
-find_expr="find \"${target_path}\" -type f -mtime +${mtime_threshold} -print"
+find_expr="find \"${target_path}\" -type f -mtime +${mtime_threshold}"
 
-stale_list="$(run_cmd "$find_expr" || true)"
-stale_count="$(printf '%s\n' "${stale_list}" | sed '/^$/d' | wc -l | tr -d '[:space:]' || true)"
+count_cmd="${find_expr} -print | wc -l | tr -d '[:space:]'"
+stale_count="$(run_cmd "$count_cmd" | tail -n 1 | tr -d '[:space:]' || true)"
 if ! is_integer "$stale_count"; then
   die "Failed to compute stale_count"
 fi
@@ -206,7 +206,8 @@ if (( stale_count == 0 )); then
 fi
 
 info "Stale file sample (first 50):"
-printf '%s\n' "${stale_list}" | sed -n '1,50p' >&2
+sample_cmd="${find_expr} -print | head -n 50"
+run_cmd "$sample_cmd" >&2 || true
 
 if [[ "${DELETE}" != "true" ]]; then
   info "Dry-run only. To delete, set DELETE=true CONFIRM_DELETE=true"

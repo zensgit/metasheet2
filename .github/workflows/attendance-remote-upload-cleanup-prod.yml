@@ -1,10 +1,19 @@
 name: Attendance Remote Upload Cleanup (Prod)
 
-run-name: Attendance Remote Upload Cleanup (Prod)
+# Mark drill runs explicitly so dashboards can ignore them.
+run-name: Attendance Remote Upload Cleanup (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
 
 on:
   workflow_dispatch:
     inputs:
+      drill_fail:
+        description: 'Optional: intentionally fail after cleanup for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
       max_file_age_days:
         description: 'Delete files with age >= N days (default 14). In dry-run mode, only reports.'
         required: false
@@ -35,11 +44,14 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      cleanup_rc: ${{ steps.remote_cleanup.outputs.cleanup_rc }}
     steps:
       - name: Remote cleanup (with host sync logs)
         id: remote_cleanup
@@ -50,6 +62,7 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
           MAX_FILE_AGE_DAYS: ${{ github.event.inputs.max_file_age_days || '14' }}
           MAX_DELETE_FILES: ${{ github.event.inputs.max_delete_files || '5000' }}
           MAX_DELETE_GB: ${{ github.event.inputs.max_delete_gb || '5' }}
@@ -64,6 +77,7 @@ jobs:
 
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DRILL_FAIL="${DRILL_FAIL:-false}"
 
           mkdir -p output/cleanup
           cleanup_log="output/cleanup/cleanup.log"
@@ -72,6 +86,7 @@ jobs:
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
+            "DRILL_FAIL=\"${DRILL_FAIL}\""
             "MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\""
             "MAX_DELETE_FILES=\"${MAX_DELETE_FILES}\""
             "MAX_DELETE_GB=\"${MAX_DELETE_GB}\""
@@ -99,6 +114,7 @@ jobs:
             "fi"
             "echo \"=== UPLOAD CLEANUP END ===\""
             'if [[ "$cleanup_rc" != "0" ]]; then exit "$cleanup_rc"; fi'
+            'if [[ "${DRILL_FAIL}" == "true" ]]; then echo "[upload-cleanup][drill] intentional failure after cleanup"; exit 97; fi'
           )
 
           set +e
@@ -113,6 +129,7 @@ jobs:
         if: always()
         env:
           CLEANUP_RC: ${{ steps.remote_cleanup.outputs.cleanup_rc }}
+          DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
         run: |
           set -euo pipefail
           cleanup_log="output/cleanup/cleanup.log"
@@ -131,6 +148,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${CLEANUP_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Output (snippet)" >> "$GITHUB_STEP_SUMMARY"
@@ -196,3 +214,128 @@ jobs:
             echo "Remote upload cleanup failed: rc=$rc" >&2
             exit 1
           fi
+
+  issue:
+    name: Upload Cleanup Issue Alert (P2)
+    needs: [cleanup]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      CLEANUP_RESULT: ${{ needs.cleanup.result }}
+      CLEANUP_RC: ${{ needs.cleanup.outputs.cleanup_rc }}
+    steps:
+      - name: Open/update issue on failure (P2, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const cleanupResult = String(process.env.CLEANUP_RESULT || '').trim()
+            const cleanupRc = String(process.env.CLEANUP_RC || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P2] Upload cleanup alert'
+            const title = titleOverride || defaultTitle
+
+            // Avoid creating drill issues unless explicitly requested via override title.
+            const allowIssueOps = !drillFail || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const artifactName = `attendance-remote-upload-cleanup-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const failed = cleanupResult === 'failure'
+            const statusLine = `job: cleanup=${cleanupResult || 'unknown'} rc=${cleanupRc || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+
+            const body = [
+              'Automated upload cleanup tracking issue (P2, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              '',
+              `Artifacts: ${artifactName}`,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            // Recovery: close an existing open issue when the cleanup job passes.
+            if (!match) {
+              core.info('No upload cleanup issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Upload cleanup issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Upload cleanup recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)
