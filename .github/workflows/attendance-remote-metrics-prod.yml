@@ -36,6 +36,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       metrics_rc: ${{ steps.remote_metrics.outputs.metrics_rc }}
+      metrics_reason: ${{ steps.remote_metrics.outputs.metrics_reason }}
+      missing_metrics: ${{ steps.remote_metrics.outputs.missing_metrics }}
     steps:
       - name: Remote metrics check (with host sync logs)
         id: remote_metrics
@@ -100,14 +102,40 @@ jobs:
           printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$metrics_log"
           rc=${PIPESTATUS[1]}
           set -e
+
+          missing_metrics="$(
+            (grep -F "[attendance-check-metrics] MISSING:" "$metrics_log" 2>/dev/null | sed -E 's/.*MISSING:[[:space:]]*//' | tr '\n' ',' | sed 's/,$//') || true
+          )"
+
+          reason="REMOTE_FAILED"
+          if [[ "$rc" == "0" ]]; then
+            reason="PASS"
+          elif [[ "$rc" == "97" ]]; then
+            reason="DRILL_FAIL"
+          elif [[ "$rc" == "255" ]]; then
+            reason="SSH_FAILED"
+          elif [[ -f "$metrics_log" ]] && grep -Fq "[attendance-metrics][skip] host sync failed" "$metrics_log"; then
+            reason="HOST_SYNC_FAILED"
+          elif [[ -n "${missing_metrics}" ]] || ([[ -f "$metrics_log" ]] && grep -Fq "[attendance-check-metrics] ERROR: Missing required attendance metrics" "$metrics_log"); then
+            reason="MISSING_REQUIRED_METRICS"
+          elif [[ -f "$metrics_log" ]] && grep -Fq "Response does not look like Prometheus metrics" "$metrics_log"; then
+            reason="NOT_PROMETHEUS"
+          elif [[ -f "$metrics_log" ]] && grep -Eq "curl:|Failed to connect|Connection refused|Could not resolve host" "$metrics_log"; then
+            reason="METRICS_FETCH_FAILED"
+          fi
+
           echo "metrics_rc=$rc" >> "$GITHUB_OUTPUT"
           echo "metrics_log=$metrics_log" >> "$GITHUB_OUTPUT"
+          echo "metrics_reason=$reason" >> "$GITHUB_OUTPUT"
+          [[ -n "${missing_metrics}" ]] && echo "missing_metrics=${missing_metrics}" >> "$GITHUB_OUTPUT"
           exit 0
 
       - name: Write step summary (metrics + runbooks)
         if: always()
         env:
           METRICS_RC: ${{ steps.remote_metrics.outputs.metrics_rc }}
+          METRICS_REASON: ${{ steps.remote_metrics.outputs.metrics_reason }}
+          MISSING_METRICS: ${{ steps.remote_metrics.outputs.missing_metrics }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
@@ -144,6 +172,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${METRICS_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Failure reason: \`${METRICS_REASON:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${MISSING_METRICS:-}" ]]; then
+            echo "- Missing metrics: \`${MISSING_METRICS}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -280,6 +312,8 @@ jobs:
       SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
       METRICS_RESULT: ${{ needs.metrics.result }}
       METRICS_RC: ${{ needs.metrics.outputs.metrics_rc }}
+      METRICS_REASON: ${{ needs.metrics.outputs.metrics_reason }}
+      MISSING_METRICS: ${{ needs.metrics.outputs.missing_metrics }}
     steps:
       - name: Open/update issue on failure (P1, no paging)
         uses: actions/github-script@v7
@@ -289,6 +323,8 @@ jobs:
             const skipHostSync = String(process.env.SKIP_HOST_SYNC || '').trim()
             const metricsResult = String(process.env.METRICS_RESULT || '').trim()
             const metricsRc = String(process.env.METRICS_RC || '').trim()
+            const metricsReason = String(process.env.METRICS_REASON || '').trim()
+            const missingMetrics = String(process.env.MISSING_METRICS || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
 
             const defaultTitle = '[Attendance P1] Host metrics alert'
@@ -309,7 +345,7 @@ jobs:
             const artifactName = `attendance-remote-metrics-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
             const failed = metricsResult === 'failure'
-            const statusLine = `job: metrics=${metricsResult || 'unknown'} rc=${metricsRc || 'missing'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+            const statusLine = `job: metrics=${metricsResult || 'unknown'} rc=${metricsRc || 'missing'} reason=${metricsReason || 'missing'} missing_metrics=${missingMetrics || 'none'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
 
             const body = [
               'Automated host metrics tracking issue (P1, no paging).',
