@@ -45,7 +45,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
 
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           PRUNE="${PRUNE:-false}"
@@ -82,8 +82,23 @@ jobs:
             'docker system df || true'
             'echo ""'
             'if [[ "${PRUNE}" == "true" ]]; then'
-              '  echo "[docker-gc] running: docker system prune -af"'
-              '  docker system prune -af'
+              '  echo "[docker-gc] running: docker system prune -af (with heartbeat)"'
+              '  set +e'
+              '  prune_log="/tmp/attendance-docker-prune-$$.log"'
+              '  docker system prune -af >"$prune_log" 2>&1 &'
+              '  prune_pid=$!'
+              '  while kill -0 "$prune_pid" 2>/dev/null; do'
+              '    echo "[docker-gc] prune in progress (pid=$prune_pid) ..."'
+              '    sleep 15'
+              '  done'
+              '  wait "$prune_pid"'
+              '  prune_rc=$?'
+              '  set -e'
+              '  echo "[docker-gc] prune rc=$prune_rc"'
+              '  echo "[docker-gc] prune output tail:"'
+              '  tail -n 80 "$prune_log" || true'
+              '  rm -f "$prune_log" || true'
+              '  if [[ "$prune_rc" != "0" ]]; then exit "$prune_rc"; fi'
             "else"
               '  echo "[docker-gc] prune skipped (prune=false)"'
             "fi"
@@ -191,4 +206,3 @@ jobs:
             echo "Remote docker GC failed: rc=$rc" >&2
             exit 1
           fi
-
