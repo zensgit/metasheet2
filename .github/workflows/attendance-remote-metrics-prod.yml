@@ -277,6 +277,7 @@ jobs:
     env:
       DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
       ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
       METRICS_RESULT: ${{ needs.metrics.result }}
       METRICS_RC: ${{ needs.metrics.outputs.metrics_rc }}
     steps:
@@ -285,6 +286,7 @@ jobs:
         with:
           script: |
             const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const skipHostSync = String(process.env.SKIP_HOST_SYNC || '').trim()
             const metricsResult = String(process.env.METRICS_RESULT || '').trim()
             const metricsRc = String(process.env.METRICS_RC || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
@@ -292,10 +294,12 @@ jobs:
             const defaultTitle = '[Attendance P1] Host metrics alert'
             const title = titleOverride || defaultTitle
 
-            // Avoid creating drill issues unless explicitly requested via override title.
-            const allowIssueOps = !drillFail || Boolean(titleOverride)
+            const debugRun = skipHostSync === 'true'
+
+            // Avoid creating drill/debug issues unless explicitly requested via override title.
+            const allowIssueOps = (!drillFail && !debugRun) || Boolean(titleOverride)
             if (!allowIssueOps) {
-              core.info('Drill run: skipping issue operations (no override title).')
+              core.info('Drill/debug run: skipping issue operations (no override title).')
               return
             }
 
@@ -305,7 +309,7 @@ jobs:
             const artifactName = `attendance-remote-metrics-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
             const failed = metricsResult === 'failure'
-            const statusLine = `job: metrics=${metricsResult || 'unknown'} rc=${metricsRc || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+            const statusLine = `job: metrics=${metricsResult || 'unknown'} rc=${metricsRc || 'missing'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
 
             const body = [
               'Automated host metrics tracking issue (P1, no paging).',

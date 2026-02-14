@@ -319,10 +319,12 @@ jobs:
             const defaultTitle = '[Attendance P1] Storage health alert'
             const title = titleOverride || defaultTitle
 
-            // Avoid creating drill issues unless explicitly requested via override title.
-            const allowIssueOps = !drillFail || Boolean(titleOverride)
+            const debugRun = skipHostSync === 'true'
+
+            // Avoid creating drill/debug issues unless explicitly requested via override title.
+            const allowIssueOps = (!drillFail && !debugRun) || Boolean(titleOverride)
             if (!allowIssueOps) {
-              core.info('Drill run: skipping issue operations (no override title).')
+              core.info('Drill/debug run: skipping issue operations (no override title).')
               return
             }
 
