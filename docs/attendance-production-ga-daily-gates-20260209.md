@@ -151,6 +151,11 @@ Manual trigger:
 gh workflow run attendance-remote-metrics-prod.yml -f drill_fail=false
 ```
 
+Optional overrides (workflow inputs):
+
+- `metrics_url` (default: `http://127.0.0.1:8900/metrics/prom`)
+- `max_time` (default: `10`)
+
 Drill (expected FAIL, validates FAIL-path evidence upload):
 
 ```bash
@@ -182,6 +187,16 @@ Notes:
 gh workflow run attendance-remote-metrics-prod.yml \
   -f drill_fail=true \
   -f issue_title='[Attendance Metrics Drill] Host metrics issue test'
+```
+
+Safe drill to validate a real fetch failure (404) classification:
+
+```bash
+gh workflow run attendance-remote-metrics-prod.yml \
+  -f drill_fail=true \
+  -f metrics_url='http://127.0.0.1:8900/metrics/prom-not-found' \
+  -f max_time=3 \
+  -f issue_title='[Attendance Metrics Drill] Host metrics reason test'
 ```
 - You can override the target:
   - `METRICS_URL="http://127.0.0.1:8900/metrics/prom" scripts/ops/attendance-check-metrics.sh`

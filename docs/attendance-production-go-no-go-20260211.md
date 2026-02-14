@@ -382,6 +382,7 @@ This record validates:
 - `Remote Metrics` step summary (and issue body on failure) includes:
   - failure `reason`
   - `missing_metrics` list (when applicable)
+  - `metrics_url` + `max_time` overrides (workflow inputs)
 
 Implementation:
 
@@ -393,3 +394,5 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Remote Metrics (reason visible) | [#22021069004](https://github.com/zensgit/metasheet2/actions/runs/22021069004) | PASS | `output/playwright/ga/22021069004/step-summary.md`, `output/playwright/ga/22021069004/metrics.log` |
+| Remote Metrics drill (fetch failure classification, expected FAIL; safe issue title) | [#22021555071](https://github.com/zensgit/metasheet2/actions/runs/22021555071) | FAIL (expected) | `output/playwright/ga/22021555071/step-summary.md`, `output/playwright/ga/22021555071/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
+| Remote Metrics drill recovery (issue auto-close) | [#22021568702](https://github.com/zensgit/metasheet2/actions/runs/22021568702) | PASS | `output/playwright/ga/22021568702/step-summary.md`, `output/playwright/ga/22021568702/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
