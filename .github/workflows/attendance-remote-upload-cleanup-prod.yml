@@ -1,0 +1,187 @@
+name: Attendance Remote Upload Cleanup (Prod)
+
+run-name: Attendance Remote Upload Cleanup (Prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_file_age_days:
+        description: 'Delete files with age >= N days (default 14). In dry-run mode, only reports.'
+        required: false
+        default: '14'
+      delete:
+        description: 'Set true to actually delete stale files (requires confirm_delete=true)'
+        required: false
+        default: 'false'
+      confirm_delete:
+        description: 'Safety switch. Must be true when delete=true'
+        required: false
+        default: 'false'
+  schedule:
+    # Weekly dry-run report (Sunday 02:20 UTC).
+    - cron: '20 2 * * 0'
+
+concurrency:
+  group: attendance-remote-upload-cleanup-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Remote cleanup (with host sync logs)
+        id: remote_cleanup
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          MAX_FILE_AGE_DAYS: ${{ github.event.inputs.max_file_age_days || '14' }}
+          DELETE: ${{ github.event.inputs.delete || 'false' }}
+          CONFIRM_DELETE: ${{ github.event.inputs.confirm_delete || 'false' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+
+          mkdir -p output/cleanup
+          cleanup_log="output/cleanup/cleanup.log"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
+            "MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\""
+            "DELETE=\"${DELETE}\""
+            "CONFIRM_DELETE=\"${CONFIRM_DELETE}\""
+            "cd \"${DEPLOY_PATH}\""
+            "echo \"=== HOST SYNC START ===\""
+            "host_sync_rc=0"
+            "set +e"
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
+            'host_sync_rc=$?'
+            "set -e"
+            'echo "[host-sync] rc=$host_sync_rc"'
+            "echo \"=== HOST SYNC END ===\""
+            "echo \"=== UPLOAD CLEANUP START ===\""
+            "cleanup_rc=0"
+            'if [[ "$host_sync_rc" != "0" ]]; then'
+              '  echo "[upload-cleanup][skip] host sync failed: rc=$host_sync_rc"'
+              '  cleanup_rc="$host_sync_rc"'
+            "else"
+              "  set +e"
+              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\" DELETE=\"${DELETE}\" CONFIRM_DELETE=\"${CONFIRM_DELETE}\" scripts/ops/attendance-clean-uploads.sh"
+              '  cleanup_rc=$?'
+              "  set -e"
+            "fi"
+            "echo \"=== UPLOAD CLEANUP END ===\""
+            'if [[ "$cleanup_rc" != "0" ]]; then exit "$cleanup_rc"; fi'
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$cleanup_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+          echo "cleanup_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "cleanup_log=$cleanup_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          CLEANUP_RC: ${{ steps.remote_cleanup.outputs.cleanup_rc }}
+        run: |
+          set -euo pipefail
+          cleanup_log="output/cleanup/cleanup.log"
+          artifact_name="attendance-remote-upload-cleanup-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          overall="UNKNOWN"
+          if [[ -n "${CLEANUP_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${CLEANUP_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
+
+          echo "## Remote Upload Cleanup (Prod)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${CLEANUP_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Output (snippet)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$cleanup_log" ]]; then
+            block="$(
+              awk '
+                /^=== UPLOAD CLEANUP START ===$/ { printing=1; next }
+                /^=== UPLOAD CLEANUP END ===$/ { printing=0; after=1; next }
+                printing { print; next }
+                after {
+                  print
+                  count++
+                  if (count >= 20) exit
+                }
+              ' "$cleanup_log" | head -n 120
+            )"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${block:-'(markers missing; see cleanup.log artifact)'}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- cleanup.log missing; see artifacts" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cleanup logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/cleanup.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Runbooks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Daily gates handbook: ${repo_url}/blob/main/docs/attendance-production-ga-daily-gates-20260209.md" >> "$GITHUB_STEP_SUMMARY"
+
+          mkdir -p output/cleanup
+          cp "$GITHUB_STEP_SUMMARY" output/cleanup/step-summary.md
+
+      - name: Upload cleanup artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-remote-upload-cleanup-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/cleanup/**
+
+      - name: Fail when remote cleanup failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_cleanup.outputs.cleanup_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "cleanup_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote upload cleanup failed: rc=$rc" >&2
+            exit 1
+          fi
+
