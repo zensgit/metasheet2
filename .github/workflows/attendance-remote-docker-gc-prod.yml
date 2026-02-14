@@ -97,6 +97,10 @@ jobs:
               '  echo "[docker-gc] prune rc=$prune_rc"'
               '  echo "[docker-gc] prune output tail:"'
               '  tail -n 80 "$prune_log" || true'
+              '  if [[ "$prune_rc" != "0" ]] && grep -q "a prune operation is already running" "$prune_log" 2>/dev/null; then'
+              '    echo "[docker-gc] WARN: prune already running; continuing without failing"'
+              '    prune_rc=0'
+              '  fi'
               '  rm -f "$prune_log" || true'
               '  if [[ "$prune_rc" != "0" ]]; then exit "$prune_rc"; fi'
             "else"
