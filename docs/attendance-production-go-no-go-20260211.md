@@ -340,3 +340,20 @@ Evidence:
 |---|---|---|---|
 | Remote Storage Health (computed metrics OK) | [#22018028547](https://github.com/zensgit/metasheet2/actions/runs/22018028547) | PASS | `output/playwright/ga/22018028547/storage.log`, `output/playwright/ga/22018028547/step-summary.md` |
 | Daily Gate Dashboard (picks up latest Storage Health run) | [#22018238598](https://github.com/zensgit/metasheet2/actions/runs/22018238598) | PASS | `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.json` |
+
+## Post-Go Validation (2026-02-14): Perf Baseline Artifacts Include perf.log
+
+This record validates:
+
+- `Perf Baseline` artifacts always include `perf.log` (stdout/stderr capture) for easier debugging.
+
+Implementation:
+
+- Commit: `ec0081e5`
+- Change: perf baseline/longrun workflows `tee` output into `perf.log` under the uploaded artifacts.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline (10k, upload_csv=true, perf.log captured) | [#22018316457](https://github.com/zensgit/metasheet2/actions/runs/22018316457) | PASS | `output/playwright/ga/22018316457/perf.log`, `output/playwright/ga/22018316457/attendance-perf-*/perf-summary.json` |
