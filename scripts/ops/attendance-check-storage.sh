@@ -171,6 +171,7 @@ function run_cmd() {
     #
     # Also, hide noisy docker compose warnings on stderr (e.g. "version is obsolete") by only
     # emitting stderr when the exec fails.
+    local tmp_err out rc
     tmp_err="$(mktemp 2>/dev/null || echo "/tmp/attendance-storage-err-$$")"
     out=""
     set +e
@@ -202,12 +203,13 @@ if [[ "$use_backend_exec" == "true" ]]; then
 set -eu
 TARGET="${target_path}"
 
-df_used_pct="\$(df -P "\${TARGET}" 2>/dev/null | awk 'END{gsub(/%/,\"\",\$5); print \$5}' || true)"
+df_line="\$(df -P "\${TARGET}" 2>/dev/null | tail -n 1 || true)"
+df_used_pct="\$(printf '%s' "\${df_line}" | tr -s ' ' | cut -d ' ' -f5 | tr -d '%')"
 
 upload_bytes="\$(du -sb "\${TARGET}" 2>/dev/null | cut -f1 || true)"
-if [[ -z "\${upload_bytes}" ]]; then
+if [ -z "\${upload_bytes}" ]; then
   kb="\$(du -sk "\${TARGET}" 2>/dev/null | cut -f1 || true)"
-  if [[ -n "\${kb}" ]]; then
+  if [ -n "\${kb}" ]; then
     upload_bytes="\$((kb * 1024))"
   fi
 fi
@@ -215,31 +217,39 @@ fi
 file_count="\$(find "\${TARGET}" -type f 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
 
 oldest_sec=""
-if [[ "\${file_count:-0}" -gt 0 ]]; then
+if [ "\${file_count:-0}" -gt 0 ]; then
   oldest_epoch="\$(find "\${TARGET}" -type f -printf '%T@\\n' 2>/dev/null | sort -n | head -n 1 || true)"
   oldest_sec="\${oldest_epoch%%.*}"
-  if [[ -z "\${oldest_sec}" || "\${oldest_sec}" =~ [^0-9] ]]; then
-    oldest_sec=""
-  fi
-
-  if [[ -z "\${oldest_sec}" ]]; then
-    oldest_sec="\$(find "\${TARGET}" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1 || true)"
-    if [[ -z "\${oldest_sec}" || "\${oldest_sec}" =~ [^0-9] ]]; then
+  case "\${oldest_sec}" in
+    ''|*[!0-9]*)
       oldest_sec=""
-    fi
+      ;;
+  esac
+
+  if [ -z "\${oldest_sec}" ]; then
+    oldest_sec="\$(find "\${TARGET}" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1 || true)"
+    case "\${oldest_sec}" in
+      ''|*[!0-9]*)
+        oldest_sec=""
+        ;;
+    esac
   fi
 fi
 
-echo "df_used_pct=\${df_used_pct}"
-echo "upload_bytes=\${upload_bytes}"
-echo "file_count=\${file_count}"
-echo "oldest_sec=\${oldest_sec}"
+printf 'df_used_pct=%s\\n' "\${df_used_pct}"
+printf 'upload_bytes=%s\\n' "\${upload_bytes}"
+printf 'file_count=%s\\n' "\${file_count}"
+printf 'oldest_sec=%s\\n' "\${oldest_sec}"
 EOF
   )"
 
-  metrics_out="$(run_cmd "$metrics_cmd" || true)"
-  if [[ -z "$metrics_out" ]]; then
-    die "Failed to compute storage metrics via backend exec (no output)."
+  metrics_out=""
+  set +e
+  metrics_out="$(run_cmd "$metrics_cmd")"
+  metrics_rc=$?
+  set -e
+  if [[ "$metrics_rc" != "0" || -z "$metrics_out" ]]; then
+    die "Failed to compute storage metrics via backend exec (rc=${metrics_rc})."
   fi
 
   while IFS='=' read -r key value; do
