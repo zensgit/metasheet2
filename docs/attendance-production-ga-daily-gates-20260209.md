@@ -237,6 +237,44 @@ gh workflow run attendance-remote-storage-prod.yml \
   -f issue_title='[Attendance Storage Drill] Storage issue test'
 ```
 
+### 2.6) Remote Upload Cleanup (Prod) (Manual / Scheduled Dry-Run)
+
+This workflow provides a safe remediation path when the upload volume accumulates stale files.
+
+Workflow:
+
+- `.github/workflows/attendance-remote-upload-cleanup-prod.yml`
+
+Schedule:
+
+- Weekly dry-run report at `02:20 UTC` (Sunday).
+
+Manual trigger (dry-run):
+
+```bash
+gh workflow run attendance-remote-upload-cleanup-prod.yml \
+  -f max_file_age_days=14 \
+  -f delete=false \
+  -f confirm_delete=false
+```
+
+Manual trigger (destructive, requires explicit confirmation):
+
+```bash
+gh workflow run attendance-remote-upload-cleanup-prod.yml \
+  -f max_file_age_days=14 \
+  -f delete=true \
+  -f confirm_delete=true
+```
+
+Artifacts:
+
+- Download:
+  - `gh run download <RUN_ID> -n "attendance-remote-upload-cleanup-prod-<RUN_ID>-1" -D "output/playwright/ga/<RUN_ID>"`
+- Evidence (local, after download):
+  - `output/playwright/ga/<RUN_ID>/cleanup.log`
+  - `output/playwright/ga/<RUN_ID>/step-summary.md`
+
 ### 3) 10k Import Perf Baseline (Rollback Enabled)
 
 This gate establishes a minimum performance baseline for production v1 while keeping the environment clean.

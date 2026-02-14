@@ -241,3 +241,16 @@ This record validates:
 | Remote Storage Health drill (P1 issue open, expected FAIL) | [#21998434122](https://github.com/zensgit/metasheet2/actions/runs/21998434122) | FAIL (expected) | `output/playwright/ga/21998434122/storage.log`, `output/playwright/ga/21998434122/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
 | Remote Storage Health drill recovery (P1 issue auto-close) | [#21998473905](https://github.com/zensgit/metasheet2/actions/runs/21998473905) | PASS | `output/playwright/ga/21998473905/storage.log`, `output/playwright/ga/21998473905/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
 | Daily Gate Dashboard (includes Storage Health gate) | [#21998506794](https://github.com/zensgit/metasheet2/actions/runs/21998506794) | PASS | `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.json` |
+
+## Post-Go Validation (2026-02-14): Storage Default P1 Issue + Upload Cleanup Runbook
+
+This record validates:
+
+- `Storage Health` opens the **default** P1 tracking issue on non-drill failures and auto-closes on recovery.
+- Upload cleanup workflow runs safely in dry-run mode and uploads evidence artifacts.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Storage Health (forced fail, default P1 issue open) | [#22010149843](https://github.com/zensgit/metasheet2/actions/runs/22010149843) | FAIL (expected) | `output/playwright/ga/22010149843/storage.log`, `output/playwright/ga/22010149843/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Storage Health recovery (default P1 issue auto-close) | [#22010164550](https://github.com/zensgit/metasheet2/actions/runs/22010164550) | PASS | `output/playwright/ga/22010164550/storage.log`, `output/playwright/ga/22010164550/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Remote Upload Cleanup (dry-run) | [#22010215217](https://github.com/zensgit/metasheet2/actions/runs/22010215217) | PASS | `output/playwright/ga/22010215217/cleanup.log`, `output/playwright/ga/22010215217/step-summary.md` |
