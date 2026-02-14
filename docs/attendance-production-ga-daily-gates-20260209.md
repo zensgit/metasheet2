@@ -419,6 +419,7 @@ Artifacts:
 
 - Uploaded for 14 days:
   - `output/playwright/attendance-import-perf/**`
+  - Includes `perf.log` (stdout/stderr capture) for debugging failures.
 
 P1 tracking issue (no paging): `[Attendance P1] Perf baseline alert` (opened/reopened on failure; commented+closed on recovery).
 
@@ -458,6 +459,7 @@ Artifacts:
 - Evidence (local, after download):
   - `output/playwright/ga/<RUN_ID>/**/attendance-import-perf-longrun-trend.md`
   - `output/playwright/ga/<RUN_ID>/**/perf-summary.json`
+  - `output/playwright/ga/<RUN_ID>/**/perf.log` (stdout/stderr capture; per scenario)
 
 P1 tracking issue (no paging): `[Attendance P1] Perf longrun alert` (opened/reopened on failure; commented+closed on recovery).
 
