@@ -256,11 +256,16 @@ Safety limits (workflow inputs):
 - `max_delete_files` (default: `5000`) refuse deletion if stale file count exceeds this threshold
 - `max_delete_gb` (default: `5`) refuse deletion if estimated stale size exceeds this threshold
 
+Debug inputs:
+
+- `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
+
 Manual trigger (dry-run):
 
 ```bash
 gh workflow run attendance-remote-upload-cleanup-prod.yml \
   -f drill_fail=false \
+  -f skip_host_sync=false \
   -f max_file_age_days=14 \
   -f max_delete_files=5000 \
   -f max_delete_gb=5 \
