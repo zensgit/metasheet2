@@ -374,3 +374,22 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Perf longrun (upload_csv=true, perf.log captured) | [#22020987167](https://github.com/zensgit/metasheet2/actions/runs/22020987167) | PASS | `output/playwright/ga/22020987167/**/perf.log`, `output/playwright/ga/22020987167/**/perf-summary.json`, `output/playwright/ga/22020987167/**/attendance-import-perf-longrun-trend.md` |
+
+## Post-Go Validation (2026-02-14): Remote Metrics Gate Adds Reason + Missing Metrics
+
+This record validates:
+
+- `Remote Metrics` step summary (and issue body on failure) includes:
+  - failure `reason`
+  - `missing_metrics` list (when applicable)
+
+Implementation:
+
+- Commit: `77453352`
+- Change: parse metrics log to emit `metrics_reason` and `missing_metrics` outputs; include them in step summary + P1 issue tracking.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Metrics (reason visible) | [#22021069004](https://github.com/zensgit/metasheet2/actions/runs/22021069004) | PASS | `output/playwright/ga/22021069004/step-summary.md`, `output/playwright/ga/22021069004/metrics.log` |
