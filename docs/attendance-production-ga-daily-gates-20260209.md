@@ -249,11 +249,18 @@ Schedule:
 
 - Weekly dry-run report at `02:20 UTC` (Sunday).
 
+Safety limits (workflow inputs):
+
+- `max_delete_files` (default: `5000`) refuse deletion if stale file count exceeds this threshold
+- `max_delete_gb` (default: `5`) refuse deletion if estimated stale size exceeds this threshold
+
 Manual trigger (dry-run):
 
 ```bash
 gh workflow run attendance-remote-upload-cleanup-prod.yml \
   -f max_file_age_days=14 \
+  -f max_delete_files=5000 \
+  -f max_delete_gb=5 \
   -f delete=false \
   -f confirm_delete=false
 ```
@@ -263,6 +270,8 @@ Manual trigger (destructive, requires explicit confirmation):
 ```bash
 gh workflow run attendance-remote-upload-cleanup-prod.yml \
   -f max_file_age_days=14 \
+  -f max_delete_files=5000 \
+  -f max_delete_gb=5 \
   -f delete=true \
   -f confirm_delete=true
 ```
@@ -421,6 +430,7 @@ Purpose:
 - Apply escalation rules automatically:
   - `P0`: strict gate failure
   - `P1`: host metrics/storage health/perf baseline/perf longrun failure or stale runs
+- `P2`: upload cleanup (weekly) failure or stale runs
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.

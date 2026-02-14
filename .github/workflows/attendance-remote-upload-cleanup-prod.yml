@@ -9,6 +9,14 @@ on:
         description: 'Delete files with age >= N days (default 14). In dry-run mode, only reports.'
         required: false
         default: '14'
+      max_delete_files:
+        description: 'Safety limit: refuse deletion when stale file count exceeds this value (default 5000).'
+        required: false
+        default: '5000'
+      max_delete_gb:
+        description: 'Safety limit: refuse deletion when estimated stale size (GiB) exceeds this value (default 5).'
+        required: false
+        default: '5'
       delete:
         description: 'Set true to actually delete stale files (requires confirm_delete=true)'
         required: false
@@ -43,6 +51,8 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           MAX_FILE_AGE_DAYS: ${{ github.event.inputs.max_file_age_days || '14' }}
+          MAX_DELETE_FILES: ${{ github.event.inputs.max_delete_files || '5000' }}
+          MAX_DELETE_GB: ${{ github.event.inputs.max_delete_gb || '5' }}
           DELETE: ${{ github.event.inputs.delete || 'false' }}
           CONFIRM_DELETE: ${{ github.event.inputs.confirm_delete || 'false' }}
         run: |
@@ -63,6 +73,8 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
             "MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\""
+            "MAX_DELETE_FILES=\"${MAX_DELETE_FILES}\""
+            "MAX_DELETE_GB=\"${MAX_DELETE_GB}\""
             "DELETE=\"${DELETE}\""
             "CONFIRM_DELETE=\"${CONFIRM_DELETE}\""
             "cd \"${DEPLOY_PATH}\""
@@ -81,7 +93,7 @@ jobs:
               '  cleanup_rc="$host_sync_rc"'
             "else"
               "  set +e"
-              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\" DELETE=\"${DELETE}\" CONFIRM_DELETE=\"${CONFIRM_DELETE}\" scripts/ops/attendance-clean-uploads.sh"
+              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FILE_AGE_DAYS=\"${MAX_FILE_AGE_DAYS}\" MAX_DELETE_FILES=\"${MAX_DELETE_FILES}\" MAX_DELETE_GB=\"${MAX_DELETE_GB}\" DELETE=\"${DELETE}\" CONFIRM_DELETE=\"${CONFIRM_DELETE}\" scripts/ops/attendance-clean-uploads.sh"
               '  cleanup_rc=$?'
               "  set -e"
             "fi"
@@ -184,4 +196,3 @@ jobs:
             echo "Remote upload cleanup failed: rc=$rc" >&2
             exit 1
           fi
-

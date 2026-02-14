@@ -8,6 +8,8 @@ ENV_FILE="${ENV_FILE:-${ROOT_DIR}/docker/app.env}"
 MAX_FILE_AGE_DAYS="${MAX_FILE_AGE_DAYS:-14}"
 DELETE="${DELETE:-false}"
 CONFIRM_DELETE="${CONFIRM_DELETE:-false}"
+MAX_DELETE_FILES="${MAX_DELETE_FILES:-5000}"
+MAX_DELETE_GB="${MAX_DELETE_GB:-5}"
 
 function die() {
   echo "[attendance-clean-uploads] ERROR: $*" >&2
@@ -57,6 +59,18 @@ fi
 if (( MAX_FILE_AGE_DAYS < 1 )); then
   die "MAX_FILE_AGE_DAYS must be >= 1 (got: '${MAX_FILE_AGE_DAYS}')"
 fi
+if ! is_integer "$MAX_DELETE_FILES"; then
+  die "MAX_DELETE_FILES must be an integer (got: '${MAX_DELETE_FILES}')"
+fi
+if (( MAX_DELETE_FILES < 1 )); then
+  die "MAX_DELETE_FILES must be >= 1 (got: '${MAX_DELETE_FILES}')"
+fi
+if ! is_integer "$MAX_DELETE_GB"; then
+  die "MAX_DELETE_GB must be an integer (got: '${MAX_DELETE_GB}')"
+fi
+if (( MAX_DELETE_GB < 1 )); then
+  die "MAX_DELETE_GB must be >= 1 (got: '${MAX_DELETE_GB}')"
+fi
 
 [[ -f "$COMPOSE_FILE" ]] || die "Compose file not found: ${COMPOSE_FILE}"
 [[ -f "$ENV_FILE" ]] || die "Env file not found: ${ENV_FILE}"
@@ -72,7 +86,7 @@ info "Repo root: ${ROOT_DIR}"
 info "Compose:   ${COMPOSE_FILE}"
 info "Env file:  ${ENV_FILE}"
 info "Upload dir (container): ${UPLOAD_DIR}"
-info "Params: max_file_age_days=${MAX_FILE_AGE_DAYS} delete=${DELETE} confirm_delete=${CONFIRM_DELETE}"
+info "Params: max_file_age_days=${MAX_FILE_AGE_DAYS} delete=${DELETE} confirm_delete=${CONFIRM_DELETE} max_delete_files=${MAX_DELETE_FILES} max_delete_gb=${MAX_DELETE_GB}"
 
 volume_line="$(
   grep -E "^[[:space:]]*-[[:space:]]*[^#]*:[[:space:]]*${UPLOAD_DIR}([[:space:]]|$|:)" "$COMPOSE_FILE" \
@@ -202,9 +216,23 @@ if [[ "${CONFIRM_DELETE}" != "true" ]]; then
   die "Refusing to delete without CONFIRM_DELETE=true"
 fi
 
+size_kb_cmd="find \"${target_path}\" -type f -mtime +${mtime_threshold} -exec du -k {} + 2>/dev/null | awk '{s+=$1} END {print s+0}'"
+stale_kb_total="$(run_cmd "$size_kb_cmd" | tail -n 1 | tr -d '[:space:]' || true)"
+if ! is_integer "$stale_kb_total"; then
+  die "Failed to compute stale_kb_total"
+fi
+stale_gb_ceil=$(( (stale_kb_total + 1024*1024 - 1) / (1024*1024) ))
+info "stale_kb_total=${stale_kb_total} (~${stale_gb_ceil} GiB)"
+
+if (( stale_count > MAX_DELETE_FILES )); then
+  die "Refusing to delete: stale_count=${stale_count} exceeds MAX_DELETE_FILES=${MAX_DELETE_FILES} (raise MAX_DELETE_FILES explicitly to override)"
+fi
+if (( stale_gb_ceil > MAX_DELETE_GB )); then
+  die "Refusing to delete: estimated size (~${stale_gb_ceil} GiB) exceeds MAX_DELETE_GB=${MAX_DELETE_GB} (raise MAX_DELETE_GB explicitly to override)"
+fi
+
 delete_cmd="find \"${target_path}\" -type f -mtime +${mtime_threshold} -print -delete"
 info "Deleting stale files (age >= ${MAX_FILE_AGE_DAYS} days)..."
 run_cmd "$delete_cmd" >/dev/null || die "Delete command failed"
 
 info "Delete completed."
-

@@ -21,6 +21,7 @@ const branch = String(process.env.BRANCH || 'main').trim()
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
 const storageWorkflow = String(process.env.STORAGE_WORKFLOW || 'attendance-remote-storage-prod.yml').trim()
+const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remote-upload-cleanup-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
@@ -192,14 +193,30 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   }
 }
 
-function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValue, preflightGate, metricsGate, storageGate, strictGate, perfGate, longrunGate, overallStatus, p0Status, findings }) {
+function renderMarkdown({
+  generatedAt,
+  repoValue,
+  branchValue,
+  lookbackHoursValue,
+  cleanupLookbackHoursValue,
+  preflightGate,
+  metricsGate,
+  storageGate,
+  cleanupGate,
+  strictGate,
+  perfGate,
+  longrunGate,
+  overallStatus,
+  p0Status,
+  findings,
+}) {
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
   lines.push(`Generated at (UTC): \`${generatedAt}\``)
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
-  lines.push(`Lookback: \`${lookbackHoursValue}h\``)
+  lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`)`)
   lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
   lines.push('')
@@ -208,7 +225,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
   lines.push('|---|---|---|---|---|---|---|')
 
-  for (const gate of [preflightGate, metricsGate, storageGate, strictGate, perfGate, longrunGate]) {
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -223,7 +240,7 @@ function renderMarkdown({ generatedAt, repoValue, branchValue, lookbackHoursValu
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
   lines.push('- `P1` (Host metrics / storage health / perf gate failure/stale runs): fix same day, rerun gates with thresholds and record evidence.')
-  lines.push('- `P2` (missing evidence metadata only): update docs within 24h.')
+  lines.push('- `P2` (weekly upload cleanup signal / missing evidence metadata): fix within 24h.')
   lines.push('')
 
   if (findings.length === 0) {
@@ -277,6 +294,7 @@ async function run() {
   const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
   const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
   const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
+  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
@@ -295,6 +313,11 @@ async function run() {
   const storageList = storageListRaw.filter((run) => !isDrillRun(run))
   if (storageListRaw.length !== storageList.length) {
     info(`storage: filtered drill runs (${storageListRaw.length - storageList.length})`)
+  }
+  const cleanupListRaw = Array.isArray(cleanupRuns?.list) ? cleanupRuns.list : []
+  const cleanupList = cleanupListRaw.filter((run) => !isDrillRun(run))
+  if (cleanupListRaw.length !== cleanupList.length) {
+    info(`cleanup: filtered drill runs (${cleanupListRaw.length - cleanupList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const strictList = strictListRaw.filter((run) => !isDrillRun(run))
@@ -318,6 +341,8 @@ async function run() {
   const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
   const storageLatestAny = storageList[0] ?? null
   const storageLatestCompleted = storageList.find((run) => run?.status === 'completed') ?? null
+  const cleanupLatestAny = cleanupList[0] ?? null
+  const cleanupLatestCompleted = cleanupList.find((run) => run?.status === 'completed') ?? null
   const strictLatestAny = strictList[0] ?? null
   const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
   const perfLatestAny = perfList[0] ?? null
@@ -352,6 +377,16 @@ async function run() {
     lookbackHoursValue: lookbackHours,
     fetchError: storageRuns.error,
   })
+  const cleanupLookbackHours = Math.max(lookbackHours, 200)
+  const cleanupGate = evaluateGate({
+    name: 'Upload Cleanup',
+    severity: 'P2',
+    latestAny: cleanupLatestAny,
+    latestCompleted: cleanupLatestCompleted,
+    now,
+    lookbackHoursValue: cleanupLookbackHours,
+    fetchError: cleanupRuns.error,
+  })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
     severity: 'P0',
@@ -385,6 +420,7 @@ async function run() {
     ...preflightGate.findings,
     ...metricsGate.findings,
     ...storageGate.findings,
+    ...cleanupGate.findings,
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
@@ -403,6 +439,7 @@ async function run() {
       preflight: preflightGate,
       metrics: metricsGate,
       storage: storageGate,
+      cleanup: cleanupGate,
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
@@ -415,9 +452,11 @@ async function run() {
     repoValue: repo,
     branchValue: branch,
     lookbackHoursValue: lookbackHours,
+    cleanupLookbackHoursValue: cleanupLookbackHours,
     preflightGate,
     metricsGate,
     storageGate,
+    cleanupGate,
     strictGate,
     perfGate,
     longrunGate,
