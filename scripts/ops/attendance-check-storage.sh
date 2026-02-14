@@ -168,36 +168,131 @@ function run_cmd() {
   if [[ "$use_backend_exec" == "true" ]]; then
     # Important: redirect stdin so docker compose exec can't consume the rest of this bash script
     # when the caller runs it via "ssh ... bash -s" (stdin carries the remaining script).
-    docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null
+    #
+    # Also, hide noisy docker compose warnings on stderr (e.g. "version is obsolete") by only
+    # emitting stderr when the exec fails.
+    tmp_err="$(mktemp 2>/dev/null || echo "/tmp/attendance-storage-err-$$")"
+    out=""
+    set +e
+    out="$(docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    rc=$?
+    set -e
+    if [[ "$rc" != "0" ]]; then
+      if [[ -f "$tmp_err" ]]; then
+        tail -n 80 "$tmp_err" >&2 || true
+        rm -f "$tmp_err" || true
+      fi
+      return "$rc"
+    fi
+    rm -f "$tmp_err" || true
+    echo "$out"
   else
     bash -c "$cmd"
   fi
 }
 
-df_line="$(run_cmd "df -P \"${target_path}\" | tail -n 1" || true)"
-[[ -n "$df_line" ]] || die "df failed for path: ${target_path}"
-df_used_pct="$(echo "$df_line" | awk '{print $5}' | tr -d '%' || true)"
-[[ -n "$df_used_pct" ]] || die "Failed to parse df used percent from: ${df_line}"
-if ! is_integer "$df_used_pct"; then
-  die "Parsed df used percent is not an integer: '${df_used_pct}' (line: ${df_line})"
+df_used_pct=""
+upload_bytes=""
+file_count=""
+oldest_sec=""
+
+if [[ "$use_backend_exec" == "true" ]]; then
+  metrics_cmd="$(
+    cat <<EOF
+set -eu
+TARGET="${target_path}"
+
+df_used_pct="\$(df -P "\${TARGET}" 2>/dev/null | awk 'END{gsub(/%/,\"\",\$5); print \$5}' || true)"
+
+upload_bytes="\$(du -sb "\${TARGET}" 2>/dev/null | cut -f1 || true)"
+if [[ -z "\${upload_bytes}" ]]; then
+  kb="\$(du -sk "\${TARGET}" 2>/dev/null | cut -f1 || true)"
+  if [[ -n "\${kb}" ]]; then
+    upload_bytes="\$((kb * 1024))"
+  fi
 fi
 
-upload_bytes=""
-if run_cmd "du -sb \"${target_path}\" >/dev/null 2>&1"; then
-  upload_bytes="$(run_cmd "du -sb \"${target_path}\" 2>/dev/null | cut -f1 | tr -d ' '" || true)"
-elif run_cmd "du -sk \"${target_path}\" >/dev/null 2>&1"; then
-  kb="$(run_cmd "du -sk \"${target_path}\" 2>/dev/null | cut -f1 | tr -d ' '" || true)"
-  [[ -n "$kb" ]] || die "du -sk returned empty output for: ${target_path}"
-  upload_bytes="$((kb * 1024))"
-else
-  die "du is not available or unsupported (cannot compute upload dir size)"
+file_count="\$(find "\${TARGET}" -type f 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
+
+oldest_sec=""
+if [[ "\${file_count:-0}" -gt 0 ]]; then
+  oldest_epoch="\$(find "\${TARGET}" -type f -printf '%T@\\n' 2>/dev/null | sort -n | head -n 1 || true)"
+  oldest_sec="\${oldest_epoch%%.*}"
+  if [[ -z "\${oldest_sec}" || "\${oldest_sec}" =~ [^0-9] ]]; then
+    oldest_sec=""
+  fi
+
+  if [[ -z "\${oldest_sec}" ]]; then
+    oldest_sec="\$(find "\${TARGET}" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1 || true)"
+    if [[ -z "\${oldest_sec}" || "\${oldest_sec}" =~ [^0-9] ]]; then
+      oldest_sec=""
+    fi
+  fi
 fi
+
+echo "df_used_pct=\${df_used_pct}"
+echo "upload_bytes=\${upload_bytes}"
+echo "file_count=\${file_count}"
+echo "oldest_sec=\${oldest_sec}"
+EOF
+  )"
+
+  metrics_out="$(run_cmd "$metrics_cmd" || true)"
+  if [[ -z "$metrics_out" ]]; then
+    die "Failed to compute storage metrics via backend exec (no output)."
+  fi
+
+  while IFS='=' read -r key value; do
+    case "$key" in
+      df_used_pct) df_used_pct="$value" ;;
+      upload_bytes) upload_bytes="$value" ;;
+      file_count) file_count="$value" ;;
+      oldest_sec) oldest_sec="$value" ;;
+      *) : ;;
+    esac
+  done <<<"$metrics_out"
+else
+  df_line="$(run_cmd "df -P \"${target_path}\" | tail -n 1" || true)"
+  [[ -n "$df_line" ]] || die "df failed for path: ${target_path}"
+  df_used_pct="$(echo "$df_line" | awk '{print $5}' | tr -d '%' || true)"
+
+  upload_bytes=""
+  if du -sb "$target_path" >/dev/null 2>&1; then
+    upload_bytes="$(du -sb "$target_path" 2>/dev/null | cut -f1 | tr -d ' ' || true)"
+  elif du -sk "$target_path" >/dev/null 2>&1; then
+    kb="$(du -sk "$target_path" 2>/dev/null | cut -f1 | tr -d ' ' || true)"
+    [[ -n "$kb" ]] || die "du -sk returned empty output for: ${target_path}"
+    upload_bytes="$((kb * 1024))"
+  else
+    die "du is not available or unsupported (cannot compute upload dir size)"
+  fi
+
+  file_count="$(find "$target_path" -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
+
+  if (( file_count > 0 )); then
+    oldest_epoch=""
+    if find "$target_path" -maxdepth 0 -printf '' >/dev/null 2>&1; then
+      oldest_epoch="$(find "$target_path" -type f -printf '%T@\\n' 2>/dev/null | sort -n | head -n 1 || true)"
+    elif stat -c %Y "$target_path" >/dev/null 2>&1; then
+      oldest_epoch="$(find "$target_path" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1 || true)"
+    elif stat -f %m "$target_path" >/dev/null 2>&1; then
+      oldest_epoch="$(find "$target_path" -type f -exec stat -f %m {} + 2>/dev/null | sort -n | head -n 1 || true)"
+    fi
+    [[ -n "$oldest_epoch" ]] || die "Failed to compute oldest file mtime under: ${target_path}"
+    oldest_sec="${oldest_epoch%%.*}"
+  fi
+fi
+
+[[ -n "$df_used_pct" ]] || die "Failed to compute df used percent for: ${target_path}"
+if ! is_integer "$df_used_pct"; then
+  die "Computed df used percent is not an integer: '${df_used_pct}'"
+fi
+
 [[ -n "$upload_bytes" ]] || die "Failed to compute upload bytes for: ${target_path}"
 if ! is_integer "$upload_bytes"; then
   die "Computed upload bytes is not an integer: '${upload_bytes}'"
 fi
 
-file_count="$(run_cmd "find \"${target_path}\" -type f 2>/dev/null | wc -l | tr -d ' '" || true)"
 [[ -n "$file_count" ]] || die "Failed to compute file count under: ${target_path}"
 if ! is_integer "$file_count"; then
   die "Computed file count is not an integer: '${file_count}'"
@@ -205,18 +300,10 @@ fi
 
 oldest_days=0
 if (( file_count > 0 )); then
-  oldest_epoch=""
-  if run_cmd "find \"${target_path}\" -maxdepth 0 -printf ''" >/dev/null 2>&1; then
-    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -printf '%T@\\n' 2>/dev/null | sort -n | head -n 1" || true)"
-  elif run_cmd "command -v stat >/dev/null 2>&1"; then
-    oldest_epoch="$(run_cmd "find \"${target_path}\" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n 1" || true)"
-  fi
-  [[ -n "$oldest_epoch" ]] || die "Failed to compute oldest file mtime under: ${target_path}"
-
-  oldest_sec="${oldest_epoch%%.*}"
+  [[ -n "$oldest_sec" ]] || die "Failed to compute oldest file mtime under: ${target_path}"
   now_sec="$(date +%s)"
   if ! is_integer "$oldest_sec"; then
-    die "Oldest mtime is not an integer epoch: '${oldest_epoch}'"
+    die "Oldest mtime is not an integer epoch: '${oldest_sec}'"
   fi
   if ! is_integer "$now_sec"; then
     die "date +%s returned non-integer: '${now_sec}'"
