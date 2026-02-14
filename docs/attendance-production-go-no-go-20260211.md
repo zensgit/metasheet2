@@ -298,3 +298,24 @@ Issue update check for #159 after non-debug failure `#22014225635`:
 
 - `commentCount=3`
 - `updatedAt=2026-02-14T08:26:52Z`
+
+## Post-Go Validation (2026-02-14): Host Disk Reclaim + Storage Health Recovery
+
+This record validates:
+
+- When storage health fails due to host disk usage (`df_used_pct`), a docker image/cache reclaim run can restore filesystem headroom.
+- `Storage Health` recovery auto-closes the default tracking issue.
+- Daily Gate Dashboard returns to `PASS` after recovery.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Docker GC (prune attempt; first run disconnected) | [#22014349249](https://github.com/zensgit/metasheet2/actions/runs/22014349249) | FAIL | `output/playwright/ga/22014349249/docker-gc.log`, `output/playwright/ga/22014349249/step-summary.md` |
+| Remote Docker GC (prune already running; shows reclaimed disk) | [#22014433107](https://github.com/zensgit/metasheet2/actions/runs/22014433107) | FAIL | `output/playwright/ga/22014433107/docker-gc.log`, `output/playwright/ga/22014433107/step-summary.md` |
+| Storage Health recovery (auto-close default issue) | [#22014448225](https://github.com/zensgit/metasheet2/actions/runs/22014448225) | PASS | `output/playwright/ga/22014448225/storage.log`, `output/playwright/ga/22014448225/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Daily Gate Dashboard (post recovery) | [#22014457079](https://github.com/zensgit/metasheet2/actions/runs/22014457079) | PASS | `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.json` |
+
+Evidence highlights:
+
+- Host disk usage recovered to `Use%=47%` on `/dev/vda2` (see `#22014433107` step summary).
+- Default storage issue `#159` is now `CLOSED` with:
+  - `updatedAt=2026-02-14T08:44:52Z`

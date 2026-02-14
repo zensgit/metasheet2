@@ -249,6 +249,27 @@ gh workflow run attendance-remote-storage-prod.yml \
   -f issue_title='[Attendance Storage Drill] Storage issue test'
 ```
 
+Remediation (when `df_used_pct` is high):
+
+- Run remote docker garbage collection (removes unused images/caches; does **not** remove named volumes):
+  - Workflow: `.github/workflows/attendance-remote-docker-gc-prod.yml`
+
+```bash
+gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true
+```
+
+- Download artifacts:
+
+```bash
+gh run download <RUN_ID> -n "attendance-remote-docker-gc-prod-<RUN_ID>-1" -D "output/playwright/ga/<RUN_ID>"
+```
+
+- Then re-run storage health to confirm recovery and auto-close the P1 issue:
+
+```bash
+gh workflow run attendance-remote-storage-prod.yml -f drill_fail=false
+```
+
 ### 2.6) Remote Upload Cleanup (Prod) (Manual / Scheduled Dry-Run)
 
 This workflow provides a safe remediation path when the upload volume accumulates stale files.
