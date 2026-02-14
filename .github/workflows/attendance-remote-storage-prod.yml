@@ -1,7 +1,7 @@
 name: Attendance Remote Storage Health (Prod)
 
 # Mark drill runs explicitly so dashboards can ignore them.
-run-name: Attendance Remote Storage Health (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+run-name: Attendance Remote Storage Health (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.skip_host_sync == 'true' && ' [DEBUG]' || '' }}
 
 on:
   workflow_dispatch:
@@ -14,6 +14,10 @@ on:
         description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
         required: false
         default: ''
+      skip_host_sync:
+        description: 'Optional: skip deploy-host git sync step (true/false). Use for debugging when host sync is broken.'
+        required: false
+        default: 'false'
       max_fs_used_pct:
         description: 'Fail when filesystem usage percent is >= this value (df used_pct)'
         required: false
@@ -55,6 +59,7 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
           MAX_FS_USED_PCT: ${{ github.event.inputs.max_fs_used_pct || '90' }}
           MAX_UPLOAD_DIR_GB: ${{ github.event.inputs.max_upload_dir_gb || '10' }}
           MAX_OLDEST_FILE_DAYS: ${{ github.event.inputs.max_oldest_file_days || '14' }}
@@ -68,6 +73,7 @@ jobs:
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
           DRILL_FAIL="${DRILL_FAIL:-false}"
+          SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 
           MAX_FS_USED_PCT="${MAX_FS_USED_PCT:-90}"
           MAX_UPLOAD_DIR_GB="${MAX_UPLOAD_DIR_GB:-10}"
@@ -81,16 +87,22 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
             "DRILL_FAIL=\"${DRILL_FAIL}\""
+            "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
             "MAX_FS_USED_PCT=\"${MAX_FS_USED_PCT}\""
             "MAX_UPLOAD_DIR_GB=\"${MAX_UPLOAD_DIR_GB}\""
             "MAX_OLDEST_FILE_DAYS=\"${MAX_OLDEST_FILE_DAYS}\""
             "cd \"${DEPLOY_PATH}\""
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
-            "set +e"
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
-            'host_sync_rc=$?'
-            "set -e"
+            'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
+              '  echo "[host-sync] skipped (skip_host_sync=true)"'
+              '  host_sync_rc=0'
+            "else"
+              "  set +e"
+              "  git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
+              '  host_sync_rc=$?'
+              "  set -e"
+            "fi"
             'echo "[host-sync] rc=$host_sync_rc"'
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE STORAGE START ===\""
@@ -122,6 +134,7 @@ jobs:
         env:
           STORAGE_RC: ${{ steps.remote_storage.outputs.storage_rc }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail
           storage_log="output/storage/storage.log"
@@ -157,6 +170,7 @@ jobs:
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${STORAGE_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
@@ -288,6 +302,7 @@ jobs:
     env:
       DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
       ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
       STORAGE_RESULT: ${{ needs.storage.result }}
       STORAGE_RC: ${{ needs.storage.outputs.storage_rc }}
     steps:
@@ -296,6 +311,7 @@ jobs:
         with:
           script: |
             const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const skipHostSync = String(process.env.SKIP_HOST_SYNC || '').trim()
             const storageResult = String(process.env.STORAGE_RESULT || '').trim()
             const storageRc = String(process.env.STORAGE_RC || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
@@ -316,7 +332,7 @@ jobs:
             const artifactName = `attendance-remote-storage-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
             const failed = storageResult === 'failure'
-            const statusLine = `job: storage=${storageResult || 'unknown'} rc=${storageRc || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
+            const statusLine = `job: storage=${storageResult || 'unknown'} rc=${storageRc || 'missing'} skip_host_sync=${skipHostSync || 'missing'}${drillFail ? ' (drill_fail=true)' : ''}`
 
             const body = [
               'Automated storage health tracking issue (P1, no paging).',
@@ -403,4 +419,3 @@ jobs:
               state: 'closed',
             })
             core.info(`Closed issue #${match.number}`)
-

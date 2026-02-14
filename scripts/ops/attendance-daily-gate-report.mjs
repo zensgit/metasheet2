@@ -55,9 +55,10 @@ function makeRunId() {
 }
 
 function isDrillRun(run) {
-  // Workflows may tag run-name like "... [DRILL]" for expected failure drills.
+  // Workflows may tag run-name like "... [DRILL]" for expected failure drills, or
+  // "... [DEBUG]" for manual debug runs that should not replace production signals.
   const title = String(run?.display_title || run?.name || '').toUpperCase()
-  return title.includes('[DRILL]')
+  return title.includes('[DRILL]') || title.includes('[DEBUG]')
 }
 
 async function apiGet(pathname) {
@@ -302,37 +303,37 @@ async function run() {
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = preflightListRaw.filter((run) => !isDrillRun(run))
   if (preflightListRaw.length !== preflightList.length) {
-    info(`preflight: filtered drill runs (${preflightListRaw.length - preflightList.length})`)
+    info(`preflight: filtered drill/debug runs (${preflightListRaw.length - preflightList.length})`)
   }
   const metricsListRaw = Array.isArray(metricsRuns?.list) ? metricsRuns.list : []
   const metricsList = metricsListRaw.filter((run) => !isDrillRun(run))
   if (metricsListRaw.length !== metricsList.length) {
-    info(`metrics: filtered drill runs (${metricsListRaw.length - metricsList.length})`)
+    info(`metrics: filtered drill/debug runs (${metricsListRaw.length - metricsList.length})`)
   }
   const storageListRaw = Array.isArray(storageRuns?.list) ? storageRuns.list : []
   const storageList = storageListRaw.filter((run) => !isDrillRun(run))
   if (storageListRaw.length !== storageList.length) {
-    info(`storage: filtered drill runs (${storageListRaw.length - storageList.length})`)
+    info(`storage: filtered drill/debug runs (${storageListRaw.length - storageList.length})`)
   }
   const cleanupListRaw = Array.isArray(cleanupRuns?.list) ? cleanupRuns.list : []
   const cleanupList = cleanupListRaw.filter((run) => !isDrillRun(run))
   if (cleanupListRaw.length !== cleanupList.length) {
-    info(`cleanup: filtered drill runs (${cleanupListRaw.length - cleanupList.length})`)
+    info(`cleanup: filtered drill/debug runs (${cleanupListRaw.length - cleanupList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const strictList = strictListRaw.filter((run) => !isDrillRun(run))
   if (strictListRaw.length !== strictList.length) {
-    info(`strict: filtered drill runs (${strictListRaw.length - strictList.length})`)
+    info(`strict: filtered drill/debug runs (${strictListRaw.length - strictList.length})`)
   }
   const perfListRaw = Array.isArray(perfRuns?.list) ? perfRuns.list : []
   const perfList = perfListRaw.filter((run) => !isDrillRun(run))
   if (perfListRaw.length !== perfList.length) {
-    info(`perf: filtered drill runs (${perfListRaw.length - perfList.length})`)
+    info(`perf: filtered drill/debug runs (${perfListRaw.length - perfList.length})`)
   }
   const longrunListRaw = Array.isArray(longrunRuns?.list) ? longrunRuns.list : []
   const longrunList = longrunListRaw.filter((run) => !isDrillRun(run))
   if (longrunListRaw.length !== longrunList.length) {
-    info(`longrun: filtered drill runs (${longrunListRaw.length - longrunList.length})`)
+    info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
 
   const preflightLatestAny = preflightList[0] ?? null

@@ -174,7 +174,7 @@ Expected:
 Notes:
 
 - This gate cannot be executed from a workstation because the backend metrics endpoint is not exposed through nginx.
-- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` runs when selecting the latest completed `Host Metrics` gate run.
+- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` (and `[DEBUG]`) runs when selecting the latest completed `Host Metrics` gate run.
 - On non-drill failures, this workflow opens/reopens: `[Attendance P1] Host metrics alert` (no paging).
 - Safe drill to validate the FAIL-path issue behavior with a safe override title:
 
@@ -185,6 +185,11 @@ gh workflow run attendance-remote-metrics-prod.yml \
 ```
 - You can override the target:
   - `METRICS_URL="http://127.0.0.1:8900/metrics/prom" scripts/ops/attendance-check-metrics.sh`
+
+Debug inputs:
+
+- `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
+  - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
 
 ### 2.5) Remote Storage Health (Prod) (Upload Volume Drift Gate)
 
@@ -210,6 +215,11 @@ Optional thresholds (workflow inputs):
 - `max_upload_dir_gb` (default: `10`)
 - `max_oldest_file_days` (default: `14`)
 
+Debug inputs:
+
+- `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
+  - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
+
 Artifacts:
 
 - Download:
@@ -227,7 +237,7 @@ Expected:
 
 Notes:
 
-- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` runs when selecting the latest completed `Storage Health` gate run.
+- Drill runs are tagged with `run-name` suffix `[DRILL]`, and the daily gate dashboard ignores `[DRILL]` (and `[DEBUG]`) runs when selecting the latest completed `Storage Health` gate run.
 - On non-drill failures, this workflow opens/reopens: `[Attendance P1] Storage health alert` (no paging).
 - Safe drill to validate the FAIL-path issue behavior with a safe override title:
 
@@ -259,6 +269,7 @@ Safety limits (workflow inputs):
 Debug inputs:
 
 - `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
+  - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
 
 Manual trigger (dry-run):
 

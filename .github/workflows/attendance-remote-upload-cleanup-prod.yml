@@ -1,7 +1,7 @@
 name: Attendance Remote Upload Cleanup (Prod)
 
 # Mark drill runs explicitly so dashboards can ignore them.
-run-name: Attendance Remote Upload Cleanup (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+run-name: Attendance Remote Upload Cleanup (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.skip_host_sync == 'true' && ' [DEBUG]' || '' }}
 
 on:
   workflow_dispatch:
