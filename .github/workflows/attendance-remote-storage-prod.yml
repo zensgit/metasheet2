@@ -132,16 +132,16 @@ jobs:
           set -e
 
           df_used_pct="$(
-            (grep -F "[attendance-storage] df_used_pct=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*df_used_pct=([0-9]+).*/\\1/') || true
+            (grep -F "[attendance-storage] df_used_pct=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*df_used_pct=([0-9]+).*/\1/') || true
           )"
           upload_gb="$(
-            (grep -F "[attendance-storage] upload_bytes=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*upload_gb=([0-9]+).*/\\1/') || true
+            (grep -F "[attendance-storage] upload_bytes=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*upload_gb=([0-9]+).*/\1/') || true
           )"
           file_count="$(
-            (grep -F "[attendance-storage] file_count=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*file_count=([0-9]+).*/\\1/') || true
+            (grep -F "[attendance-storage] file_count=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*file_count=([0-9]+).*/\1/') || true
           )"
           oldest_file_days="$(
-            (grep -F "[attendance-storage] file_count=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*oldest_file_days=([0-9]+).*/\\1/') || true
+            (grep -F "[attendance-storage] file_count=" "$storage_log" 2>/dev/null | tail -n 1 | sed -E 's/.*oldest_file_days=([0-9]+).*/\1/') || true
           )"
 
           reason="REMOTE_FAILED"
