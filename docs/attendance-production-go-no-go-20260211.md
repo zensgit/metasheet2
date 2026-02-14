@@ -321,3 +321,21 @@ Evidence highlights:
 - Host disk usage recovered to `Use%=47%` on `/dev/vda2` (see `#22014433107` step summary).
 - Default storage issue `#159` is now `CLOSED` with:
   - `updatedAt=2026-02-14T08:44:52Z`
+
+## Post-Go Validation (2026-02-14): Storage Health Metrics Parsing Fix
+
+This record validates:
+
+- `Storage Health` step summary shows computed metrics (not literal `\\1`).
+- Host sync updates the workflow logic on the deploy host before executing checks.
+
+Implementation:
+
+- Commit: `e6f5b373`
+- Change: fix GNU `sed` backref replacement in storage metrics parsing.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Storage Health (computed metrics OK) | [#22018028547](https://github.com/zensgit/metasheet2/actions/runs/22018028547) | PASS | `output/playwright/ga/22018028547/storage.log`, `output/playwright/ga/22018028547/step-summary.md` |
