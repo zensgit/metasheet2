@@ -190,6 +190,7 @@ Debug inputs:
 
 - `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
   - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
+  - Debug runs also skip default issue operations (open/reopen/close) unless `issue_title` is explicitly provided.
 
 ### 2.5) Remote Storage Health (Prod) (Upload Volume Drift Gate)
 
@@ -219,6 +220,7 @@ Debug inputs:
 
 - `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
   - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
+  - Debug runs also skip default issue operations (open/reopen/close) unless `issue_title` is explicitly provided.
 
 Artifacts:
 
@@ -270,6 +272,7 @@ Debug inputs:
 
 - `skip_host_sync` (default: `false`) skip deploy-host git sync step (use when host sync is broken)
   - Runs with `skip_host_sync=true` are tagged with `run-name` suffix `[DEBUG]` and ignored by the daily gate dashboard (debug-only).
+  - Debug runs also skip default issue operations (open/reopen/close) unless `issue_title` is explicitly provided.
 
 Manual trigger (dry-run):
 

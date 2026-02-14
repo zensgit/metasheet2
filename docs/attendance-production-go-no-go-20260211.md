@@ -266,3 +266,28 @@ This record validates:
 | Remote Upload Cleanup (input validation classified, safe title override) | [#22013779376](https://github.com/zensgit/metasheet2/actions/runs/22013779376) | FAIL (expected) | `output/playwright/ga/22013779376/cleanup.log`, `output/playwright/ga/22013779376/step-summary.md`, Issue: [#162](https://github.com/zensgit/metasheet2/issues/162) |
 | Remote Upload Cleanup (skip_host_sync=true, recovery closes issue) | [#22013804879](https://github.com/zensgit/metasheet2/actions/runs/22013804879) | PASS | `output/playwright/ga/22013804879/cleanup.log`, `output/playwright/ga/22013804879/step-summary.md`, Issue: [#162](https://github.com/zensgit/metasheet2/issues/162) |
 | Daily Gate Dashboard (Upload Cleanup latest run after skip_host_sync recovery) | [#22013819495](https://github.com/zensgit/metasheet2/actions/runs/22013819495) | PASS | `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.json` |
+
+## Post-Go Validation (2026-02-14): Debug Runs Do Not Touch Default Issues
+
+This record validates:
+
+- Workflow-dispatch debug runs (`skip_host_sync=true`, tagged `[DEBUG]`) do not create/reopen/close the **default** production issue titles.
+- Debug runs still upload evidence artifacts and step summaries for troubleshooting.
+
+Implementation:
+
+- Commit: `41e3b056`
+- Change: remote metrics/storage/upload-cleanup issue jobs now treat `[DEBUG]` runs like drills: skip issue ops unless `issue_title` override is provided.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Storage Health (debug, expected FAIL; issue unchanged) | [#22014157084](https://github.com/zensgit/metasheet2/actions/runs/22014157084) | FAIL (expected) | `output/playwright/ga/22014157084/storage.log`, `output/playwright/ga/22014157084/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
+| Remote Metrics (debug) | [#22014173363](https://github.com/zensgit/metasheet2/actions/runs/22014173363) | PASS | `output/playwright/ga/22014173363/metrics.log`, `output/playwright/ga/22014173363/step-summary.md` |
+| Remote Upload Cleanup (debug, dry-run) | [#22014183752](https://github.com/zensgit/metasheet2/actions/runs/22014183752) | PASS | `output/playwright/ga/22014183752/cleanup.log`, `output/playwright/ga/22014183752/step-summary.md` |
+
+Issue immutability check for #159 (before vs after `#22014157084`):
+
+- `commentCount=2`
+- `updatedAt=2026-02-14T08:08:53Z`
