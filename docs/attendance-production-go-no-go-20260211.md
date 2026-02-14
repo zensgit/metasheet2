@@ -357,3 +357,20 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Perf baseline (10k, upload_csv=true, perf.log captured) | [#22018316457](https://github.com/zensgit/metasheet2/actions/runs/22018316457) | PASS | `output/playwright/ga/22018316457/perf.log`, `output/playwright/ga/22018316457/attendance-perf-*/perf-summary.json` |
+
+## Post-Go Validation (2026-02-14): Perf Long Run Artifacts Include perf.log
+
+This record validates:
+
+- `Perf Long Run` artifacts always include `perf.log` (stdout/stderr capture) for easier debugging.
+
+Implementation:
+
+- Commit: `ec0081e5`
+- Change: perf baseline/longrun workflows `tee` output into `perf.log` under the uploaded artifacts.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf longrun (upload_csv=true, perf.log captured) | [#22020987167](https://github.com/zensgit/metasheet2/actions/runs/22020987167) | PASS | `output/playwright/ga/22020987167/**/perf.log`, `output/playwright/ga/22020987167/**/perf-summary.json`, `output/playwright/ga/22020987167/**/attendance-import-perf-longrun-trend.md` |
