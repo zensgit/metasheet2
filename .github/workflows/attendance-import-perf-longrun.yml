@@ -149,7 +149,9 @@ jobs:
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail
-          node ./scripts/ops/attendance-import-perf.mjs
+          # Always capture logs so failures are diagnosable from artifacts.
+          mkdir -p "$OUTPUT_DIR"
+          node ./scripts/ops/attendance-import-perf.mjs 2>&1 | tee "$OUTPUT_DIR/perf.log"
 
       - name: Capture scenario summary
         run: |
