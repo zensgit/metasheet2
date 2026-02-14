@@ -339,3 +339,4 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Remote Storage Health (computed metrics OK) | [#22018028547](https://github.com/zensgit/metasheet2/actions/runs/22018028547) | PASS | `output/playwright/ga/22018028547/storage.log`, `output/playwright/ga/22018028547/step-summary.md` |
+| Daily Gate Dashboard (picks up latest Storage Health run) | [#22018238598](https://github.com/zensgit/metasheet2/actions/runs/22018238598) | PASS | `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.json` |
