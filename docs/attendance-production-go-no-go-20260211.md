@@ -247,10 +247,13 @@ This record validates:
 This record validates:
 
 - `Storage Health` opens the **default** P1 tracking issue on non-drill failures and auto-closes on recovery.
-- Upload cleanup workflow runs safely in dry-run mode and uploads evidence artifacts.
+- Upload cleanup workflow runs safely in dry-run mode and uploads evidence artifacts (including safety limits inputs).
+- Daily Gate Dashboard includes `Upload Cleanup` as a `P2` gate (weekly signal; longer lookback window).
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Storage Health (forced fail, default P1 issue open) | [#22010149843](https://github.com/zensgit/metasheet2/actions/runs/22010149843) | FAIL (expected) | `output/playwright/ga/22010149843/storage.log`, `output/playwright/ga/22010149843/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
 | Storage Health recovery (default P1 issue auto-close) | [#22010164550](https://github.com/zensgit/metasheet2/actions/runs/22010164550) | PASS | `output/playwright/ga/22010164550/storage.log`, `output/playwright/ga/22010164550/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
 | Remote Upload Cleanup (dry-run) | [#22010215217](https://github.com/zensgit/metasheet2/actions/runs/22010215217) | PASS | `output/playwright/ga/22010215217/cleanup.log`, `output/playwright/ga/22010215217/step-summary.md` |
+| Remote Upload Cleanup (dry-run, safety limits inputs) | [#22010499353](https://github.com/zensgit/metasheet2/actions/runs/22010499353) | PASS | `output/playwright/ga/22010499353/cleanup.log`, `output/playwright/ga/22010499353/step-summary.md` |
+| Daily Gate Dashboard (includes Upload Cleanup gate) | [#22010519536](https://github.com/zensgit/metasheet2/actions/runs/22010519536) | PASS | `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.json` |
