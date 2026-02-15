@@ -754,6 +754,10 @@ function renderMarkdown({
           lines.push('- Strict Gates: `apiSmoke` attendance-admin API missing. Deploy the backend that includes attendance-admin routes, then rerun.')
         } else if (apiReason === 'ADMIN_BATCH_RESOLVE_MISSING') {
           lines.push('- Strict Gates: `apiSmoke` attendance-admin batch resolve API missing. Deploy the backend that includes the batch resolve route (or disable `require_batch_resolve` only for debugging).')
+        } else if (apiReason === 'ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH') {
+          lines.push('- Strict Gates: `apiSmoke` batch resolve failed due to DB/schema mismatch. Run DB migrations for attendance-admin users (and verify ID types), redeploy, then rerun.')
+        } else if (apiReason === 'ADMIN_BATCH_RESOLVE_FAILED') {
+          lines.push('- Strict Gates: `apiSmoke` batch resolve failed. Inspect backend logs + DB, then rerun.')
         } else if (apiReason === 'AUDIT_EXPORT_MISSING') {
           lines.push('- Strict Gates: `apiSmoke` audit export endpoint missing. Deploy backend/route changes for audit export, then rerun.')
         } else if (apiReason === 'AUDIT_SUMMARY_MISSING') {
@@ -766,6 +770,12 @@ function renderMarkdown({
           lines.push('- Strict Gates: `apiSmoke` audit export failed. Inspect backend logs + DB migrations, then rerun.')
         } else if (apiReason === 'AUDIT_SUMMARY_FAILED' || apiReason === 'AUDIT_SUMMARY_BAD_RESPONSE') {
           lines.push('- Strict Gates: `apiSmoke` audit summary failed. Inspect backend logs + DB migrations, then rerun.')
+        } else if (apiReason === 'PREVIEW_ASYNC_IDEMPOTENCY_NOT_SUPPORTED') {
+          lines.push('- Strict Gates: `apiSmoke` async preview idempotency retry is not supported (commitToken required). Deploy backend fix for preview-async idempotency, then rerun (disable `require_preview_async` only for debugging).')
+        } else if (apiReason === 'IDEMPOTENCY_NOT_SUPPORTED') {
+          lines.push('- Strict Gates: `apiSmoke` import commit idempotency retry is not supported. Deploy backend fix for idempotencyKey commit retry, then rerun.')
+        } else if (apiReason === 'COMMIT_TOKEN_REJECTED') {
+          lines.push('- Strict Gates: `apiSmoke` import commitToken rejected. Inspect `gate-api-smoke.log` for the first COMMIT_TOKEN_* error and verify token issuance/expiry/server clock.')
         } else if (apiReason === 'IMPORT_UPLOAD_FAILED') {
           lines.push('- Strict Gates: `apiSmoke` import upload failed. Run Remote Preflight to validate nginx upload config + volume mount, then rerun.')
         } else if (apiReason === 'IMPORT_EXPORT_MISSING' || apiReason === 'IMPORT_EXPORT_BAD_HEADERS') {

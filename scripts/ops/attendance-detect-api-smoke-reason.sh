@@ -22,11 +22,11 @@ if grep -qE 'HTTP 429 |RATE_LIMITED' "$log_path"; then
   echo "RATE_LIMITED"
   exit 0
 fi
-if grep -qE 'features\\.mode expected' "$log_path"; then
+if grep -qE 'features\.mode expected' "$log_path"; then
   echo "PRODUCT_MODE_MISMATCH"
   exit 0
 fi
-if grep -qE 'features\\.attendance is not true' "$log_path"; then
+if grep -qE 'features\.attendance is not true' "$log_path"; then
   echo "FEATURE_DISABLED"
   exit 0
 fi
@@ -38,6 +38,18 @@ if grep -qE 'attendance-admin API missing \(404\)' "$log_path"; then
 fi
 if grep -qE 'attendance-admin batch resolve API missing \(404\)' "$log_path"; then
   echo "ADMIN_BATCH_RESOLVE_MISSING"
+  exit 0
+fi
+if grep -qE 'POST /attendance-admin/users/batch/resolve: HTTP 404' "$log_path" || grep -qE 'Cannot POST /api/attendance-admin/users/batch/resolve' "$log_path"; then
+  echo "ADMIN_BATCH_RESOLVE_MISSING"
+  exit 0
+fi
+if grep -qE 'BATCH_USER_RESOLVE_FAILED' "$log_path"; then
+  if grep -qiE 'operator does not exist|text = uuid' "$log_path"; then
+    echo "ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH"
+    exit 0
+  fi
+  echo "ADMIN_BATCH_RESOLVE_FAILED"
   exit 0
 fi
 
@@ -58,7 +70,7 @@ if grep -qE 'AUDIT_LOGS_EXPORT_FAILED' "$log_path"; then
   echo "AUDIT_EXPORT_FAILED"
   exit 0
 fi
-if grep -qE 'GET /attendance-admin/audit-logs/export\\.csv failed: ' "$log_path"; then
+if grep -qE 'GET /attendance-admin/audit-logs/export\.csv failed: ' "$log_path"; then
   echo "AUDIT_EXPORT_FAILED"
   exit 0
 fi
@@ -110,6 +122,19 @@ if grep -qE 'plugin-attendance is not active' "$log_path"; then
   exit 0
 fi
 
+if grep -qE 'POST /attendance/import/preview-async \(idempotency retry\): HTTP 4' "$log_path" && grep -qE 'COMMIT_TOKEN_(REQUIRED|INVALID)' "$log_path"; then
+  echo "PREVIEW_ASYNC_IDEMPOTENCY_NOT_SUPPORTED"
+  exit 0
+fi
+if grep -qE 'idempotency not supported \(commitToken required on retry\)' "$log_path"; then
+  echo "IDEMPOTENCY_NOT_SUPPORTED"
+  exit 0
+fi
+if grep -qE 'COMMIT_TOKEN_(REQUIRED|INVALID)' "$log_path"; then
+  echo "COMMIT_TOKEN_REJECTED"
+  exit 0
+fi
+
 if grep -qE 'import job timed out' "$log_path"; then
   echo "IMPORT_ASYNC_TIMEOUT"
   exit 0
@@ -119,6 +144,10 @@ if grep -qE 'import job failed' "$log_path"; then
   exit 0
 fi
 if grep -qE 'commit did not succeed|Import commit did not succeed' "$log_path"; then
+  echo "IMPORT_COMMIT_FAILED"
+  exit 0
+fi
+if grep -qE 'POST /attendance/import/commit: HTTP 5' "$log_path"; then
   echo "IMPORT_COMMIT_FAILED"
   exit 0
 fi

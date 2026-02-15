@@ -424,8 +424,9 @@ Notes:
 - Strict gates artifacts include a `gate-summary.json` with `gateReasons` (reason codes) to speed up triage in Daily Dashboard remediation hints.
 - Common `apiSmoke` reason codes:
   - Auth/feature/mode: `AUTH_FAILED`, `RATE_LIMITED`, `PRODUCT_MODE_MISMATCH`, `FEATURE_DISABLED`
-  - Admin/audit: `ADMIN_API_MISSING`, `AUDIT_EXPORT_MISSING`, `AUDIT_EXPORT_SCHEMA_MISSING`, `AUDIT_EXPORT_FAILED`, `AUDIT_SUMMARY_MISSING`, `AUDIT_SUMMARY_FAILED`
-  - Import channels: `IMPORT_UPLOAD_FAILED`, `IMPORT_EXPORT_MISSING`
+  - Admin/batch resolve: `ADMIN_API_MISSING`, `ADMIN_BATCH_RESOLVE_MISSING`, `ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH`, `ADMIN_BATCH_RESOLVE_FAILED`
+  - Audit logs: `AUDIT_EXPORT_MISSING`, `AUDIT_EXPORT_SCHEMA_MISSING`, `AUDIT_EXPORT_FAILED`, `AUDIT_SUMMARY_MISSING`, `AUDIT_SUMMARY_FAILED`
+  - Import channels: `IMPORT_UPLOAD_FAILED`, `IMPORT_EXPORT_MISSING`, `IMPORT_COMMIT_FAILED`, `IDEMPOTENCY_NOT_SUPPORTED`, `PREVIEW_ASYNC_IDEMPOTENCY_NOT_SUPPORTED`, `COMMIT_TOKEN_REJECTED`
 
 Drill (expected FAIL; no production API calls; validates dashboard parsing/hints):
 
