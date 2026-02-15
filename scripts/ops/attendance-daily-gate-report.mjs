@@ -211,6 +211,16 @@ function renderMarkdown({
   p0Status,
   findings,
 }) {
+  const workflowByGate = {
+    'Remote Preflight': preflightWorkflow,
+    'Host Metrics': metricsWorkflow,
+    'Storage Health': storageWorkflow,
+    'Upload Cleanup': cleanupWorkflow,
+    'Strict Gates': strictWorkflow,
+    'Perf Baseline': perfWorkflow,
+    'Perf Long Run': longrunWorkflow,
+  }
+
   const lines = []
   lines.push('# Attendance Daily Gate Dashboard')
   lines.push('')
@@ -258,11 +268,48 @@ function renderMarkdown({
   }
 
   lines.push('')
+  lines.push('## Remediation Hints')
+  lines.push('')
+  if (findings.length === 0) {
+    lines.push('- None.')
+  } else {
+    const staleGates = new Set(findings.filter((f) => f && f.code === 'STALE_RUN').map((f) => f.gate))
+    for (const gateName of staleGates) {
+      const wf = workflowByGate[gateName]
+      if (wf) lines.push(`- ${gateName}: stale signal. Re-run: \`gh workflow run ${wf}\``)
+    }
+
+    if (findings.some((f) => f && f.gate === 'Host Metrics' && f.code === 'RUN_FAILED')) {
+      lines.push('- Host Metrics: open the run Step Summary and check `Failure reason`.')
+      lines.push('- If `reason=METRICS_FETCH_FAILED`: run Remote Preflight first, verify backend is up and port `8900` is reachable on the host (127.0.0.1), then inspect `metrics.log`.')
+      lines.push('- If `reason=MISSING_REQUIRED_METRICS`: verify attendance plugin is enabled and metrics are exported (HELP/TYPE lines exist for required counters). Redeploy if needed, then rerun Host Metrics.')
+    }
+
+    if (findings.some((f) => f && f.gate === 'Storage Health' && f.code === 'RUN_FAILED')) {
+      lines.push('- Storage Health: open the run Step Summary and check `Failure reason`.')
+      lines.push('- If `reason` includes `FS_USAGE_TOO_HIGH`: run `Attendance Remote Docker GC (Prod)` (`gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true`), then rerun Storage Health.')
+      lines.push('- If `reason` includes `UPLOAD_DIR_TOO_LARGE` or `OLDEST_FILE_TOO_OLD`: run `Remote Upload Cleanup (Prod)` (dry-run first; do not delete without confirm), then rerun Storage Health.')
+    }
+
+    if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
+      lines.push('- Remote Preflight: inspect `preflight.log` for the first failing check. Fix config drift, then rerun Remote Preflight and Strict Gates.')
+    }
+  }
+
+  lines.push('')
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
   lines.push('2. Re-run host metrics / storage health / perf baseline / perf long run manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
+  lines.push('')
+  lines.push('Quick re-run commands:')
+  lines.push('')
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
+    const wf = workflowByGate[gate.name]
+    if (!wf) continue
+    lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
+  }
   return `${lines.join('\n')}\n`
 }
 
