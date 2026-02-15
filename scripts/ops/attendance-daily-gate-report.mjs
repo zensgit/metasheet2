@@ -811,7 +811,13 @@ function renderMarkdown({
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightProd\` failure reason detected: \`${pwReason}\`.`)
         }
-        if (pwReason === 'RATE_LIMITED') {
+        if (pwReason === 'AUTH_FAILED') {
+          lines.push('- Strict Gates: `playwrightProd` auth failed. Refresh the admin token and rerun.')
+        } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
+          lines.push('- Strict Gates: `playwrightProd` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+        } else if (pwReason === 'FEATURE_DISABLED') {
+          lines.push('- Strict Gates: `playwrightProd` feature disabled. Ensure attendance plugin is enabled, then rerun.')
+        } else if (pwReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `playwrightProd` was rate-limited. Wait briefly and rerun.')
         } else if (pwReason === 'TIMEOUT') {
           lines.push('- Strict Gates: `playwrightProd` timed out. Inspect server load + screenshots; consider increasing playwright timeouts if needed.')
@@ -829,7 +835,13 @@ function renderMarkdown({
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightDesktop\` failure reason detected: \`${pwReason}\`.`)
         }
-        if (pwReason === 'RATE_LIMITED') {
+        if (pwReason === 'AUTH_FAILED') {
+          lines.push('- Strict Gates: `playwrightDesktop` auth failed. Refresh the admin token and rerun.')
+        } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
+          lines.push('- Strict Gates: `playwrightDesktop` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+        } else if (pwReason === 'FEATURE_DISABLED') {
+          lines.push('- Strict Gates: `playwrightDesktop` feature disabled. Ensure attendance plugin is enabled, then rerun.')
+        } else if (pwReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `playwrightDesktop` was rate-limited. Wait briefly and rerun.')
         } else if (pwReason === 'TIMEOUT') {
           lines.push('- Strict Gates: `playwrightDesktop` timed out. Inspect screenshots + logs; consider increasing timeouts if needed.')
@@ -847,7 +859,13 @@ function renderMarkdown({
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightMobile\` failure reason detected: \`${pwReason}\`.`)
         }
-        if (pwReason === 'RATE_LIMITED') {
+        if (pwReason === 'AUTH_FAILED') {
+          lines.push('- Strict Gates: `playwrightMobile` auth failed. Refresh the admin token and rerun.')
+        } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
+          lines.push('- Strict Gates: `playwrightMobile` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+        } else if (pwReason === 'FEATURE_DISABLED') {
+          lines.push('- Strict Gates: `playwrightMobile` feature disabled. Ensure attendance plugin is enabled, then rerun.')
+        } else if (pwReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `playwrightMobile` was rate-limited. Wait briefly and rerun.')
         } else if (pwReason === 'TIMEOUT') {
           lines.push('- Strict Gates: `playwrightMobile` timed out. Inspect screenshots + logs; consider increasing timeouts if needed.')

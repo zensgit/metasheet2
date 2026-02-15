@@ -269,6 +269,18 @@ function detect_playwright_reason() {
     echo "LOG_MISSING"
     return 0
   fi
+  if grep -qE 'HTTP (401|403) |Missing Bearer token|Invalid token' "$log"; then
+    echo "AUTH_FAILED"
+    return 0
+  fi
+  if grep -qE 'features\.mode expected|features\.mode missing' "$log"; then
+    echo "PRODUCT_MODE_MISMATCH"
+    return 0
+  fi
+  if grep -qE 'features\.attendance is not true' "$log"; then
+    echo "FEATURE_DISABLED"
+    return 0
+  fi
   if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
     echo "RATE_LIMITED"
     return 0
