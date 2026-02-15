@@ -265,9 +265,9 @@ jobs:
             echo "- Source: \`$f\`" >> "$out_md"
 
             # Use jq to avoid heredocs (which can break GitHub YAML parsing).
-            exit_code="$(jq -r '.exitCode // \"unknown\"' "$f" 2>/dev/null || echo unknown)"
-            failed="$(jq -r '.gates // {} | to_entries | map(select(.value == \"FAIL\") | .key) | join(\",\")' "$f" 2>/dev/null || echo '')"
-            reasons="$(jq -r '.gateReasons // {} | to_entries | map(select(.value != null and (.value|tostring) != \"\") | \"\\(.key)=\\(.value)\") | join(\" \")' "$f" 2>/dev/null || echo '')"
+            exit_code="$(jq -r '.exitCode // "unknown"' "$f" 2>/dev/null || echo unknown)"
+            failed="$(jq -r '.gates // {} | to_entries | map(select(.value == "FAIL") | .key) | join(",")' "$f" 2>/dev/null || echo '')"
+            reasons="$(jq -r '.gateReasons // {} | to_entries | map(select(.value != null and (.value|tostring) != "") | "\(.key)=\(.value)") | join(" ")' "$f" 2>/dev/null || echo '')"
 
             echo "  - exitCode=${exit_code}" >> "$out_md"
             echo "  - failed=${failed:-none}" >> "$out_md"
