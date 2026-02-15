@@ -501,6 +501,7 @@ Purpose:
   - `P1`: host metrics/storage health/perf baseline/perf longrun failure or stale runs
 - `P2`: upload cleanup (weekly) failure or stale runs
 - Include `Remediation Hints` + quick re-run commands to speed up operator recovery.
+  - When a remote gate fails (`Host Metrics` / `Storage Health`), the dashboard best-effort enriches findings by parsing the gate `step-summary.md` artifact (reason/metrics_url/df_used_pct, etc). Evidence is written under `gate-meta/**`.
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
@@ -539,6 +540,14 @@ gh workflow run attendance-daily-gate-dashboard.yml \
   -f branch='nonexistent-branch-for-drill' \
   -f lookback_hours=48 \
   -f issue_title='[Attendance Gate Drill] Dashboard P0 escalation test'
+```
+
+Optional: include `[DRILL]` / `[DEBUG]` runs in evaluation (for drill validation only):
+
+```bash
+gh workflow run attendance-daily-gate-dashboard.yml \
+  -f lookback_hours=48 \
+  -f include_drill_runs=true
 ```
 
 ### E) Gate Issue Channel Sync (Slack / DingTalk)

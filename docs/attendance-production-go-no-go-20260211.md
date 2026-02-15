@@ -415,3 +415,24 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Daily Gate Dashboard (remediation hints + quick rerun commands) | [#22036640772](https://github.com/zensgit/metasheet2/actions/runs/22036640772) | PASS | `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.json` |
+
+## Post-Go Validation (2026-02-15): Daily Gate Dashboard Failure Enrichment (Reason Parsing)
+
+This record validates:
+
+- When a remote gate fails (e.g. `Host Metrics`), the dashboard enriches findings by parsing the gate artifact `step-summary.md`:
+  - `reason` (e.g. `METRICS_FETCH_FAILED`)
+  - `metrics_url` (when available)
+- Evidence is written under `gate-meta/**`.
+- The dashboard workflow supports `include_drill_runs=true` for drill validation (do not use for normal scheduled signals).
+
+Implementation:
+
+- Commit: `032a1948`
+- Change: download & parse remote gate artifacts (best-effort) to add reason-based metadata and remediation hints.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason visible) | [#22036997527](https://github.com/zensgit/metasheet2/actions/runs/22036997527) | FAIL (expected) | `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22036997527/gate-meta/metrics/meta.json` |
