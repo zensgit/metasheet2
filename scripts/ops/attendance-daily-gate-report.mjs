@@ -314,14 +314,23 @@ function parseStrictGateSummaryJson(text) {
   }
 
   const gates = value && typeof value.gates === 'object' && value.gates ? value.gates : {}
+  const gateReasons = value && typeof value.gateReasons === 'object' && value.gateReasons ? value.gateReasons : {}
   const failed = Object.entries(gates)
     .filter(([, status]) => String(status || '').toUpperCase() === 'FAIL')
     .map(([key]) => key)
   const failedGates = failed.length > 0 ? failed.join(',') : null
+  const failedGateReasons = {}
+  for (const gate of failed) {
+    const code = gateReasons && Object.prototype.hasOwnProperty.call(gateReasons, gate) ? gateReasons[gate] : null
+    if (typeof code === 'string' && code.trim()) {
+      failedGateReasons[gate] = code.trim()
+    }
+  }
 
   return {
     reason: failedGates ? 'GATE_FAILED' : null,
     failedGates,
+    failedGateReasons,
     gates,
   }
 }
@@ -596,6 +605,12 @@ function renderMarkdown({
       }
       if (finding.gate === 'Strict Gates') {
         if (meta?.failedGates) metaBits.push(`failed=${meta.failedGates}`)
+        if (meta?.failedGateReasons && typeof meta.failedGateReasons === 'object') {
+          for (const [gateName, code] of Object.entries(meta.failedGateReasons)) {
+            if (!code) continue
+            metaBits.push(`${gateName}_reason=${code}`)
+          }
+        }
       }
       const metaSuffix = metaBits.length > 0 ? ` (${metaBits.join(' ')})` : ''
       const link = finding.runUrl ? ` ([run](${finding.runUrl}))` : ''
@@ -713,6 +728,9 @@ function renderMarkdown({
 
     if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'RUN_FAILED')) {
       const failedGates = String(strictGate?.meta?.failedGates || '').trim()
+      const failedReasonsObj = strictGate?.meta?.failedGateReasons && typeof strictGate.meta.failedGateReasons === 'object'
+        ? strictGate.meta.failedGateReasons
+        : null
       if (failedGates) {
         lines.push(`- Strict Gates: failed gates detected: \`${failedGates}\`.`)
       } else {
@@ -720,18 +738,48 @@ function renderMarkdown({
       }
 
       if (failedGates.includes('apiSmoke')) {
-        lines.push('- Strict Gates: `apiSmoke` failed. Inspect `gate-api-smoke.log` in the strict gates artifacts.')
+        const apiReason = failedReasonsObj && typeof failedReasonsObj.apiSmoke === 'string' ? failedReasonsObj.apiSmoke : ''
+        if (apiReason) {
+          lines.push(`- Strict Gates: \`apiSmoke\` failure reason detected: \`${apiReason}\`.`)
+        }
+        if (apiReason === 'AUTH_FAILED') {
+          lines.push('- Strict Gates: `apiSmoke` auth failed. Refresh the admin token (or rotate JWT secret carefully) and rerun strict gates.')
+        } else if (apiReason === 'RATE_LIMITED') {
+          lines.push('- Strict Gates: `apiSmoke` was rate-limited. Wait briefly and rerun; consider reviewing rate-limit settings if this is frequent.')
+        } else if (apiReason === 'PRODUCT_MODE_MISMATCH') {
+          lines.push('- Strict Gates: `apiSmoke` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+        } else if (apiReason === 'FEATURE_DISABLED') {
+          lines.push('- Strict Gates: `apiSmoke` feature disabled. Ensure attendance plugin is enabled in the target environment, then rerun.')
+        } else {
+          lines.push('- Strict Gates: `apiSmoke` failed. Inspect `gate-api-smoke.log` in the strict gates artifacts.')
+        }
       }
       if (failedGates.includes('provisioning')) {
+        const provReason = failedReasonsObj && typeof failedReasonsObj.provisioning === 'string' ? failedReasonsObj.provisioning : ''
+        if (provReason) {
+          lines.push(`- Strict Gates: \`provisioning\` failure reason detected: \`${provReason}\`.`)
+        }
         lines.push('- Strict Gates: `provisioning` failed. Inspect `gate-provision-*.log` in the strict gates artifacts.')
       }
       if (failedGates.includes('playwrightProd')) {
+        const pwReason = failedReasonsObj && typeof failedReasonsObj.playwrightProd === 'string' ? failedReasonsObj.playwrightProd : ''
+        if (pwReason) {
+          lines.push(`- Strict Gates: \`playwrightProd\` failure reason detected: \`${pwReason}\`.`)
+        }
         lines.push('- Strict Gates: `playwrightProd` failed. Inspect `gate-playwright-production-flow.log` and screenshots under `playwright-production-flow/`.')
       }
       if (failedGates.includes('playwrightDesktop')) {
+        const pwReason = failedReasonsObj && typeof failedReasonsObj.playwrightDesktop === 'string' ? failedReasonsObj.playwrightDesktop : ''
+        if (pwReason) {
+          lines.push(`- Strict Gates: \`playwrightDesktop\` failure reason detected: \`${pwReason}\`.`)
+        }
         lines.push('- Strict Gates: `playwrightDesktop` failed. Inspect `gate-playwright-full-flow-desktop.log` and screenshots under `playwright-full-flow-desktop/`.')
       }
       if (failedGates.includes('playwrightMobile')) {
+        const pwReason = failedReasonsObj && typeof failedReasonsObj.playwrightMobile === 'string' ? failedReasonsObj.playwrightMobile : ''
+        if (pwReason) {
+          lines.push(`- Strict Gates: \`playwrightMobile\` failure reason detected: \`${pwReason}\`.`)
+        }
         lines.push('- Strict Gates: `playwrightMobile` failed. Inspect `gate-playwright-full-flow-mobile.log` and screenshots under `playwright-full-flow-mobile/`.')
       }
     }

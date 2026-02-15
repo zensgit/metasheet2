@@ -100,6 +100,13 @@ jobs:
               "playwrightProd": "SKIP",
               "playwrightDesktop": "SKIP",
               "playwrightMobile": "SKIP"
+            },
+            "gateReasons": {
+              "apiSmoke": "AUTH_FAILED",
+              "provisioning": null,
+              "playwrightProd": null,
+              "playwrightDesktop": null,
+              "playwrightMobile": null
             }
           }
           EOF

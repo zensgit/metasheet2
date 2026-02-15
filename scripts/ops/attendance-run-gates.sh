@@ -226,6 +226,117 @@ if ! run_playwright_full_flow_mobile; then
   exit_code=1
 fi
 
+function detect_api_smoke_reason() {
+  local log="$1"
+  if [[ ! -f "$log" ]]; then
+    echo "LOG_MISSING"
+    return 0
+  fi
+  if grep -qE 'HTTP (401|403) ' "$log"; then
+    echo "AUTH_FAILED"
+    return 0
+  fi
+  if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
+    echo "RATE_LIMITED"
+    return 0
+  fi
+  if grep -qE 'features\\.mode expected' "$log"; then
+    echo "PRODUCT_MODE_MISMATCH"
+    return 0
+  fi
+  if grep -qE 'features\\.attendance is not true' "$log"; then
+    echo "FEATURE_DISABLED"
+    return 0
+  fi
+  if grep -qE 'import job timed out' "$log"; then
+    echo "IMPORT_ASYNC_TIMEOUT"
+    return 0
+  fi
+  if grep -qE 'import job failed' "$log"; then
+    echo "IMPORT_ASYNC_FAILED"
+    return 0
+  fi
+  if grep -qE 'commit did not succeed|Import commit did not succeed' "$log"; then
+    echo "IMPORT_COMMIT_FAILED"
+    return 0
+  fi
+  echo "UNKNOWN"
+}
+
+function detect_provision_reason() {
+  local log="$1"
+  if [[ ! -f "$log" ]]; then
+    echo "LOG_MISSING"
+    return 0
+  fi
+  if grep -qE 'curl: \\([0-9]+\\)' "$log"; then
+    echo "CURL_FAILED"
+    return 0
+  fi
+  echo "UNKNOWN"
+}
+
+function detect_playwright_reason() {
+  local log="$1"
+  if [[ ! -f "$log" ]]; then
+    echo "LOG_MISSING"
+    return 0
+  fi
+  if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
+    echo "RATE_LIMITED"
+    return 0
+  fi
+  if grep -qiE 'timeout|timed out' "$log"; then
+    echo "TIMEOUT"
+    return 0
+  fi
+  if grep -qE 'COMMIT_TOKEN_(INVALID|REQUIRED)' "$log"; then
+    echo "COMMIT_TOKEN_REJECTED"
+    return 0
+  fi
+  if grep -qE 'Legacy /api/attendance/import was used' "$log"; then
+    echo "LEGACY_IMPORT_USED"
+    return 0
+  fi
+  if grep -qE 'PUNCH_TOO_SOON' "$log"; then
+    echo "PUNCH_TOO_SOON"
+    return 0
+  fi
+  echo "UNKNOWN"
+}
+
+function json_string_or_null() {
+  local value="${1:-}"
+  if [[ -z "$value" ]]; then
+    echo "null"
+    return 0
+  fi
+  # Reason codes are uppercase+underscores; safe to embed without escaping.
+  echo "\"$value\""
+}
+
+api_smoke_reason=""
+provision_reason=""
+pw_prod_reason=""
+pw_desktop_reason=""
+pw_mobile_reason=""
+
+if [[ "$gate_api" == "FAIL" ]]; then
+  api_smoke_reason="$(detect_api_smoke_reason "${OUTPUT_ROOT}/gate-api-smoke.log")"
+fi
+if [[ "$gate_provision" == "FAIL" ]]; then
+  provision_reason="$(detect_provision_reason "${OUTPUT_ROOT}/gate-provision-employee.log")"
+fi
+if [[ "$gate_pw_prod" == "FAIL" ]]; then
+  pw_prod_reason="$(detect_playwright_reason "${OUTPUT_ROOT}/gate-playwright-production-flow.log")"
+fi
+if [[ "$gate_pw_desktop" == "FAIL" ]]; then
+  pw_desktop_reason="$(detect_playwright_reason "${OUTPUT_ROOT}/gate-playwright-full-flow-desktop.log")"
+fi
+if [[ "$gate_pw_mobile" == "FAIL" ]]; then
+  pw_mobile_reason="$(detect_playwright_reason "${OUTPUT_ROOT}/gate-playwright-full-flow-mobile.log")"
+fi
+
 summary_json="${OUTPUT_ROOT}/gate-summary.json"
 cat >"$summary_json" <<EOF
 {
@@ -241,6 +352,13 @@ cat >"$summary_json" <<EOF
     "playwrightProd": "${gate_pw_prod}",
     "playwrightDesktop": "${gate_pw_desktop}",
     "playwrightMobile": "${gate_pw_mobile}"
+  },
+  "gateReasons": {
+    "apiSmoke": $(json_string_or_null "$api_smoke_reason"),
+    "provisioning": $(json_string_or_null "$provision_reason"),
+    "playwrightProd": $(json_string_or_null "$pw_prod_reason"),
+    "playwrightDesktop": $(json_string_or_null "$pw_desktop_reason"),
+    "playwrightMobile": $(json_string_or_null "$pw_mobile_reason")
   }
 }
 EOF
