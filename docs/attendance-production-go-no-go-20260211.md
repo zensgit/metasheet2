@@ -396,3 +396,22 @@ Evidence:
 | Remote Metrics (reason visible) | [#22021069004](https://github.com/zensgit/metasheet2/actions/runs/22021069004) | PASS | `output/playwright/ga/22021069004/step-summary.md`, `output/playwright/ga/22021069004/metrics.log` |
 | Remote Metrics drill (fetch failure classification, expected FAIL; safe issue title) | [#22021555071](https://github.com/zensgit/metasheet2/actions/runs/22021555071) | FAIL (expected) | `output/playwright/ga/22021555071/step-summary.md`, `output/playwright/ga/22021555071/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
 | Remote Metrics drill recovery (issue auto-close) | [#22021568702](https://github.com/zensgit/metasheet2/actions/runs/22021568702) | PASS | `output/playwright/ga/22021568702/step-summary.md`, `output/playwright/ga/22021568702/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
+
+## Post-Go Validation (2026-02-15): Daily Gate Dashboard Remediation Hints
+
+This record validates:
+
+- `Attendance Daily Gate Dashboard` includes:
+  - `Remediation Hints` section (reason-based guidance for common failure modes, e.g. Host Metrics fetch failure)
+  - quick re-run commands for each gate workflow
+
+Implementation:
+
+- Commit: `4123a6c9`
+- Change: add remediation hints + quick re-run commands to the dashboard markdown output.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (remediation hints + quick rerun commands) | [#22036640772](https://github.com/zensgit/metasheet2/actions/runs/22036640772) | PASS | `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.json` |
