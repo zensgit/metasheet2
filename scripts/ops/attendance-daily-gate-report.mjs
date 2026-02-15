@@ -151,6 +151,66 @@ function parseMetricsStepSummary(text) {
   }
 }
 
+function parsePreflightStepSummary(text) {
+  if (!text) return null
+
+  const rc = text.match(/^- Remote exit code: `([^`]+)`/m)?.[1] || null
+
+  // Attempt to classify the first preflight error line into a stable reason code.
+  const errorLine = text.match(/^\[attendance-preflight\] ERROR: (.+)$/m)?.[1] || null
+  const message = String(errorLine || '').trim()
+
+  let reason = null
+  if (rc === '97') {
+    reason = 'DRILL_FAIL'
+  } else if (message.includes('Compose file not found')) {
+    reason = 'COMPOSE_FILE_MISSING'
+  } else if (message.includes('Missing env file')) {
+    reason = 'ENV_FILE_MISSING'
+  } else if (message.includes('Missing nginx config')) {
+    reason = 'NGINX_CONF_MISSING'
+  } else if (message.includes('exposes Postgres port 5432')) {
+    reason = 'DB_EXPOSED'
+  } else if (message.includes('exposes Redis port 6379')) {
+    reason = 'REDIS_EXPOSED'
+  } else if (message.includes('JWT_SECRET is missing')) {
+    reason = 'JWT_SECRET_MISSING'
+  } else if (message.includes("JWT_SECRET is still 'change-me'")) {
+    reason = 'JWT_SECRET_INSECURE'
+  } else if (message.includes('POSTGRES_PASSWORD is missing')) {
+    reason = 'POSTGRES_PASSWORD_MISSING'
+  } else if (message.includes("POSTGRES_PASSWORD is still 'change-me'")) {
+    reason = 'POSTGRES_PASSWORD_INSECURE'
+  } else if (message.includes('DATABASE_URL is missing')) {
+    reason = 'DATABASE_URL_MISSING'
+  } else if (message.includes("DATABASE_URL still contains 'change-me'")) {
+    reason = 'DATABASE_URL_INSECURE'
+  } else if (message.includes('ATTENDANCE_IMPORT_REQUIRE_TOKEN must be set to')) {
+    reason = 'IMPORT_REQUIRE_TOKEN_MISSING'
+  } else if (message.includes('ATTENDANCE_IMPORT_UPLOAD_DIR is missing')) {
+    reason = 'UPLOAD_DIR_MISSING'
+  } else if (message.includes('ATTENDANCE_IMPORT_UPLOAD_DIR must be an absolute path')) {
+    reason = 'UPLOAD_DIR_NOT_ABSOLUTE'
+  } else if (message.includes('docker-compose volume mount for ATTENDANCE_IMPORT_UPLOAD_DIR not found')) {
+    reason = 'UPLOAD_DIR_VOLUME_MOUNT_MISSING'
+  } else if (message.includes('nginx upload location missing')) {
+    reason = 'NGINX_UPLOAD_LOCATION_MISSING'
+  } else if (message.includes('nginx upload location is missing client_max_body_size')) {
+    reason = 'NGINX_UPLOAD_BODY_SIZE_MISSING'
+  } else if (message.includes('nginx upload client_max_body_size too small')) {
+    reason = 'NGINX_UPLOAD_BODY_SIZE_TOO_SMALL'
+  } else if (message) {
+    reason = 'PREFLIGHT_FAILED'
+  } else if (rc && rc !== '0') {
+    reason = 'REMOTE_FAILED'
+  }
+
+  return {
+    rc,
+    reason,
+  }
+}
+
 function parseStorageStepSummary(text) {
   if (!text) return null
   const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
@@ -167,6 +227,16 @@ function parseStorageStepSummary(text) {
     uploadGb,
     oldestFileDays,
     fileCount,
+  }
+}
+
+function parseCleanupStepSummary(text) {
+  if (!text) return null
+  const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
+  const staleCount = text.match(/^\[attendance-clean-uploads\] stale_count=([0-9]+)/m)?.[1] || null
+  return {
+    reason,
+    staleCount,
   }
 }
 
@@ -409,6 +479,9 @@ function renderMarkdown({
       const meta = gate?.meta || null
       const metaBits = []
       if (meta?.reason) metaBits.push(`reason=${meta.reason}`)
+      if (finding.gate === 'Remote Preflight') {
+        if (meta?.rc) metaBits.push(`rc=${meta.rc}`)
+      }
       if (finding.gate === 'Host Metrics') {
         if (meta?.missingMetrics) metaBits.push(`missing=${meta.missingMetrics}`)
         if (meta?.metricsUrl) metaBits.push(`metrics_url=${meta.metricsUrl}`)
@@ -417,6 +490,9 @@ function renderMarkdown({
         if (meta?.dfUsedPct) metaBits.push(`df_used_pct=${meta.dfUsedPct}`)
         if (meta?.uploadGb) metaBits.push(`upload_gb=${meta.uploadGb}`)
         if (meta?.oldestFileDays) metaBits.push(`oldest_days=${meta.oldestFileDays}`)
+      }
+      if (finding.gate === 'Upload Cleanup') {
+        if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
       const metaSuffix = metaBits.length > 0 ? ` (${metaBits.join(' ')})` : ''
       const link = finding.runUrl ? ` ([run](${finding.runUrl}))` : ''
@@ -477,7 +553,37 @@ function renderMarkdown({
     }
 
     if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
+      const reason = String(preflightGate?.meta?.reason || '').trim()
+      if (reason) {
+        lines.push(`- Remote Preflight: failure reason detected: \`${reason}\`.`)
+      }
       lines.push('- Remote Preflight: inspect `preflight.log` for the first failing check. Fix config drift, then rerun Remote Preflight and Strict Gates.')
+      if (reason === 'DB_EXPOSED' || reason === 'REDIS_EXPOSED') {
+        lines.push('- Remote Preflight: remove DB/Redis port exposure from production compose (use debug compose for localhost only), then redeploy.')
+      }
+      if (reason === 'IMPORT_REQUIRE_TOKEN_MISSING') {
+        lines.push("- Remote Preflight: set `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1` in `docker/app.env` on deploy host, then rerun preflight.")
+      }
+      if (reason && reason.startsWith('NGINX_UPLOAD_')) {
+        lines.push('- Remote Preflight: verify `docker/nginx.conf` includes the upload location and has `client_max_body_size >= 120m`, then redeploy.')
+      }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Upload Cleanup' && f.code === 'RUN_FAILED')) {
+      const reason = String(cleanupGate?.meta?.reason || '').trim()
+      if (reason) {
+        lines.push(`- Upload Cleanup: failure reason detected: \`${reason}\`.`)
+      } else {
+        lines.push('- Upload Cleanup: open the run Step Summary and check `Failure reason`.')
+      }
+
+      if (reason === 'INPUT_VALIDATION_FAILED') {
+        lines.push('- Upload Cleanup: input validation failed. Check workflow inputs (`max_file_age_days`, `max_delete_files`, `max_delete_gb`) and rerun.')
+      } else if (reason === 'HOST_SYNC_FAILED') {
+        lines.push('- Upload Cleanup: deploy-host sync failed. Run Remote Preflight (or set `skip_host_sync=true` for debugging) and fix host sync, then rerun.')
+      } else if (reason) {
+        lines.push('- Upload Cleanup: inspect `cleanup.log` for the first error line and rerun with dry-run first (`delete=false`).')
+      }
     }
   }
 
@@ -656,6 +762,18 @@ async function run() {
   const metaRoot = path.join(outDir, 'gate-meta')
   try {
     await fs.mkdir(metaRoot, { recursive: true })
+    if (hasRunFailed(preflightGate) && preflightGate.completed?.id) {
+      const runId = preflightGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-remote-preflight-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'preflight'),
+        parse: parsePreflightStepSummary,
+      })
+      if (meta) preflightGate.meta = meta
+    }
     if (hasRunFailed(metricsGate) && metricsGate.completed?.id) {
       const runId = metricsGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
@@ -679,6 +797,18 @@ async function run() {
         parse: parseStorageStepSummary,
       })
       if (meta) storageGate.meta = meta
+    }
+    if (hasRunFailed(cleanupGate) && cleanupGate.completed?.id) {
+      const runId = cleanupGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-remote-upload-cleanup-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'cleanup'),
+        parse: parseCleanupStepSummary,
+      })
+      if (meta) cleanupGate.meta = meta
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
