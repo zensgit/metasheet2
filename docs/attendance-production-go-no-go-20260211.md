@@ -441,3 +441,22 @@ Evidence:
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; perf+longrun summaries visible) | [#22037515667](https://github.com/zensgit/metasheet2/actions/runs/22037515667) | FAIL (expected) | `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/perf/meta.json`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/longrun/meta.json` |
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates failure details visible) | [#22037671365](https://github.com/zensgit/metasheet2/actions/runs/22037671365) | FAIL (expected) | `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/gate-meta/strict/meta.json` |
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates reason codes visible) | [#22037869488](https://github.com/zensgit/metasheet2/actions/runs/22037869488) | FAIL (expected) | `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/gate-meta/strict/meta.json` |
+
+## Post-Go Validation (2026-02-15): Remote Preflight Debug skip_host_sync
+
+This record validates:
+
+- `Remote Preflight (Prod)` supports `skip_host_sync=true` for debugging when deploy-host git sync is broken.
+- Debug runs are tagged `[DEBUG]` so dashboards can ignore them by default.
+- Debug runs skip default P0 escalation unless `issue_title` is explicitly provided.
+
+Implementation:
+
+- Commit: `fe8bcfe5`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Preflight (debug + drill, safe issue title) | [#22037980657](https://github.com/zensgit/metasheet2/actions/runs/22037980657) | FAIL (expected) | `output/playwright/ga/22037980657/attendance-remote-preflight-prod-22037980657-1/step-summary.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
+| Daily Gate Dashboard (recovery, closes drill issue) | [#22038001045](https://github.com/zensgit/metasheet2/actions/runs/22038001045) | PASS | `output/playwright/ga/22038001045/attendance-daily-gate-dashboard-22038001045-1/attendance-daily-gate-dashboard.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
