@@ -11,6 +11,10 @@ on:
         description: 'Max age (hours) for latest completed runs'
         required: false
         default: '36'
+      include_drill_runs:
+        description: 'Optional: include [DRILL]/[DEBUG] runs in evaluation (true/false). For drill validation only.'
+        required: false
+        default: 'false'
       issue_title:
         description: 'Optional: override escalation issue title for workflow_dispatch drills (leave empty for production title)'
         required: false
@@ -36,6 +40,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BRANCH: ${{ inputs.branch || 'main' }}
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
+      INCLUDE_DRILL_RUNS: ${{ inputs.include_drill_runs || 'false' }}
       PREFLIGHT_WORKFLOW: attendance-remote-preflight-prod.yml
       METRICS_WORKFLOW: attendance-remote-metrics-prod.yml
       STORAGE_WORKFLOW: attendance-remote-storage-prod.yml

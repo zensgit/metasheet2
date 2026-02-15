@@ -13,11 +13,14 @@
 
 import fs from 'fs/promises'
 import path from 'path'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 
 const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
 const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')
 const branch = String(process.env.BRANCH || 'main').trim()
+const includeDrillRuns = String(process.env.INCLUDE_DRILL_RUNS || '').trim() === 'true'
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
 const storageWorkflow = String(process.env.STORAGE_WORKFLOW || 'attendance-remote-storage-prod.yml').trim()
@@ -61,6 +64,8 @@ function isDrillRun(run) {
   return title.includes('[DRILL]') || title.includes('[DEBUG]')
 }
 
+const execFileAsync = promisify(execFile)
+
 async function apiGet(pathname) {
   const url = `${apiBase}${pathname}`
   const res = await fetch(url, {
@@ -81,6 +86,135 @@ async function apiGet(pathname) {
     throw new Error(`GET ${pathname} failed: HTTP ${res.status} ${raw.slice(0, 240)}`)
   }
   return body
+}
+
+async function tryGetRunArtifacts({ ownerValue, repoValue, runId }) {
+  const pathname = `/repos/${ownerValue}/${repoValue}/actions/runs/${runId}/artifacts?per_page=100`
+  try {
+    const body = await apiGet(pathname)
+    const list = Array.isArray(body?.artifacts) ? body.artifacts : []
+    return { list, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: failed to query run artifacts for ${runId}: ${message}`)
+    return { list: [], error: message }
+  }
+}
+
+async function tryDownloadArtifactZip({ archiveUrl, zipPath }) {
+  try {
+    const res = await fetch(archiveUrl, {
+      headers: {
+        // GitHub REST API requires JSON accept headers for artifact download endpoints
+        // (the response is a redirect to the actual archive URL).
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'attendance-daily-gate-report',
+      },
+      redirect: 'follow',
+    })
+    if (!res.ok) {
+      const raw = await res.text()
+      throw new Error(`HTTP ${res.status} ${raw.slice(0, 240)}`)
+    }
+    const ab = await res.arrayBuffer()
+    await fs.writeFile(zipPath, Buffer.from(ab))
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: failed to download artifact zip: ${message}`)
+    return false
+  }
+}
+
+async function tryReadZipText({ zipPath, innerPath }) {
+  try {
+    const { stdout } = await execFileAsync('unzip', ['-p', zipPath, innerPath], { maxBuffer: 2 * 1024 * 1024 })
+    return String(stdout || '')
+  } catch {
+    return null
+  }
+}
+
+function parseMetricsStepSummary(text) {
+  if (!text) return null
+  const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
+  const missingMetrics = text.match(/^- Missing metrics: `([^`]+)`/m)?.[1] || null
+  const urlMatch = text.match(/^- Metrics URL: `([^`]+)` \(max_time=`([^`]+)`s\)/m)
+  const metricsUrl = urlMatch?.[1] || null
+  const maxTime = urlMatch?.[2] || null
+  return {
+    reason,
+    missingMetrics,
+    metricsUrl,
+    maxTime,
+  }
+}
+
+function parseStorageStepSummary(text) {
+  if (!text) return null
+  const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
+  const computedMatch = text.match(
+    /- Computed: df_used_pct=`([^`]+)` .* upload_gb=`([^`]+)` .* oldest_file_days=`([^`]+)` .* file_count=`([^`]+)`/m,
+  )
+  const dfUsedPct = computedMatch?.[1] || null
+  const uploadGb = computedMatch?.[2] || null
+  const oldestFileDays = computedMatch?.[3] || null
+  const fileCount = computedMatch?.[4] || null
+  return {
+    reason,
+    dfUsedPct,
+    uploadGb,
+    oldestFileDays,
+    fileCount,
+  }
+}
+
+async function tryEnrichGateFromStepSummary({
+  ownerValue,
+  repoValue,
+  runId,
+  artifactNamePrefix,
+  metaOutDir,
+  parse,
+}) {
+  const artifacts = await tryGetRunArtifacts({ ownerValue, repoValue, runId })
+  if (artifacts.error) return null
+  const list = Array.isArray(artifacts.list) ? artifacts.list : []
+
+  const match = list.find((a) => a && typeof a.name === 'string' && a.name.startsWith(artifactNamePrefix)) || null
+  if (!match || !match.archive_download_url) return null
+
+  const tmpDir = path.join(metaOutDir, '.tmp')
+  const zipPath = path.join(tmpDir, `${match.name}.zip`)
+  await fs.mkdir(tmpDir, { recursive: true })
+
+  try {
+    const ok = await tryDownloadArtifactZip({ archiveUrl: match.archive_download_url, zipPath })
+    if (!ok) return null
+
+    const text = await tryReadZipText({ zipPath, innerPath: 'step-summary.md' })
+    if (!text) return null
+
+    const parsed = parse(text)
+    if (!parsed) return null
+
+    const meta = {
+      runId,
+      artifactId: match.id ?? null,
+      artifactName: match.name,
+      ...parsed,
+    }
+    await fs.mkdir(metaOutDir, { recursive: true })
+    await fs.writeFile(path.join(metaOutDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+    return meta
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: gate meta enrichment failed: ${message}`)
+    return null
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  }
 }
 
 async function tryGetWorkflowRuns({ ownerValue, repoValue, workflowFile, branchValue }) {
@@ -259,11 +393,34 @@ function renderMarkdown({
     lines.push('')
     lines.push('- None.')
   } else {
+    const gateByName = {
+      [preflightGate.name]: preflightGate,
+      [metricsGate.name]: metricsGate,
+      [storageGate.name]: storageGate,
+      [cleanupGate.name]: cleanupGate,
+      [strictGate.name]: strictGate,
+      [perfGate.name]: perfGate,
+      [longrunGate.name]: longrunGate,
+    }
     lines.push('## Findings')
     lines.push('')
     for (const finding of findings) {
+      const gate = gateByName[finding.gate] || null
+      const meta = gate?.meta || null
+      const metaBits = []
+      if (meta?.reason) metaBits.push(`reason=${meta.reason}`)
+      if (finding.gate === 'Host Metrics') {
+        if (meta?.missingMetrics) metaBits.push(`missing=${meta.missingMetrics}`)
+        if (meta?.metricsUrl) metaBits.push(`metrics_url=${meta.metricsUrl}`)
+      }
+      if (finding.gate === 'Storage Health') {
+        if (meta?.dfUsedPct) metaBits.push(`df_used_pct=${meta.dfUsedPct}`)
+        if (meta?.uploadGb) metaBits.push(`upload_gb=${meta.uploadGb}`)
+        if (meta?.oldestFileDays) metaBits.push(`oldest_days=${meta.oldestFileDays}`)
+      }
+      const metaSuffix = metaBits.length > 0 ? ` (${metaBits.join(' ')})` : ''
       const link = finding.runUrl ? ` ([run](${finding.runUrl}))` : ''
-      lines.push(`- [${finding.severity}] ${finding.gate} / ${finding.code}: ${finding.message}${link}`)
+      lines.push(`- [${finding.severity}] ${finding.gate} / ${finding.code}: ${finding.message}${metaSuffix}${link}`)
     }
   }
 
@@ -280,15 +437,43 @@ function renderMarkdown({
     }
 
     if (findings.some((f) => f && f.gate === 'Host Metrics' && f.code === 'RUN_FAILED')) {
-      lines.push('- Host Metrics: open the run Step Summary and check `Failure reason`.')
-      lines.push('- If `reason=METRICS_FETCH_FAILED`: run Remote Preflight first, verify backend is up and port `8900` is reachable on the host (127.0.0.1), then inspect `metrics.log`.')
-      lines.push('- If `reason=MISSING_REQUIRED_METRICS`: verify attendance plugin is enabled and metrics are exported (HELP/TYPE lines exist for required counters). Redeploy if needed, then rerun Host Metrics.')
+      const reason = String(metricsGate?.meta?.reason || '').trim()
+      if (reason) {
+        lines.push(`- Host Metrics: failure reason detected: \`${reason}\`.`)
+      } else {
+        lines.push('- Host Metrics: open the run Step Summary and check `Failure reason`.')
+      }
+
+      if (reason === 'METRICS_FETCH_FAILED') {
+        lines.push('- Host Metrics: fetch failed. Run Remote Preflight first, verify backend is up and port `8900` is reachable on the host (127.0.0.1), then inspect `metrics.log`.')
+      } else if (reason === 'MISSING_REQUIRED_METRICS') {
+        lines.push('- Host Metrics: required metric names missing. Verify attendance plugin is enabled and metrics are exported (HELP/TYPE lines exist for required counters). Redeploy if needed, then rerun Host Metrics.')
+      } else if (reason) {
+        lines.push('- Host Metrics: inspect `metrics.log` and the Step Summary output snippet for the first error.')
+      } else {
+        lines.push('- If `reason=METRICS_FETCH_FAILED`: run Remote Preflight first, verify backend is up and port `8900` is reachable on the host (127.0.0.1), then inspect `metrics.log`.')
+        lines.push('- If `reason=MISSING_REQUIRED_METRICS`: verify attendance plugin is enabled and metrics are exported (HELP/TYPE lines exist for required counters). Redeploy if needed, then rerun Host Metrics.')
+      }
     }
 
     if (findings.some((f) => f && f.gate === 'Storage Health' && f.code === 'RUN_FAILED')) {
-      lines.push('- Storage Health: open the run Step Summary and check `Failure reason`.')
-      lines.push('- If `reason` includes `FS_USAGE_TOO_HIGH`: run `Attendance Remote Docker GC (Prod)` (`gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true`), then rerun Storage Health.')
-      lines.push('- If `reason` includes `UPLOAD_DIR_TOO_LARGE` or `OLDEST_FILE_TOO_OLD`: run `Remote Upload Cleanup (Prod)` (dry-run first; do not delete without confirm), then rerun Storage Health.')
+      const reason = String(storageGate?.meta?.reason || '').trim()
+      if (reason) {
+        lines.push(`- Storage Health: failure reason detected: \`${reason}\`.`)
+      } else {
+        lines.push('- Storage Health: open the run Step Summary and check `Failure reason`.')
+      }
+
+      if (reason.includes('FS_USAGE_TOO_HIGH')) {
+        lines.push('- Storage Health: filesystem usage too high. Run `Attendance Remote Docker GC (Prod)` (`gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true`), then rerun Storage Health.')
+      }
+      if (reason.includes('UPLOAD_DIR_TOO_LARGE') || reason.includes('OLDEST_FILE_TOO_OLD')) {
+        lines.push('- Storage Health: upload dir needs cleanup. Run `Remote Upload Cleanup (Prod)` (dry-run first; do not delete without confirm), then rerun Storage Health.')
+      }
+      if (!reason) {
+        lines.push('- If `reason` includes `FS_USAGE_TOO_HIGH`: run `Attendance Remote Docker GC (Prod)` (`gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true`), then rerun Storage Health.')
+        lines.push('- If `reason` includes `UPLOAD_DIR_TOO_LARGE` or `OLDEST_FILE_TOO_OLD`: run `Remote Upload Cleanup (Prod)` (dry-run first; do not delete without confirm), then rerun Storage Health.')
+      }
     }
 
     if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
@@ -348,38 +533,38 @@ async function run() {
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
-  const preflightList = preflightListRaw.filter((run) => !isDrillRun(run))
-  if (preflightListRaw.length !== preflightList.length) {
+  const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && preflightListRaw.length !== preflightList.length) {
     info(`preflight: filtered drill/debug runs (${preflightListRaw.length - preflightList.length})`)
   }
   const metricsListRaw = Array.isArray(metricsRuns?.list) ? metricsRuns.list : []
-  const metricsList = metricsListRaw.filter((run) => !isDrillRun(run))
-  if (metricsListRaw.length !== metricsList.length) {
+  const metricsList = includeDrillRuns ? metricsListRaw : metricsListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && metricsListRaw.length !== metricsList.length) {
     info(`metrics: filtered drill/debug runs (${metricsListRaw.length - metricsList.length})`)
   }
   const storageListRaw = Array.isArray(storageRuns?.list) ? storageRuns.list : []
-  const storageList = storageListRaw.filter((run) => !isDrillRun(run))
-  if (storageListRaw.length !== storageList.length) {
+  const storageList = includeDrillRuns ? storageListRaw : storageListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && storageListRaw.length !== storageList.length) {
     info(`storage: filtered drill/debug runs (${storageListRaw.length - storageList.length})`)
   }
   const cleanupListRaw = Array.isArray(cleanupRuns?.list) ? cleanupRuns.list : []
-  const cleanupList = cleanupListRaw.filter((run) => !isDrillRun(run))
-  if (cleanupListRaw.length !== cleanupList.length) {
+  const cleanupList = includeDrillRuns ? cleanupListRaw : cleanupListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && cleanupListRaw.length !== cleanupList.length) {
     info(`cleanup: filtered drill/debug runs (${cleanupListRaw.length - cleanupList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
-  const strictList = strictListRaw.filter((run) => !isDrillRun(run))
-  if (strictListRaw.length !== strictList.length) {
+  const strictList = includeDrillRuns ? strictListRaw : strictListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && strictListRaw.length !== strictList.length) {
     info(`strict: filtered drill/debug runs (${strictListRaw.length - strictList.length})`)
   }
   const perfListRaw = Array.isArray(perfRuns?.list) ? perfRuns.list : []
-  const perfList = perfListRaw.filter((run) => !isDrillRun(run))
-  if (perfListRaw.length !== perfList.length) {
+  const perfList = includeDrillRuns ? perfListRaw : perfListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && perfListRaw.length !== perfList.length) {
     info(`perf: filtered drill/debug runs (${perfListRaw.length - perfList.length})`)
   }
   const longrunListRaw = Array.isArray(longrunRuns?.list) ? longrunRuns.list : []
-  const longrunList = longrunListRaw.filter((run) => !isDrillRun(run))
-  if (longrunListRaw.length !== longrunList.length) {
+  const longrunList = includeDrillRuns ? longrunListRaw : longrunListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && longrunListRaw.length !== longrunList.length) {
     info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
 
@@ -463,6 +648,42 @@ async function run() {
     lookbackHoursValue: lookbackHours,
     fetchError: longrunRuns.error,
   })
+
+  const hasRunFailed = (gate) => Array.isArray(gate?.findings) && gate.findings.some((f) => f && f.code === 'RUN_FAILED')
+
+  // Best-effort: enrich failing remote gates by parsing their step-summary artifacts.
+  // Never fail the dashboard on enrichment errors.
+  const metaRoot = path.join(outDir, 'gate-meta')
+  try {
+    await fs.mkdir(metaRoot, { recursive: true })
+    if (hasRunFailed(metricsGate) && metricsGate.completed?.id) {
+      const runId = metricsGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-remote-metrics-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'metrics'),
+        parse: parseMetricsStepSummary,
+      })
+      if (meta) metricsGate.meta = meta
+    }
+    if (hasRunFailed(storageGate) && storageGate.completed?.id) {
+      const runId = storageGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-remote-storage-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'storage'),
+        parse: parseStorageStepSummary,
+      })
+      if (meta) storageGate.meta = meta
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: gate meta enrichment skipped: ${message}`)
+  }
 
   const findings = [
     ...preflightGate.findings,
