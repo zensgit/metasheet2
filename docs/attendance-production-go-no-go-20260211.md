@@ -532,3 +532,23 @@ Evidence:
 | Strict Gates drill (expected FAIL; provisioning reason simulated) | [#22038675256](https://github.com/zensgit/metasheet2/actions/runs/22038675256) | FAIL (expected) | `output/playwright/ga/22038675256/drill/gate-summary.json` |
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038687016](https://github.com/zensgit/metasheet2/actions/runs/22038687016) | FAIL (expected) | `output/playwright/ga/22038687016/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038687016/gate-meta/strict/meta.json`, Issue: [#171](https://github.com/zensgit/metasheet2/issues/171) |
 | Daily Gate Dashboard (recovery; closes drill issue) | [#22038701760](https://github.com/zensgit/metasheet2/actions/runs/22038701760) | PASS | `output/playwright/ga/22038701760/attendance-daily-gate-dashboard.md`, Issue: [#171](https://github.com/zensgit/metasheet2/issues/171) |
+
+## Post-Go Validation (2026-02-15): Strict Gates Playwright Reason Coverage
+
+This record validates:
+
+- Strict gates `playwright*` failures include stable `gateReasons.playwright*` reason codes.
+- Daily Gate Dashboard renders remediation hints based on these reason codes.
+
+Implementation:
+
+- Commit: `3de56dd4`
+- Change: strict gates drill supports selecting which gate fails + reason-based hints for playwright gates.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates drill (expected FAIL; playwrightDesktop reason simulated) | [#22038724666](https://github.com/zensgit/metasheet2/actions/runs/22038724666) | FAIL (expected) | `output/playwright/ga/22038724666/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038735962](https://github.com/zensgit/metasheet2/actions/runs/22038735962) | FAIL (expected) | `output/playwright/ga/22038735962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038735962/gate-meta/strict/meta.json`, Issue: [#172](https://github.com/zensgit/metasheet2/issues/172) |
+| Daily Gate Dashboard (recovery; closes drill issue) | [#22038750877](https://github.com/zensgit/metasheet2/actions/runs/22038750877) | PASS | `output/playwright/ga/22038750877/attendance-daily-gate-dashboard.md`, Issue: [#172](https://github.com/zensgit/metasheet2/issues/172) |
