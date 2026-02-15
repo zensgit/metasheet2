@@ -500,6 +500,7 @@ Purpose:
   - `P0`: strict gate failure
   - `P1`: host metrics/storage health/perf baseline/perf longrun failure or stale runs
 - `P2`: upload cleanup (weekly) failure or stale runs
+- Include `Remediation Hints` + quick re-run commands to speed up operator recovery.
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
