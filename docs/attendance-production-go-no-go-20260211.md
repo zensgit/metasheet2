@@ -570,3 +570,21 @@ Evidence:
 |---|---|---|---|
 | Strict Gates (manual, non-drill) | [#22038886570](https://github.com/zensgit/metasheet2/actions/runs/22038886570) | PASS | `output/playwright/ga/22038886570/20260215-161416-1/gate-summary.json`, `output/playwright/ga/22038886570/20260215-161416-2/gate-summary.json` |
 | Daily Gate Dashboard (manual, non-drill) | [#22038947184](https://github.com/zensgit/metasheet2/actions/runs/22038947184) | PASS | `output/playwright/ga/22038947184/attendance-daily-gate-dashboard.md` |
+
+## Post-Go Validation (2026-02-15): Strict Gates Fast Alert Includes Gate Summary
+
+This record validates:
+
+- The strict gates fast-alert escalation issue body includes a compact `gate-summary.json` excerpt (`exitCode`, failing gates, `gateReasons`) for faster triage.
+- The workflow remains `workflow_dispatch`-triggerable after the escalation context extraction change.
+
+Implementation:
+
+- Commit: `1121b038`
+- Commit: `fa93216b`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates drill (expected FAIL; fast alert issue includes gate summary block) | [#22039515349](https://github.com/zensgit/metasheet2/actions/runs/22039515349) | FAIL (expected) | `output/playwright/ga/22039515349/drill/gate-summary.json`, Issue: [#174](https://github.com/zensgit/metasheet2/issues/174) |

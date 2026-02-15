@@ -422,6 +422,10 @@ Inputs:
 Notes:
 
 - Strict gates artifacts include a `gate-summary.json` with `gateReasons` (reason codes) to speed up triage in Daily Dashboard remediation hints.
+- On failure, the workflow also opens a fast-alert issue (`[Attendance Gate] Daily dashboard alert` by default) with:
+  - Run URL + job status
+  - A compact `gate-summary.json` excerpt (`exitCode`, failing gates, `gateReasons`)
+  - Artifact download command
 - Common `apiSmoke` reason codes:
   - Auth/feature/mode: `AUTH_FAILED`, `RATE_LIMITED`, `PRODUCT_MODE_MISMATCH`, `FEATURE_DISABLED`
   - Admin/batch resolve: `ADMIN_API_MISSING`, `ADMIN_BATCH_RESOLVE_MISSING`, `ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH`, `ADMIN_BATCH_RESOLVE_FAILED`
@@ -434,7 +438,8 @@ Drill (expected FAIL; no production API calls; validates dashboard parsing/hints
 gh workflow run attendance-strict-gates-prod.yml \
   -f drill=true \
   -f drill_fail=true \
-  -f drill_api_smoke_reason='AUDIT_EXPORT_SCHEMA_MISSING'
+  -f drill_api_smoke_reason='AUDIT_EXPORT_SCHEMA_MISSING' \
+  -f issue_title='[Attendance Gate Drill] Strict gates fast alert test'
 ```
 
 Drill other strict-gate failures (simulates `gate-summary.json` only; still no production API calls):
