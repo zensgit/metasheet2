@@ -223,6 +223,78 @@ jobs:
       DRILL_RESULT: ${{ needs.drill.result }}
       STRICT_RESULT: ${{ needs.strict-gates.result }}
     steps:
+      - name: Download strict gate artifacts (for escalation context)
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: attendance-strict-gates-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/escalate/strict
+
+      - name: Build gate summary context
+        if: always()
+        run: |
+          set -euo pipefail
+
+          root="output/escalate/strict"
+          out_dir="output/escalate"
+          mkdir -p "$out_dir"
+
+          out_md="${out_dir}/gate-summary.md"
+          echo "## Gate Summary (artifact snapshot)" > "$out_md"
+          echo "" >> "$out_md"
+
+          if [[ ! -d "$root" ]]; then
+            echo "- No artifacts downloaded (missing directory: \`$root\`)." >> "$out_md"
+            exit 0
+          fi
+
+          mapfile -t summaries < <(find "$root" -type f -name 'gate-summary.json' | sort)
+          if (( ${#summaries[@]} == 0 )); then
+            echo "- \`gate-summary.json\` not found in strict gate artifacts." >> "$out_md"
+            exit 0
+          fi
+
+          # Keep output short: at most 2 summaries (strict gates runs twice).
+          count=0
+          for f in "${summaries[@]}"; do
+            count=$((count + 1))
+            if (( count > 2 )); then
+              break
+            fi
+
+            echo "- Source: \`$f\`" >> "$out_md"
+            # Extract a compact view: exitCode + failing gates + non-null reasons.
+            node - <<'NODE' "$f" >> "$out_md" || true
+            const fs = require('fs')
+
+            const file = process.argv[2]
+            const raw = fs.readFileSync(file, 'utf8')
+            const parsed = JSON.parse(raw)
+
+            const gates = parsed && typeof parsed === 'object' ? parsed.gates : null
+            const reasons = parsed && typeof parsed === 'object' ? parsed.gateReasons : null
+
+            const failed = []
+            if (gates && typeof gates === 'object') {
+              for (const [k, v] of Object.entries(gates)) {
+                if (String(v) === 'FAIL') failed.push(k)
+              }
+            }
+
+            const reasonPairs = []
+            if (reasons && typeof reasons === 'object') {
+              for (const [k, v] of Object.entries(reasons)) {
+                if (typeof v === 'string' && v) reasonPairs.push(`${k}=${v}`)
+              }
+            }
+
+            process.stdout.write(`  - exitCode=${String(parsed.exitCode)}\\n`)
+            process.stdout.write(`  - failed=${failed.length ? failed.join(',') : 'none'}\\n`)
+            if (reasonPairs.length) process.stdout.write(`  - reasons=${reasonPairs.join(' ')}\\n`)
+NODE
+            echo "" >> "$out_md"
+          done
+
       - name: Escalate issue when strict gates failed
         uses: actions/github-script@v7
         with:
@@ -232,6 +304,7 @@ jobs:
             const drillResult = String(process.env.DRILL_RESULT || '').trim()
             const strictResult = String(process.env.STRICT_RESULT || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+            const gateSummaryPath = 'output/escalate/gate-summary.md'
 
             const failed = drillResult === 'failure' || strictResult === 'failure'
             if (!failed) {
@@ -252,11 +325,25 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
             const artifactName = `attendance-strict-gates-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
+            let gateSummary = ''
+            try {
+              if (gateSummaryPath) {
+                const fs = require('fs')
+                if (fs.existsSync(gateSummaryPath)) {
+                  gateSummary = fs.readFileSync(gateSummaryPath, 'utf8')
+                }
+              }
+            } catch {
+              gateSummary = ''
+            }
+
             const body = [
               'Automated strict gates escalation.',
               '',
               `Run: ${runUrl}`,
               `jobs: strict=${strictResult || 'unknown'} drill=${drillResult || 'unknown'}${drill && drillFail ? ' (drill_fail=true)' : ''}`,
+              '',
+              gateSummary ? gateSummary.trim() : '(gate summary missing; download artifacts to inspect `gate-summary.json`)',
               '',
               `Artifacts: ${artifactName}`,
               '',
