@@ -263,35 +263,17 @@ jobs:
             fi
 
             echo "- Source: \`$f\`" >> "$out_md"
-            # Extract a compact view: exitCode + failing gates + non-null reasons.
-            node - <<'NODE' "$f" >> "$out_md" || true
-            const fs = require('fs')
 
-            const file = process.argv[2]
-            const raw = fs.readFileSync(file, 'utf8')
-            const parsed = JSON.parse(raw)
+            # Use jq to avoid heredocs (which can break GitHub YAML parsing).
+            exit_code="$(jq -r '.exitCode // \"unknown\"' "$f" 2>/dev/null || echo unknown)"
+            failed="$(jq -r '.gates // {} | to_entries | map(select(.value == \"FAIL\") | .key) | join(\",\")' "$f" 2>/dev/null || echo '')"
+            reasons="$(jq -r '.gateReasons // {} | to_entries | map(select(.value != null and (.value|tostring) != \"\") | \"\\(.key)=\\(.value)\") | join(\" \")' "$f" 2>/dev/null || echo '')"
 
-            const gates = parsed && typeof parsed === 'object' ? parsed.gates : null
-            const reasons = parsed && typeof parsed === 'object' ? parsed.gateReasons : null
-
-            const failed = []
-            if (gates && typeof gates === 'object') {
-              for (const [k, v] of Object.entries(gates)) {
-                if (String(v) === 'FAIL') failed.push(k)
-              }
-            }
-
-            const reasonPairs = []
-            if (reasons && typeof reasons === 'object') {
-              for (const [k, v] of Object.entries(reasons)) {
-                if (typeof v === 'string' && v) reasonPairs.push(`${k}=${v}`)
-              }
-            }
-
-            process.stdout.write(`  - exitCode=${String(parsed.exitCode)}\\n`)
-            process.stdout.write(`  - failed=${failed.length ? failed.join(',') : 'none'}\\n`)
-            if (reasonPairs.length) process.stdout.write(`  - reasons=${reasonPairs.join(' ')}\\n`)
-NODE
+            echo "  - exitCode=${exit_code}" >> "$out_md"
+            echo "  - failed=${failed:-none}" >> "$out_md"
+            if [[ -n "$reasons" ]]; then
+              echo "  - reasons=${reasons}" >> "$out_md"
+            fi
             echo "" >> "$out_md"
           done
 
