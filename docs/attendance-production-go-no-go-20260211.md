@@ -460,3 +460,35 @@ Evidence:
 |---|---|---|---|
 | Remote Preflight (debug + drill, safe issue title) | [#22037980657](https://github.com/zensgit/metasheet2/actions/runs/22037980657) | FAIL (expected) | `output/playwright/ga/22037980657/attendance-remote-preflight-prod-22037980657-1/step-summary.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
 | Daily Gate Dashboard (recovery, closes drill issue) | [#22038001045](https://github.com/zensgit/metasheet2/actions/runs/22038001045) | PASS | `output/playwright/ga/22038001045/attendance-daily-gate-dashboard-22038001045-1/attendance-daily-gate-dashboard.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
+
+## Post-Go Validation (2026-02-15): Strict Gates apiSmoke Audit Export Reason Coverage
+
+This record validates:
+
+- Strict gates `apiSmoke` failures include stable `gateReasons.apiSmoke` reason codes for audit export issues.
+- Daily Gate Dashboard renders remediation hints based on these reason codes.
+
+Implementation:
+
+- Commit: `e2b8a3de`
+- Change: add `attendance-detect-api-smoke-reason.sh` and extend `apiSmoke` reason detection + dashboard hints.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates drill (expected FAIL; apiSmoke reason simulated) | [#22038312244](https://github.com/zensgit/metasheet2/actions/runs/22038312244) | FAIL (expected) | `output/playwright/ga/22038312244/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038333334](https://github.com/zensgit/metasheet2/actions/runs/22038333334) | FAIL (expected) | `output/playwright/ga/22038333334/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038333334/gate-meta/strict/meta.json`, Issue: [#169](https://github.com/zensgit/metasheet2/issues/169) |
+| Daily Gate Dashboard (recovery; closes drill issue) | [#22038356301](https://github.com/zensgit/metasheet2/actions/runs/22038356301) | PASS | `output/playwright/ga/22038356301/attendance-daily-gate-dashboard.md`, Issue: [#169](https://github.com/zensgit/metasheet2/issues/169) |
+
+Local replay (historical strict gate apiSmoke logs):
+
+```bash
+./scripts/ops/attendance-detect-api-smoke-reason.sh output/playwright/ga/21894139054/20260211-054336-1/gate-api-smoke.log
+./scripts/ops/attendance-detect-api-smoke-reason.sh output/playwright/ga/21894255303/20260211-054939-1/gate-api-smoke.log
+```
+
+Expected outputs:
+
+- `AUDIT_EXPORT_MISSING`
+- `AUDIT_EXPORT_SCHEMA_MISSING`

@@ -419,6 +419,23 @@ Inputs:
 - `require_import_async` defaults to `true` (recommended).
 - Set `require_import_async=false` only for temporary legacy compatibility checks.
 
+Notes:
+
+- Strict gates artifacts include a `gate-summary.json` with `gateReasons` (reason codes) to speed up triage in Daily Dashboard remediation hints.
+- Common `apiSmoke` reason codes:
+  - Auth/feature/mode: `AUTH_FAILED`, `RATE_LIMITED`, `PRODUCT_MODE_MISMATCH`, `FEATURE_DISABLED`
+  - Admin/audit: `ADMIN_API_MISSING`, `AUDIT_EXPORT_MISSING`, `AUDIT_EXPORT_SCHEMA_MISSING`, `AUDIT_EXPORT_FAILED`, `AUDIT_SUMMARY_MISSING`, `AUDIT_SUMMARY_FAILED`
+  - Import channels: `IMPORT_UPLOAD_FAILED`, `IMPORT_EXPORT_MISSING`
+
+Drill (expected FAIL; no production API calls; validates dashboard parsing/hints):
+
+```bash
+gh workflow run attendance-strict-gates-prod.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f drill_api_smoke_reason='AUDIT_EXPORT_SCHEMA_MISSING'
+```
+
 ### B) Perf Baseline (Scheduled + Manual)
 
 Workflow:
