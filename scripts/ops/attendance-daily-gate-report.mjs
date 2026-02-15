@@ -750,6 +750,28 @@ function renderMarkdown({
           lines.push('- Strict Gates: `apiSmoke` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
         } else if (apiReason === 'FEATURE_DISABLED') {
           lines.push('- Strict Gates: `apiSmoke` feature disabled. Ensure attendance plugin is enabled in the target environment, then rerun.')
+        } else if (apiReason === 'ADMIN_API_MISSING') {
+          lines.push('- Strict Gates: `apiSmoke` attendance-admin API missing. Deploy the backend that includes attendance-admin routes, then rerun.')
+        } else if (apiReason === 'ADMIN_BATCH_RESOLVE_MISSING') {
+          lines.push('- Strict Gates: `apiSmoke` attendance-admin batch resolve API missing. Deploy the backend that includes the batch resolve route (or disable `require_batch_resolve` only for debugging).')
+        } else if (apiReason === 'AUDIT_EXPORT_MISSING') {
+          lines.push('- Strict Gates: `apiSmoke` audit export endpoint missing. Deploy backend/route changes for audit export, then rerun.')
+        } else if (apiReason === 'AUDIT_SUMMARY_MISSING') {
+          lines.push('- Strict Gates: `apiSmoke` audit summary endpoint missing. Deploy backend/route changes for audit summary, then rerun.')
+        } else if (apiReason === 'AUDIT_EXPORT_SCHEMA_MISSING') {
+          lines.push('- Strict Gates: `apiSmoke` audit export failed due to schema mismatch (missing column). Run DB migrations (audit log table) and redeploy, then rerun.')
+        } else if (apiReason === 'AUDIT_EXPORT_BAD_HEADERS') {
+          lines.push('- Strict Gates: `apiSmoke` audit export CSV headers mismatch. Deploy backend fixes to ensure headers include `occurredAt/action/route`, then rerun.')
+        } else if (apiReason === 'AUDIT_EXPORT_FAILED') {
+          lines.push('- Strict Gates: `apiSmoke` audit export failed. Inspect backend logs + DB migrations, then rerun.')
+        } else if (apiReason === 'AUDIT_SUMMARY_FAILED' || apiReason === 'AUDIT_SUMMARY_BAD_RESPONSE') {
+          lines.push('- Strict Gates: `apiSmoke` audit summary failed. Inspect backend logs + DB migrations, then rerun.')
+        } else if (apiReason === 'IMPORT_UPLOAD_FAILED') {
+          lines.push('- Strict Gates: `apiSmoke` import upload failed. Run Remote Preflight to validate nginx upload config + volume mount, then rerun.')
+        } else if (apiReason === 'IMPORT_EXPORT_MISSING' || apiReason === 'IMPORT_EXPORT_BAD_HEADERS') {
+          lines.push('- Strict Gates: `apiSmoke` import export.csv is missing or malformed. Deploy backend fixes and rerun strict gates.')
+        } else if (apiReason === 'PLUGIN_INACTIVE') {
+          lines.push('- Strict Gates: `apiSmoke` attendance plugin is not active. Enable/activate plugin-attendance in the target environment, then rerun.')
         } else {
           lines.push('- Strict Gates: `apiSmoke` failed. Inspect `gate-api-smoke.log` in the strict gates artifacts.')
         }

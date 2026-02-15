@@ -14,6 +14,10 @@ on:
         description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
         required: false
         default: 'false'
+      drill_api_smoke_reason:
+        description: 'Optional: apiSmoke reason code to embed in drill gate-summary.json (example: AUDIT_EXPORT_SCHEMA_MISSING)'
+        required: false
+        default: 'AUTH_FAILED'
       issue_title:
         description: 'Optional: override escalation issue title for workflow_dispatch drills (leave empty for production title)'
         required: false
@@ -73,11 +77,16 @@ jobs:
     timeout-minutes: 5
     env:
       DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+      DRILL_API_SMOKE_REASON: ${{ inputs.drill_api_smoke_reason || 'AUTH_FAILED' }}
     steps:
       - name: Drill no-op (skip strict gates)
         run: |
           set -euo pipefail
           DRILL_FAIL="${DRILL_FAIL:-false}"
+          DRILL_API_SMOKE_REASON="${DRILL_API_SMOKE_REASON:-AUTH_FAILED}"
+          if [[ ! "${DRILL_API_SMOKE_REASON}" =~ ^[A-Z0-9_]+$ ]]; then
+            DRILL_API_SMOKE_REASON="AUTH_FAILED"
+          fi
           mkdir -p output/playwright/attendance-prod-acceptance/drill
           cat > output/playwright/attendance-prod-acceptance/drill/drill.txt <<'EOF'
           This is a DRILL run for Attendance Strict Gates (Prod).
@@ -86,7 +95,7 @@ jobs:
 
           # Provide a minimal gate-summary.json so dashboards can exercise
           # artifact parsing without calling production.
-          cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<'EOF'
+          cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<EOF
           {
             "generatedAt": "1970-01-01T00:00:00Z",
             "apiBase": "<DRILL>",
@@ -102,7 +111,7 @@ jobs:
               "playwrightMobile": "SKIP"
             },
             "gateReasons": {
-              "apiSmoke": "AUTH_FAILED",
+              "apiSmoke": "${DRILL_API_SMOKE_REASON}",
               "provisioning": null,
               "playwrightProd": null,
               "playwrightDesktop": null,

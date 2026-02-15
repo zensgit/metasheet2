@@ -226,43 +226,6 @@ if ! run_playwright_full_flow_mobile; then
   exit_code=1
 fi
 
-function detect_api_smoke_reason() {
-  local log="$1"
-  if [[ ! -f "$log" ]]; then
-    echo "LOG_MISSING"
-    return 0
-  fi
-  if grep -qE 'HTTP (401|403) ' "$log"; then
-    echo "AUTH_FAILED"
-    return 0
-  fi
-  if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
-    echo "RATE_LIMITED"
-    return 0
-  fi
-  if grep -qE 'features\\.mode expected' "$log"; then
-    echo "PRODUCT_MODE_MISMATCH"
-    return 0
-  fi
-  if grep -qE 'features\\.attendance is not true' "$log"; then
-    echo "FEATURE_DISABLED"
-    return 0
-  fi
-  if grep -qE 'import job timed out' "$log"; then
-    echo "IMPORT_ASYNC_TIMEOUT"
-    return 0
-  fi
-  if grep -qE 'import job failed' "$log"; then
-    echo "IMPORT_ASYNC_FAILED"
-    return 0
-  fi
-  if grep -qE 'commit did not succeed|Import commit did not succeed' "$log"; then
-    echo "IMPORT_COMMIT_FAILED"
-    return 0
-  fi
-  echo "UNKNOWN"
-}
-
 function detect_provision_reason() {
   local log="$1"
   if [[ ! -f "$log" ]]; then
@@ -322,7 +285,7 @@ pw_desktop_reason=""
 pw_mobile_reason=""
 
 if [[ "$gate_api" == "FAIL" ]]; then
-  api_smoke_reason="$(detect_api_smoke_reason "${OUTPUT_ROOT}/gate-api-smoke.log")"
+  api_smoke_reason="$("${ROOT_DIR}/scripts/ops/attendance-detect-api-smoke-reason.sh" "${OUTPUT_ROOT}/gate-api-smoke.log")"
 fi
 if [[ "$gate_provision" == "FAIL" ]]; then
   provision_reason="$(detect_provision_reason "${OUTPUT_ROOT}/gate-provision-employee.log")"
