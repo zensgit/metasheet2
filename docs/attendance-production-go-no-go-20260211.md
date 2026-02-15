@@ -556,3 +556,17 @@ Evidence:
 | Strict Gates drill (expected FAIL; playwrightDesktop auth failure simulated) | [#22038819581](https://github.com/zensgit/metasheet2/actions/runs/22038819581) | FAIL (expected) | `output/playwright/ga/22038819581/drill/gate-summary.json` |
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; auth remediation hint visible) | [#22038829941](https://github.com/zensgit/metasheet2/actions/runs/22038829941) | FAIL (expected) | `output/playwright/ga/22038829941/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038829941/gate-meta/strict/meta.json`, Issue: [#173](https://github.com/zensgit/metasheet2/issues/173) |
 | Daily Gate Dashboard (recovery; closes drill issue) | [#22038845477](https://github.com/zensgit/metasheet2/actions/runs/22038845477) | PASS | `output/playwright/ga/22038845477/attendance-daily-gate-dashboard.md`, Issue: [#173](https://github.com/zensgit/metasheet2/issues/173) |
+
+## Post-Go Validation (2026-02-15): Manual Strict Gates + Daily Dashboard PASS
+
+This record validates:
+
+- A non-drill strict gate run passes after the reason/hint refactors.
+- Daily dashboard (non-drill) still evaluates all gates as PASS.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (manual, non-drill) | [#22038886570](https://github.com/zensgit/metasheet2/actions/runs/22038886570) | PASS | `output/playwright/ga/22038886570/20260215-161416-1/gate-summary.json`, `output/playwright/ga/22038886570/20260215-161416-2/gate-summary.json` |
+| Daily Gate Dashboard (manual, non-drill) | [#22038947184](https://github.com/zensgit/metasheet2/actions/runs/22038947184) | PASS | `output/playwright/ga/22038947184/attendance-daily-gate-dashboard.md` |
