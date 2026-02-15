@@ -1,7 +1,7 @@
 name: Attendance Remote Preflight (Prod)
 
 # Mark drill runs explicitly so dashboards can ignore them.
-run-name: Attendance Remote Preflight (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+run-name: Attendance Remote Preflight (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.skip_host_sync == 'true' && ' [DEBUG]' || '' }}
 
 on:
   workflow_dispatch:
@@ -14,6 +14,10 @@ on:
         description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
         required: false
         default: ''
+      skip_host_sync:
+        description: 'Optional: skip deploy-host git sync step (true/false). Use for debugging when host sync is broken.'
+        required: false
+        default: 'false'
   schedule:
     # Daily at 02:05 UTC (before strict gates at 02:15 UTC).
     - cron: '5 2 * * *'
@@ -41,6 +45,7 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -51,6 +56,7 @@ jobs:
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
           DRILL_FAIL="${DRILL_FAIL:-false}"
+          SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 
           mkdir -p output/preflight
           preflight_log="output/preflight/preflight.log"
@@ -60,13 +66,19 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
             "DRILL_FAIL=\"${DRILL_FAIL}\""
+            "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
             "cd \"${DEPLOY_PATH}\""
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
-            "set +e"
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
-            'host_sync_rc=$?'
-            "set -e"
+            'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
+              '  echo "[host-sync] skipped (skip_host_sync=true)"'
+              '  host_sync_rc=0'
+            "else"
+              "  set +e"
+              "  git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
+              '  host_sync_rc=$?'
+              "  set -e"
+            "fi"
             'echo "[host-sync] rc=$host_sync_rc"'
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
@@ -98,6 +110,7 @@ jobs:
         env:
           PREFLIGHT_RC: ${{ steps.remote_preflight.outputs.preflight_rc }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail
           preflight_log="output/preflight/preflight.log"
@@ -133,6 +146,7 @@ jobs:
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Remote exit code: \`${PREFLIGHT_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail: \`${DRILL_FAIL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Host Sync" >> "$GITHUB_STEP_SUMMARY"
@@ -253,6 +267,7 @@ jobs:
         env:
           PREFLIGHT_RC: ${{ steps.remote_preflight.outputs.preflight_rc }}
           DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
           ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
         with:
           script: |
@@ -260,6 +275,7 @@ jobs:
 
             const preflightRc = String(process.env.PREFLIGHT_RC || '').trim()
             const isDrill = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const skipHostSync = String(process.env.SKIP_HOST_SYNC || '').trim() === 'true'
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
 
             if (!preflightRc) {
@@ -273,9 +289,9 @@ jobs:
 
             const defaultTitle = '[Attendance Gate] Daily dashboard alert'
             const title = titleOverride || defaultTitle
-            const allowEscalate = !isDrill || Boolean(titleOverride)
+            const allowEscalate = (!isDrill && !skipHostSync) || Boolean(titleOverride)
             if (!allowEscalate) {
-              core.info('Drill run: skipping issue escalation (no override title).')
+              core.info('Drill/debug run: skipping issue escalation (no override title).')
               return
             }
 
