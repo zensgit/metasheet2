@@ -136,6 +136,27 @@ async function tryReadZipText({ zipPath, innerPath }) {
   }
 }
 
+async function tryListZipEntries({ zipPath }) {
+  try {
+    const { stdout } = await execFileAsync('unzip', ['-Z1', zipPath], { maxBuffer: 2 * 1024 * 1024 })
+    return String(stdout || '')
+      .split('\n')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function tryReadZipTextBySuffix({ zipPath, suffix }) {
+  const entries = await tryListZipEntries({ zipPath })
+  const matches = entries.filter((entry) => entry.endsWith(suffix))
+  if (matches.length === 0) return null
+  matches.sort()
+  const innerPath = matches[matches.length - 1]
+  return tryReadZipText({ zipPath, innerPath })
+}
+
 function parseMetricsStepSummary(text) {
   if (!text) return null
   const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
@@ -240,12 +261,57 @@ function parseCleanupStepSummary(text) {
   }
 }
 
+function parsePerfSummaryJson(text) {
+  if (!text) return null
+  let value = null
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  const regressionsRaw = Array.isArray(value?.regressions) ? value.regressions : []
+  const regressionsSample = regressionsRaw
+    .slice(0, 3)
+    .map((entry) => {
+      const asString = typeof entry === 'string' ? entry : JSON.stringify(entry)
+      return asString.length > 160 ? `${asString.slice(0, 160)}...` : asString
+    })
+    .filter(Boolean)
+    .join(' | ')
+
+  const previewMs = typeof value?.previewMs === 'number' ? value.previewMs : null
+  const commitMs = typeof value?.commitMs === 'number' ? value.commitMs : null
+  const exportMs = typeof value?.exportMs === 'number' ? value.exportMs : null
+  const rollbackMs = typeof value?.rollbackMs === 'number' ? value.rollbackMs : null
+  const rows = typeof value?.rows === 'number' ? value.rows : null
+  const scenario = typeof value?.scenario === 'string' ? value.scenario : null
+  const mode = typeof value?.mode === 'string' ? value.mode : null
+  const uploadCsv = typeof value?.uploadCsv === 'boolean' ? value.uploadCsv : null
+
+  return {
+    reason: regressionsRaw.length > 0 ? 'REGRESSION' : null,
+    scenario,
+    rows,
+    mode,
+    uploadCsv: uploadCsv === null ? null : uploadCsv ? 'true' : 'false',
+    previewMs: previewMs === null ? null : String(previewMs),
+    commitMs: commitMs === null ? null : String(commitMs),
+    exportMs: exportMs === null ? null : String(exportMs),
+    rollbackMs: rollbackMs === null ? null : String(rollbackMs),
+    regressionsCount: String(regressionsRaw.length),
+    regressionsSample: regressionsSample || null,
+  }
+}
+
 async function tryEnrichGateFromStepSummary({
   ownerValue,
   repoValue,
   runId,
   artifactNamePrefix,
   metaOutDir,
+  innerSuffix = null,
+  innerPath = 'step-summary.md',
   parse,
 }) {
   const artifacts = await tryGetRunArtifacts({ ownerValue, repoValue, runId })
@@ -263,7 +329,9 @@ async function tryEnrichGateFromStepSummary({
     const ok = await tryDownloadArtifactZip({ archiveUrl: match.archive_download_url, zipPath })
     if (!ok) return null
 
-    const text = await tryReadZipText({ zipPath, innerPath: 'step-summary.md' })
+    const text = innerSuffix
+      ? await tryReadZipTextBySuffix({ zipPath, suffix: innerSuffix })
+      : await tryReadZipText({ zipPath, innerPath })
     if (!text) return null
 
     const parsed = parse(text)
@@ -494,6 +562,16 @@ function renderMarkdown({
       if (finding.gate === 'Upload Cleanup') {
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
+      if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
+        if (meta?.rows) metaBits.push(`rows=${meta.rows}`)
+        if (meta?.mode) metaBits.push(`mode=${meta.mode}`)
+        if (meta?.uploadCsv) metaBits.push(`upload_csv=${meta.uploadCsv}`)
+        if (meta?.previewMs) metaBits.push(`preview_ms=${meta.previewMs}`)
+        if (meta?.commitMs) metaBits.push(`commit_ms=${meta.commitMs}`)
+        if (meta?.exportMs) metaBits.push(`export_ms=${meta.exportMs}`)
+        if (meta?.rollbackMs) metaBits.push(`rollback_ms=${meta.rollbackMs}`)
+        if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
+      }
       const metaSuffix = metaBits.length > 0 ? ` (${metaBits.join(' ')})` : ''
       const link = finding.runUrl ? ` ([run](${finding.runUrl}))` : ''
       lines.push(`- [${finding.severity}] ${finding.gate} / ${finding.code}: ${finding.message}${metaSuffix}${link}`)
@@ -583,6 +661,28 @@ function renderMarkdown({
         lines.push('- Upload Cleanup: deploy-host sync failed. Run Remote Preflight (or set `skip_host_sync=true` for debugging) and fix host sync, then rerun.')
       } else if (reason) {
         lines.push('- Upload Cleanup: inspect `cleanup.log` for the first error line and rerun with dry-run first (`delete=false`).')
+      }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Perf Baseline' && f.code === 'RUN_FAILED')) {
+      if (perfGate?.meta?.regressionsCount && perfGate.meta.regressionsCount !== '0') {
+        lines.push(`- Perf Baseline: regressions detected (count=${perfGate.meta.regressionsCount}). See perf artifacts for details.`)
+        if (perfGate.meta.regressionsSample) {
+          lines.push(`- Perf Baseline: sample regressions: ${perfGate.meta.regressionsSample}`)
+        }
+      } else {
+        lines.push('- Perf Baseline: inspect perf artifacts (`perf.log`, `perf-summary.json`) for the first error and threshold evaluation.')
+      }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Perf Long Run' && f.code === 'RUN_FAILED')) {
+      if (longrunGate?.meta?.regressionsCount && longrunGate.meta.regressionsCount !== '0') {
+        lines.push(`- Perf Long Run: regressions detected (count=${longrunGate.meta.regressionsCount}). See perf artifacts for details.`)
+        if (longrunGate.meta.regressionsSample) {
+          lines.push(`- Perf Long Run: sample regressions: ${longrunGate.meta.regressionsSample}`)
+        }
+      } else {
+        lines.push('- Perf Long Run: inspect perf artifacts (`perf.log`, scenario summaries) for the first error and threshold evaluation.')
       }
     }
   }
@@ -809,6 +909,45 @@ async function run() {
         parse: parseCleanupStepSummary,
       })
       if (meta) cleanupGate.meta = meta
+    }
+    if (hasRunFailed(perfGate) && perfGate.completed?.id) {
+      const runId = perfGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-import-perf-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'perf'),
+        innerSuffix: 'perf-summary.json',
+        parse: parsePerfSummaryJson,
+      })
+      if (meta) perfGate.meta = meta
+    }
+    if (hasRunFailed(longrunGate) && longrunGate.completed?.id) {
+      const runId = longrunGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-import-perf-longrun-rows10k-commit-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'longrun'),
+        innerSuffix: 'rows10000-commit.json',
+        parse: parsePerfSummaryJson,
+      })
+      if (meta) {
+        longrunGate.meta = meta
+      } else {
+        const drillMeta = await tryEnrichGateFromStepSummary({
+          ownerValue: owner,
+          repoValue: repoName,
+          runId,
+          artifactNamePrefix: `attendance-import-perf-longrun-drill-${runId}-`,
+          metaOutDir: path.join(metaRoot, 'longrun'),
+          innerSuffix: 'rows10000-commit.json',
+          parse: parsePerfSummaryJson,
+        })
+        if (drillMeta) longrunGate.meta = drillMeta
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

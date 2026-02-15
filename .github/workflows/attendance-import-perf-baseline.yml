@@ -87,6 +87,35 @@ jobs:
           This is a DRILL run for Attendance Import Perf Baseline.
           The workflow intentionally skips calling production APIs.
           EOF
+
+          # Provide a minimal perf-summary.json so dashboards can exercise
+          # artifact parsing without calling production.
+          cat > output/playwright/attendance-import-perf/drill/perf-summary.json <<'EOF'
+          {
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "scenario": "DRILL",
+            "mode": "commit",
+            "apiBase": "<DRILL>",
+            "orgId": "default",
+            "rows": 10000,
+            "commitAsync": true,
+            "uploadCsv": true,
+            "previewMs": 1111,
+            "commitMs": 2222,
+            "exportMs": 333,
+            "rollbackMs": 44,
+            "thresholds": {
+              "maxPreviewMs": 100000,
+              "maxCommitMs": 150000,
+              "maxExportMs": 25000,
+              "maxRollbackMs": 8000
+            },
+            "regressions": [
+              "DRILL: synthetic regression entry"
+            ]
+          }
+          EOF
+
           if [[ "$DRILL_FAIL" == "true" ]]; then
             echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
             exit 97

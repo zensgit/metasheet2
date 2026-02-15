@@ -72,6 +72,36 @@ jobs:
           This is a DRILL run for Attendance Import Perf Long Run.
           The workflow intentionally skips calling production APIs.
           EOF
+
+          # Provide a minimal scenario summary so dashboards can exercise
+          # artifact parsing without calling production.
+          mkdir -p output/playwright/attendance-import-perf-longrun/drill/current-flat
+          cat > output/playwright/attendance-import-perf-longrun/drill/current-flat/rows10000-commit.json <<'EOF'
+          {
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "scenario": "rows10k-commit",
+            "mode": "commit",
+            "apiBase": "<DRILL>",
+            "orgId": "default",
+            "rows": 10000,
+            "commitAsync": true,
+            "uploadCsv": true,
+            "previewMs": 4444,
+            "commitMs": 5555,
+            "exportMs": 666,
+            "rollbackMs": 77,
+            "thresholds": {
+              "maxPreviewMs": 100000,
+              "maxCommitMs": 150000,
+              "maxExportMs": 25000,
+              "maxRollbackMs": 8000
+            },
+            "regressions": [
+              "DRILL: synthetic longrun regression entry"
+            ]
+          }
+          EOF
+
           if [[ "$DRILL_FAIL" == "true" ]]; then
             echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
             exit 97
