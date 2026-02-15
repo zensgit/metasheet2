@@ -232,6 +232,30 @@ function detect_provision_reason() {
     echo "LOG_MISSING"
     return 0
   fi
+  if grep -qE 'error: (401|403)' "$log"; then
+    echo "AUTH_FAILED"
+    return 0
+  fi
+  if grep -qE 'error: 429' "$log"; then
+    echo "RATE_LIMITED"
+    return 0
+  fi
+  if grep -qE 'error: 404' "$log"; then
+    echo "ENDPOINT_MISSING"
+    return 0
+  fi
+  if grep -qiE 'Could not resolve host' "$log"; then
+    echo "DNS_FAILED"
+    return 0
+  fi
+  if grep -qiE 'Connection refused' "$log"; then
+    echo "CONNECTION_REFUSED"
+    return 0
+  fi
+  if grep -qiE 'Operation timed out|timed out' "$log"; then
+    echo "TIMEOUT"
+    return 0
+  fi
   if grep -qE 'curl: \\([0-9]+\\)' "$log"; then
     echo "CURL_FAILED"
     return 0

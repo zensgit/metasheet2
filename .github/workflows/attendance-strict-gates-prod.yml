@@ -14,6 +14,14 @@ on:
         description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
         required: false
         default: 'false'
+      drill_failed_gate:
+        description: 'Optional: gate to mark as FAIL in drill gate-summary.json (apiSmoke|provisioning|playwrightProd|playwrightDesktop|playwrightMobile)'
+        required: false
+        default: 'apiSmoke'
+      drill_gate_reason:
+        description: 'Optional: reason code for drill_failed_gate when it is not apiSmoke (example: TIMEOUT)'
+        required: false
+        default: 'TIMEOUT'
       drill_api_smoke_reason:
         description: 'Optional: apiSmoke reason code to embed in drill gate-summary.json (example: AUDIT_EXPORT_SCHEMA_MISSING)'
         required: false
@@ -77,15 +85,30 @@ jobs:
     timeout-minutes: 5
     env:
       DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+      DRILL_FAILED_GATE: ${{ inputs.drill_failed_gate || 'apiSmoke' }}
+      DRILL_GATE_REASON: ${{ inputs.drill_gate_reason || 'TIMEOUT' }}
       DRILL_API_SMOKE_REASON: ${{ inputs.drill_api_smoke_reason || 'AUTH_FAILED' }}
     steps:
       - name: Drill no-op (skip strict gates)
         run: |
           set -euo pipefail
           DRILL_FAIL="${DRILL_FAIL:-false}"
+          DRILL_FAILED_GATE="${DRILL_FAILED_GATE:-apiSmoke}"
+          DRILL_GATE_REASON="${DRILL_GATE_REASON:-TIMEOUT}"
           DRILL_API_SMOKE_REASON="${DRILL_API_SMOKE_REASON:-AUTH_FAILED}"
-          if [[ ! "${DRILL_API_SMOKE_REASON}" =~ ^[A-Z0-9_]+$ ]]; then
-            DRILL_API_SMOKE_REASON="AUTH_FAILED"
+          if [[ ! "${DRILL_API_SMOKE_REASON}" =~ ^[A-Z0-9_]+$ ]]; then DRILL_API_SMOKE_REASON="AUTH_FAILED"; fi
+          if [[ ! "${DRILL_GATE_REASON}" =~ ^[A-Z0-9_]+$ ]]; then DRILL_GATE_REASON="TIMEOUT"; fi
+          case "$DRILL_FAILED_GATE" in
+            apiSmoke|provisioning|playwrightProd|playwrightDesktop|playwrightMobile)
+              ;;
+            *)
+              DRILL_FAILED_GATE="apiSmoke"
+              ;;
+          esac
+
+          reason="$DRILL_GATE_REASON"
+          if [[ "$DRILL_FAILED_GATE" == "apiSmoke" ]]; then
+            reason="$DRILL_API_SMOKE_REASON"
           fi
           mkdir -p output/playwright/attendance-prod-acceptance/drill
           cat > output/playwright/attendance-prod-acceptance/drill/drill.txt <<'EOF'
@@ -104,18 +127,18 @@ jobs:
             "exitCode": 1,
             "gates": {
               "preflight": "SKIP",
-              "apiSmoke": "FAIL",
-              "provisioning": "SKIP",
-              "playwrightProd": "SKIP",
-              "playwrightDesktop": "SKIP",
-              "playwrightMobile": "SKIP"
+              "apiSmoke": "$([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo FAIL || echo SKIP)",
+              "provisioning": "$([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo FAIL || echo SKIP)",
+              "playwrightProd": "$([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo FAIL || echo SKIP)",
+              "playwrightDesktop": "$([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo FAIL || echo SKIP)",
+              "playwrightMobile": "$([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo FAIL || echo SKIP)"
             },
             "gateReasons": {
-              "apiSmoke": "${DRILL_API_SMOKE_REASON}",
-              "provisioning": null,
-              "playwrightProd": null,
-              "playwrightDesktop": null,
-              "playwrightMobile": null
+              "apiSmoke": $([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo "\"$reason\"" || echo null),
+              "provisioning": $([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo "\"$reason\"" || echo null),
+              "playwrightProd": $([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo "\"$reason\"" || echo null),
+              "playwrightDesktop": $([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo "\"$reason\"" || echo null),
+              "playwrightMobile": $([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo "\"$reason\"" || echo null)
             }
           }
           EOF

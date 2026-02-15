@@ -437,6 +437,23 @@ gh workflow run attendance-strict-gates-prod.yml \
   -f drill_api_smoke_reason='AUDIT_EXPORT_SCHEMA_MISSING'
 ```
 
+Drill other strict-gate failures (simulates `gate-summary.json` only; still no production API calls):
+
+- Inputs:
+  - `drill_failed_gate` selects which gate is marked `FAIL` in `gate-summary.json`.
+  - When `drill_failed_gate=apiSmoke`, use `drill_api_smoke_reason=...`.
+  - Otherwise, use `drill_gate_reason=...` (example: `AUTH_FAILED`, `TIMEOUT`, `RATE_LIMITED`).
+
+Example (provisioning auth failure):
+
+```bash
+gh workflow run attendance-strict-gates-prod.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f drill_failed_gate='provisioning' \
+  -f drill_gate_reason='AUTH_FAILED'
+```
+
 ### B) Perf Baseline (Scheduled + Manual)
 
 Workflow:

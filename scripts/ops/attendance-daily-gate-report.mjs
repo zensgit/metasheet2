@@ -791,12 +791,36 @@ function renderMarkdown({
         if (provReason) {
           lines.push(`- Strict Gates: \`provisioning\` failure reason detected: \`${provReason}\`.`)
         }
+        if (provReason === 'AUTH_FAILED') {
+          lines.push('- Strict Gates: `provisioning` auth failed. Refresh the admin token and rerun (permission grants require admin).')
+        } else if (provReason === 'RATE_LIMITED') {
+          lines.push('- Strict Gates: `provisioning` was rate-limited. Wait briefly and rerun.')
+        } else if (provReason === 'ENDPOINT_MISSING') {
+          lines.push('- Strict Gates: `provisioning` endpoint missing. Ensure backend routes include `/api/permissions/grant`, then redeploy.')
+        } else if (provReason === 'DNS_FAILED') {
+          lines.push('- Strict Gates: `provisioning` failed due to DNS resolution. Check deploy DNS/network and rerun.')
+        } else if (provReason === 'CONNECTION_REFUSED') {
+          lines.push('- Strict Gates: `provisioning` connection refused. Check API availability and rerun.')
+        } else if (provReason === 'TIMEOUT') {
+          lines.push('- Strict Gates: `provisioning` timed out. Check deploy load/network and rerun.')
+        }
         lines.push('- Strict Gates: `provisioning` failed. Inspect `gate-provision-*.log` in the strict gates artifacts.')
       }
       if (failedGates.includes('playwrightProd')) {
         const pwReason = failedReasonsObj && typeof failedReasonsObj.playwrightProd === 'string' ? failedReasonsObj.playwrightProd : ''
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightProd\` failure reason detected: \`${pwReason}\`.`)
+        }
+        if (pwReason === 'RATE_LIMITED') {
+          lines.push('- Strict Gates: `playwrightProd` was rate-limited. Wait briefly and rerun.')
+        } else if (pwReason === 'TIMEOUT') {
+          lines.push('- Strict Gates: `playwrightProd` timed out. Inspect server load + screenshots; consider increasing playwright timeouts if needed.')
+        } else if (pwReason === 'COMMIT_TOKEN_REJECTED') {
+          lines.push('- Strict Gates: `playwrightProd` import commitToken rejected. Inspect logs and verify backend commitToken behavior.')
+        } else if (pwReason === 'LEGACY_IMPORT_USED') {
+          lines.push('- Strict Gates: `playwrightProd` used legacy import API. Deploy frontend/backend changes to use upload + commitToken flow, then rerun.')
+        } else if (pwReason === 'PUNCH_TOO_SOON') {
+          lines.push('- Strict Gates: `playwrightProd` hit PUNCH_TOO_SOON (business rule). Wait for min punch interval then rerun.')
         }
         lines.push('- Strict Gates: `playwrightProd` failed. Inspect `gate-playwright-production-flow.log` and screenshots under `playwright-production-flow/`.')
       }
@@ -805,12 +829,34 @@ function renderMarkdown({
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightDesktop\` failure reason detected: \`${pwReason}\`.`)
         }
+        if (pwReason === 'RATE_LIMITED') {
+          lines.push('- Strict Gates: `playwrightDesktop` was rate-limited. Wait briefly and rerun.')
+        } else if (pwReason === 'TIMEOUT') {
+          lines.push('- Strict Gates: `playwrightDesktop` timed out. Inspect screenshots + logs; consider increasing timeouts if needed.')
+        } else if (pwReason === 'COMMIT_TOKEN_REJECTED') {
+          lines.push('- Strict Gates: `playwrightDesktop` import commitToken rejected. Inspect logs and verify backend commitToken behavior.')
+        } else if (pwReason === 'LEGACY_IMPORT_USED') {
+          lines.push('- Strict Gates: `playwrightDesktop` used legacy import API. Deploy frontend/backend changes to use upload + commitToken flow, then rerun.')
+        } else if (pwReason === 'PUNCH_TOO_SOON') {
+          lines.push('- Strict Gates: `playwrightDesktop` hit PUNCH_TOO_SOON (business rule). Wait for min punch interval then rerun.')
+        }
         lines.push('- Strict Gates: `playwrightDesktop` failed. Inspect `gate-playwright-full-flow-desktop.log` and screenshots under `playwright-full-flow-desktop/`.')
       }
       if (failedGates.includes('playwrightMobile')) {
         const pwReason = failedReasonsObj && typeof failedReasonsObj.playwrightMobile === 'string' ? failedReasonsObj.playwrightMobile : ''
         if (pwReason) {
           lines.push(`- Strict Gates: \`playwrightMobile\` failure reason detected: \`${pwReason}\`.`)
+        }
+        if (pwReason === 'RATE_LIMITED') {
+          lines.push('- Strict Gates: `playwrightMobile` was rate-limited. Wait briefly and rerun.')
+        } else if (pwReason === 'TIMEOUT') {
+          lines.push('- Strict Gates: `playwrightMobile` timed out. Inspect screenshots + logs; consider increasing timeouts if needed.')
+        } else if (pwReason === 'COMMIT_TOKEN_REJECTED') {
+          lines.push('- Strict Gates: `playwrightMobile` import commitToken rejected. Inspect logs and verify backend commitToken behavior.')
+        } else if (pwReason === 'LEGACY_IMPORT_USED') {
+          lines.push('- Strict Gates: `playwrightMobile` used legacy import API. Deploy frontend/backend changes to use upload + commitToken flow, then rerun.')
+        } else if (pwReason === 'PUNCH_TOO_SOON') {
+          lines.push('- Strict Gates: `playwrightMobile` hit PUNCH_TOO_SOON (business rule). Wait for min punch interval then rerun.')
         }
         lines.push('- Strict Gates: `playwrightMobile` failed. Inspect `gate-playwright-full-flow-mobile.log` and screenshots under `playwright-full-flow-mobile/`.')
       }
