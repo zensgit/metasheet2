@@ -226,6 +226,25 @@ if ! run_playwright_full_flow_mobile; then
   exit_code=1
 fi
 
+summary_json="${OUTPUT_ROOT}/gate-summary.json"
+cat >"$summary_json" <<EOF
+{
+  "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "apiBase": "${API_BASE}",
+  "webUrl": "${WEB_URL}",
+  "expectProductMode": "${EXPECT_PRODUCT_MODE}",
+  "exitCode": ${exit_code},
+  "gates": {
+    "preflight": "${gate_preflight}",
+    "apiSmoke": "${gate_api}",
+    "provisioning": "${gate_provision}",
+    "playwrightProd": "${gate_pw_prod}",
+    "playwrightDesktop": "${gate_pw_desktop}",
+    "playwrightMobile": "${gate_pw_mobile}"
+  }
+}
+EOF
+
 cat <<EOF
 
 ✅ Gate Summary

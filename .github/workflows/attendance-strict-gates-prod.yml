@@ -83,6 +83,27 @@ jobs:
           This is a DRILL run for Attendance Strict Gates (Prod).
           The workflow intentionally skips calling production APIs.
           EOF
+
+          # Provide a minimal gate-summary.json so dashboards can exercise
+          # artifact parsing without calling production.
+          cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<'EOF'
+          {
+            "generatedAt": "1970-01-01T00:00:00Z",
+            "apiBase": "<DRILL>",
+            "webUrl": "<DRILL>",
+            "expectProductMode": "attendance",
+            "exitCode": 1,
+            "gates": {
+              "preflight": "SKIP",
+              "apiSmoke": "FAIL",
+              "provisioning": "SKIP",
+              "playwrightProd": "SKIP",
+              "playwrightDesktop": "SKIP",
+              "playwrightMobile": "SKIP"
+            }
+          }
+          EOF
+
           if [[ "$DRILL_FAIL" == "true" ]]; then
             echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
             exit 97

@@ -304,6 +304,28 @@ function parsePerfSummaryJson(text) {
   }
 }
 
+function parseStrictGateSummaryJson(text) {
+  if (!text) return null
+  let value = null
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  const gates = value && typeof value.gates === 'object' && value.gates ? value.gates : {}
+  const failed = Object.entries(gates)
+    .filter(([, status]) => String(status || '').toUpperCase() === 'FAIL')
+    .map(([key]) => key)
+  const failedGates = failed.length > 0 ? failed.join(',') : null
+
+  return {
+    reason: failedGates ? 'GATE_FAILED' : null,
+    failedGates,
+    gates,
+  }
+}
+
 async function tryEnrichGateFromStepSummary({
   ownerValue,
   repoValue,
@@ -572,6 +594,9 @@ function renderMarkdown({
         if (meta?.rollbackMs) metaBits.push(`rollback_ms=${meta.rollbackMs}`)
         if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
       }
+      if (finding.gate === 'Strict Gates') {
+        if (meta?.failedGates) metaBits.push(`failed=${meta.failedGates}`)
+      }
       const metaSuffix = metaBits.length > 0 ? ` (${metaBits.join(' ')})` : ''
       const link = finding.runUrl ? ` ([run](${finding.runUrl}))` : ''
       lines.push(`- [${finding.severity}] ${finding.gate} / ${finding.code}: ${finding.message}${metaSuffix}${link}`)
@@ -683,6 +708,31 @@ function renderMarkdown({
         }
       } else {
         lines.push('- Perf Long Run: inspect perf artifacts (`perf.log`, scenario summaries) for the first error and threshold evaluation.')
+      }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'RUN_FAILED')) {
+      const failedGates = String(strictGate?.meta?.failedGates || '').trim()
+      if (failedGates) {
+        lines.push(`- Strict Gates: failed gates detected: \`${failedGates}\`.`)
+      } else {
+        lines.push('- Strict Gates: inspect the strict gates artifact logs (`gate-*.log`) to identify the failing gate.')
+      }
+
+      if (failedGates.includes('apiSmoke')) {
+        lines.push('- Strict Gates: `apiSmoke` failed. Inspect `gate-api-smoke.log` in the strict gates artifacts.')
+      }
+      if (failedGates.includes('provisioning')) {
+        lines.push('- Strict Gates: `provisioning` failed. Inspect `gate-provision-*.log` in the strict gates artifacts.')
+      }
+      if (failedGates.includes('playwrightProd')) {
+        lines.push('- Strict Gates: `playwrightProd` failed. Inspect `gate-playwright-production-flow.log` and screenshots under `playwright-production-flow/`.')
+      }
+      if (failedGates.includes('playwrightDesktop')) {
+        lines.push('- Strict Gates: `playwrightDesktop` failed. Inspect `gate-playwright-full-flow-desktop.log` and screenshots under `playwright-full-flow-desktop/`.')
+      }
+      if (failedGates.includes('playwrightMobile')) {
+        lines.push('- Strict Gates: `playwrightMobile` failed. Inspect `gate-playwright-full-flow-mobile.log` and screenshots under `playwright-full-flow-mobile/`.')
       }
     }
   }
@@ -909,6 +959,19 @@ async function run() {
         parse: parseCleanupStepSummary,
       })
       if (meta) cleanupGate.meta = meta
+    }
+    if (hasRunFailed(strictGate) && strictGate.completed?.id) {
+      const runId = strictGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-strict-gates-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'strict'),
+        innerSuffix: 'gate-summary.json',
+        parse: parseStrictGateSummaryJson,
+      })
+      if (meta) strictGate.meta = meta
     }
     if (hasRunFailed(perfGate) && perfGate.completed?.id) {
       const runId = perfGate.completed.id
