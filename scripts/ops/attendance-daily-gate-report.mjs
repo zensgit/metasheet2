@@ -88,6 +88,19 @@ async function apiGet(pathname) {
   return body
 }
 
+async function tryListOpenIssues({ ownerValue, repoValue }) {
+  const pathname = `/repos/${ownerValue}/${repoValue}/issues?state=open&per_page=100`
+  try {
+    const body = await apiGet(pathname)
+    const list = Array.isArray(body) ? body : []
+    return { list, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    info(`WARN: failed to list open issues: ${message}`)
+    return { list: [], error: message }
+  }
+}
+
 async function tryGetRunArtifacts({ ownerValue, repoValue, runId }) {
   const pathname = `/repos/${ownerValue}/${repoValue}/actions/runs/${runId}/artifacts?per_page=100`
   try {
@@ -510,6 +523,8 @@ function renderMarkdown({
   strictGate,
   perfGate,
   longrunGate,
+  openTrackingIssues,
+  openTrackingIssuesError,
   overallStatus,
   p0Status,
   findings,
@@ -895,6 +910,25 @@ function renderMarkdown({
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
   }
+
+  lines.push('')
+  lines.push('## Open Tracking Issues (P1)')
+  lines.push('')
+  if (openTrackingIssuesError) {
+    lines.push(`- Unable to list open issues: \`${openTrackingIssuesError}\``)
+  } else if (!Array.isArray(openTrackingIssues) || openTrackingIssues.length === 0) {
+    lines.push('- None open.')
+  } else {
+    for (const issue of openTrackingIssues) {
+      const number = issue?.number ? `#${issue.number}` : '#?'
+      const title = String(issue?.title || '').trim() || '(missing title)'
+      const url = String(issue?.html_url || '').trim()
+      const updatedAt = String(issue?.updated_at || '').trim()
+      const link = url ? `[${number}](${url})` : number
+      lines.push(`- ${link}: ${title}${updatedAt ? ` (updated: \`${updatedAt}\`)` : ''}`)
+    }
+  }
+
   return `${lines.join('\n')}\n`
 }
 
@@ -1173,6 +1207,13 @@ async function run() {
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
   const p0Status = findings.some((f) => f && f.severity === 'P0') ? 'fail' : 'pass'
 
+  const openIssues = await tryListOpenIssues({ ownerValue: owner, repoValue: repoName })
+  const openIssuesListRaw = Array.isArray(openIssues?.list) ? openIssues.list : []
+  const openTrackingIssues = openIssuesListRaw
+    .filter((issue) => issue && !issue.pull_request && String(issue.title || '').startsWith('[Attendance P1]'))
+    .slice(0, 10)
+  const openTrackingIssuesError = openIssues.error
+
   const report = {
     generatedAt,
     repository: repo,
@@ -1180,6 +1221,7 @@ async function run() {
     lookbackHours,
     p0Status,
     overallStatus,
+    openTrackingIssues,
     gates: {
       preflight: preflightGate,
       metrics: metricsGate,
@@ -1205,6 +1247,8 @@ async function run() {
     strictGate,
     perfGate,
     longrunGate,
+    openTrackingIssues,
+    openTrackingIssuesError,
     overallStatus,
     p0Status,
     findings,
