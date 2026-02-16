@@ -553,6 +553,7 @@ Purpose:
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - The dashboard report appends an `Escalation Issue` section (issue title + issue link when P0 fails) to keep evidence self-contained in artifacts.
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
+- The dashboard report also lists open **P1 tracking issues** (titles starting with `[Attendance P1]`) under `Open Tracking Issues (P1)` to keep operational follow-ups visible.
 
 Schedule:
 

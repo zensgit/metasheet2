@@ -611,3 +611,23 @@ Evidence:
 |---|---|---|---|
 | Daily Gate Dashboard (include_drill_runs=true; expected FAIL; report includes issue link) | [#22046861202](https://github.com/zensgit/metasheet2/actions/runs/22046861202) | FAIL (expected) | `output/playwright/ga/22046861202/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
 | Daily Gate Dashboard recovery (expected PASS; report shows none open; issue closed) | [#22046878200](https://github.com/zensgit/metasheet2/actions/runs/22046878200) | PASS | `output/playwright/ga/22046878200/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
+
+## Post-Go Validation (2026-02-16): Daily Dashboard Lists Open P1 Tracking Issues
+
+This record validates:
+
+- The Daily Gate Dashboard report artifact includes an `Open Tracking Issues (P1)` section that lists open issues with titles starting `[Attendance P1]`.
+- A drill-created P1 issue appears in the dashboard report while open, and disappears after recovery auto-close.
+
+Implementation:
+
+- Commit: `d49dc844`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run drill (P1 issue open, expected FAIL) | [#22047000256](https://github.com/zensgit/metasheet2/actions/runs/22047000256) | FAIL (expected) | `output/playwright/ga/22047000256/drill/drill.txt`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
+| Daily Gate Dashboard (expected PASS; shows open P1 tracking issue) | [#22047013470](https://github.com/zensgit/metasheet2/actions/runs/22047013470) | PASS | `output/playwright/ga/22047013470/attendance-daily-gate-dashboard.md`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
+| Perf Long Run drill recovery (P1 issue auto-close) | [#22047026564](https://github.com/zensgit/metasheet2/actions/runs/22047026564) | PASS | `output/playwright/ga/22047026564/drill/drill.txt`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
+| Daily Gate Dashboard (expected PASS; no open P1 tracking issues) | [#22047038178](https://github.com/zensgit/metasheet2/actions/runs/22047038178) | PASS | `output/playwright/ga/22047038178/attendance-daily-gate-dashboard.md` |
