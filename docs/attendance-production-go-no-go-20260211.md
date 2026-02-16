@@ -746,3 +746,24 @@ Evidence:
 |---|---|---|---|
 | Strict Gates (manual, non-drill; strict chain full pass) | [#22060140322](https://github.com/zensgit/metasheet2/actions/runs/22060140322) | PASS | `output/playwright/ga/22060140322/20260216-110306-1/gate-summary.json`, `output/playwright/ga/22060140322/20260216-110306-2/gate-summary.json` |
 | Daily Gate Dashboard (manual, non-drill; final pass) | [#22060251897](https://github.com/zensgit/metasheet2/actions/runs/22060251897) | PASS | `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`, `p0Status=pass`, `overallStatus=pass`) |
+
+## Post-Go Validation (2026-02-16): Dashboard `escalationIssue` JSON Contract
+
+This record validates:
+
+- Dashboard report JSON includes machine-readable escalation metadata at `.escalationIssue`.
+- PASS and strict-only suppression paths both emit deterministic escalation modes.
+
+Implementation:
+
+- Commit: `2113c6f0`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (contract PASS path) | [#22067085381](https://github.com/zensgit/metasheet2/actions/runs/22067085381) | PASS | `output/playwright/ga/22067085381/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=none_or_closed`) |
+| Strict drill fail (source for strict-only P0) | [#22067119138](https://github.com/zensgit/metasheet2/actions/runs/22067119138) | FAIL (expected) | `output/playwright/ga/22067119138/attendance-strict-gates-prod-22067119138-1/drill/gate-summary.json`, Issue: [#184](https://github.com/zensgit/metasheet2/issues/184) |
+| Preflight recovery (ensure strict-only condition) | [#22067169136](https://github.com/zensgit/metasheet2/actions/runs/22067169136) | PASS | `output/playwright/ga/22067169136/attendance-remote-preflight-prod-22067169136-1/step-summary.md` |
+| Daily Dashboard include-drill strict-only suppression | [#22067185239](https://github.com/zensgit/metasheet2/actions/runs/22067185239) | FAIL (expected) | `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_strict_only`, `action=suppressed_strict_only_closed`), `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.md`, Issue: [#185](https://github.com/zensgit/metasheet2/issues/185) closed |
+| Strict drill recovery (cleanup close) | [#22067219193](https://github.com/zensgit/metasheet2/actions/runs/22067219193) | PASS | `output/playwright/ga/22067219193/attendance-strict-gates-prod-22067219193-1/drill/gate-summary.json`, Issue: [#184](https://github.com/zensgit/metasheet2/issues/184) closed |

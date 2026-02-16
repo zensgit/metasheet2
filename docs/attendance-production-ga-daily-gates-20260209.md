@@ -1085,3 +1085,30 @@ Final production-path re-validation after dedupe/suppression hardening:
     - `overallStatus=pass`
     - `gateFlat.schemaVersion=2`
     - `strictRunId=22060140322`
+
+## Latest Notes (2026-02-16): Dashboard JSON `escalationIssue` Metadata
+
+Implementation:
+
+- Commit: `2113c6f0`
+- Change:
+  - `attendance-daily-gate-dashboard.json` now includes machine-readable `escalationIssue` metadata (`title`, `action`, `number`, `url`, `mode`, `p0Status`).
+
+Validation:
+
+- PASS path (`mode=none_or_closed`):
+  - [Attendance Daily Gate Dashboard #22067085381](https://github.com/zensgit/metasheet2/actions/runs/22067085381) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22067085381/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22067085381/attendance-daily-gate-dashboard.md`
+- Strict-only suppression path (`mode=suppressed_strict_only`):
+  - Strict drill fail: [Attendance Strict Gates (Prod) #22067119138](https://github.com/zensgit/metasheet2/actions/runs/22067119138) (`FAILURE`, expected), Issue: [#184](https://github.com/zensgit/metasheet2/issues/184)
+  - Preflight drill recovery (to keep strict-only condition): [Attendance Remote Preflight (Prod) #22067169136](https://github.com/zensgit/metasheet2/actions/runs/22067169136) (`SUCCESS`)
+  - Dashboard include-drill run: [Attendance Daily Gate Dashboard #22067185239](https://github.com/zensgit/metasheet2/actions/runs/22067185239) (`FAILURE`, expected)
+  - Evidence:
+    - `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_strict_only`, `action=suppressed_strict_only_closed`)
+    - `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.md` (`Issue: suppressed ...`)
+  - Suppressed dashboard drill issue auto-closed: [#185](https://github.com/zensgit/metasheet2/issues/185)
+- Strict drill recovery close:
+  - [Attendance Strict Gates (Prod) #22067219193](https://github.com/zensgit/metasheet2/actions/runs/22067219193) (`SUCCESS`)
+  - Issue [#184](https://github.com/zensgit/metasheet2/issues/184) is `CLOSED`.
