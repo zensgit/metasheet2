@@ -631,3 +631,39 @@ Evidence:
 | Daily Gate Dashboard (expected PASS; shows open P1 tracking issue) | [#22047013470](https://github.com/zensgit/metasheet2/actions/runs/22047013470) | PASS | `output/playwright/ga/22047013470/attendance-daily-gate-dashboard.md`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
 | Perf Long Run drill recovery (P1 issue auto-close) | [#22047026564](https://github.com/zensgit/metasheet2/actions/runs/22047026564) | PASS | `output/playwright/ga/22047026564/drill/drill.txt`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
 | Daily Gate Dashboard (expected PASS; no open P1 tracking issues) | [#22047038178](https://github.com/zensgit/metasheet2/actions/runs/22047038178) | PASS | `output/playwright/ga/22047038178/attendance-daily-gate-dashboard.md` |
+
+## Post-Go Validation (2026-02-16): Daily Dashboard Reasons + Artifact Download Commands
+
+This record validates:
+
+- The Daily Gate Dashboard Gate Status table includes a `Reason` column (stable reason codes + compact metrics).
+- The report includes an `Artifact Download Commands` section for one-liner evidence retrieval per gate.
+
+Implementation:
+
+- Commit: `5ef33df3`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; reasons + download commands visible; issue link visible) | [#22047507241](https://github.com/zensgit/metasheet2/actions/runs/22047507241) | FAIL (expected) | `output/playwright/ga/22047507241/attendance-daily-gate-dashboard.md`, Issue: [#178](https://github.com/zensgit/metasheet2/issues/178) |
+| Daily Gate Dashboard recovery (expected PASS; issue closed) | [#22047524824](https://github.com/zensgit/metasheet2/actions/runs/22047524824) | PASS | `output/playwright/ga/22047524824/attendance-daily-gate-dashboard.md`, Issue: [#178](https://github.com/zensgit/metasheet2/issues/178) |
+
+## Post-Go Validation (2026-02-16): Strict Fast Alert Comment De-Dupe (Rerun Attempts)
+
+This record validates:
+
+- Strict gates fast-alert escalation comments are de-duplicated by `runId` (rerun attempts do not add duplicate comments to the same issue).
+
+Implementation:
+
+- Commit: `5ef33df3`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates drill (expected FAIL; issue created with body) | [#22047540386](https://github.com/zensgit/metasheet2/actions/runs/22047540386) | FAIL (expected) | `output/playwright/ga/22047540386/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
+| Strict Gates drill rerun (expected FAIL; issue already open; adds 1 comment) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
+| Strict Gates drill rerun attempt=2 (expected FAIL; duplicate comment skipped) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/attempt2/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |

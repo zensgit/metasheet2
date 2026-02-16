@@ -549,6 +549,7 @@ Purpose:
 - `P2`: upload cleanup (weekly) failure or stale runs
 - Include `Remediation Hints` + quick re-run commands to speed up operator recovery.
   - When a remote gate fails (`Host Metrics` / `Storage Health`), the dashboard best-effort enriches findings by parsing the gate `step-summary.md` artifact (reason/metrics_url/df_used_pct, etc). Evidence is written under `gate-meta/**`.
+- Gate Status table includes a `Reason` column (stable reason codes + compact metrics) and an `Artifact Download Commands` section for one-liner evidence retrieval.
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - The dashboard report appends an `Escalation Issue` section (issue title + issue link when P0 fails) to keep evidence self-contained in artifacts.
