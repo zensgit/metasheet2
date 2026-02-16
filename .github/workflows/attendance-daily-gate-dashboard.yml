@@ -181,6 +181,7 @@ jobs:
         if: always()
         env:
           REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
+          REPORT_JSON: ${{ steps.report.outputs.report_json }}
           REPORT_P0_STATUS: ${{ steps.report.outputs.report_p0_status }}
           ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
           ISSUE_NUMBER: ${{ steps.issue_open.outputs.issue_number }}
@@ -189,6 +190,7 @@ jobs:
         run: |
           set -euo pipefail
           md="${REPORT_MARKDOWN}"
+          report_json="${REPORT_JSON:-}"
           [[ -n "$md" ]] || exit 0
           if [[ ! -f "$md" ]]; then
             echo "Report markdown missing: $md" >&2
@@ -204,6 +206,14 @@ jobs:
               echo "- Issue: [#${ISSUE_NUMBER}](${ISSUE_URL}) (${ISSUE_ACTION:-updated})" >> "$md"
             else
               echo "- Issue: (missing issue link; see workflow logs)" >> "$md"
+            fi
+
+            # Provide a one-liner to download strict-gates artifacts for gate-summary.json triage.
+            if [[ -n "$report_json" && -f "$report_json" ]]; then
+              strict_run_id="$(jq -r '.gates.strict.completed.id // empty' "$report_json" 2>/dev/null || true)"
+              if [[ -n "${strict_run_id:-}" ]]; then
+                echo "- Strict Gates artifacts: \`gh run download ${strict_run_id} -D \"output/playwright/ga/${strict_run_id}\"\`" >> "$md"
+              fi
             fi
           else
             echo "- Issue: none open (recovery path closes any open P0 issue)" >> "$md"

@@ -1274,6 +1274,111 @@ async function run() {
     .slice(0, 10)
   const openTrackingIssuesError = openIssues.error
 
+  function toGateFlat(gate) {
+    const completed = gate?.completed && typeof gate.completed === 'object' ? gate.completed : {}
+    const meta = gate?.meta && typeof gate.meta === 'object' ? gate.meta : null
+
+    const codesRaw = Array.isArray(gate?.findings)
+      ? gate.findings.map((f) => (f && f.code ? String(f.code) : '')).filter(Boolean)
+      : []
+    const codes = Array.from(new Set(codesRaw))
+    const has = (code) => codes.includes(code)
+
+    let reasonCode = null
+    if (!gate?.ok) {
+      if (has('WORKFLOW_QUERY_FAILED')) reasonCode = 'WORKFLOW_QUERY_FAILED'
+      else if (has('NO_COMPLETED_RUN')) reasonCode = 'NO_COMPLETED_RUN'
+      else if (has('STALE_RUN')) reasonCode = 'STALE_RUN'
+      else if (has('RUN_FAILED')) reasonCode = String(meta?.reason || 'RUN_FAILED')
+      else reasonCode = codes[0] || 'FAIL'
+    }
+
+    const summaryBits = []
+    if (meta) {
+      if (gate.name === 'Remote Preflight') {
+        if (meta.rc) summaryBits.push(`rc=${meta.rc}`)
+      } else if (gate.name === 'Host Metrics') {
+        if (meta.missingMetrics) summaryBits.push(`missing=${meta.missingMetrics}`)
+        if (meta.metricsUrl) summaryBits.push(`metrics_url=${meta.metricsUrl}`)
+      } else if (gate.name === 'Storage Health') {
+        if (meta.dfUsedPct) summaryBits.push(`df_used_pct=${meta.dfUsedPct}`)
+        if (meta.uploadGb) summaryBits.push(`upload_gb=${meta.uploadGb}`)
+        if (meta.oldestFileDays) summaryBits.push(`oldest_days=${meta.oldestFileDays}`)
+      } else if (gate.name === 'Upload Cleanup') {
+        if (meta.staleCount) summaryBits.push(`stale_count=${meta.staleCount}`)
+      } else if (gate.name === 'Strict Gates') {
+        if (meta.failedGates) summaryBits.push(`failed=${meta.failedGates}`)
+        const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
+        if (pairs.length > 0) {
+          summaryBits.push(`reasons=${pairs.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ')}`)
+        }
+      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
+        if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
+        if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
+        if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
+      }
+    }
+
+    const reasonSummary = reasonCode
+      ? summaryBits.length > 0 ? `${reasonCode} ${summaryBits.join(' ')}` : reasonCode
+      : null
+
+    const flat = {
+      gate: gate?.name || null,
+      severity: gate?.severity || null,
+      status: gate?.ok ? 'PASS' : 'FAIL',
+      reasonCode,
+      reasonSummary,
+      runId: completed.id ?? null,
+      runUrl: completed.url ?? null,
+      conclusion: completed.conclusion ?? null,
+      updatedAt: completed.updatedAt ?? null,
+    }
+
+    if (meta) {
+      if (gate.name === 'Remote Preflight') {
+        flat.remoteExitCode = meta.rc ?? null
+      } else if (gate.name === 'Host Metrics') {
+        flat.missingMetrics = meta.missingMetrics ?? null
+        flat.metricsUrl = meta.metricsUrl ?? null
+      } else if (gate.name === 'Storage Health') {
+        flat.dfUsedPct = meta.dfUsedPct ?? null
+        flat.uploadGb = meta.uploadGb ?? null
+        flat.oldestFileDays = meta.oldestFileDays ?? null
+        flat.fileCount = meta.fileCount ?? null
+      } else if (gate.name === 'Upload Cleanup') {
+        flat.staleCount = meta.staleCount ?? null
+      } else if (gate.name === 'Strict Gates') {
+        flat.failedGates = meta.failedGates ?? null
+        flat.failedGateReasons = meta.failedGateReasons ?? null
+      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        flat.scenario = meta.scenario ?? null
+        flat.rows = meta.rows ?? null
+        flat.mode = meta.mode ?? null
+        flat.uploadCsv = meta.uploadCsv ?? null
+        flat.previewMs = meta.previewMs ?? null
+        flat.commitMs = meta.commitMs ?? null
+        flat.exportMs = meta.exportMs ?? null
+        flat.rollbackMs = meta.rollbackMs ?? null
+        flat.regressionsCount = meta.regressionsCount ?? null
+        flat.regressionsSample = meta.regressionsSample ?? null
+      }
+    }
+
+    return flat
+  }
+
+  const gateFlat = {
+    preflight: toGateFlat(preflightGate),
+    metrics: toGateFlat(metricsGate),
+    storage: toGateFlat(storageGate),
+    cleanup: toGateFlat(cleanupGate),
+    strict: toGateFlat(strictGate),
+    perf: toGateFlat(perfGate),
+    longrun: toGateFlat(longrunGate),
+  }
+
   const report = {
     generatedAt,
     repository: repo,
@@ -1282,6 +1387,7 @@ async function run() {
     p0Status,
     overallStatus,
     openTrackingIssues,
+    gateFlat,
     gates: {
       preflight: preflightGate,
       metrics: metricsGate,
