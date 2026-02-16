@@ -356,8 +356,32 @@ jobs:
                 })
                 core.info(`Reopened issue #${match.number}`)
               } else {
-                // Keep the issue body stable (daily dashboard may own it), but always add a
-                // comment with the latest strict gates context for auditability.
+                // Keep the issue body stable (daily dashboard may own it), but add a comment
+                // with the latest strict gates context for auditability. Avoid duplicate
+                // comments for the same runId (rerun attempts share the same run URL).
+                const runMarker = `actions/runs/${context.runId}`
+                const bodyText = typeof match.body === 'string' ? match.body : ''
+                if (bodyText.includes(runMarker)) {
+                  core.info(`Issue body already includes run ${context.runId}; skipping duplicate comment.`)
+                  return
+                }
+                try {
+                  const comments = await github.rest.issues.listComments({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    per_page: 100,
+                  })
+                  const list = Array.isArray(comments.data) ? comments.data : []
+                  const exists = list.some((c) => typeof c?.body === 'string' && c.body.includes(runMarker))
+                  if (exists) {
+                    core.info(`Issue already has a comment for run ${context.runId}; skipping duplicate comment.`)
+                    return
+                  }
+                } catch (error) {
+                  core.info(`WARN: failed to list issue comments for dedupe: ${String(error)}`)
+                }
+
                 await github.rest.issues.createComment({
                   owner,
                   repo,

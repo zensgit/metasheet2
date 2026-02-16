@@ -551,17 +551,77 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Gate Status')
   lines.push('')
-  lines.push('| Gate | Severity | Latest Completed | Conclusion | Updated (UTC) | Status | Link |')
-  lines.push('|---|---|---|---|---|---|---|')
+  lines.push('| Gate | Severity | Latest Completed | Conclusion | Reason | Updated (UTC) | Status | Link |')
+  lines.push('|---|---|---|---|---|---|---|---|')
+
+  function gateReasonCell(gate) {
+    if (!gate || gate.ok) return '-'
+    const codes = Array.isArray(gate.findings) ? gate.findings.map((f) => f?.code).filter(Boolean) : []
+    const has = (code) => codes.includes(code)
+    let reason = 'FAIL'
+    if (has('WORKFLOW_QUERY_FAILED')) reason = 'WORKFLOW_QUERY_FAILED'
+    else if (has('NO_COMPLETED_RUN')) reason = 'NO_COMPLETED_RUN'
+    else if (has('STALE_RUN')) reason = 'STALE_RUN'
+    else if (has('RUN_FAILED')) reason = String(gate?.meta?.reason || 'RUN_FAILED')
+    else if (codes.length > 0) reason = String(codes[0])
+
+    const extra = []
+    const meta = gate?.meta || null
+    if (meta && typeof meta === 'object') {
+      if (gate.name === 'Remote Preflight') {
+        if (meta.rc) extra.push(`rc=${meta.rc}`)
+      }
+      if (gate.name === 'Host Metrics') {
+        if (meta.missingMetrics) extra.push(`missing=${meta.missingMetrics}`)
+      }
+      if (gate.name === 'Storage Health') {
+        if (meta.dfUsedPct) extra.push(`df=${meta.dfUsedPct}`)
+        if (meta.uploadGb) extra.push(`upload_gb=${meta.uploadGb}`)
+        if (meta.oldestFileDays) extra.push(`oldest_days=${meta.oldestFileDays}`)
+      }
+      if (gate.name === 'Upload Cleanup') {
+        if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
+      }
+      if (gate.name === 'Strict Gates') {
+        if (meta.failedGates) extra.push(`failed=${meta.failedGates}`)
+        const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
+        if (pairs.length > 0) {
+          const head = pairs.slice(0, 2).map(([k, v]) => `${k}=${v}`)
+          extra.push(`reasons=${head.join(' ')}`)
+        }
+      }
+      if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        if (meta.rows) extra.push(`rows=${meta.rows}`)
+        if (meta.mode) extra.push(`mode=${meta.mode}`)
+        if (meta.uploadCsv) extra.push(`upload=${meta.uploadCsv}`)
+        if (meta.regressionsCount) extra.push(`regressions=${meta.regressionsCount}`)
+      }
+    }
+
+    const value = extra.length > 0 ? `${reason} ${extra.join(' ')}` : reason
+    // Keep the table readable.
+    if (value.length > 90) return `\`${value.slice(0, 87)}...\``
+    return `\`${value}\``
+  }
 
   for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
+    const reason = gateReasonCell(gate)
     const updatedAt = completed.updatedAt || '-'
     const status = gate.ok ? 'PASS' : 'FAIL'
     const link = completed.url ? `[run](${completed.url})` : '-'
-    lines.push(`| ${gate.name} | ${gate.severity} | ${runId} | ${conclusion} | ${updatedAt} | ${status} | ${link} |`)
+    lines.push(`| ${gate.name} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
+  }
+
+  lines.push('')
+  lines.push('## Artifact Download Commands')
+  lines.push('')
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
+    const runIdValue = gate?.completed?.id
+    if (!runIdValue) continue
+    lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
   }
 
   lines.push('')
