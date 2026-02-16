@@ -1064,3 +1064,24 @@ Validation:
   - Drill issues auto-closed:
     - [#182](https://github.com/zensgit/metasheet2/issues/182)
     - [#183](https://github.com/zensgit/metasheet2/issues/183)
+
+## Latest Notes (2026-02-16): Final Non-Drill Strict + Dashboard PASS (Post-Hardening)
+
+Final production-path re-validation after dedupe/suppression hardening:
+
+- Strict Gates (manual, non-drill):
+  - [Attendance Strict Gates (Prod) #22060140322](https://github.com/zensgit/metasheet2/actions/runs/22060140322) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22060140322/20260216-110306-1/gate-summary.json`
+    - `output/playwright/ga/22060140322/20260216-110306-2/gate-summary.json`
+  - Contains full strict chain artifacts (`gate-api-smoke.log`, `gate-playwright-*.log`, `gate-provision-*.log`).
+- Daily Gate Dashboard (manual, non-drill):
+  - [Attendance Daily Gate Dashboard #22060251897](https://github.com/zensgit/metasheet2/actions/runs/22060251897) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.json`
+  - Result:
+    - `p0Status=pass`
+    - `overallStatus=pass`
+    - `gateFlat.schemaVersion=2`
+    - `strictRunId=22060140322`

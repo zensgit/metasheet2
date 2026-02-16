@@ -728,3 +728,21 @@ Evidence:
 | Daily Dashboard rerun attempt=2 (same runId; duplicate skipped) | [#22050266002](https://github.com/zensgit/metasheet2/actions/runs/22050266002) | FAIL (expected) | `output/playwright/ga/22050266002-attempt2/attendance-daily-gate-dashboard.md` (Escalation section: `(skipped_duplicate)`), `gh issue view 183 --json comments` => empty list |
 | Strict drill recovery (close strict drill issue) | [#22050296690](https://github.com/zensgit/metasheet2/actions/runs/22050296690) | PASS | `output/playwright/ga/22050296690/attendance-strict-gates-prod-22050296690-1/drill/gate-summary.json`, Issue: [#182](https://github.com/zensgit/metasheet2/issues/182) closed |
 | Daily Dashboard recovery (close dashboard drill issue) | [#22050308198](https://github.com/zensgit/metasheet2/actions/runs/22050308198) | PASS | `output/playwright/ga/22050308198/attendance-daily-gate-dashboard.md`, Issue: [#183](https://github.com/zensgit/metasheet2/issues/183) closed |
+
+## Post-Go Validation (2026-02-16): Final Non-Drill PASS After Dashboard Hardening
+
+This record validates:
+
+- The hardened daily-dashboard escalation logic does not regress the production (non-drill) strict + dashboard path.
+- Strict gates and dashboard both pass with latest main.
+
+Implementation baseline:
+
+- Commit: `d9862334`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (manual, non-drill; strict chain full pass) | [#22060140322](https://github.com/zensgit/metasheet2/actions/runs/22060140322) | PASS | `output/playwright/ga/22060140322/20260216-110306-1/gate-summary.json`, `output/playwright/ga/22060140322/20260216-110306-2/gate-summary.json` |
+| Daily Gate Dashboard (manual, non-drill; final pass) | [#22060251897](https://github.com/zensgit/metasheet2/actions/runs/22060251897) | PASS | `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`, `p0Status=pass`, `overallStatus=pass`) |
