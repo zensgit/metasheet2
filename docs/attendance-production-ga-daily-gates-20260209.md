@@ -551,6 +551,7 @@ Purpose:
   - When a remote gate fails (`Host Metrics` / `Storage Health`), the dashboard best-effort enriches findings by parsing the gate `step-summary.md` artifact (reason/metrics_url/df_used_pct, etc). Evidence is written under `gate-meta/**`.
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
+- The dashboard report appends an `Escalation Issue` section (issue title + issue link when P0 fails) to keep evidence self-contained in artifacts.
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
 
 Schedule:

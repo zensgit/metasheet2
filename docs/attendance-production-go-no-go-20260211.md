@@ -593,3 +593,21 @@ Evidence:
 | Daily Gate Dashboard (manual, non-drill; ignores strict `[DRILL]` runs) | [#22039675025](https://github.com/zensgit/metasheet2/actions/runs/22039675025) | PASS | `output/playwright/ga/22039675025/attendance-daily-gate-dashboard.md` |
 | Strict Gates drill rerun (expected FAIL; fast alert adds comment when issue already open) | [#22046721909](https://github.com/zensgit/metasheet2/actions/runs/22046721909) | FAIL (expected) | `output/playwright/ga/22046721909/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |
 | Strict Gates drill rerun (expected FAIL; verify comment path) | [#22046734857](https://github.com/zensgit/metasheet2/actions/runs/22046734857) | FAIL (expected) | `output/playwright/ga/22046734857/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |
+
+## Post-Go Validation (2026-02-16): Daily Dashboard Embeds Escalation Issue Link
+
+This record validates:
+
+- The Daily Gate Dashboard report artifact includes an `Escalation Issue` section with the issue title + link (when P0 fails).
+- Recovery path removes the open issue and the report reflects `none open`.
+
+Implementation:
+
+- Commit: `b557c3ea`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; report includes issue link) | [#22046861202](https://github.com/zensgit/metasheet2/actions/runs/22046861202) | FAIL (expected) | `output/playwright/ga/22046861202/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
+| Daily Gate Dashboard recovery (expected PASS; report shows none open; issue closed) | [#22046878200](https://github.com/zensgit/metasheet2/actions/runs/22046878200) | PASS | `output/playwright/ga/22046878200/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
