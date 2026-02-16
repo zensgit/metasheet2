@@ -356,7 +356,15 @@ jobs:
                 })
                 core.info(`Reopened issue #${match.number}`)
               } else {
-                core.info(`Escalation issue already open (#${match.number}); not spamming updates.`)
+                // Keep the issue body stable (daily dashboard may own it), but always add a
+                // comment with the latest strict gates context for auditability.
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: match.number,
+                  body,
+                })
+                core.info(`Commented on existing open issue #${match.number}`)
               }
               return
             }
