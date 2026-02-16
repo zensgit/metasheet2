@@ -41,6 +41,7 @@ jobs:
       BRANCH: ${{ inputs.branch || 'main' }}
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
       INCLUDE_DRILL_RUNS: ${{ inputs.include_drill_runs || 'false' }}
+      ESCALATION_ISSUE_TITLE: ${{ inputs.issue_title || '[Attendance Gate] Daily dashboard alert' }}
       PREFLIGHT_WORKFLOW: attendance-remote-preflight-prod.yml
       METRICS_WORKFLOW: attendance-remote-metrics-prod.yml
       STORAGE_WORKFLOW: attendance-remote-storage-prod.yml
@@ -63,34 +64,20 @@ jobs:
           set -euo pipefail
           node ./scripts/ops/attendance-daily-gate-report.mjs
 
-      - name: Add markdown to step summary
-        if: always()
-        run: |
-          cat "${{ steps.report.outputs.report_markdown }}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload dashboard artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: attendance-daily-gate-dashboard-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 30
-          path: |
-            ${{ steps.report.outputs.report_dir }}/**
-
       - name: Open/update escalation issue on failure
         if: steps.report.outputs.report_p0_status != 'pass'
+        id: issue_open
         uses: actions/github-script@v7
         env:
           REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
           REPORT_STATUS: ${{ steps.report.outputs.report_status }}
-          ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+          ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
         with:
           script: |
             const fs = require('fs')
             const owner = context.repo.owner
             const repo = context.repo.repo
-            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
-            const title = titleOverride || '[Attendance Gate] Daily dashboard alert'
+            const title = String(process.env.ESCALATION_ISSUE_TITLE || '[Attendance Gate] Daily dashboard alert').trim()
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
             const markdownPath = process.env.REPORT_MARKDOWN
             const markdown = fs.readFileSync(markdownPath, 'utf8')
@@ -118,6 +105,9 @@ jobs:
                 body,
               })
               core.info(`Updated issue #${existing.number}`)
+              core.setOutput('issue_number', String(existing.number))
+              core.setOutput('issue_url', String(existing.html_url || ''))
+              core.setOutput('issue_action', 'commented')
             } else {
               const created = await github.rest.issues.create({
                 owner,
@@ -126,21 +116,24 @@ jobs:
                 body,
               })
               core.info(`Created issue #${created.data.number}`)
+              core.setOutput('issue_number', String(created.data.number))
+              core.setOutput('issue_url', String(created.data.html_url || ''))
+              core.setOutput('issue_action', 'created')
             }
 
       - name: Auto-close escalation issue on recovery
         if: steps.report.outputs.report_p0_status == 'pass'
+        id: issue_close
         uses: actions/github-script@v7
         env:
           REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
-          ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+          ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
         with:
           script: |
             const fs = require('fs')
             const owner = context.repo.owner
             const repo = context.repo.repo
-            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
-            const title = titleOverride || '[Attendance Gate] Daily dashboard alert'
+            const title = String(process.env.ESCALATION_ISSUE_TITLE || '[Attendance Gate] Daily dashboard alert').trim()
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
             const markdownPath = process.env.REPORT_MARKDOWN
             const markdown = markdownPath && fs.existsSync(markdownPath)
@@ -183,6 +176,52 @@ jobs:
               })
               core.info(`Closed issue #${issue.number}`)
             }
+
+      - name: Append escalation issue info to report
+        if: always()
+        env:
+          REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
+          REPORT_P0_STATUS: ${{ steps.report.outputs.report_p0_status }}
+          ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
+          ISSUE_NUMBER: ${{ steps.issue_open.outputs.issue_number }}
+          ISSUE_URL: ${{ steps.issue_open.outputs.issue_url }}
+          ISSUE_ACTION: ${{ steps.issue_open.outputs.issue_action }}
+        run: |
+          set -euo pipefail
+          md="${REPORT_MARKDOWN}"
+          [[ -n "$md" ]] || exit 0
+          if [[ ! -f "$md" ]]; then
+            echo "Report markdown missing: $md" >&2
+            exit 0
+          fi
+
+          echo "" >> "$md"
+          echo "## Escalation Issue" >> "$md"
+          echo "" >> "$md"
+          echo "- Issue title: \`${ESCALATION_ISSUE_TITLE}\`" >> "$md"
+          if [[ "${REPORT_P0_STATUS}" != "pass" ]]; then
+            if [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
+              echo "- Issue: [#${ISSUE_NUMBER}](${ISSUE_URL}) (${ISSUE_ACTION:-updated})" >> "$md"
+            else
+              echo "- Issue: (missing issue link; see workflow logs)" >> "$md"
+            fi
+          else
+            echo "- Issue: none open (recovery path closes any open P0 issue)" >> "$md"
+          fi
+
+      - name: Add markdown to step summary
+        if: always()
+        run: |
+          cat "${{ steps.report.outputs.report_markdown }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dashboard artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-daily-gate-dashboard-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            ${{ steps.report.outputs.report_dir }}/**
 
       - name: Fail workflow when dashboard status is fail
         if: steps.report.outputs.report_status != 'pass'
