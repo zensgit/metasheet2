@@ -1370,6 +1370,7 @@ async function run() {
   }
 
   const gateFlat = {
+    schemaVersion: 2,
     preflight: toGateFlat(preflightGate),
     metrics: toGateFlat(metricsGate),
     storage: toGateFlat(storageGate),

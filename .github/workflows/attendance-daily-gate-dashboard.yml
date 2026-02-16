@@ -42,6 +42,8 @@ jobs:
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
       INCLUDE_DRILL_RUNS: ${{ inputs.include_drill_runs || 'false' }}
       ESCALATION_ISSUE_TITLE: ${{ inputs.issue_title || '[Attendance Gate] Daily dashboard alert' }}
+      STRICT_FAST_ALERT_TITLE: '[Attendance Gate] Strict gates fast alert'
+      SUPPRESS_STRICT_ONLY_P0_ISSUE: 'true'
       PREFLIGHT_WORKFLOW: attendance-remote-preflight-prod.yml
       METRICS_WORKFLOW: attendance-remote-metrics-prod.yml
       STORAGE_WORKFLOW: attendance-remote-storage-prod.yml
@@ -70,17 +72,42 @@ jobs:
         uses: actions/github-script@v7
         env:
           REPORT_MARKDOWN: ${{ steps.report.outputs.report_markdown }}
+          REPORT_JSON: ${{ steps.report.outputs.report_json }}
           REPORT_STATUS: ${{ steps.report.outputs.report_status }}
           ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
+          STRICT_FAST_ALERT_TITLE: ${{ env.STRICT_FAST_ALERT_TITLE }}
+          SUPPRESS_STRICT_ONLY_P0_ISSUE: ${{ env.SUPPRESS_STRICT_ONLY_P0_ISSUE }}
         with:
           script: |
             const fs = require('fs')
             const owner = context.repo.owner
             const repo = context.repo.repo
             const title = String(process.env.ESCALATION_ISSUE_TITLE || '[Attendance Gate] Daily dashboard alert').trim()
+            const strictFastAlertTitle = String(process.env.STRICT_FAST_ALERT_TITLE || '[Attendance Gate] Strict gates fast alert').trim()
+            const suppressStrictOnly = String(process.env.SUPPRESS_STRICT_ONLY_P0_ISSUE || 'true').trim() === 'true'
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const runMarker = `actions/runs/${context.runId}`
             const markdownPath = process.env.REPORT_MARKDOWN
             const markdown = fs.readFileSync(markdownPath, 'utf8')
+            const reportJsonPath = process.env.REPORT_JSON
+
+            let strictOnlyP0Failure = false
+            try {
+              if (reportJsonPath && fs.existsSync(reportJsonPath)) {
+                const report = JSON.parse(fs.readFileSync(reportJsonPath, 'utf8'))
+                const gateFlat = report?.gateFlat && typeof report.gateFlat === 'object' ? report.gateFlat : {}
+                const preflightFlat = gateFlat.preflight && typeof gateFlat.preflight === 'object' ? gateFlat.preflight : null
+                const strictFlat = gateFlat.strict && typeof gateFlat.strict === 'object' ? gateFlat.strict : null
+
+                const failedP0 = []
+                if (preflightFlat && String(preflightFlat.status || '').toUpperCase() === 'FAIL') failedP0.push('preflight')
+                if (strictFlat && String(strictFlat.status || '').toUpperCase() === 'FAIL') failedP0.push('strict')
+                strictOnlyP0Failure = failedP0.length === 1 && failedP0[0] === 'strict'
+              }
+            } catch (error) {
+              core.info(`WARN: failed to parse report_json for strict-only suppression: ${String(error)}`)
+            }
+
             const body = [
               'Automated attendance gate escalation.',
               '',
@@ -97,7 +124,76 @@ jobs:
             })
 
             const existing = issues.find((issue) => !issue.pull_request && issue.title === title)
+            const strictFastAlert = issues.find((issue) => !issue.pull_request && issue.title === strictFastAlertTitle)
+
+            if (suppressStrictOnly && strictOnlyP0Failure) {
+              if (existing) {
+                const closeBody = [
+                  'Daily dashboard P0 is strict-only; closing this issue to avoid duplicate paging.',
+                  '',
+                  `Run: ${runUrl}`,
+                  strictFastAlert
+                    ? `Strict fast alert: #${strictFastAlert.number} ${strictFastAlert.html_url || ''}`
+                    : `Strict fast alert issue title: \`${strictFastAlertTitle}\``,
+                ].join('\n')
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body: closeBody,
+                })
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  state: 'closed',
+                })
+                core.info(`Closed dashboard issue #${existing.number} due to strict-only P0 failure.`)
+                core.setOutput('issue_number', String(existing.number))
+                core.setOutput('issue_url', String(existing.html_url || ''))
+                core.setOutput('issue_action', 'suppressed_strict_only_closed')
+                return
+              }
+
+              core.info('Strict-only P0 failure: suppressing dashboard escalation issue (handled by strict fast alert).')
+              core.setOutput('issue_action', 'suppressed_strict_only')
+              if (strictFastAlert) {
+                core.setOutput('issue_number', String(strictFastAlert.number))
+                core.setOutput('issue_url', String(strictFastAlert.html_url || ''))
+              }
+              return
+            }
+
             if (existing) {
+              const bodyText = typeof existing.body === 'string' ? existing.body : ''
+              if (bodyText.includes(runMarker)) {
+                core.info(`Issue body already includes run ${context.runId}; skipping duplicate comment.`)
+                core.setOutput('issue_number', String(existing.number))
+                core.setOutput('issue_url', String(existing.html_url || ''))
+                core.setOutput('issue_action', 'skipped_duplicate')
+                return
+              }
+
+              try {
+                const comments = await github.rest.issues.listComments({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  per_page: 100,
+                })
+                const list = Array.isArray(comments.data) ? comments.data : []
+                const exists = list.some((comment) => typeof comment?.body === 'string' && comment.body.includes(runMarker))
+                if (exists) {
+                  core.info(`Issue already has a comment for run ${context.runId}; skipping duplicate comment.`)
+                  core.setOutput('issue_number', String(existing.number))
+                  core.setOutput('issue_url', String(existing.html_url || ''))
+                  core.setOutput('issue_action', 'skipped_duplicate')
+                  return
+                }
+              } catch (error) {
+                core.info(`WARN: failed to list issue comments for dedupe: ${String(error)}`)
+              }
+
               await github.rest.issues.createComment({
                 owner,
                 repo,
@@ -184,6 +280,7 @@ jobs:
           REPORT_JSON: ${{ steps.report.outputs.report_json }}
           REPORT_P0_STATUS: ${{ steps.report.outputs.report_p0_status }}
           ESCALATION_ISSUE_TITLE: ${{ env.ESCALATION_ISSUE_TITLE }}
+          STRICT_FAST_ALERT_TITLE: ${{ env.STRICT_FAST_ALERT_TITLE }}
           ISSUE_NUMBER: ${{ steps.issue_open.outputs.issue_number }}
           ISSUE_URL: ${{ steps.issue_open.outputs.issue_url }}
           ISSUE_ACTION: ${{ steps.issue_open.outputs.issue_action }}
@@ -202,7 +299,12 @@ jobs:
           echo "" >> "$md"
           echo "- Issue title: \`${ESCALATION_ISSUE_TITLE}\`" >> "$md"
           if [[ "${REPORT_P0_STATUS}" != "pass" ]]; then
-            if [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
+            if [[ "${ISSUE_ACTION:-}" == suppressed_strict_only* ]]; then
+              echo "- Issue: suppressed (strict-only P0 failure handled by \`${STRICT_FAST_ALERT_TITLE}\`)" >> "$md"
+              if [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
+                echo "- Strict fast alert: [#${ISSUE_NUMBER}](${ISSUE_URL})" >> "$md"
+              fi
+            elif [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
               echo "- Issue: [#${ISSUE_NUMBER}](${ISSUE_URL}) (${ISSUE_ACTION:-updated})" >> "$md"
             else
               echo "- Issue: (missing issue link; see workflow logs)" >> "$md"
