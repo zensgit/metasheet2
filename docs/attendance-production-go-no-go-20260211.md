@@ -667,3 +667,39 @@ Evidence:
 | Strict Gates drill (expected FAIL; issue created with body) | [#22047540386](https://github.com/zensgit/metasheet2/actions/runs/22047540386) | FAIL (expected) | `output/playwright/ga/22047540386/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
 | Strict Gates drill rerun (expected FAIL; issue already open; adds 1 comment) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
 | Strict Gates drill rerun attempt=2 (expected FAIL; duplicate comment skipped) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/attempt2/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
+
+## Post-Go Validation (2026-02-16): Dashboard `gateFlat` + Strict Artifacts Cmd In Escalation Section
+
+This record validates:
+
+- `attendance-daily-gate-dashboard.json` includes a machine-friendly `gateFlat` object (reasonCode/reasonSummary + key metrics).
+- When P0 fails, the report `Escalation Issue` section includes a strict-gates artifact download one-liner pointing at the strict runId.
+
+Implementation:
+
+- Commit: `8fcb6a4b`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; strict artifacts cmd visible; gateFlat visible) | [#22047781872](https://github.com/zensgit/metasheet2/actions/runs/22047781872) | FAIL (expected) | `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.json`, Issue: [#180](https://github.com/zensgit/metasheet2/issues/180) |
+| Daily Gate Dashboard recovery (expected PASS; issue closed) | [#22047797730](https://github.com/zensgit/metasheet2/actions/runs/22047797730) | PASS | `output/playwright/ga/22047797730/attendance-daily-gate-dashboard.md`, Issue: [#180](https://github.com/zensgit/metasheet2/issues/180) |
+
+## Post-Go Validation (2026-02-16): Strict Fast Alert Title Split + Auto-Close On Recovery
+
+This record validates:
+
+- Strict gates fast alert uses a dedicated title (separate from Daily Dashboard escalation issue).
+- Recovery path auto-comments and closes the strict fast alert issue.
+
+Implementation:
+
+- Commit: `8fcb6a4b`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates drill (expected FAIL; opens fast alert issue) | [#22047808837](https://github.com/zensgit/metasheet2/actions/runs/22047808837) | FAIL (expected) | `output/playwright/ga/22047808837/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |
+| Strict Gates drill recovery (expected PASS; auto-close issue) | [#22047821432](https://github.com/zensgit/metasheet2/actions/runs/22047821432) | PASS | `output/playwright/ga/22047821432/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |

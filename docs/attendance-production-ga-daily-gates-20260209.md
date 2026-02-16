@@ -427,6 +427,8 @@ Notes:
   - A compact `gate-summary.json` excerpt (`exitCode`, failing gates, `gateReasons`)
   - Artifact download command
   - If the issue is already open, the workflow adds a **comment** with the latest strict-gates context (so repeated failures are auditable without overwriting the issue body).
+- Default issue title (production): `[Attendance Gate] Strict gates fast alert` (separate from Daily Dashboard escalation title).
+- Recovery behavior: when strict gates pass again, the workflow auto-comments and closes the fast-alert issue.
 - Common `apiSmoke` reason codes:
   - Auth/feature/mode: `AUTH_FAILED`, `RATE_LIMITED`, `PRODUCT_MODE_MISMATCH`, `FEATURE_DISABLED`
   - Admin/batch resolve: `ADMIN_API_MISSING`, `ADMIN_BATCH_RESOLVE_MISSING`, `ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH`, `ADMIN_BATCH_RESOLVE_FAILED`
@@ -553,8 +555,10 @@ Purpose:
 - Remote preflight is also included as a `P0` gate (config drift detection).
 - Open/update GitHub issue `[Attendance Gate] Daily dashboard alert` only when **P0** status is `FAIL` (Remote preflight / strict gate failure).
 - The dashboard report appends an `Escalation Issue` section (issue title + issue link when P0 fails) to keep evidence self-contained in artifacts.
+- When P0 fails, the `Escalation Issue` section also includes a one-liner to download `Strict Gates` artifacts for `gate-summary.json` triage.
 - P1/P2 findings still make the workflow `FAIL` (for visibility), but do not page via the `[Attendance Gate]` escalation issue.
 - The dashboard report also lists open **P1 tracking issues** (titles starting with `[Attendance P1]`) under `Open Tracking Issues (P1)` to keep operational follow-ups visible.
+- Report JSON includes a machine-friendly `gateFlat` object (reasonCode/reasonSummary + key metrics) in `attendance-daily-gate-dashboard.json`.
 
 Schedule:
 
