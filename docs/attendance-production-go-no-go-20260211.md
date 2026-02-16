@@ -582,6 +582,7 @@ Implementation:
 
 - Commit: `1121b038`
 - Commit: `fa93216b`
+- Commit: `9a971b4a`
 
 Evidence:
 
@@ -590,3 +591,5 @@ Evidence:
 | Strict Gates drill (expected FAIL; fast alert issue includes gate summary block) | [#22039515349](https://github.com/zensgit/metasheet2/actions/runs/22039515349) | FAIL (expected) | `output/playwright/ga/22039515349/drill/gate-summary.json`, Issue: [#174](https://github.com/zensgit/metasheet2/issues/174) |
 | Strict Gates (manual, non-drill; post-fix) | [#22039600337](https://github.com/zensgit/metasheet2/actions/runs/22039600337) | PASS | `output/playwright/ga/22039600337/20260215-170508-1/gate-summary.json`, `output/playwright/ga/22039600337/20260215-170508-2/gate-summary.json` |
 | Daily Gate Dashboard (manual, non-drill; ignores strict `[DRILL]` runs) | [#22039675025](https://github.com/zensgit/metasheet2/actions/runs/22039675025) | PASS | `output/playwright/ga/22039675025/attendance-daily-gate-dashboard.md` |
+| Strict Gates drill rerun (expected FAIL; fast alert adds comment when issue already open) | [#22046721909](https://github.com/zensgit/metasheet2/actions/runs/22046721909) | FAIL (expected) | `output/playwright/ga/22046721909/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |
+| Strict Gates drill rerun (expected FAIL; verify comment path) | [#22046734857](https://github.com/zensgit/metasheet2/actions/runs/22046734857) | FAIL (expected) | `output/playwright/ga/22046734857/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |

@@ -426,6 +426,7 @@ Notes:
   - Run URL + job status
   - A compact `gate-summary.json` excerpt (`exitCode`, failing gates, `gateReasons`)
   - Artifact download command
+  - If the issue is already open, the workflow adds a **comment** with the latest strict-gates context (so repeated failures are auditable without overwriting the issue body).
 - Common `apiSmoke` reason codes:
   - Auth/feature/mode: `AUTH_FAILED`, `RATE_LIMITED`, `PRODUCT_MODE_MISMATCH`, `FEATURE_DISABLED`
   - Admin/batch resolve: `ADMIN_API_MISSING`, `ADMIN_BATCH_RESOLVE_MISSING`, `ADMIN_BATCH_RESOLVE_SCHEMA_MISMATCH`, `ADMIN_BATCH_RESOLVE_FAILED`
