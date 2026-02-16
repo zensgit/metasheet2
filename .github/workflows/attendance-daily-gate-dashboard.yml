@@ -321,6 +321,36 @@ jobs:
             echo "- Issue: none open (recovery path closes any open P0 issue)" >> "$md"
           fi
 
+          # Persist machine-readable escalation metadata in report JSON for downstream tooling.
+          if [[ -n "$report_json" && -f "$report_json" ]] && command -v jq >/dev/null 2>&1; then
+            tmp_json="$(mktemp)"
+            jq \
+              --arg issue_title "${ESCALATION_ISSUE_TITLE}" \
+              --arg issue_action "${ISSUE_ACTION:-}" \
+              --arg issue_url "${ISSUE_URL:-}" \
+              --arg issue_number "${ISSUE_NUMBER:-}" \
+              --arg report_p0_status "${REPORT_P0_STATUS:-}" \
+              --arg strict_fast_alert_title "${STRICT_FAST_ALERT_TITLE:-}" \
+              '
+              .escalationIssue = {
+                title: $issue_title,
+                p0Status: $report_p0_status,
+                action: (if $issue_action == "" then null else $issue_action end),
+                number: (if $issue_number == "" then null else ($issue_number | tonumber? // $issue_number) end),
+                url: (if $issue_url == "" then null else $issue_url end),
+                strictFastAlertTitle: (if $strict_fast_alert_title == "" then null else $strict_fast_alert_title end),
+                mode: (
+                  if $report_p0_status == "pass" then "none_or_closed"
+                  elif ($issue_action | startswith("suppressed_strict_only")) then "suppressed_strict_only"
+                  elif $issue_url != "" then "open"
+                  else "unknown"
+                  end
+                )
+              }
+              ' "$report_json" > "$tmp_json"
+            mv "$tmp_json" "$report_json"
+          fi
+
       - name: Add markdown to step summary
         if: always()
         run: |
