@@ -703,3 +703,28 @@ Evidence:
 |---|---|---|---|
 | Strict Gates drill (expected FAIL; opens fast alert issue) | [#22047808837](https://github.com/zensgit/metasheet2/actions/runs/22047808837) | FAIL (expected) | `output/playwright/ga/22047808837/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |
 | Strict Gates drill recovery (expected PASS; auto-close issue) | [#22047821432](https://github.com/zensgit/metasheet2/actions/runs/22047821432) | PASS | `output/playwright/ga/22047821432/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |
+
+## Post-Go Validation (2026-02-16): Dashboard RunId De-dup + Strict-only P0 Suppression
+
+This record validates:
+
+- Daily dashboard issue updates are de-duplicated by `runId` (rerun attempts do not produce duplicate comments).
+- Daily dashboard suppresses P0 issue creation when the only P0 failure is `Strict Gates` (to avoid dual paging with strict fast alert).
+- Dashboard JSON exposes `gateFlat.schemaVersion=2`.
+
+Implementation:
+
+- Commit: `d9862334`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill baseline | [#22050219004](https://github.com/zensgit/metasheet2/actions/runs/22050219004) | PASS | `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.json` |
+| Strict drill fail (strict-only source) | [#22050232447](https://github.com/zensgit/metasheet2/actions/runs/22050232447) | FAIL (expected) | `output/playwright/ga/22050232447/attendance-strict-gates-prod-22050232447-1/drill/gate-summary.json`, Issue: [#182](https://github.com/zensgit/metasheet2/issues/182) |
+| Daily Dashboard include-drill (strict-only; suppression path) | [#22050242111](https://github.com/zensgit/metasheet2/actions/runs/22050242111) | FAIL (expected) | `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.md` (Escalation section: `Issue: suppressed ...`), `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`) |
+| Preflight drill fail (force non strict-only P0) | [#22050258287](https://github.com/zensgit/metasheet2/actions/runs/22050258287) | FAIL (expected) | `output/playwright/ga/22050258287/attendance-remote-preflight-prod-22050258287-1/preflight.log` |
+| Daily Dashboard fail run (issue created once) | [#22050266002](https://github.com/zensgit/metasheet2/actions/runs/22050266002) | FAIL (expected) | `output/playwright/ga/22050266002/attendance-daily-gate-dashboard.md`, Issue: [#183](https://github.com/zensgit/metasheet2/issues/183) |
+| Daily Dashboard rerun attempt=2 (same runId; duplicate skipped) | [#22050266002](https://github.com/zensgit/metasheet2/actions/runs/22050266002) | FAIL (expected) | `output/playwright/ga/22050266002-attempt2/attendance-daily-gate-dashboard.md` (Escalation section: `(skipped_duplicate)`), `gh issue view 183 --json comments` => empty list |
+| Strict drill recovery (close strict drill issue) | [#22050296690](https://github.com/zensgit/metasheet2/actions/runs/22050296690) | PASS | `output/playwright/ga/22050296690/attendance-strict-gates-prod-22050296690-1/drill/gate-summary.json`, Issue: [#182](https://github.com/zensgit/metasheet2/issues/182) closed |
+| Daily Dashboard recovery (close dashboard drill issue) | [#22050308198](https://github.com/zensgit/metasheet2/actions/runs/22050308198) | PASS | `output/playwright/ga/22050308198/attendance-daily-gate-dashboard.md`, Issue: [#183](https://github.com/zensgit/metasheet2/issues/183) closed |
