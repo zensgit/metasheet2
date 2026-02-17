@@ -89,6 +89,9 @@ jobs:
       DRILL_GATE_REASON: ${{ inputs.drill_gate_reason || 'TIMEOUT' }}
       DRILL_API_SMOKE_REASON: ${{ inputs.drill_api_smoke_reason || 'AUTH_FAILED' }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Drill no-op (skip strict gates)
         id: run_drill
         run: |
