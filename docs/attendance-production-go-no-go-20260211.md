@@ -804,3 +804,20 @@ Evidence:
 | Strict drill fail (expected), validator passes | [#22086891675](https://github.com/zensgit/metasheet2/actions/runs/22086891675) | FAIL (expected) | `output/playwright/ga/22086891675/attendance-strict-gates-prod-22086891675-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
 | Strict non-drill (validator in strict job) | [#22086903531](https://github.com/zensgit/metasheet2/actions/runs/22086903531) | PASS | `output/playwright/ga/22086903531/20260217-052052-1/gate-summary.json`, `output/playwright/ga/22086903531/20260217-052052-2/gate-summary.json` (`Validate gate-summary contract (strict)` step success) |
 | Strict drill recovery (close drill issue) | [#22086993681](https://github.com/zensgit/metasheet2/actions/runs/22086993681) | PASS | Issue [#186](https://github.com/zensgit/metasheet2/issues/186) closed |
+
+## Post-Go Validation (2026-02-17): Dashboard Requires Strict Summary Evidence For PASS
+
+This record validates:
+
+- Daily dashboard no longer treats strict workflow `success` as sufficient by itself; strict summary artifact must be present.
+- Dashboard exposes `gateFlat.strict.summaryPresent` for machine checks.
+
+Implementation:
+
+- Commit: `8a5c1162`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (strict summary evidence present) | [#22097651139](https://github.com/zensgit/metasheet2/actions/runs/22097651139) | PASS | `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gates.strict.completed.id=22086903531`, `p0Status=pass`) |

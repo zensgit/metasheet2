@@ -1165,3 +1165,26 @@ Validation:
 - Drill recovery close:
   - [Attendance Strict Gates (Prod) #22086993681](https://github.com/zensgit/metasheet2/actions/runs/22086993681) (`SUCCESS`)
   - Drill issue auto-closed: [#186](https://github.com/zensgit/metasheet2/issues/186)
+
+## Latest Notes (2026-02-17): Dashboard Enforces Strict Summary Evidence On PASS
+
+Implementation:
+
+- Commit: `8a5c1162`
+- Change:
+  - Daily gate report now fetches strict `gate-summary.json` metadata for every completed strict run (not only failed runs).
+  - If latest strict run is `success` but strict artifact has no `gate-summary.json`, dashboard emits P0 finding `STRICT_SUMMARY_MISSING` (prevent false PASS).
+  - `gateFlat.strict.summaryPresent` is exported as machine-readable signal.
+
+Validation:
+
+- Dashboard non-drill:
+  - [Attendance Daily Gate Dashboard #22097651139](https://github.com/zensgit/metasheet2/actions/runs/22097651139) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.md`
+  - Verified fields:
+    - `gates.strict.completed.id=22086903531`
+    - `gateFlat.strict.summaryPresent=true`
+    - `gateFlat.strict.reasonCode=null`
+    - `p0Status=pass`
