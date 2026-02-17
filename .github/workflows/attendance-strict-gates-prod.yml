@@ -253,7 +253,7 @@ jobs:
           if [[ "${STRICT_OUTCOME:-}" == "success" ]]; then
             min_count=2
           fi
-          node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
+          pnpm --filter @metasheet/core-backend exec node ../../scripts/ops/attendance-validate-gate-summary-schema.mjs \
             output/playwright/attendance-prod-acceptance \
             "$min_count" \
             schemas/attendance/strict-gate-summary.schema.json

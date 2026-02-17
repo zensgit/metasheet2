@@ -86,9 +86,13 @@ function expect_fail() {
 }
 
 if [[ "$CASE_ID" == "strict" ]]; then
+  schema_cmd=(
+    pnpm --filter @metasheet/core-backend exec node ../../scripts/ops/attendance-validate-gate-summary-schema.mjs
+  )
+
   cp "$valid_summary" "${strict_dir}/gate-summary.json"
   ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
-  node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
+  "${schema_cmd[@]}" \
     "$strict_dir" \
     1 \
     schemas/attendance/strict-gate-summary.schema.json
@@ -97,7 +101,7 @@ if [[ "$CASE_ID" == "strict" ]]; then
   expect_fail "strict jq contract (invalid summary)" \
     ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
   expect_fail "strict json schema contract (invalid summary)" \
-    node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
+    "${schema_cmd[@]}" \
       "$strict_dir" \
       1 \
       schemas/attendance/strict-gate-summary.schema.json
