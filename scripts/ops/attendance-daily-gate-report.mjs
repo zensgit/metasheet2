@@ -326,11 +326,26 @@ function parseStrictGateSummaryJson(text) {
     return null
   }
 
+  const expectedGates = ['preflight', 'apiSmoke', 'provisioning', 'playwrightProd', 'playwrightDesktop', 'playwrightMobile']
+  const validStatuses = new Set(['PASS', 'FAIL', 'SKIP'])
   const gates = value && typeof value.gates === 'object' && value.gates ? value.gates : {}
   const gateReasons = value && typeof value.gateReasons === 'object' && value.gateReasons ? value.gateReasons : {}
-  const failed = Object.entries(gates)
-    .filter(([, status]) => String(status || '').toUpperCase() === 'FAIL')
-    .map(([key]) => key)
+  const invalidReasonsRaw = []
+
+  const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+    ? schemaVersionRaw
+    : null
+  if (schemaVersionRaw !== null && schemaVersion === null) invalidReasonsRaw.push('schema_version')
+
+  if (!(value && typeof value.generatedAt === 'string' && value.generatedAt.trim())) invalidReasonsRaw.push('generated_at')
+  if (!(value && typeof value.apiBase === 'string')) invalidReasonsRaw.push('api_base')
+  if (!(value && typeof value.webUrl === 'string')) invalidReasonsRaw.push('web_url')
+  if (!(value && typeof value.expectProductMode === 'string' && value.expectProductMode.trim())) invalidReasonsRaw.push('expect_product_mode')
+  if (!(value && typeof value.exitCode === 'number' && Number.isFinite(value.exitCode))) invalidReasonsRaw.push('exit_code')
+
+  const failed = expectedGates
+    .filter((gate) => String(gates?.[gate] || '').toUpperCase() === 'FAIL')
   const failedGates = failed.length > 0 ? failed.join(',') : null
   const failedGateReasons = {}
   for (const gate of failed) {
@@ -340,10 +355,31 @@ function parseStrictGateSummaryJson(text) {
     }
   }
 
+  for (const gate of expectedGates) {
+    const status = String(gates?.[gate] || '').toUpperCase()
+    if (!validStatuses.has(status)) {
+      invalidReasonsRaw.push(`gates.${gate}`)
+    }
+    if (!Object.prototype.hasOwnProperty.call(gateReasons, gate)) {
+      continue
+    }
+    const code = gateReasons[gate]
+    if (code === null || code === undefined) continue
+    if (typeof code !== 'string' || !/^[A-Z0-9_]+$/.test(code.trim())) {
+      invalidReasonsRaw.push(`gateReasons.${gate}`)
+    }
+  }
+
+  const invalidReasons = Array.from(new Set(invalidReasonsRaw))
+  const summaryValid = invalidReasons.length === 0
+
   return {
-    reason: failedGates ? 'GATE_FAILED' : null,
+    reason: summaryValid ? (failedGates ? 'GATE_FAILED' : null) : 'SUMMARY_INVALID',
     failedGates,
     failedGateReasons,
+    schemaVersion,
+    summaryValid,
+    summaryInvalidReasons: summaryValid ? null : invalidReasons,
     gates,
   }
 }
@@ -562,6 +598,7 @@ function renderMarkdown({
     if (has('WORKFLOW_QUERY_FAILED')) reason = 'WORKFLOW_QUERY_FAILED'
     else if (has('NO_COMPLETED_RUN')) reason = 'NO_COMPLETED_RUN'
     else if (has('STALE_RUN')) reason = 'STALE_RUN'
+    else if (has('STRICT_SUMMARY_INVALID')) reason = 'STRICT_SUMMARY_INVALID'
     else if (has('STRICT_SUMMARY_MISSING')) reason = 'STRICT_SUMMARY_MISSING'
     else if (has('RUN_FAILED')) reason = String(gate?.meta?.reason || 'RUN_FAILED')
     else if (codes.length > 0) reason = String(codes[0])
@@ -584,6 +621,10 @@ function renderMarkdown({
         if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
       }
       if (gate.name === 'Strict Gates') {
+        if (meta.summaryValid === false) extra.push('summary=invalid')
+        if (meta.summaryInvalidReasons && Array.isArray(meta.summaryInvalidReasons) && meta.summaryInvalidReasons.length > 0) {
+          extra.push(`invalid=${meta.summaryInvalidReasons.slice(0, 2).join(',')}`)
+        }
         if (meta.failedGates) extra.push(`failed=${meta.failedGates}`)
         const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
         if (pairs.length > 0) {
@@ -680,6 +721,10 @@ function renderMarkdown({
         if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
       }
       if (finding.gate === 'Strict Gates') {
+        if (meta?.summaryValid === false) metaBits.push('summary_valid=false')
+        if (Array.isArray(meta?.summaryInvalidReasons) && meta.summaryInvalidReasons.length > 0) {
+          metaBits.push(`summary_invalid=${meta.summaryInvalidReasons.join(',')}`)
+        }
         if (meta?.failedGates) metaBits.push(`failed=${meta.failedGates}`)
         if (meta?.failedGateReasons && typeof meta.failedGateReasons === 'object') {
           for (const [gateName, code] of Object.entries(meta.failedGateReasons)) {
@@ -956,6 +1001,11 @@ function renderMarkdown({
       }
     }
 
+    if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'STRICT_SUMMARY_INVALID')) {
+      lines.push('- Strict Gates: latest run has an invalid `gate-summary.json` contract (fields/types/status values).')
+      lines.push('- Strict Gates: inspect strict artifact `gate-summary.json` and ensure schema/version fields are emitted by the latest scripts.')
+    }
+
     if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'STRICT_SUMMARY_MISSING')) {
       lines.push('- Strict Gates: latest run is `success` but `gate-summary.json` is missing from strict artifacts.')
       lines.push('- Strict Gates: rerun strict gates and verify upload artifacts include gate summaries before considering the gate healthy.')
@@ -1217,6 +1267,16 @@ async function run() {
       })
       if (meta) {
         strictGate.meta = meta
+        if (meta.summaryValid === false) {
+          strictGate.ok = false
+          strictGate.findings.push({
+            severity: 'P0',
+            code: 'STRICT_SUMMARY_INVALID',
+            gate: 'Strict Gates',
+            message: 'Strict Gates: latest completed run has invalid gate-summary.json contract',
+            runUrl: strictGate.completed.url,
+          })
+        }
       } else if (strictGate.completed?.conclusion === 'success') {
         strictGate.ok = false
         strictGate.findings.push({
@@ -1306,6 +1366,7 @@ async function run() {
       if (has('WORKFLOW_QUERY_FAILED')) reasonCode = 'WORKFLOW_QUERY_FAILED'
       else if (has('NO_COMPLETED_RUN')) reasonCode = 'NO_COMPLETED_RUN'
       else if (has('STALE_RUN')) reasonCode = 'STALE_RUN'
+      else if (has('STRICT_SUMMARY_INVALID')) reasonCode = 'STRICT_SUMMARY_INVALID'
       else if (has('STRICT_SUMMARY_MISSING')) reasonCode = 'STRICT_SUMMARY_MISSING'
       else if (has('RUN_FAILED')) reasonCode = String(meta?.reason || 'RUN_FAILED')
       else reasonCode = codes[0] || 'FAIL'
@@ -1356,6 +1417,9 @@ async function run() {
 
     if (gate.name === 'Strict Gates') {
       flat.summaryPresent = Boolean(meta)
+      flat.summaryValid = meta ? (meta.summaryValid !== false) : false
+      flat.summarySchemaVersion = meta?.schemaVersion ?? null
+      flat.summaryInvalidReasons = Array.isArray(meta?.summaryInvalidReasons) ? meta.summaryInvalidReasons : null
     }
 
     if (meta) {

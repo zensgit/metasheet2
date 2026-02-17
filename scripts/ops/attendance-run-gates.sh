@@ -339,6 +339,7 @@ fi
 summary_json="${OUTPUT_ROOT}/gate-summary.json"
 cat >"$summary_json" <<EOF
 {
+  "schemaVersion": 1,
   "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "apiBase": "${API_BASE}",
   "webUrl": "${WEB_URL}",

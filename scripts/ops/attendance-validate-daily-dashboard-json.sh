@@ -23,6 +23,7 @@ overall_status="$(jq -r '.overallStatus // empty' "$report_json")"
 escalation_p0_status="$(jq -r '.escalationIssue.p0Status // empty' "$report_json")"
 strict_conclusion="$(jq -r '.gates.strict.completed.conclusion // empty' "$report_json")"
 strict_summary_present="$(jq -r 'if (.gateFlat.strict | type == "object" and has("summaryPresent")) then (.gateFlat.strict.summaryPresent | tostring) else "" end' "$report_json")"
+strict_summary_valid="$(jq -r 'if (.gateFlat.strict | type == "object" and has("summaryValid")) then (.gateFlat.strict.summaryValid | tostring) else "" end' "$report_json")"
 
 if [[ -z "$schema_version" ]] || ! [[ "$schema_version" =~ ^[0-9]+$ ]] || (( schema_version < 2 )); then
   die "invalid gateFlat.schemaVersion=${schema_version:-<empty>} (expected integer >= 2)"
@@ -60,4 +61,8 @@ if [[ "$strict_conclusion" == "success" && "$strict_summary_present" != "true" ]
   die "strict summary contract failed: strict conclusion=success but gateFlat.strict.summaryPresent=${strict_summary_present:-<empty>}"
 fi
 
-info "OK: schemaVersion=$schema_version p0Status=$p0_status overallStatus=$overall_status mode=$escalation_mode strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>}"
+if [[ "$strict_conclusion" == "success" && "$strict_summary_valid" != "true" ]]; then
+  die "strict summary contract failed: strict conclusion=success but gateFlat.strict.summaryValid=${strict_summary_valid:-<empty>}"
+fi
+
+info "OK: schemaVersion=$schema_version p0Status=$p0_status overallStatus=$overall_status mode=$escalation_mode strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>} strictSummaryValid=${strict_summary_valid:-<empty>}"

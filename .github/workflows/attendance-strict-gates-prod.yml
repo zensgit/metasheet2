@@ -124,6 +124,7 @@ jobs:
           # artifact parsing without calling production.
           cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<EOF
           {
+            "schemaVersion": 1,
             "generatedAt": "1970-01-01T00:00:00Z",
             "apiBase": "<DRILL>",
             "webUrl": "<DRILL>",

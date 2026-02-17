@@ -34,6 +34,7 @@ fi
 
 for summary in "${summaries[@]}"; do
   if ! jq -e '
+      (.schemaVersion | type == "number" and (floor == .) and . >= 1) and
       (.generatedAt | type == "string" and length > 0) and
       (.apiBase | type == "string") and
       (.webUrl | type == "string") and
