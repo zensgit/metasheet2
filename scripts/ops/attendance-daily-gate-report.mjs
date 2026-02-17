@@ -562,6 +562,7 @@ function renderMarkdown({
     if (has('WORKFLOW_QUERY_FAILED')) reason = 'WORKFLOW_QUERY_FAILED'
     else if (has('NO_COMPLETED_RUN')) reason = 'NO_COMPLETED_RUN'
     else if (has('STALE_RUN')) reason = 'STALE_RUN'
+    else if (has('STRICT_SUMMARY_MISSING')) reason = 'STRICT_SUMMARY_MISSING'
     else if (has('RUN_FAILED')) reason = String(gate?.meta?.reason || 'RUN_FAILED')
     else if (codes.length > 0) reason = String(codes[0])
 
@@ -954,6 +955,11 @@ function renderMarkdown({
         lines.push('- Strict Gates: `playwrightMobile` failed. Inspect `gate-playwright-full-flow-mobile.log` and screenshots under `playwright-full-flow-mobile/`.')
       }
     }
+
+    if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'STRICT_SUMMARY_MISSING')) {
+      lines.push('- Strict Gates: latest run is `success` but `gate-summary.json` is missing from strict artifacts.')
+      lines.push('- Strict Gates: rerun strict gates and verify upload artifacts include gate summaries before considering the gate healthy.')
+    }
   }
 
   lines.push('')
@@ -1198,7 +1204,7 @@ async function run() {
       })
       if (meta) cleanupGate.meta = meta
     }
-    if (hasRunFailed(strictGate) && strictGate.completed?.id) {
+    if (strictGate.completed?.id) {
       const runId = strictGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
         ownerValue: owner,
@@ -1209,7 +1215,18 @@ async function run() {
         innerSuffix: 'gate-summary.json',
         parse: parseStrictGateSummaryJson,
       })
-      if (meta) strictGate.meta = meta
+      if (meta) {
+        strictGate.meta = meta
+      } else if (strictGate.completed?.conclusion === 'success') {
+        strictGate.ok = false
+        strictGate.findings.push({
+          severity: 'P0',
+          code: 'STRICT_SUMMARY_MISSING',
+          gate: 'Strict Gates',
+          message: 'Strict Gates: latest completed run succeeded but gate-summary.json is missing from artifacts',
+          runUrl: strictGate.completed.url,
+        })
+      }
     }
     if (hasRunFailed(perfGate) && perfGate.completed?.id) {
       const runId = perfGate.completed.id
@@ -1289,6 +1306,7 @@ async function run() {
       if (has('WORKFLOW_QUERY_FAILED')) reasonCode = 'WORKFLOW_QUERY_FAILED'
       else if (has('NO_COMPLETED_RUN')) reasonCode = 'NO_COMPLETED_RUN'
       else if (has('STALE_RUN')) reasonCode = 'STALE_RUN'
+      else if (has('STRICT_SUMMARY_MISSING')) reasonCode = 'STRICT_SUMMARY_MISSING'
       else if (has('RUN_FAILED')) reasonCode = String(meta?.reason || 'RUN_FAILED')
       else reasonCode = codes[0] || 'FAIL'
     }
@@ -1334,6 +1352,10 @@ async function run() {
       runUrl: completed.url ?? null,
       conclusion: completed.conclusion ?? null,
       updatedAt: completed.updatedAt ?? null,
+    }
+
+    if (gate.name === 'Strict Gates') {
+      flat.summaryPresent = Boolean(meta)
     }
 
     if (meta) {
