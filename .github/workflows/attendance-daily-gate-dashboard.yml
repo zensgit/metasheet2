@@ -372,6 +372,8 @@ jobs:
           escalation_mode="$(jq -r '.escalationIssue.mode // empty' "$report_json")"
           p0_status="$(jq -r '.p0Status // empty' "$report_json")"
           escalation_p0_status="$(jq -r '.escalationIssue.p0Status // empty' "$report_json")"
+          strict_conclusion="$(jq -r '.gates.strict.completed.conclusion // empty' "$report_json")"
+          strict_summary_present="$(jq -r '.gateFlat.strict.summaryPresent // empty' "$report_json")"
 
           if [[ -z "$schema_version" ]] || ! [[ "$schema_version" =~ ^[0-9]+$ ]] || (( schema_version < 2 )); then
             echo "Invalid gateFlat.schemaVersion: ${schema_version:-<empty>} (expected integer >= 2)" >&2
@@ -392,7 +394,12 @@ jobs:
             exit 1
           fi
 
-          echo "JSON contract OK: schemaVersion=$schema_version mode=$escalation_mode p0Status=$p0_status"
+          if [[ "$strict_conclusion" == "success" && "$strict_summary_present" != "true" ]]; then
+            echo "Strict summary contract failed: strict conclusion=success but gateFlat.strict.summaryPresent=${strict_summary_present:-<empty>}" >&2
+            exit 1
+          fi
+
+          echo "JSON contract OK: schemaVersion=$schema_version mode=$escalation_mode p0Status=$p0_status strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>}"
 
       - name: Upload dashboard artifacts
         if: always()
