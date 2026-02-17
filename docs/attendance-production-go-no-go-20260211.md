@@ -838,3 +838,21 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Daily Dashboard non-drill (strict summary contract check active) | [#22097790153](https://github.com/zensgit/metasheet2/actions/runs/22097790153) | PASS | `output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22097790153/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`) |
+
+## Post-Go Validation (2026-02-17): Dashboard Contract Checks Moved To Reusable Script
+
+This record validates:
+
+- Dashboard JSON contract checks are centralized in a reusable script for local/CI parity.
+- GA still passes with the stricter strict-summary condition enabled.
+
+Implementation:
+
+- Commit: `89718ae9`
+- Script: `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (script-based JSON contract validation) | [#22098000346](https://github.com/zensgit/metasheet2/actions/runs/22098000346) | PASS | `output/playwright/ga/22098000346/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22098000346/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`, `escalationIssue.mode=none_or_closed`) |

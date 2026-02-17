@@ -1209,3 +1209,39 @@ Validation:
     - `gates.strict.completed.conclusion=success`
     - `gateFlat.strict.summaryPresent=true`
     - `p0Status=pass`
+
+## Latest Notes (2026-02-17): Dashboard JSON Contract Validator Script (Reusable)
+
+Implementation:
+
+- Commit: `89718ae9`
+- Change:
+  - Added reusable validator script:
+    - `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - Workflow `Validate report JSON contract` now calls the script directly (instead of inline jq checks).
+  - Script covers:
+    - `gateFlat.schemaVersion >= 2`
+    - `p0Status/overallStatus` enum checks
+    - `escalationIssue.mode` enum
+    - `escalationIssue.p0Status == p0Status`
+    - `strict success => gateFlat.strict.summaryPresent=true`
+
+Validation:
+
+- Local positive sample:
+  - `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`
+  - Result: `OK`
+- Local negative sample (expected fail):
+  - set `gateFlat.strict.summaryPresent=false` with `gates.strict.completed.conclusion=success`
+  - Result: `ERROR: strict summary contract failed` (expected)
+- GA dashboard non-drill:
+  - [Attendance Daily Gate Dashboard #22098000346](https://github.com/zensgit/metasheet2/actions/runs/22098000346) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22098000346/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22098000346/gate-meta/strict/meta.json`
+  - Verified:
+    - `p0Status=pass`
+    - `overallStatus=pass`
+    - `gates.strict.completed.conclusion=success`
+    - `gateFlat.strict.summaryPresent=true`
+    - `escalationIssue.mode=none_or_closed`
