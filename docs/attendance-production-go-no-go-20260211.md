@@ -856,3 +856,24 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Daily Dashboard non-drill (script-based JSON contract validation) | [#22098000346](https://github.com/zensgit/metasheet2/actions/runs/22098000346) | PASS | `output/playwright/ga/22098000346/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22098000346/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`, `escalationIssue.mode=none_or_closed`) |
+
+## Post-Go Validation (2026-02-17): Strict Summary `schemaVersion` + `summaryValid` Enforced
+
+This record validates:
+
+- Strict `gate-summary.json` now has an explicit schema version and is validated in both drill and non-drill paths.
+- Daily dashboard fails closed if strict run is `success` but strict summary is missing or invalid.
+- Recovery path still auto-closes strict drill issue.
+
+Implementation:
+
+- Commit: `613d2590`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict drill fail (expected), validator checks `schemaVersion>=1` | [#22098220215](https://github.com/zensgit/metasheet2/actions/runs/22098220215) | FAIL (expected) | `output/playwright/ga/22098220215/attendance-strict-gates-prod-22098220215-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
+| Strict non-drill (validator checks schema on real artifacts) | [#22098241004](https://github.com/zensgit/metasheet2/actions/runs/22098241004) | PASS | `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-1/gate-summary.json`, `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-2/gate-summary.json` (`schemaVersion=1`, `Validate gate-summary contract (strict)` step success) |
+| Daily Dashboard non-drill (strict summary validity contract) | [#22098385887](https://github.com/zensgit/metasheet2/actions/runs/22098385887) | PASS | `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gateFlat.strict.summaryValid=true`, `gateFlat.strict.summarySchemaVersion=1`) |
+| Strict drill recovery (close strict drill issue) | [#22098421982](https://github.com/zensgit/metasheet2/actions/runs/22098421982) | PASS | `output/playwright/ga/22098421982/attendance-strict-gates-prod-22098421982-1/drill/gate-summary.json`, Issue: [#187](https://github.com/zensgit/metasheet2/issues/187) closed |

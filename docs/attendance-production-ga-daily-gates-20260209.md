@@ -1245,3 +1245,47 @@ Validation:
     - `gates.strict.completed.conclusion=success`
     - `gateFlat.strict.summaryPresent=true`
     - `escalationIssue.mode=none_or_closed`
+
+## Latest Notes (2026-02-17): Strict Summary Validity + SchemaVersion Contract
+
+Implementation:
+
+- Commit: `613d2590`
+- Change:
+  - `scripts/ops/attendance-run-gates.sh` now writes `gate-summary.json` with `schemaVersion: 1`.
+  - `.github/workflows/attendance-strict-gates-prod.yml` drill `gate-summary.json` also includes `schemaVersion: 1`.
+  - `scripts/ops/attendance-validate-gate-summary.sh` now requires `schemaVersion` integer `>= 1`.
+  - `scripts/ops/attendance-daily-gate-report.mjs` now validates strict summary shape and exports:
+    - `gateFlat.strict.summaryValid`
+    - `gateFlat.strict.summarySchemaVersion`
+    - `gateFlat.strict.summaryInvalidReasons`
+  - `scripts/ops/attendance-validate-daily-dashboard-json.sh` now enforces:
+    - strict `success` => `gateFlat.strict.summaryPresent=true` and `gateFlat.strict.summaryValid=true`.
+
+Validation:
+
+- Strict drill fail (expected), schema validator step passes:
+  - [Attendance Strict Gates (Prod) #22098220215](https://github.com/zensgit/metasheet2/actions/runs/22098220215) (`FAILURE`, expected due `drill_fail=true`)
+  - Evidence:
+    - `output/playwright/ga/22098220215/attendance-strict-gates-prod-22098220215-1/drill/gate-summary.json`
+  - Job step status: `Validate gate-summary contract (drill) = success`
+- Strict non-drill pass, strict validator step passes:
+  - [Attendance Strict Gates (Prod) #22098241004](https://github.com/zensgit/metasheet2/actions/runs/22098241004) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-1/gate-summary.json`
+    - `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-2/gate-summary.json`
+  - Job step status: `Validate gate-summary contract (strict) = success`
+- Dashboard non-drill pass with strict summary validity fields:
+  - [Attendance Daily Gate Dashboard #22098385887](https://github.com/zensgit/metasheet2/actions/runs/22098385887) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/gate-meta/strict/meta.json`
+  - Verified:
+    - `gates.strict.completed.id=22098241004`
+    - `gateFlat.strict.summaryPresent=true`
+    - `gateFlat.strict.summaryValid=true`
+    - `gateFlat.strict.summarySchemaVersion=1`
+    - `p0Status=pass`
+- Strict drill recovery:
+  - [Attendance Strict Gates (Prod) #22098421982](https://github.com/zensgit/metasheet2/actions/runs/22098421982) (`SUCCESS`)
+  - Drill issue auto-closed: [#187](https://github.com/zensgit/metasheet2/issues/187)
