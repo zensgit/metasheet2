@@ -362,44 +362,7 @@ jobs:
           REPORT_JSON: ${{ steps.report.outputs.report_json }}
         run: |
           set -euo pipefail
-          report_json="${REPORT_JSON:-}"
-          if [[ -z "$report_json" || ! -f "$report_json" ]]; then
-            echo "Missing report JSON: ${report_json:-<empty>}" >&2
-            exit 1
-          fi
-
-          schema_version="$(jq -r '.gateFlat.schemaVersion // empty' "$report_json")"
-          escalation_mode="$(jq -r '.escalationIssue.mode // empty' "$report_json")"
-          p0_status="$(jq -r '.p0Status // empty' "$report_json")"
-          escalation_p0_status="$(jq -r '.escalationIssue.p0Status // empty' "$report_json")"
-          strict_conclusion="$(jq -r '.gates.strict.completed.conclusion // empty' "$report_json")"
-          strict_summary_present="$(jq -r '.gateFlat.strict.summaryPresent // empty' "$report_json")"
-
-          if [[ -z "$schema_version" ]] || ! [[ "$schema_version" =~ ^[0-9]+$ ]] || (( schema_version < 2 )); then
-            echo "Invalid gateFlat.schemaVersion: ${schema_version:-<empty>} (expected integer >= 2)" >&2
-            exit 1
-          fi
-
-          case "$escalation_mode" in
-            none_or_closed|suppressed_strict_only|open|unknown)
-              ;;
-            *)
-              echo "Invalid escalationIssue.mode: ${escalation_mode:-<empty>}" >&2
-              exit 1
-              ;;
-          esac
-
-          if [[ -z "$p0_status" || -z "$escalation_p0_status" || "$p0_status" != "$escalation_p0_status" ]]; then
-            echo "p0Status mismatch: p0Status=${p0_status:-<empty>} escalationIssue.p0Status=${escalation_p0_status:-<empty>}" >&2
-            exit 1
-          fi
-
-          if [[ "$strict_conclusion" == "success" && "$strict_summary_present" != "true" ]]; then
-            echo "Strict summary contract failed: strict conclusion=success but gateFlat.strict.summaryPresent=${strict_summary_present:-<empty>}" >&2
-            exit 1
-          fi
-
-          echo "JSON contract OK: schemaVersion=$schema_version mode=$escalation_mode p0Status=$p0_status strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>}"
+          ./scripts/ops/attendance-validate-daily-dashboard-json.sh "${REPORT_JSON:-}"
 
       - name: Upload dashboard artifacts
         if: always()
