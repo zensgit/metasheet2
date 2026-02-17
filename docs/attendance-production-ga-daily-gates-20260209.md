@@ -1138,3 +1138,30 @@ Validation:
     - `gateFlat.schemaVersion=2`
     - `escalationIssue.mode=none_or_closed`
     - `escalationIssue.p0Status=pass`
+
+## Latest Notes (2026-02-17): Strict `gate-summary.json` Contract Gate
+
+Implementation:
+
+- Commit: `dc61d9b5`
+  - Added validator script: `scripts/ops/attendance-validate-gate-summary.sh`
+  - Strict workflow now validates gate-summary contract in both `drill` and `strict-gates` jobs.
+- Commit: `b110f612`
+  - Added `checkout` to `drill` job so validator script is available in-run.
+
+Validation:
+
+- Drill FAIL (expected), validator step passes:
+  - [Attendance Strict Gates (Prod) #22086891675](https://github.com/zensgit/metasheet2/actions/runs/22086891675) (`FAILURE`, expected due `drill_fail=true`)
+  - Evidence:
+    - `output/playwright/ga/22086891675/attendance-strict-gates-prod-22086891675-1/drill/gate-summary.json`
+  - Job step status: `Validate gate-summary contract (drill) = success`
+- Non-drill strict pass, strict validator step passes:
+  - [Attendance Strict Gates (Prod) #22086903531](https://github.com/zensgit/metasheet2/actions/runs/22086903531) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22086903531/20260217-052052-1/gate-summary.json`
+    - `output/playwright/ga/22086903531/20260217-052052-2/gate-summary.json`
+  - Job step status: `Validate gate-summary contract (strict) = success`
+- Drill recovery close:
+  - [Attendance Strict Gates (Prod) #22086993681](https://github.com/zensgit/metasheet2/actions/runs/22086993681) (`SUCCESS`)
+  - Drill issue auto-closed: [#186](https://github.com/zensgit/metasheet2/issues/186)

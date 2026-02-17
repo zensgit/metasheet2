@@ -784,3 +784,23 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Daily Dashboard non-drill (contract validation step enabled) | [#22085141111](https://github.com/zensgit/metasheet2/actions/runs/22085141111) | PASS | `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.md` (`gateFlat.schemaVersion=2`, `escalationIssue.mode=none_or_closed`, `escalationIssue.p0Status=p0Status=pass`) |
+
+## Post-Go Validation (2026-02-17): Strict `gate-summary.json` Contract Is Enforced
+
+This record validates:
+
+- Strict workflow enforces a machine-readable `gate-summary.json` contract in both drill and non-drill paths.
+- Non-drill strict success requires complete strict artifacts and valid gate summaries.
+
+Implementation:
+
+- Commit: `dc61d9b5`
+- Commit: `b110f612`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict drill fail (expected), validator passes | [#22086891675](https://github.com/zensgit/metasheet2/actions/runs/22086891675) | FAIL (expected) | `output/playwright/ga/22086891675/attendance-strict-gates-prod-22086891675-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
+| Strict non-drill (validator in strict job) | [#22086903531](https://github.com/zensgit/metasheet2/actions/runs/22086903531) | PASS | `output/playwright/ga/22086903531/20260217-052052-1/gate-summary.json`, `output/playwright/ga/22086903531/20260217-052052-2/gate-summary.json` (`Validate gate-summary contract (strict)` step success) |
+| Strict drill recovery (close drill issue) | [#22086993681](https://github.com/zensgit/metasheet2/actions/runs/22086993681) | PASS | Issue [#186](https://github.com/zensgit/metasheet2/issues/186) closed |
