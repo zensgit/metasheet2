@@ -821,3 +821,20 @@ Evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Daily Dashboard non-drill (strict summary evidence present) | [#22097651139](https://github.com/zensgit/metasheet2/actions/runs/22097651139) | PASS | `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gates.strict.completed.id=22086903531`, `p0Status=pass`) |
+
+## Post-Go Validation (2026-02-17): Dashboard JSON Contract Enforces `strict success => summaryPresent`
+
+This record validates:
+
+- Dashboard workflow contract check fails closed if strict run is `success` but strict summary evidence is absent.
+- Current production path satisfies the stricter rule.
+
+Implementation:
+
+- Commit: `a9588c34`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (strict summary contract check active) | [#22097790153](https://github.com/zensgit/metasheet2/actions/runs/22097790153) | PASS | `output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22097790153/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`) |

@@ -1188,3 +1188,24 @@ Validation:
     - `gateFlat.strict.summaryPresent=true`
     - `gateFlat.strict.reasonCode=null`
     - `p0Status=pass`
+
+## Latest Notes (2026-02-17): Dashboard JSON Contract Also Enforces Strict Summary Presence
+
+Implementation:
+
+- Commit: `a9588c34`
+- Change:
+  - `Validate report JSON contract` now enforces:
+    - if `.gates.strict.completed.conclusion == "success"` then `.gateFlat.strict.summaryPresent == true`
+
+Validation:
+
+- Daily dashboard non-drill:
+  - [Attendance Daily Gate Dashboard #22097790153](https://github.com/zensgit/metasheet2/actions/runs/22097790153) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22097790153/gate-meta/strict/meta.json`
+  - Verified fields:
+    - `gates.strict.completed.conclusion=success`
+    - `gateFlat.strict.summaryPresent=true`
+    - `p0Status=pass`
