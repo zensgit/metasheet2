@@ -1289,3 +1289,68 @@ Validation:
 - Strict drill recovery:
   - [Attendance Strict Gates (Prod) #22098421982](https://github.com/zensgit/metasheet2/actions/runs/22098421982) (`SUCCESS`)
   - Drill issue auto-closed: [#187](https://github.com/zensgit/metasheet2/issues/187)
+
+## Latest Notes (2026-02-17): Invalid Summary Drill + JSON Schema + Nightly Contract Matrix
+
+Implementation:
+
+- Commit: `d130c5be`
+  - Added strict drill input `drill_invalid_summary` in `.github/workflows/attendance-strict-gates-prod.yml`.
+  - When enabled, drill mutates `gate-summary.json` to an invalid contract (`gates.apiSmoke=BROKEN`) for deterministic FAIL-path testing.
+  - Added JSON schema:
+    - `schemas/attendance/strict-gate-summary.schema.json`
+  - Added schema validator:
+    - `scripts/ops/attendance-validate-gate-summary-schema.mjs`
+  - Added nightly + PR contract matrix workflow:
+    - `.github/workflows/attendance-gate-contract-matrix.yml`
+  - Added contract case runner:
+    - `scripts/ops/attendance-run-gate-contract-case.sh`
+- Commit: `fade1f9b`
+  - Hardened schema validator Ajv resolution (workspace fallback) so CI can validate without root-level Ajv dependency.
+
+Validation:
+
+- Strict drill invalid summary (expected FAIL):
+  - [Attendance Strict Gates (Prod) #22099065860](https://github.com/zensgit/metasheet2/actions/runs/22099065860) (`FAILURE`, expected)
+  - Evidence:
+    - `output/playwright/ga/22099065860/attendance-strict-gates-prod-22099065860-1/drill/gate-summary.json`
+  - Verified:
+    - `gates.apiSmoke="BROKEN"`
+    - `Validate gate-summary contract (drill) = failure` (expected)
+- Dashboard include-drill catches invalid strict summary (expected FAIL):
+  - [Attendance Daily Gate Dashboard #22099097589](https://github.com/zensgit/metasheet2/actions/runs/22099097589) (`FAILURE`, expected)
+  - Evidence:
+    - `output/playwright/ga/22099097589/attendance-daily-gate-dashboard-22099097589-1/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - `gateFlat.strict.reasonCode=STRICT_SUMMARY_INVALID`
+    - `gateFlat.strict.summaryValid=false`
+    - `gateFlat.strict.summaryInvalidReasons=["gates.apiSmoke"]`
+- Strict drill recovery:
+  - [Attendance Strict Gates (Prod) #22099142413](https://github.com/zensgit/metasheet2/actions/runs/22099142413) (`SUCCESS`)
+  - Drill issue auto-closed: [#188](https://github.com/zensgit/metasheet2/issues/188)
+- Nightly/PR contract matrix:
+  - [Attendance Gate Contract Matrix #22099303110](https://github.com/zensgit/metasheet2/actions/runs/22099303110) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.valid.json`
+    - `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.invalid.json`
+    - `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.valid.json`
+    - `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.invalid.json`
+- Strict non-drill (schema step in real path):
+  - [Attendance Strict Gates (Prod) #22099435815](https://github.com/zensgit/metasheet2/actions/runs/22099435815) (`SUCCESS`)
+  - Verified:
+    - `Validate gate-summary JSON schema (strict) = success`
+    - both strict runs generated `gate-summary.json` with `schemaVersion=1`
+- Dashboard non-drill baseline recovery:
+  - [Attendance Daily Gate Dashboard #22099580597](https://github.com/zensgit/metasheet2/actions/runs/22099580597) (`SUCCESS`)
+  - Verified:
+    - `gateFlat.strict.summaryPresent=true`
+    - `gateFlat.strict.summaryValid=true`
+    - `gateFlat.strict.summarySchemaVersion=1`
+
+Branch protection readiness:
+
+- `attendance-gate-contract-matrix.yml` runs on `pull_request` to `main` and is now usable as required checks.
+- Current state: `main` branch protection is not enabled (`GET /branches/main/protection -> 404`).
+- Recommended required checks after enabling protection:
+  - `contracts (strict)`
+  - `contracts (dashboard)`

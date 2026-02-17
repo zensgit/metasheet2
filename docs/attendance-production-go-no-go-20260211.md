@@ -877,3 +877,38 @@ Evidence:
 | Strict non-drill (validator checks schema on real artifacts) | [#22098241004](https://github.com/zensgit/metasheet2/actions/runs/22098241004) | PASS | `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-1/gate-summary.json`, `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-2/gate-summary.json` (`schemaVersion=1`, `Validate gate-summary contract (strict)` step success) |
 | Daily Dashboard non-drill (strict summary validity contract) | [#22098385887](https://github.com/zensgit/metasheet2/actions/runs/22098385887) | PASS | `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gateFlat.strict.summaryValid=true`, `gateFlat.strict.summarySchemaVersion=1`) |
 | Strict drill recovery (close strict drill issue) | [#22098421982](https://github.com/zensgit/metasheet2/actions/runs/22098421982) | PASS | `output/playwright/ga/22098421982/attendance-strict-gates-prod-22098421982-1/drill/gate-summary.json`, Issue: [#187](https://github.com/zensgit/metasheet2/issues/187) closed |
+
+## Post-Go Validation (2026-02-17): Invalid Summary Drill + JSON Schema CI + Nightly Contract Matrix
+
+This record validates:
+
+- Strict drill can intentionally emit invalid `gate-summary.json` and dashboard catches it as `STRICT_SUMMARY_INVALID`.
+- Strict summary schema is externalized and validated in CI.
+- A dedicated nightly + PR contract matrix is in place for branch-protection-ready regression checks.
+
+Implementation:
+
+- Commits: `d130c5be`, `fade1f9b`
+- New assets:
+  - `schemas/attendance/strict-gate-summary.schema.json`
+  - `scripts/ops/attendance-validate-gate-summary-schema.mjs`
+  - `scripts/ops/attendance-run-gate-contract-case.sh`
+  - `.github/workflows/attendance-gate-contract-matrix.yml`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict drill invalid summary (expected FAIL) | [#22099065860](https://github.com/zensgit/metasheet2/actions/runs/22099065860) | FAIL (expected) | `output/playwright/ga/22099065860/attendance-strict-gates-prod-22099065860-1/drill/gate-summary.json` (`gates.apiSmoke=BROKEN`) |
+| Daily Dashboard include-drill (expected FAIL; detects `STRICT_SUMMARY_INVALID`) | [#22099097589](https://github.com/zensgit/metasheet2/actions/runs/22099097589) | FAIL (expected) | `output/playwright/ga/22099097589/attendance-daily-gate-dashboard-22099097589-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.reasonCode=STRICT_SUMMARY_INVALID`, `summaryValid=false`) |
+| Strict drill recovery (close drill issue) | [#22099142413](https://github.com/zensgit/metasheet2/actions/runs/22099142413) | PASS | Issue [#188](https://github.com/zensgit/metasheet2/issues/188) closed |
+| Gate Contract Matrix (nightly/PR regression) | [#22099303110](https://github.com/zensgit/metasheet2/actions/runs/22099303110) | PASS | `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.invalid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.invalid.json` |
+| Strict non-drill (real path; schema validation step enabled) | [#22099435815](https://github.com/zensgit/metasheet2/actions/runs/22099435815) | PASS | `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-1/gate-summary.json`, `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-2/gate-summary.json` (`Validate gate-summary JSON schema (strict)=success`) |
+| Daily Dashboard non-drill baseline (post-recovery) | [#22099580597](https://github.com/zensgit/metasheet2/actions/runs/22099580597) | PASS | `output/playwright/ga/22099580597/attendance-daily-gate-dashboard-22099580597-1/attendance-daily-gate-dashboard.json` (`summaryPresent=true`, `summaryValid=true`, `summarySchemaVersion=1`) |
+
+Branch protection note:
+
+- `attendance-gate-contract-matrix.yml` now runs on `pull_request` and can be set as required checks:
+  - `contracts (strict)`
+  - `contracts (dashboard)`
+- Current API check shows `main` is not protected yet (`Branch not protected`, HTTP 404).
