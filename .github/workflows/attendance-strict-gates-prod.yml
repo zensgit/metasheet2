@@ -90,6 +90,7 @@ jobs:
       DRILL_API_SMOKE_REASON: ${{ inputs.drill_api_smoke_reason || 'AUTH_FAILED' }}
     steps:
       - name: Drill no-op (skip strict gates)
+        id: run_drill
         run: |
           set -euo pipefail
           DRILL_FAIL="${DRILL_FAIL:-false}"
@@ -148,6 +149,12 @@ jobs:
             exit 97
           fi
 
+      - name: Validate gate-summary contract (drill)
+        if: always()
+        run: |
+          set -euo pipefail
+          ./scripts/ops/attendance-validate-gate-summary.sh output/playwright/attendance-prod-acceptance 1
+
       - name: Upload drill artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -197,9 +204,22 @@ jobs:
         run: pnpm exec playwright install --with-deps
 
       - name: Run strict gates twice (remote)
+        id: run_strict
         run: |
           set -euo pipefail
           ./scripts/ops/attendance-run-strict-gates-twice.sh
+
+      - name: Validate gate-summary contract (strict)
+        if: always()
+        env:
+          STRICT_OUTCOME: ${{ steps.run_strict.outcome }}
+        run: |
+          set -euo pipefail
+          min_count=1
+          if [[ "${STRICT_OUTCOME:-}" == "success" ]]; then
+            min_count=2
+          fi
+          ./scripts/ops/attendance-validate-gate-summary.sh output/playwright/attendance-prod-acceptance "$min_count"
 
       - name: Upload artifacts
         if: always()
