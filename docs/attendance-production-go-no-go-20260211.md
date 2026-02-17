@@ -767,3 +767,20 @@ Evidence:
 | Preflight recovery (ensure strict-only condition) | [#22067169136](https://github.com/zensgit/metasheet2/actions/runs/22067169136) | PASS | `output/playwright/ga/22067169136/attendance-remote-preflight-prod-22067169136-1/step-summary.md` |
 | Daily Dashboard include-drill strict-only suppression | [#22067185239](https://github.com/zensgit/metasheet2/actions/runs/22067185239) | FAIL (expected) | `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_strict_only`, `action=suppressed_strict_only_closed`), `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.md`, Issue: [#185](https://github.com/zensgit/metasheet2/issues/185) closed |
 | Strict drill recovery (cleanup close) | [#22067219193](https://github.com/zensgit/metasheet2/actions/runs/22067219193) | PASS | `output/playwright/ga/22067219193/attendance-strict-gates-prod-22067219193-1/drill/gate-summary.json`, Issue: [#184](https://github.com/zensgit/metasheet2/issues/184) closed |
+
+## Post-Go Validation (2026-02-17): Dashboard JSON Contract Is Enforced By Workflow Step
+
+This record validates:
+
+- Dashboard workflow now enforces JSON contract invariants before artifact upload.
+- Contract failure will fail the dashboard job immediately (prevents silent schema drift).
+
+Implementation:
+
+- Commit: `0805a966`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (contract validation step enabled) | [#22085141111](https://github.com/zensgit/metasheet2/actions/runs/22085141111) | PASS | `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.md` (`gateFlat.schemaVersion=2`, `escalationIssue.mode=none_or_closed`, `escalationIssue.p0Status=p0Status=pass`) |

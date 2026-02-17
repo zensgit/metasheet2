@@ -1112,3 +1112,29 @@ Validation:
 - Strict drill recovery close:
   - [Attendance Strict Gates (Prod) #22067219193](https://github.com/zensgit/metasheet2/actions/runs/22067219193) (`SUCCESS`)
   - Issue [#184](https://github.com/zensgit/metasheet2/issues/184) is `CLOSED`.
+
+## Latest Notes (2026-02-17): Dashboard JSON Contract Validation Step (CI Gate)
+
+Implementation:
+
+- Commit: `0805a966`
+- Change:
+  - Daily dashboard workflow adds `Validate report JSON contract` step.
+  - Contract checks:
+    - `.gateFlat.schemaVersion` exists and `>= 2`
+    - `.escalationIssue.mode` in `{none_or_closed,suppressed_strict_only,open,unknown}`
+    - `.escalationIssue.p0Status == .p0Status`
+
+Validation:
+
+- Daily dashboard non-drill:
+  - [Attendance Daily Gate Dashboard #22085141111](https://github.com/zensgit/metasheet2/actions/runs/22085141111) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.md`
+  - Verified fields:
+    - `p0Status=pass`
+    - `overallStatus=pass`
+    - `gateFlat.schemaVersion=2`
+    - `escalationIssue.mode=none_or_closed`
+    - `escalationIssue.p0Status=pass`
