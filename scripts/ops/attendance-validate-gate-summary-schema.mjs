@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import Ajv from 'ajv'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '..', '..')
+const require = createRequire(import.meta.url)
 
 const rootInput = process.argv[2] ?? 'output/playwright/attendance-prod-acceptance'
 const minCountRaw = process.argv[3] ?? '1'
@@ -25,6 +26,22 @@ function resolveFromRepo(value) {
   if (!value) return repoRoot
   if (path.isAbsolute(value)) return path.resolve(value)
   return path.resolve(repoRoot, value)
+}
+
+function loadAjvCtor() {
+  const candidates = [
+    'ajv',
+    path.join(repoRoot, 'packages/core-backend/node_modules/ajv'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const moduleValue = require(candidate)
+      return moduleValue?.default || moduleValue
+    } catch {
+      // try next candidate
+    }
+  }
+  return null
 }
 
 async function pathType(targetPath) {
@@ -105,9 +122,14 @@ async function main() {
     die(`gate-summary.json count=${files.length} < expected minimum=${minCount} (root=${rootPath})`)
   }
 
-  const ajv = new Ajv({
+  const AjvCtor = loadAjvCtor()
+  if (!AjvCtor) {
+    die('cannot resolve ajv module (tried root and packages/core-backend)')
+  }
+  const ajv = new AjvCtor({
     allErrors: true,
     strict: false,
+    schemaId: 'auto',
   })
   const validate = ajv.compile(schema)
 
