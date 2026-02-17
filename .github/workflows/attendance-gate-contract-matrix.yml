@@ -1,0 +1,68 @@
+name: Attendance Gate Contract Matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly contract regression after attendance gates complete.
+    - cron: '45 4 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/attendance-gate-contract-matrix.yml'
+      - '.github/workflows/attendance-strict-gates-prod.yml'
+      - '.github/workflows/attendance-daily-gate-dashboard.yml'
+      - 'scripts/ops/attendance-validate-gate-summary.sh'
+      - 'scripts/ops/attendance-validate-gate-summary-schema.mjs'
+      - 'scripts/ops/attendance-validate-daily-dashboard-json.sh'
+      - 'scripts/ops/attendance-run-gate-contract-case.sh'
+      - 'scripts/ops/attendance-daily-gate-report.mjs'
+      - 'scripts/ops/attendance-run-gates.sh'
+      - 'schemas/attendance/strict-gate-summary.schema.json'
+
+concurrency:
+  group: attendance-gate-contract-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        case_id: [strict, dashboard]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run contract case
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ops/attendance-run-gate-contract-case.sh
+          ./scripts/ops/attendance-run-gate-contract-case.sh "${{ matrix.case_id }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-gate-contract-matrix-${{ matrix.case_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-gate-contract-matrix/${{ matrix.case_id }}/**

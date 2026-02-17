@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metasheet.app/schemas/attendance/strict-gate-summary.schema.json",
+  "title": "Attendance Strict Gate Summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "apiBase",
+    "webUrl",
+    "expectProductMode",
+    "exitCode",
+    "gates",
+    "gateReasons"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "apiBase": {
+      "type": "string"
+    },
+    "webUrl": {
+      "type": "string"
+    },
+    "expectProductMode": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exitCode": {
+      "type": "number"
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preflight",
+        "apiSmoke",
+        "provisioning",
+        "playwrightProd",
+        "playwrightDesktop",
+        "playwrightMobile"
+      ],
+      "properties": {
+        "preflight": {
+          "$ref": "#/definitions/gateStatus"
+        },
+        "apiSmoke": {
+          "$ref": "#/definitions/gateStatus"
+        },
+        "provisioning": {
+          "$ref": "#/definitions/gateStatus"
+        },
+        "playwrightProd": {
+          "$ref": "#/definitions/gateStatus"
+        },
+        "playwrightDesktop": {
+          "$ref": "#/definitions/gateStatus"
+        },
+        "playwrightMobile": {
+          "$ref": "#/definitions/gateStatus"
+        }
+      }
+    },
+    "gateReasons": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiSmoke",
+        "provisioning",
+        "playwrightProd",
+        "playwrightDesktop",
+        "playwrightMobile"
+      ],
+      "properties": {
+        "apiSmoke": {
+          "$ref": "#/definitions/gateReason"
+        },
+        "provisioning": {
+          "$ref": "#/definitions/gateReason"
+        },
+        "playwrightProd": {
+          "$ref": "#/definitions/gateReason"
+        },
+        "playwrightDesktop": {
+          "$ref": "#/definitions/gateReason"
+        },
+        "playwrightMobile": {
+          "$ref": "#/definitions/gateReason"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "gateStatus": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SKIP"
+      ]
+    },
+    "gateReason": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[A-Z0-9_]+$",
+          "minLength": 1
+        }
+      ]
+    }
+  }
+}

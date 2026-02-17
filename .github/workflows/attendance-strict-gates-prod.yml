@@ -14,6 +14,10 @@ on:
         description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
         required: false
         default: 'false'
+      drill_invalid_summary:
+        description: 'Optional: write an intentionally invalid gate-summary.json in drill mode (true/false)'
+        required: false
+        default: 'false'
       drill_failed_gate:
         description: 'Optional: gate to mark as FAIL in drill gate-summary.json (apiSmoke|provisioning|playwrightProd|playwrightDesktop|playwrightMobile)'
         required: false
@@ -85,6 +89,7 @@ jobs:
     timeout-minutes: 5
     env:
       DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+      DRILL_INVALID_SUMMARY: ${{ inputs.drill_invalid_summary || 'false' }}
       DRILL_FAILED_GATE: ${{ inputs.drill_failed_gate || 'apiSmoke' }}
       DRILL_GATE_REASON: ${{ inputs.drill_gate_reason || 'TIMEOUT' }}
       DRILL_API_SMOKE_REASON: ${{ inputs.drill_api_smoke_reason || 'AUTH_FAILED' }}
@@ -97,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           DRILL_FAIL="${DRILL_FAIL:-false}"
+          DRILL_INVALID_SUMMARY="${DRILL_INVALID_SUMMARY:-false}"
           DRILL_FAILED_GATE="${DRILL_FAILED_GATE:-apiSmoke}"
           DRILL_GATE_REASON="${DRILL_GATE_REASON:-TIMEOUT}"
           DRILL_API_SMOKE_REASON="${DRILL_API_SMOKE_REASON:-AUTH_FAILED}"
@@ -147,6 +153,18 @@ jobs:
             }
           }
           EOF
+
+          if [[ "$DRILL_INVALID_SUMMARY" == "true" ]]; then
+            invalid_tmp="output/playwright/attendance-prod-acceptance/drill/gate-summary.tmp.json"
+            jq '.gates.apiSmoke = "BROKEN"' \
+              output/playwright/attendance-prod-acceptance/drill/gate-summary.json > "$invalid_tmp"
+            mv "$invalid_tmp" output/playwright/attendance-prod-acceptance/drill/gate-summary.json
+            {
+              echo ""
+              echo "DRILL_INVALID_SUMMARY=true"
+              echo "Mutated drill gate-summary.json to invalid contract: gates.apiSmoke=BROKEN"
+            } >> output/playwright/attendance-prod-acceptance/drill/drill.txt
+          fi
 
           if [[ "$DRILL_FAIL" == "true" ]]; then
             echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
@@ -224,6 +242,21 @@ jobs:
             min_count=2
           fi
           ./scripts/ops/attendance-validate-gate-summary.sh output/playwright/attendance-prod-acceptance "$min_count"
+
+      - name: Validate gate-summary JSON schema (strict)
+        if: always()
+        env:
+          STRICT_OUTCOME: ${{ steps.run_strict.outcome }}
+        run: |
+          set -euo pipefail
+          min_count=1
+          if [[ "${STRICT_OUTCOME:-}" == "success" ]]; then
+            min_count=2
+          fi
+          node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
+            output/playwright/attendance-prod-acceptance \
+            "$min_count" \
+            schemas/attendance/strict-gate-summary.schema.json
 
       - name: Upload artifacts
         if: always()
