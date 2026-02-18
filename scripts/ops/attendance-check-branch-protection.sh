@@ -63,6 +63,70 @@ trap cleanup EXIT
 
 protection_json="${tmp_dir}/protection.json"
 protection_err="${tmp_dir}/protection.err"
+graphql_json="${tmp_dir}/graphql.json"
+graphql_err="${tmp_dir}/graphql.err"
+
+strict_current=""
+contexts_current=()
+
+function try_graphql_fallback() {
+  set +e
+  gh api graphql \
+    -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks requiredStatusCheckContexts } } } }' \
+    -f owner="$owner" \
+    -f name="$repo_name" \
+    >"$graphql_json" 2>"$graphql_err"
+  local gql_rc=$?
+  set -e
+  if (( gql_rc != 0 )); then
+    return 1
+  fi
+
+  local lines_path="${tmp_dir}/graphql-rules.tsv"
+  jq -r '
+    .data.repository.branchProtectionRules.nodes[]? |
+    [.pattern, ((.requiresStrictStatusChecks // false) | tostring), ((.requiredStatusCheckContexts // []) | join("\u001f"))] |
+    @tsv
+  ' "$graphql_json" >"$lines_path"
+
+  local best_score=-1
+  local best_pattern=""
+  local best_strict=""
+  local best_contexts_join=""
+
+  while IFS=$'\t' read -r pattern strict_value contexts_join; do
+    [[ -n "${pattern:-}" ]] || continue
+    local match=false
+    local score=-1
+
+    if [[ "$pattern" == "$BRANCH" ]]; then
+      match=true
+      score=$((1000 + ${#pattern}))
+    elif [[ "$BRANCH" == $pattern ]]; then
+      match=true
+      score=${#pattern}
+    fi
+
+    if [[ "$match" == "true" && "$score" -gt "$best_score" ]]; then
+      best_score="$score"
+      best_pattern="$pattern"
+      best_strict="$strict_value"
+      best_contexts_join="$contexts_join"
+    fi
+  done <"$lines_path"
+
+  if [[ "$best_score" -lt 0 ]]; then
+    return 2
+  fi
+
+  strict_current="${best_strict:-false}"
+  contexts_current=()
+  if [[ -n "${best_contexts_join:-}" ]]; then
+    IFS=$'\x1f' read -r -a contexts_current <<< "$best_contexts_join"
+  fi
+  info "graphql_fallback_pattern=${best_pattern}"
+  return 0
+}
 
 set +e
 gh api -H "Accept: application/vnd.github+json" \
@@ -77,13 +141,23 @@ if (( rc != 0 )); then
     die "BRANCH_NOT_PROTECTED" "branch '${BRANCH}' is not protected"
   fi
   if grep -Eqi "Resource not accessible by integration|HTTP 403" <<<"$err_text"; then
-    die "API_FORBIDDEN" "branch protection API is forbidden for current token (need admin-capable token)"
+    if try_graphql_fallback; then
+      info "using_graphql_fallback=true"
+    else
+      gql_fallback_rc=$?
+      if (( gql_fallback_rc == 2 )); then
+        die "BRANCH_NOT_PROTECTED" "branch '${BRANCH}' is not protected"
+      fi
+      gql_err="$(cat "$graphql_err" 2>/dev/null || true)"
+      die "API_FORBIDDEN" "branch protection API is forbidden and graphql fallback failed: ${gql_err:-unknown error}"
+    fi
+  else
+    die "API_FAILED" "failed to fetch branch protection: ${err_text:-unknown error}"
   fi
-  die "API_FAILED" "failed to fetch branch protection: ${err_text:-unknown error}"
+else
+  strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
+  mapfile -t contexts_current < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
 fi
-
-strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
-mapfile -t contexts_current < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
 
 missing_checks=()
 for check in "${required_checks[@]}"; do
