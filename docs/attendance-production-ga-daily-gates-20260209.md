@@ -1439,3 +1439,44 @@ Operational note:
   - `ATTENDANCE_ADMIN_GH_TOKEN` (read branch protection API for this repo)
 - Then rerun:
   - `gh workflow run attendance-branch-protection-prod.yml -f drill_fail=false`
+
+## Latest Notes (2026-02-18): Branch Protection Gate Recovery (PASS)
+
+Recovery actions:
+
+- Added workflow token secret for branch-protection API reads:
+  - `ATTENDANCE_ADMIN_GH_TOKEN`
+- Applied branch protection baseline on `main` via:
+  - `scripts/ops/attendance-ensure-branch-protection.sh`
+  - Required checks:
+    - `contracts (strict)`
+    - `contracts (dashboard)`
+  - Strict mode:
+    - `required_status_checks.strict=true`
+
+Validation:
+
+- Branch Protection gate detects true drift state:
+  - [Attendance Branch Protection (Prod) #22142204955](https://github.com/zensgit/metasheet2/actions/runs/22142204955) (`FAILURE`)
+  - Reason: `BRANCH_NOT_PROTECTED`
+  - Evidence:
+    - `output/playwright/ga/22142204955/step-summary.md`
+    - `output/playwright/ga/22142204955/protection.log`
+- Branch Protection gate recovery:
+  - [Attendance Branch Protection (Prod) #22142247652](https://github.com/zensgit/metasheet2/actions/runs/22142247652) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22142247652/step-summary.md`
+    - `output/playwright/ga/22142247652/protection.log`
+  - Verified:
+    - `strict_current=true`
+    - `contexts_current=contracts (strict),contracts (dashboard)`
+- Daily Dashboard after recovery:
+  - [Attendance Daily Gate Dashboard #22142280338](https://github.com/zensgit/metasheet2/actions/runs/22142280338) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - `Overall=PASS`
+    - `Branch Protection` row `PASS` (run `#22142247652`)
+- P1 issue closure:
+  - [#190](https://github.com/zensgit/metasheet2/issues/190) auto-closed on recovery.

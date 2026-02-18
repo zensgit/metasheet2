@@ -955,3 +955,26 @@ Current blocker:
 
 - Workflow token lacks permission to read branch protection API in this repository (`API_FORBIDDEN`).
 - Required follow-up: set secret `ATTENDANCE_ADMIN_GH_TOKEN` (admin-capable token) and rerun `attendance-branch-protection-prod.yml`.
+
+## Post-Go Validation (2026-02-18): Branch Protection Gate Recovery (PASS)
+
+This record validates:
+
+- Branch Protection gate moved from token-blocked/branch-unprotected state to healthy PASS.
+- Daily Dashboard now remains PASS with Branch Protection included as P1.
+- P1 branch-protection tracking issue auto-closed after recovery.
+
+Implementation:
+
+- Commit: `ade579cb` (REST 403 -> GraphQL fallback in check script)
+- Ops action: configured repo secret `ATTENDANCE_ADMIN_GH_TOKEN`
+- Ops action: applied branch protection on `main` with required checks + strict mode
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Protection (state check, expected FAIL before apply) | [#22142204955](https://github.com/zensgit/metasheet2/actions/runs/22142204955) | FAIL (expected) | `output/playwright/ga/22142204955/step-summary.md`, `output/playwright/ga/22142204955/protection.log` (`reason=BRANCH_NOT_PROTECTED`) |
+| Branch Protection recovery (after apply) | [#22142247652](https://github.com/zensgit/metasheet2/actions/runs/22142247652) | PASS | `output/playwright/ga/22142247652/step-summary.md`, `output/playwright/ga/22142247652/protection.log` (`strict_current=true`, required checks present) |
+| Daily Dashboard (includes Branch Protection, post recovery) | [#22142280338](https://github.com/zensgit/metasheet2/actions/runs/22142280338) | PASS | `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| P1 issue closure | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Auto-closed by Branch Protection workflow recovery path |
