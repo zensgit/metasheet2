@@ -1,6 +1,6 @@
 name: Attendance Branch Protection (Prod)
 
-run-name: Attendance Branch Protection (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+run-name: Attendance Branch Protection (Prod)
 
 on:
   workflow_dispatch:
