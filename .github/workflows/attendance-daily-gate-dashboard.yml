@@ -51,6 +51,7 @@ jobs:
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
+      CONTRACT_WORKFLOW: attendance-gate-contract-matrix.yml
     steps:
       - name: Checkout
         uses: actions/checkout@v4

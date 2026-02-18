@@ -28,6 +28,7 @@ const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remot
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
+const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-daily-gate-dashboard').trim()
 
@@ -559,6 +560,7 @@ function renderMarkdown({
   strictGate,
   perfGate,
   longrunGate,
+  contractGate,
   openTrackingIssues,
   openTrackingIssuesError,
   overallStatus,
@@ -573,6 +575,7 @@ function renderMarkdown({
     'Strict Gates': strictWorkflow,
     'Perf Baseline': perfWorkflow,
     'Perf Long Run': longrunWorkflow,
+    'Gate Contract Matrix': contractWorkflow,
   }
 
   const lines = []
@@ -646,7 +649,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -660,7 +663,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -670,7 +673,7 @@ function renderMarkdown({
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Host metrics / storage health / perf gate failure/stale runs): fix same day, rerun gates with thresholds and record evidence.')
+  lines.push('- `P1` (Host metrics / storage health / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
   lines.push('- `P2` (weekly upload cleanup signal / missing evidence metadata): fix within 24h.')
   lines.push('')
 
@@ -687,6 +690,7 @@ function renderMarkdown({
       [strictGate.name]: strictGate,
       [perfGate.name]: perfGate,
       [longrunGate.name]: longrunGate,
+      [contractGate.name]: contractGate,
     }
     lines.push('## Findings')
     lines.push('')
@@ -845,6 +849,10 @@ function renderMarkdown({
       } else {
         lines.push('- Perf Long Run: inspect perf artifacts (`perf.log`, scenario summaries) for the first error and threshold evaluation.')
       }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Gate Contract Matrix' && f.code === 'RUN_FAILED')) {
+      lines.push('- Gate Contract Matrix: contract regression detected. Open matrix artifacts and fix strict/dashboard contract scripts or schema drift before merging.')
     }
 
     if (findings.some((f) => f && f.gate === 'Strict Gates' && f.code === 'RUN_FAILED')) {
@@ -1016,12 +1024,12 @@ function renderMarkdown({
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run host metrics / storage health / perf baseline / perf long run manually when any `P1` finding exists.')
+  lines.push('2. Re-run host metrics / storage health / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate]) {
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
@@ -1081,6 +1089,7 @@ async function run() {
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
+  const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
@@ -1117,6 +1126,11 @@ async function run() {
   if (!includeDrillRuns && longrunListRaw.length !== longrunList.length) {
     info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
+  const contractListRaw = Array.isArray(contractRuns?.list) ? contractRuns.list : []
+  const contractList = includeDrillRuns ? contractListRaw : contractListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && contractListRaw.length !== contractList.length) {
+    info(`contract: filtered drill/debug runs (${contractListRaw.length - contractList.length})`)
+  }
 
   const preflightLatestAny = preflightList[0] ?? null
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
@@ -1132,6 +1146,8 @@ async function run() {
   const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
   const longrunLatestAny = longrunList[0] ?? null
   const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
+  const contractLatestAny = contractList[0] ?? null
+  const contractLatestCompleted = contractList.find((run) => run?.status === 'completed') ?? null
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
@@ -1197,6 +1213,16 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: longrunRuns.error,
+  })
+
+  const contractGate = evaluateGate({
+    name: 'Gate Contract Matrix',
+    severity: 'P1',
+    latestAny: contractLatestAny,
+    latestCompleted: contractLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: contractRuns.error,
   })
 
   const hasRunFailed = (gate) => Array.isArray(gate?.findings) && gate.findings.some((f) => f && f.code === 'RUN_FAILED')
@@ -1340,6 +1366,7 @@ async function run() {
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
+    ...contractGate.findings,
   ]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
   const p0Status = findings.some((f) => f && f.severity === 'P0') ? 'fail' : 'pass'
@@ -1464,6 +1491,7 @@ async function run() {
     strict: toGateFlat(strictGate),
     perf: toGateFlat(perfGate),
     longrun: toGateFlat(longrunGate),
+    contract: toGateFlat(contractGate),
   }
 
   const report = {
@@ -1483,6 +1511,7 @@ async function run() {
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
+      contract: contractGate,
     },
     findings,
   }
@@ -1500,6 +1529,7 @@ async function run() {
     strictGate,
     perfGate,
     longrunGate,
+    contractGate,
     openTrackingIssues,
     openTrackingIssuesError,
     overallStatus,
