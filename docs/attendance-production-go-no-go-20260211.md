@@ -912,3 +912,21 @@ Branch protection note:
   - `contracts (strict)`
   - `contracts (dashboard)`
 - Current API check shows `main` is not protected yet (`Branch not protected`, HTTP 404).
+
+## Post-Go Validation (2026-02-18): Daily Dashboard Adds Contract Matrix Gate
+
+This record validates:
+
+- Daily dashboard now tracks `Gate Contract Matrix` as a P1 gate.
+- Contract matrix signal is visible in both Markdown and JSON outputs.
+
+Implementation:
+
+- Commit: `fe25ba74`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard non-drill (includes contract matrix gate) | [#22137921321](https://github.com/zensgit/metasheet2/actions/runs/22137921321) | PASS | `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.json` (`gates.contract` present, `gateFlat.contract.status=PASS`) |
+| Referenced Contract Matrix run (latest non-drill completed) | [#22127576975](https://github.com/zensgit/metasheet2/actions/runs/22127576975) | PASS | `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`, `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json` |

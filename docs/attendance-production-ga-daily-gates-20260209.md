@@ -1354,3 +1354,41 @@ Branch protection readiness:
 - Recommended required checks after enabling protection:
   - `contracts (strict)`
   - `contracts (dashboard)`
+
+## Latest Notes (2026-02-18): Daily Dashboard Includes Gate Contract Matrix (P1)
+
+Implementation:
+
+- Commit: `fe25ba74`
+- Change:
+  - `scripts/ops/attendance-daily-gate-report.mjs` now includes a new P1 gate: `Gate Contract Matrix`.
+  - `.github/workflows/attendance-daily-gate-dashboard.yml` now exports `CONTRACT_WORKFLOW=attendance-gate-contract-matrix.yml`.
+  - Dashboard markdown/json now includes:
+    - Gate Status row for `Gate Contract Matrix`
+    - Artifact download command for the matrix run
+    - `gateFlat.contract` + `gates.contract` machine-readable entries
+
+Validation:
+
+- Local report generation (with GH token):
+  - `GH_TOKEN="$(gh auth token)" BRANCH=main LOOKBACK_HOURS=48 node scripts/ops/attendance-daily-gate-report.mjs`
+  - Evidence:
+    - `output/playwright/attendance-daily-gate-dashboard/20260218-112756/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - `gateFlat.contract.status=PASS`
+    - `gateFlat.contract.runId=22127576975`
+- GA dashboard non-drill (with contract gate):
+  - [Attendance Daily Gate Dashboard #22137921321](https://github.com/zensgit/metasheet2/actions/runs/22137921321) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - Gate table contains `Gate Contract Matrix` row (`PASS`)
+    - `gates.contract` exists
+    - `gateFlat.contract.gate="Gate Contract Matrix"`
+    - `gateFlat.contract.severity="P1"`
+- Referenced matrix run evidence (latest non-drill completed):
+  - [Attendance Gate Contract Matrix #22127576975](https://github.com/zensgit/metasheet2/actions/runs/22127576975) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`
+    - `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json`
