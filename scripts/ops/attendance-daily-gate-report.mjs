@@ -854,6 +854,8 @@ function renderMarkdown({
         lines.push('- Branch Protection: one or more required checks are missing. Restore required contexts and rerun.')
       } else if (reason === 'STRICT_NOT_ENABLED') {
         lines.push('- Branch Protection: `required_status_checks.strict` is disabled. Re-enable strict mode and rerun.')
+      } else if (reason === 'API_FORBIDDEN') {
+        lines.push('- Branch Protection: workflow token lacks branch-protection read permission. Configure an admin-capable token secret (for example `ATTENDANCE_ADMIN_GH_TOKEN`) and rerun.')
       }
     }
 

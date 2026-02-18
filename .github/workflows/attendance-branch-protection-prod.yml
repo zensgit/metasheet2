@@ -45,7 +45,7 @@ jobs:
       rc: ${{ steps.run_check.outputs.rc }}
       reason: ${{ steps.run_check.outputs.reason }}
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_GH_TOKEN || secrets.GITHUB_TOKEN }}
       BRANCH: ${{ inputs.branch || 'main' }}
       REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
       REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}

@@ -76,6 +76,9 @@ if (( rc != 0 )); then
   if grep -qi "Branch not protected" <<<"$err_text"; then
     die "BRANCH_NOT_PROTECTED" "branch '${BRANCH}' is not protected"
   fi
+  if grep -Eqi "Resource not accessible by integration|HTTP 403" <<<"$err_text"; then
+    die "API_FORBIDDEN" "branch protection API is forbidden for current token (need admin-capable token)"
+  fi
   die "API_FAILED" "failed to fetch branch protection: ${err_text:-unknown error}"
 fi
 
