@@ -1,0 +1,264 @@
+name: Attendance Branch Protection (Prod)
+
+run-name: Attendance Branch Protection (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to validate protection on'
+        required: false
+        default: 'main'
+      required_checks_csv:
+        description: 'Comma-separated required checks'
+        required: false
+        default: 'contracts (strict),contracts (dashboard)'
+      require_strict:
+        description: 'Require required_status_checks.strict=true (true/false)'
+        required: false
+        default: 'true'
+      drill_fail:
+        description: 'Optional: force failure after check for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for drill runs'
+        required: false
+        default: ''
+  schedule:
+    # Daily before daily dashboard.
+    - cron: '25 4 * * *'
+
+concurrency:
+  group: attendance-branch-protection-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  protection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rc: ${{ steps.run_check.outputs.rc }}
+      reason: ${{ steps.run_check.outputs.reason }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH: ${{ inputs.branch || 'main' }}
+      REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
+      REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}
+      DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run branch protection check
+        id: run_check
+        continue-on-error: true
+        run: |
+          set +e
+          set -o pipefail
+          mkdir -p output/branch-protection
+          log_file="output/branch-protection/protection.log"
+
+          REPO="${GITHUB_REPOSITORY}" \
+          BRANCH="${BRANCH}" \
+          REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV}" \
+          REQUIRE_STRICT="${REQUIRE_STRICT}" \
+          OUTPUT_JSON="output/branch-protection/protection.json" \
+          ./scripts/ops/attendance-check-branch-protection.sh 2>&1 | tee "$log_file"
+          rc="${PIPESTATUS[0]}"
+
+          if [[ "${DRILL_FAIL}" == "true" ]]; then
+            echo "[attendance-branch-protection][drill] forcing failure after check" | tee -a "$log_file"
+            rc=97
+          fi
+
+          reason="OK"
+          if [[ "$rc" != "0" ]]; then
+            reason="$(grep -Eo '\[attendance-check-branch-protection\] reason=[A-Z0-9_]+' "$log_file" | tail -n1 | sed 's/.*reason=//' || true)"
+            if [[ -z "$reason" ]]; then
+              reason="CHECK_FAILED"
+            fi
+          fi
+
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          CHECK_RC: ${{ steps.run_check.outputs.rc }}
+          CHECK_REASON: ${{ steps.run_check.outputs.reason }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/branch-protection
+          status="PASS"
+          if [[ "${CHECK_RC:-1}" != "0" ]]; then
+            status="FAIL"
+          fi
+          reason="${CHECK_REASON:-UNKNOWN}"
+          artifact_name="attendance-branch-protection-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          {
+            echo "### Branch Protection"
+            echo ""
+            echo "- Status: **${status}**"
+            echo "- Failure reason: \`${reason}\`"
+            echo "- Branch: \`${BRANCH}\`"
+            echo "- Required checks: \`${REQUIRED_CHECKS_CSV}\`"
+            echo "- Require strict: \`${REQUIRE_STRICT}\`"
+            echo "- Run: ${run_url}"
+            echo ""
+            echo "#### Runbook"
+            echo "- Daily gates handbook: ${repo_url}/blob/main/docs/attendance-production-ga-daily-gates-20260209.md"
+            echo "- Go/No-Go log: ${repo_url}/blob/main/docs/attendance-production-go-no-go-20260211.md"
+            echo ""
+            echo "#### Download artifacts"
+            echo '```bash'
+            echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\""
+            echo '```'
+            echo ""
+            echo "#### Output tail"
+            echo '```text'
+            tail -n 120 output/branch-protection/protection.log || true
+            echo '```'
+          } | tee output/branch-protection/step-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-branch-protection-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/branch-protection/**
+
+      - name: Fail workflow when check failed
+        if: always()
+        env:
+          CHECK_RC: ${{ steps.run_check.outputs.rc }}
+        run: |
+          set -euo pipefail
+          if [[ "${CHECK_RC:-1}" != "0" ]]; then
+            exit 1
+          fi
+
+  issue:
+    name: Track P1 Issue
+    needs: [protection]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      CHECK_RESULT: ${{ needs.protection.result }}
+      CHECK_REASON: ${{ needs.protection.outputs.reason }}
+      CHECK_RC: ${{ needs.protection.outputs.rc }}
+    steps:
+      - name: Create/reopen/close P1 issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drill = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+            const allowIssueOps = !drill || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue ops (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const title = titleOverride || '[Attendance P1] Branch protection drift alert'
+            const failed = String(process.env.CHECK_RESULT || '').trim() === 'failure'
+            const reason = String(process.env.CHECK_REASON || 'UNKNOWN').trim() || 'UNKNOWN'
+            const rc = String(process.env.CHECK_RC || '1').trim() || '1'
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const runMarker = `actions/runs/${context.runId}`
+            const artifactName = `attendance-branch-protection-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+
+            const body = [
+              'Automated branch protection drift tracking (P1).',
+              '',
+              `Run: ${runUrl}`,
+              `Result: ${failed ? 'FAIL' : 'PASS'} (rc=${rc}, reason=${reason})`,
+              '',
+              'Download artifacts:',
+              '```bash',
+              `gh run download ${context.runId} -n \"${artifactName}\" -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (!failed) {
+              if (!match || match.state !== 'open') {
+                core.info('No open P1 issue to close.')
+                return
+              }
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: match.number,
+                body: `Branch protection gate recovered.\n\nRun: ${runUrl}`,
+              })
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: match.number,
+                state: 'closed',
+              })
+              core.info(`Closed issue #${match.number}`)
+              return
+            }
+
+            if (match) {
+              if (match.state !== 'open') {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: match.number,
+                  state: 'open',
+                  body,
+                })
+                core.info(`Reopened issue #${match.number}`)
+                return
+              }
+
+              const bodyText = typeof match.body === 'string' ? match.body : ''
+              if (bodyText.includes(runMarker)) {
+                core.info(`Issue body already includes run ${context.runId}; skipping comment.`)
+                return
+              }
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: match.number,
+                body,
+              })
+              core.info(`Commented on existing issue #${match.number}`)
+              return
+            }
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+            })
+            core.info(`Created issue #${created.data.number}`)

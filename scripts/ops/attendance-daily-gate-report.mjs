@@ -29,6 +29,7 @@ const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
+const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-protection-prod.yml').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-daily-gate-dashboard').trim()
 
@@ -262,6 +263,20 @@ function parseStorageStepSummary(text) {
     uploadGb,
     oldestFileDays,
     fileCount,
+  }
+}
+
+function parseBranchProtectionStepSummary(text) {
+  if (!text) return null
+  const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
+  const branch = text.match(/^- Branch: `([^`]+)`/m)?.[1] || null
+  const checks = text.match(/^- Required checks: `([^`]+)`/m)?.[1] || null
+  const strict = text.match(/^- Require strict: `([^`]+)`/m)?.[1] || null
+  return {
+    reason,
+    branch,
+    checks,
+    strict,
   }
 }
 
@@ -554,6 +569,7 @@ function renderMarkdown({
   lookbackHoursValue,
   cleanupLookbackHoursValue,
   preflightGate,
+  protectionGate,
   metricsGate,
   storageGate,
   cleanupGate,
@@ -569,6 +585,7 @@ function renderMarkdown({
 }) {
   const workflowByGate = {
     'Remote Preflight': preflightWorkflow,
+    'Branch Protection': protectionWorkflow,
     'Host Metrics': metricsWorkflow,
     'Storage Health': storageWorkflow,
     'Upload Cleanup': cleanupWorkflow,
@@ -612,6 +629,11 @@ function renderMarkdown({
       if (gate.name === 'Remote Preflight') {
         if (meta.rc) extra.push(`rc=${meta.rc}`)
       }
+      if (gate.name === 'Branch Protection') {
+        if (meta.branch) extra.push(`branch=${meta.branch}`)
+        if (meta.checks) extra.push(`checks=${meta.checks}`)
+        if (meta.strict) extra.push(`strict=${meta.strict}`)
+      }
       if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) extra.push(`missing=${meta.missingMetrics}`)
       }
@@ -649,7 +671,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -663,7 +685,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -673,7 +695,7 @@ function renderMarkdown({
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Host metrics / storage health / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
+  lines.push('- `P1` (Branch protection / host metrics / storage health / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
   lines.push('- `P2` (weekly upload cleanup signal / missing evidence metadata): fix within 24h.')
   lines.push('')
 
@@ -684,6 +706,7 @@ function renderMarkdown({
   } else {
     const gateByName = {
       [preflightGate.name]: preflightGate,
+      [protectionGate.name]: protectionGate,
       [metricsGate.name]: metricsGate,
       [storageGate.name]: storageGate,
       [cleanupGate.name]: cleanupGate,
@@ -701,6 +724,11 @@ function renderMarkdown({
       if (meta?.reason) metaBits.push(`reason=${meta.reason}`)
       if (finding.gate === 'Remote Preflight') {
         if (meta?.rc) metaBits.push(`rc=${meta.rc}`)
+      }
+      if (finding.gate === 'Branch Protection') {
+        if (meta?.branch) metaBits.push(`branch=${meta.branch}`)
+        if (meta?.checks) metaBits.push(`checks=${meta.checks}`)
+        if (meta?.strict) metaBits.push(`strict=${meta.strict}`)
       }
       if (finding.gate === 'Host Metrics') {
         if (meta?.missingMetrics) metaBits.push(`missing=${meta.missingMetrics}`)
@@ -809,6 +837,23 @@ function renderMarkdown({
       }
       if (reason && reason.startsWith('NGINX_UPLOAD_')) {
         lines.push('- Remote Preflight: verify `docker/nginx.conf` includes the upload location and has `client_max_body_size >= 120m`, then redeploy.')
+      }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Branch Protection' && f.code === 'RUN_FAILED')) {
+      const reason = String(protectionGate?.meta?.reason || '').trim()
+      if (reason) {
+        lines.push(`- Branch Protection: failure reason detected: \`${reason}\`.`)
+      } else {
+        lines.push('- Branch Protection: open the run Step Summary and check `Failure reason`.')
+      }
+      lines.push('- Branch Protection: keep required checks `contracts (strict)` + `contracts (dashboard)` on `main` and rerun the branch-protection workflow.')
+      if (reason === 'BRANCH_NOT_PROTECTED') {
+        lines.push('- Branch Protection: `main` is unprotected. Enable branch protection immediately (required status checks + strict) and rerun.')
+      } else if (reason === 'REQUIRED_CHECKS_MISSING') {
+        lines.push('- Branch Protection: one or more required checks are missing. Restore required contexts and rerun.')
+      } else if (reason === 'STRICT_NOT_ENABLED') {
+        lines.push('- Branch Protection: `required_status_checks.strict` is disabled. Re-enable strict mode and rerun.')
       }
     }
 
@@ -1024,12 +1069,12 @@ function renderMarkdown({
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run host metrics / storage health / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
+  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
@@ -1083,6 +1128,7 @@ async function run() {
   info(`repository=${repo} branch=${branch}`)
 
   const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
+  const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: branch })
   const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
   const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
   const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
@@ -1095,6 +1141,11 @@ async function run() {
   const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
   if (!includeDrillRuns && preflightListRaw.length !== preflightList.length) {
     info(`preflight: filtered drill/debug runs (${preflightListRaw.length - preflightList.length})`)
+  }
+  const protectionListRaw = Array.isArray(protectionRuns?.list) ? protectionRuns.list : []
+  const protectionList = includeDrillRuns ? protectionListRaw : protectionListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && protectionListRaw.length !== protectionList.length) {
+    info(`protection: filtered drill/debug runs (${protectionListRaw.length - protectionList.length})`)
   }
   const metricsListRaw = Array.isArray(metricsRuns?.list) ? metricsRuns.list : []
   const metricsList = includeDrillRuns ? metricsListRaw : metricsListRaw.filter((run) => !isDrillRun(run))
@@ -1134,6 +1185,8 @@ async function run() {
 
   const preflightLatestAny = preflightList[0] ?? null
   const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
+  const protectionLatestAny = protectionList[0] ?? null
+  const protectionLatestCompleted = protectionList.find((run) => run?.status === 'completed') ?? null
   const metricsLatestAny = metricsList[0] ?? null
   const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
   const storageLatestAny = storageList[0] ?? null
@@ -1157,6 +1210,15 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: preflightRuns.error,
+  })
+  const protectionGate = evaluateGate({
+    name: 'Branch Protection',
+    severity: 'P1',
+    latestAny: protectionLatestAny,
+    latestCompleted: protectionLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: protectionRuns.error,
   })
   const metricsGate = evaluateGate({
     name: 'Host Metrics',
@@ -1243,6 +1305,18 @@ async function run() {
         parse: parsePreflightStepSummary,
       })
       if (meta) preflightGate.meta = meta
+    }
+    if (hasRunFailed(protectionGate) && protectionGate.completed?.id) {
+      const runId = protectionGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-branch-protection-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'protection'),
+        parse: parseBranchProtectionStepSummary,
+      })
+      if (meta) protectionGate.meta = meta
     }
     if (hasRunFailed(metricsGate) && metricsGate.completed?.id) {
       const runId = metricsGate.completed.id
@@ -1360,6 +1434,7 @@ async function run() {
 
   const findings = [
     ...preflightGate.findings,
+    ...protectionGate.findings,
     ...metricsGate.findings,
     ...storageGate.findings,
     ...cleanupGate.findings,
@@ -1403,6 +1478,10 @@ async function run() {
     if (meta) {
       if (gate.name === 'Remote Preflight') {
         if (meta.rc) summaryBits.push(`rc=${meta.rc}`)
+      } else if (gate.name === 'Branch Protection') {
+        if (meta.branch) summaryBits.push(`branch=${meta.branch}`)
+        if (meta.checks) summaryBits.push(`checks=${meta.checks}`)
+        if (meta.strict) summaryBits.push(`strict=${meta.strict}`)
       } else if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) summaryBits.push(`missing=${meta.missingMetrics}`)
         if (meta.metricsUrl) summaryBits.push(`metrics_url=${meta.metricsUrl}`)
@@ -1452,6 +1531,10 @@ async function run() {
     if (meta) {
       if (gate.name === 'Remote Preflight') {
         flat.remoteExitCode = meta.rc ?? null
+      } else if (gate.name === 'Branch Protection') {
+        flat.branch = meta.branch ?? null
+        flat.requiredChecks = meta.checks ?? null
+        flat.requireStrict = meta.strict ?? null
       } else if (gate.name === 'Host Metrics') {
         flat.missingMetrics = meta.missingMetrics ?? null
         flat.metricsUrl = meta.metricsUrl ?? null
@@ -1485,6 +1568,7 @@ async function run() {
   const gateFlat = {
     schemaVersion: 2,
     preflight: toGateFlat(preflightGate),
+    protection: toGateFlat(protectionGate),
     metrics: toGateFlat(metricsGate),
     storage: toGateFlat(storageGate),
     cleanup: toGateFlat(cleanupGate),
@@ -1505,6 +1589,7 @@ async function run() {
     gateFlat,
     gates: {
       preflight: preflightGate,
+      protection: protectionGate,
       metrics: metricsGate,
       storage: storageGate,
       cleanup: cleanupGate,
@@ -1523,6 +1608,7 @@ async function run() {
     lookbackHoursValue: lookbackHours,
     cleanupLookbackHoursValue: cleanupLookbackHours,
     preflightGate,
+    protectionGate,
     metricsGate,
     storageGate,
     cleanupGate,
