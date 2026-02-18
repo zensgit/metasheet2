@@ -1392,3 +1392,50 @@ Validation:
   - Evidence:
     - `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`
     - `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json`
+
+## Latest Notes (2026-02-18): Branch Protection Drift Gate (P1) + Dashboard Integration
+
+Implementation:
+
+- Commit: `1e2f7fc0`
+  - Added workflow: `.github/workflows/attendance-branch-protection-prod.yml`
+  - Added scripts:
+    - `scripts/ops/attendance-check-branch-protection.sh`
+    - `scripts/ops/attendance-ensure-branch-protection.sh`
+  - Added Daily Dashboard integration:
+    - `.github/workflows/attendance-daily-gate-dashboard.yml` (`PROTECTION_WORKFLOW`)
+    - `scripts/ops/attendance-daily-gate-report.mjs` (`Branch Protection` gate, P1)
+- Commit: `bb317a8d`
+  - Simplified workflow `run-name` so GitHub can register/dispatch the new workflow normally.
+- Commit: `de293073`
+  - Classified token permission failures as `API_FORBIDDEN`.
+  - Workflow token fallback now supports:
+    - `secrets.ATTENDANCE_ADMIN_GH_TOKEN || secrets.GITHUB_TOKEN`
+
+Validation:
+
+- Branch Protection workflow (non-drill):
+  - [Attendance Branch Protection (Prod) #22141450936](https://github.com/zensgit/metasheet2/actions/runs/22141450936) (`FAILURE`)
+  - Verified reason: `API_FORBIDDEN` (current token cannot read branch protection API).
+  - Evidence:
+    - `output/playwright/ga/22141450936/step-summary.md`
+    - `output/playwright/ga/22141450936/protection.log`
+- P1 issue tracking:
+  - Opened/updated: [#190](https://github.com/zensgit/metasheet2/issues/190) (`[Attendance P1] Branch protection drift alert`)
+- Daily Dashboard includes `Branch Protection` gate:
+  - [Attendance Daily Gate Dashboard #22141481582](https://github.com/zensgit/metasheet2/actions/runs/22141481582) (`FAILURE`, expected while P1 unresolved)
+  - Verified:
+    - `P0 Status = PASS`
+    - `Overall = FAIL` (due P1 `Branch Protection`)
+    - `gateFlat.protection.reasonCode=API_FORBIDDEN`
+  - Evidence:
+    - `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22141481582/gate-meta/protection/meta.json`
+
+Operational note:
+
+- To make this gate pass in CI, configure an admin-capable token secret:
+  - `ATTENDANCE_ADMIN_GH_TOKEN` (read branch protection API for this repo)
+- Then rerun:
+  - `gh workflow run attendance-branch-protection-prod.yml -f drill_fail=false`

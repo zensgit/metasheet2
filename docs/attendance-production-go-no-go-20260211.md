@@ -930,3 +930,28 @@ Evidence:
 |---|---|---|---|
 | Daily Dashboard non-drill (includes contract matrix gate) | [#22137921321](https://github.com/zensgit/metasheet2/actions/runs/22137921321) | PASS | `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.json` (`gates.contract` present, `gateFlat.contract.status=PASS`) |
 | Referenced Contract Matrix run (latest non-drill completed) | [#22127576975](https://github.com/zensgit/metasheet2/actions/runs/22127576975) | PASS | `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`, `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json` |
+
+## Post-Go Validation (2026-02-18): Branch Protection Drift Gate + Dashboard Integration
+
+This record validates:
+
+- A dedicated branch-protection drift workflow exists and uploads auditable artifacts.
+- Daily dashboard now includes `Branch Protection` as a P1 gate.
+- P1 issue tracking is active for branch-protection drift.
+
+Implementation:
+
+- Commits: `1e2f7fc0`, `bb317a8d`, `de293073`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Protection (Prod) non-drill | [#22141450936](https://github.com/zensgit/metasheet2/actions/runs/22141450936) | FAIL | `output/playwright/ga/22141450936/step-summary.md`, `output/playwright/ga/22141450936/protection.log` (`reason=API_FORBIDDEN`) |
+| P1 tracking issue (branch protection drift) | [#190](https://github.com/zensgit/metasheet2/issues/190) | OPEN | `[Attendance P1] Branch protection drift alert` (opened/updated by run `#22141450936`) |
+| Daily Dashboard (includes Branch Protection gate) | [#22141481582](https://github.com/zensgit/metasheet2/actions/runs/22141481582) | FAIL (expected, P1 unresolved) | `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22141481582/gate-meta/protection/meta.json` (`P0 Status=PASS`, `gateFlat.protection.reasonCode=API_FORBIDDEN`) |
+
+Current blocker:
+
+- Workflow token lacks permission to read branch protection API in this repository (`API_FORBIDDEN`).
+- Required follow-up: set secret `ATTENDANCE_ADMIN_GH_TOKEN` (admin-capable token) and rerun `attendance-branch-protection-prod.yml`.
