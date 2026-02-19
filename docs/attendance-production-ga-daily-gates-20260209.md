@@ -478,6 +478,7 @@ Optional repo variables (threshold guardrails):
 - `ATTENDANCE_PERF_MAX_COMMIT_MS`
 - `ATTENDANCE_PERF_MAX_EXPORT_MS`
 - `ATTENDANCE_PERF_MAX_ROLLBACK_MS`
+- `ATTENDANCE_PERF_BASELINE_ROWS` (optional; default baseline rows, current default is `100000`)
 
 Artifacts:
 
@@ -486,6 +487,13 @@ Artifacts:
   - Includes `perf.log` (stdout/stderr capture) for debugging failures.
 
 P1 tracking issue (no paging): `[Attendance P1] Perf baseline alert` (opened/reopened on failure; commented+closed on recovery).
+
+Defaults (current):
+
+- `rows=100000` (daily baseline)
+- `upload_csv=true`
+- `commit_async=true`
+- `mode=commit`
 
 Drill (expected FAIL; no production API calls; uses a safe override title):
 
@@ -509,6 +517,11 @@ Schedule:
 Defaults:
 
 - `upload_csv=true` (recommended; ensures the longrun trend covers the `/attendance/import/upload` channel).
+- Scenario matrix includes:
+  - `rows10k-commit` (commit + export + rollback)
+  - `rows50k-preview`
+  - `rows100k-preview`
+  - `rows500k-preview` (extreme-scale guard)
 
 Manual trigger:
 
