@@ -1525,3 +1525,37 @@ Validation:
     - Branch Protection row `PASS` (run `#22168353987`)
 - P1 issue:
   - [#190](https://github.com/zensgit/metasheet2/issues/190) remained `CLOSED` after recovery update.
+
+## Latest Notes (2026-02-19): Protected Main PR Compatibility + Post-Merge Re-Verify
+
+Implementation:
+
+- Commit: `c68df5c7`
+  - `.github/workflows/attendance-gate-contract-matrix.yml` now runs on **all** PRs to `main` (removed `paths` filter).
+  - Reason: branch protection requires `contracts (strict)` + `contracts (dashboard)` checks; path-filtered workflow could make some PRs unmergeable.
+
+Validation:
+
+- PR checks include both required contexts and pass:
+  - PR: [#191](https://github.com/zensgit/metasheet2/pull/191) (`MERGED`)
+  - Contract matrix PR run:
+    - [Attendance Gate Contract Matrix #22168460857](https://github.com/zensgit/metasheet2/actions/runs/22168460857) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22168460857/attendance-gate-contract-matrix-strict-22168460857-1/strict/gate-summary.valid.json`
+    - `output/playwright/ga/22168460857/attendance-gate-contract-matrix-dashboard-22168460857-1/dashboard.valid.json`
+- Post-merge branch protection gate:
+  - [Attendance Branch Protection (Prod) #22168482721](https://github.com/zensgit/metasheet2/actions/runs/22168482721) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22168482721/step-summary.md`
+    - `output/playwright/ga/22168482721/protection.log`
+  - Verified:
+    - `strict_current=true`
+    - `enforce_admins_current=true`
+- Post-merge daily dashboard:
+  - [Attendance Daily Gate Dashboard #22168496046](https://github.com/zensgit/metasheet2/actions/runs/22168496046) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - `Overall=PASS`
+    - Branch Protection row `PASS` (run `#22168482721`)
