@@ -1116,6 +1116,10 @@ describe('Attendance Plugin Integration', () => {
     const job = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
     const jobId = job?.id
     expect(typeof jobId).toBe('string')
+    expect(['standard', 'bulk']).toContain(String(job?.engine || ''))
+    expect(typeof job?.processedRows).toBe('number')
+    expect(typeof job?.failedRows).toBe('number')
+    expect(typeof job?.elapsedMs).toBe('number')
 
     // Retry should return the same job without requiring a new commitToken.
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
@@ -1134,6 +1138,7 @@ describe('Attendance Plugin Integration', () => {
 
     // Poll job status until completion (fallback path runs in-process in tests).
     let batchId = ''
+    let completedJob: any = null
     for (let i = 0; i < 100; i++) {
       const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
         method: 'GET',
@@ -1147,6 +1152,7 @@ describe('Attendance Plugin Integration', () => {
       const status = String(jobData?.status || '')
       if (status === 'completed') {
         batchId = String(jobData?.batchId || '')
+        completedJob = jobData
         break
       }
       if (status === 'failed') {
@@ -1156,6 +1162,11 @@ describe('Attendance Plugin Integration', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     expect(batchId).toBeTruthy()
+    expect(['standard', 'bulk']).toContain(String(completedJob?.engine || ''))
+    expect(typeof completedJob?.processedRows).toBe('number')
+    expect(typeof completedJob?.failedRows).toBe('number')
+    expect(completedJob?.processedRows).toBeGreaterThanOrEqual(1)
+    expect(typeof completedJob?.elapsedMs).toBe('number')
 
     const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
       method: 'POST',
@@ -1231,6 +1242,10 @@ describe('Attendance Plugin Integration', () => {
     const job = (previewRes.body as { data?: { job?: any } } | undefined)?.data?.job
     const jobId = job?.id
     expect(typeof jobId).toBe('string')
+    expect(['standard', 'bulk']).toContain(String(job?.engine || ''))
+    expect(typeof job?.processedRows).toBe('number')
+    expect(typeof job?.failedRows).toBe('number')
+    expect(typeof job?.elapsedMs).toBe('number')
 
     const { commitToken: _commitToken, ...retryPayload } = previewPayload
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
@@ -1247,6 +1262,7 @@ describe('Attendance Plugin Integration', () => {
     expect(retryData?.idempotent).toBe(true)
 
     let finished = false
+    let completedPreviewJob: any = null
     for (let i = 0; i < 100; i++) {
       const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
         method: 'GET',
@@ -1263,6 +1279,7 @@ describe('Attendance Plugin Integration', () => {
         expect(Array.isArray(jobData?.preview?.items)).toBe(true)
         expect(jobData?.preview?.items?.length).toBeGreaterThan(0)
         expect(jobData?.preview?.rowCount).toBe(2)
+        completedPreviewJob = jobData
         finished = true
         break
       }
@@ -1274,6 +1291,11 @@ describe('Attendance Plugin Integration', () => {
     }
 
     expect(finished).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(completedPreviewJob?.engine || ''))
+    expect(typeof completedPreviewJob?.processedRows).toBe('number')
+    expect(typeof completedPreviewJob?.failedRows).toBe('number')
+    expect(completedPreviewJob?.processedRows).toBeGreaterThanOrEqual(2)
+    expect(typeof completedPreviewJob?.elapsedMs).toBe('number')
   })
 
   it('exports attendance admin audit logs as CSV', async () => {
@@ -1575,6 +1597,7 @@ describe('Attendance Plugin Integration', () => {
     expect(commitRes.status).toBe(200)
     const commitData = (commitRes.body as { data?: any } | undefined)?.data
     expect(commitData?.imported).toBe(1)
+    expect(commitData?.engine).toBe('standard')
     expect(Array.isArray(commitData?.items)).toBe(true)
     expect(commitData?.items.length).toBe(0)
     expect(typeof commitData?.batchId).toBe('string')
