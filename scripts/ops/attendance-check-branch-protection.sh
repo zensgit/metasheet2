@@ -6,6 +6,9 @@ BRANCH="${BRANCH:-main}"
 REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV:-contracts (strict),contracts (dashboard)}"
 REQUIRE_STRICT="${REQUIRE_STRICT:-true}"
 REQUIRE_ENFORCE_ADMINS="${REQUIRE_ENFORCE_ADMINS:-false}"
+REQUIRE_PR_REVIEWS="${REQUIRE_PR_REVIEWS:-false}"
+MIN_APPROVING_REVIEW_COUNT="${MIN_APPROVING_REVIEW_COUNT:-1}"
+REQUIRE_CODE_OWNER_REVIEWS="${REQUIRE_CODE_OWNER_REVIEWS:-false}"
 OUTPUT_JSON="${OUTPUT_JSON:-}"
 
 function die() {
@@ -44,6 +47,12 @@ repo_name="${REPO##*/}"
 
 require_strict="$(bool_normalize "$REQUIRE_STRICT")"
 require_enforce_admins="$(bool_normalize "$REQUIRE_ENFORCE_ADMINS")"
+require_pr_reviews="$(bool_normalize "$REQUIRE_PR_REVIEWS")"
+require_code_owner_reviews="$(bool_normalize "$REQUIRE_CODE_OWNER_REVIEWS")"
+if [[ ! "$MIN_APPROVING_REVIEW_COUNT" =~ ^[0-9]+$ ]]; then
+  die "INVALID_MIN_APPROVING_REVIEW_COUNT" "MIN_APPROVING_REVIEW_COUNT must be a non-negative integer"
+fi
+min_approving_review_count="$MIN_APPROVING_REVIEW_COUNT"
 
 required_checks=()
 IFS=',' read -r -a raw_required_checks <<< "$REQUIRED_CHECKS_CSV"
@@ -57,7 +66,7 @@ if (( ${#required_checks[@]} == 0 )); then
 fi
 
 info "repo=${REPO} branch=${BRANCH}"
-info "required_checks=$(IFS=,; echo "${required_checks[*]}") require_strict=${require_strict} require_enforce_admins=${require_enforce_admins}"
+info "required_checks=$(IFS=,; echo "${required_checks[*]}") require_strict=${require_strict} require_enforce_admins=${require_enforce_admins} require_pr_reviews=${require_pr_reviews} min_approving_review_count=${min_approving_review_count} require_code_owner_reviews=${require_code_owner_reviews}"
 
 tmp_dir="$(mktemp -d)"
 cleanup() { rm -rf "$tmp_dir"; }
@@ -70,12 +79,15 @@ graphql_err="${tmp_dir}/graphql.err"
 
 strict_current=""
 enforce_admins_current=""
+pr_reviews_required_current=""
+approving_review_count_current=""
+code_owner_reviews_current=""
 contexts_current=()
 
 function try_graphql_fallback() {
   set +e
   gh api graphql \
-    -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks requiredStatusCheckContexts } } } }' \
+    -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks isAdminEnforced requiredStatusCheckContexts requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews } } } }' \
     -f owner="$owner" \
     -f name="$repo_name" \
     >"$graphql_json" 2>"$graphql_err"
@@ -88,7 +100,15 @@ function try_graphql_fallback() {
   local lines_path="${tmp_dir}/graphql-rules.tsv"
   jq -r '
     .data.repository.branchProtectionRules.nodes[]? |
-    [.pattern, ((.requiresStrictStatusChecks // false) | tostring), ((.isAdminEnforced // false) | tostring), ((.requiredStatusCheckContexts // []) | join("\u001f"))] |
+    [
+      .pattern,
+      ((.requiresStrictStatusChecks // false) | tostring),
+      ((.isAdminEnforced // false) | tostring),
+      ((.requiresApprovingReviews // false) | tostring),
+      ((.requiredApprovingReviewCount // 0) | tostring),
+      ((.requiresCodeOwnerReviews // false) | tostring),
+      ((.requiredStatusCheckContexts // []) | join("\u001f"))
+    ] |
     @tsv
   ' "$graphql_json" >"$lines_path"
 
@@ -96,9 +116,12 @@ function try_graphql_fallback() {
   local best_pattern=""
   local best_strict=""
   local best_enforce_admins=""
+  local best_pr_reviews_required=""
+  local best_approving_review_count=""
+  local best_code_owner_reviews=""
   local best_contexts_join=""
 
-  while IFS=$'\t' read -r pattern strict_value enforce_admins_value contexts_join; do
+  while IFS=$'\t' read -r pattern strict_value enforce_admins_value pr_reviews_required_value approving_review_count_value code_owner_reviews_value contexts_join; do
     [[ -n "${pattern:-}" ]] || continue
     local match=false
     local score=-1
@@ -116,6 +139,9 @@ function try_graphql_fallback() {
       best_pattern="$pattern"
       best_strict="$strict_value"
       best_enforce_admins="$enforce_admins_value"
+      best_pr_reviews_required="$pr_reviews_required_value"
+      best_approving_review_count="$approving_review_count_value"
+      best_code_owner_reviews="$code_owner_reviews_value"
       best_contexts_join="$contexts_join"
     fi
   done <"$lines_path"
@@ -126,6 +152,9 @@ function try_graphql_fallback() {
 
   strict_current="${best_strict:-false}"
   enforce_admins_current="${best_enforce_admins:-false}"
+  pr_reviews_required_current="${best_pr_reviews_required:-false}"
+  approving_review_count_current="${best_approving_review_count:-0}"
+  code_owner_reviews_current="${best_code_owner_reviews:-false}"
   contexts_current=()
   if [[ -n "${best_contexts_join:-}" ]]; then
     IFS=$'\x1f' read -r -a contexts_current <<< "$best_contexts_join"
@@ -163,6 +192,9 @@ if (( rc != 0 )); then
 else
   strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
   enforce_admins_current="$(jq -r '.enforce_admins.enabled // false' "$protection_json")"
+  pr_reviews_required_current="$(jq -r 'if (.required_pull_request_reviews == null) then false else true end' "$protection_json")"
+  approving_review_count_current="$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' "$protection_json")"
+  code_owner_reviews_current="$(jq -r '.required_pull_request_reviews.require_code_owner_reviews // false' "$protection_json")"
   mapfile -t contexts_current < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
 fi
 
@@ -180,6 +212,102 @@ for check in "${required_checks[@]}"; do
   fi
 done
 
+if [[ ! "$approving_review_count_current" =~ ^[0-9]+$ ]]; then
+  approving_review_count_current=0
+fi
+checks_missing_csv=""
+if (( ${#missing_checks[@]} > 0 )); then
+  checks_missing_csv="$(IFS=,; echo "${missing_checks[*]}")"
+fi
+
+strict_ok=true
+if [[ "$require_strict" == "true" && "$strict_current" != "true" ]]; then
+  strict_ok=false
+fi
+
+admins_ok=true
+if [[ "$require_enforce_admins" == "true" && "$enforce_admins_current" != "true" ]]; then
+  admins_ok=false
+fi
+
+checks_ok=true
+if (( ${#missing_checks[@]} > 0 )); then
+  checks_ok=false
+fi
+
+pr_reviews_enabled_ok=true
+if [[ "$require_pr_reviews" == "true" && "$pr_reviews_required_current" != "true" ]]; then
+  pr_reviews_enabled_ok=false
+fi
+
+approving_count_ok=true
+if [[ "$require_pr_reviews" == "true" && "$approving_review_count_current" -lt "$min_approving_review_count" ]]; then
+  approving_count_ok=false
+fi
+
+code_owner_ok=true
+if [[ "$require_code_owner_reviews" == "true" && "$code_owner_reviews_current" != "true" ]]; then
+  code_owner_ok=false
+fi
+
+info "strict_current=${strict_current}"
+info "enforce_admins_current=${enforce_admins_current}"
+info "pr_reviews_required_current=${pr_reviews_required_current}"
+info "approving_review_count_current=${approving_review_count_current}"
+info "code_owner_reviews_current=${code_owner_reviews_current}"
+info "checks_missing=${checks_missing_csv}"
+info "contexts_current=$(IFS=,; echo "${contexts_current[*]}")"
+
+if [[ -n "$OUTPUT_JSON" ]]; then
+  mkdir -p "$(dirname "$OUTPUT_JSON")"
+  jq -n \
+    --arg repo "$REPO" \
+    --arg branch "$BRANCH" \
+    --arg requireStrict "$require_strict" \
+    --arg strictCurrent "$strict_current" \
+    --arg requireEnforceAdmins "$require_enforce_admins" \
+    --arg enforceAdminsCurrent "$enforce_admins_current" \
+    --arg requirePrReviews "$require_pr_reviews" \
+    --arg minApprovingReviewCount "$min_approving_review_count" \
+    --arg prReviewsRequiredCurrent "$pr_reviews_required_current" \
+    --arg approvingReviewCountCurrent "$approving_review_count_current" \
+    --arg requireCodeOwnerReviews "$require_code_owner_reviews" \
+    --arg codeOwnerReviewsCurrent "$code_owner_reviews_current" \
+    --arg strictOk "$strict_ok" \
+    --arg adminsOk "$admins_ok" \
+    --arg checksOk "$checks_ok" \
+    --arg prReviewsEnabledOk "$pr_reviews_enabled_ok" \
+    --arg approvingCountOk "$approving_count_ok" \
+    --arg codeOwnerOk "$code_owner_ok" \
+    --argjson requiredChecks "$(printf '%s\n' "${required_checks[@]}" | jq -R . | jq -s .)" \
+    --argjson contextsCurrent "$(printf '%s\n' "${contexts_current[@]}" | jq -R . | jq -s .)" \
+    --arg checksMissing "$checks_missing_csv" \
+    '{
+      repo: $repo,
+      branch: $branch,
+      requireStrict: ($requireStrict == "true"),
+      strictCurrent: ($strictCurrent == "true"),
+      requireEnforceAdmins: ($requireEnforceAdmins == "true"),
+      enforceAdminsCurrent: ($enforceAdminsCurrent == "true"),
+      requirePrReviews: ($requirePrReviews == "true"),
+      minApprovingReviewCount: ($minApprovingReviewCount | tonumber),
+      prReviewsRequiredCurrent: ($prReviewsRequiredCurrent == "true"),
+      approvingReviewCountCurrent: ($approvingReviewCountCurrent | tonumber),
+      requireCodeOwnerReviews: ($requireCodeOwnerReviews == "true"),
+      codeOwnerReviewsCurrent: ($codeOwnerReviewsCurrent == "true"),
+      strictOk: ($strictOk == "true"),
+      adminsOk: ($adminsOk == "true"),
+      checksOk: ($checksOk == "true"),
+      prReviewsEnabledOk: ($prReviewsEnabledOk == "true"),
+      approvingCountOk: ($approvingCountOk == "true"),
+      codeOwnerOk: ($codeOwnerOk == "true"),
+      requiredChecks: $requiredChecks,
+      contextsCurrent: $contextsCurrent,
+      checksMissing: (if ($checksMissing | length) == 0 then [] else ($checksMissing | split(",")) end),
+      ok: (($strictOk == "true") and ($adminsOk == "true") and ($checksOk == "true") and ($prReviewsEnabledOk == "true") and ($approvingCountOk == "true") and ($codeOwnerOk == "true"))
+    }' >"$OUTPUT_JSON"
+fi
+
 if [[ "$require_strict" == "true" && "$strict_current" != "true" ]]; then
   die "STRICT_NOT_ENABLED" "required_status_checks.strict=false but REQUIRE_STRICT=true"
 fi
@@ -192,31 +320,16 @@ if (( ${#missing_checks[@]} > 0 )); then
   die "REQUIRED_CHECKS_MISSING" "missing required checks: $(IFS=,; echo "${missing_checks[*]}")"
 fi
 
-if [[ -n "$OUTPUT_JSON" ]]; then
-  mkdir -p "$(dirname "$OUTPUT_JSON")"
-  jq -n \
-    --arg repo "$REPO" \
-    --arg branch "$BRANCH" \
-    --arg requireStrict "$require_strict" \
-    --arg strictCurrent "$strict_current" \
-    --arg requireEnforceAdmins "$require_enforce_admins" \
-    --arg enforceAdminsCurrent "$enforce_admins_current" \
-    --argjson requiredChecks "$(printf '%s\n' "${required_checks[@]}" | jq -R . | jq -s .)" \
-    --argjson contextsCurrent "$(printf '%s\n' "${contexts_current[@]}" | jq -R . | jq -s .)" \
-    '{
-      repo: $repo,
-      branch: $branch,
-      requireStrict: ($requireStrict == "true"),
-      strictCurrent: ($strictCurrent == "true"),
-      requireEnforceAdmins: ($requireEnforceAdmins == "true"),
-      enforceAdminsCurrent: ($enforceAdminsCurrent == "true"),
-      requiredChecks: $requiredChecks,
-      contextsCurrent: $contextsCurrent,
-      ok: true
-    }' >"$OUTPUT_JSON"
+if [[ "$require_pr_reviews" == "true" && "$pr_reviews_required_current" != "true" ]]; then
+  die "PR_REVIEWS_NOT_ENABLED" "required_pull_request_reviews is not enabled but REQUIRE_PR_REVIEWS=true"
 fi
 
-info "strict_current=${strict_current}"
-info "enforce_admins_current=${enforce_admins_current}"
-info "contexts_current=$(IFS=,; echo "${contexts_current[*]}")"
-info "OK: required checks present and strict/admin settings are acceptable"
+if [[ "$require_pr_reviews" == "true" && "$approving_review_count_current" -lt "$min_approving_review_count" ]]; then
+  die "APPROVING_REVIEW_COUNT_TOO_LOW" "required_approving_review_count=${approving_review_count_current} but expected >= ${min_approving_review_count}"
+fi
+
+if [[ "$require_code_owner_reviews" == "true" && "$code_owner_reviews_current" != "true" ]]; then
+  die "CODE_OWNER_REVIEWS_NOT_ENABLED" "require_code_owner_reviews=false but REQUIRE_CODE_OWNER_REVIEWS=true"
+fi
+
+info "OK: required checks, strict/admin settings, and review settings are acceptable"

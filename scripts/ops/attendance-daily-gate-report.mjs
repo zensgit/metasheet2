@@ -29,7 +29,10 @@ const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
-const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-protection-prod.yml').trim()
+const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-policy-drift-prod.yml').trim()
+const protectionArtifactPrefix = protectionWorkflow.includes('branch-policy-drift')
+  ? 'attendance-branch-policy-drift-prod'
+  : 'attendance-branch-protection-prod'
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-daily-gate-dashboard').trim()
 
@@ -273,12 +276,18 @@ function parseBranchProtectionStepSummary(text) {
   const checks = text.match(/^- Required checks: `([^`]+)`/m)?.[1] || null
   const strict = text.match(/^- Require strict: `([^`]+)`/m)?.[1] || null
   const enforceAdmins = text.match(/^- Require enforce admins: `([^`]+)`/m)?.[1] || null
+  const requirePrReviews = text.match(/^- Require PR reviews: `([^`]+)`/m)?.[1] || null
+  const minApprovingReviews = text.match(/^- Min approving reviews: `([^`]+)`/m)?.[1] || null
+  const requireCodeOwnerReviews = text.match(/^- Require code owner reviews: `([^`]+)`/m)?.[1] || null
   return {
     reason,
     branch,
     checks,
     strict,
     enforceAdmins,
+    requirePrReviews,
+    minApprovingReviews,
+    requireCodeOwnerReviews,
   }
 }
 
@@ -636,6 +645,9 @@ function renderMarkdown({
         if (meta.checks) extra.push(`checks=${meta.checks}`)
         if (meta.strict) extra.push(`strict=${meta.strict}`)
         if (meta.enforceAdmins) extra.push(`enforce_admins=${meta.enforceAdmins}`)
+        if (meta.requirePrReviews) extra.push(`pr_reviews=${meta.requirePrReviews}`)
+        if (meta.minApprovingReviews) extra.push(`min_approvals=${meta.minApprovingReviews}`)
+        if (meta.requireCodeOwnerReviews) extra.push(`code_owner=${meta.requireCodeOwnerReviews}`)
       }
       if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) extra.push(`missing=${meta.missingMetrics}`)
@@ -733,6 +745,9 @@ function renderMarkdown({
         if (meta?.checks) metaBits.push(`checks=${meta.checks}`)
         if (meta?.strict) metaBits.push(`strict=${meta.strict}`)
         if (meta?.enforceAdmins) metaBits.push(`enforce_admins=${meta.enforceAdmins}`)
+        if (meta?.requirePrReviews) metaBits.push(`pr_reviews=${meta.requirePrReviews}`)
+        if (meta?.minApprovingReviews) metaBits.push(`min_approvals=${meta.minApprovingReviews}`)
+        if (meta?.requireCodeOwnerReviews) metaBits.push(`code_owner=${meta.requireCodeOwnerReviews}`)
       }
       if (finding.gate === 'Host Metrics') {
         if (meta?.missingMetrics) metaBits.push(`missing=${meta.missingMetrics}`)
@@ -851,7 +866,7 @@ function renderMarkdown({
       } else {
         lines.push('- Branch Protection: open the run Step Summary and check `Failure reason`.')
       }
-      lines.push('- Branch Protection: keep required checks `contracts (strict)` + `contracts (dashboard)` on `main` and rerun the branch-protection workflow.')
+      lines.push('- Branch Protection: keep required checks `contracts (strict)` + `contracts (dashboard)` on `main` and rerun the branch-policy-drift workflow.')
       if (reason === 'BRANCH_NOT_PROTECTED') {
         lines.push('- Branch Protection: `main` is unprotected. Enable branch protection immediately (required status checks + strict) and rerun.')
       } else if (reason === 'REQUIRED_CHECKS_MISSING') {
@@ -860,6 +875,12 @@ function renderMarkdown({
         lines.push('- Branch Protection: `required_status_checks.strict` is disabled. Re-enable strict mode and rerun.')
       } else if (reason === 'ENFORCE_ADMINS_DISABLED') {
         lines.push('- Branch Protection: `enforce_admins.enabled` is disabled. Enable enforce-admins and rerun to prevent bypass pushes.')
+      } else if (reason === 'PR_REVIEWS_NOT_ENABLED') {
+        lines.push('- Branch Protection: `required_pull_request_reviews` is not enabled. Enable PR reviews and rerun.')
+      } else if (reason === 'APPROVING_REVIEW_COUNT_TOO_LOW') {
+        lines.push('- Branch Protection: required approving review count is below policy. Increase `required_approving_review_count` and rerun.')
+      } else if (reason === 'CODE_OWNER_REVIEWS_NOT_ENABLED') {
+        lines.push('- Branch Protection: `require_code_owner_reviews` is disabled. Enable code-owner reviews and rerun.')
       } else if (reason === 'API_FORBIDDEN') {
         lines.push('- Branch Protection: workflow token lacks branch-protection read permission. Configure an admin-capable token secret (for example `ATTENDANCE_ADMIN_GH_TOKEN`) and rerun.')
       }
@@ -1314,13 +1335,13 @@ async function run() {
       })
       if (meta) preflightGate.meta = meta
     }
-    if (hasRunFailed(protectionGate) && protectionGate.completed?.id) {
+    if (protectionGate.completed?.id) {
       const runId = protectionGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
         ownerValue: owner,
         repoValue: repoName,
         runId,
-        artifactNamePrefix: `attendance-branch-protection-prod-${runId}-`,
+        artifactNamePrefix: `${protectionArtifactPrefix}-${runId}-`,
         metaOutDir: path.join(metaRoot, 'protection'),
         parse: parseBranchProtectionStepSummary,
       })
@@ -1491,6 +1512,9 @@ async function run() {
         if (meta.checks) summaryBits.push(`checks=${meta.checks}`)
         if (meta.strict) summaryBits.push(`strict=${meta.strict}`)
         if (meta.enforceAdmins) summaryBits.push(`enforce_admins=${meta.enforceAdmins}`)
+        if (meta.requirePrReviews) summaryBits.push(`pr_reviews=${meta.requirePrReviews}`)
+        if (meta.minApprovingReviews) summaryBits.push(`min_approvals=${meta.minApprovingReviews}`)
+        if (meta.requireCodeOwnerReviews) summaryBits.push(`code_owner=${meta.requireCodeOwnerReviews}`)
       } else if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) summaryBits.push(`missing=${meta.missingMetrics}`)
         if (meta.metricsUrl) summaryBits.push(`metrics_url=${meta.metricsUrl}`)
@@ -1545,6 +1569,9 @@ async function run() {
         flat.requiredChecks = meta.checks ?? null
         flat.requireStrict = meta.strict ?? null
         flat.requireEnforceAdmins = meta.enforceAdmins ?? null
+        flat.requirePrReviews = meta.requirePrReviews ?? null
+        flat.minApprovingReviews = meta.minApprovingReviews ?? null
+        flat.requireCodeOwnerReviews = meta.requireCodeOwnerReviews ?? null
       } else if (gate.name === 'Host Metrics') {
         flat.missingMetrics = meta.missingMetrics ?? null
         flat.metricsUrl = meta.metricsUrl ?? null

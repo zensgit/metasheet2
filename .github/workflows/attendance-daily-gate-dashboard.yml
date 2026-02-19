@@ -52,7 +52,7 @@ jobs:
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
       CONTRACT_WORKFLOW: attendance-gate-contract-matrix.yml
-      PROTECTION_WORKFLOW: attendance-branch-protection-prod.yml
+      PROTECTION_WORKFLOW: attendance-branch-policy-drift-prod.yml
     steps:
       - name: Checkout
         uses: actions/checkout@v4

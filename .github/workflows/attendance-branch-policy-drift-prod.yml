@@ -1,12 +1,12 @@
-name: Attendance Branch Protection (Prod)
+name: Attendance Branch Policy Drift (Prod)
 
-run-name: Attendance Branch Protection (Prod)
+run-name: Attendance Branch Policy Drift (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to validate protection on'
+        description: 'Branch to validate protection policy on'
         required: false
         default: 'main'
       required_checks_csv:
@@ -43,10 +43,10 @@ on:
         default: ''
   schedule:
     # Daily before daily dashboard.
-    - cron: '25 4 * * *'
+    - cron: '22 4 * * *'
 
 concurrency:
-  group: attendance-branch-protection-prod
+  group: attendance-branch-policy-drift-prod
   cancel-in-progress: true
 
 permissions:
@@ -54,7 +54,7 @@ permissions:
   issues: write
 
 jobs:
-  protection:
+  policy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -74,14 +74,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run branch protection check
+      - name: Run branch policy drift check
         id: run_check
         continue-on-error: true
         run: |
           set +e
           set -o pipefail
-          mkdir -p output/branch-protection
-          log_file="output/branch-protection/protection.log"
+          mkdir -p output/branch-policy
+          log_file="output/branch-policy/policy.log"
 
           REPO="${GITHUB_REPOSITORY}" \
           BRANCH="${BRANCH}" \
@@ -91,12 +91,12 @@ jobs:
           REQUIRE_PR_REVIEWS="${REQUIRE_PR_REVIEWS}" \
           MIN_APPROVING_REVIEW_COUNT="${MIN_APPROVING_REVIEW_COUNT}" \
           REQUIRE_CODE_OWNER_REVIEWS="${REQUIRE_CODE_OWNER_REVIEWS}" \
-          OUTPUT_JSON="output/branch-protection/protection.json" \
+          OUTPUT_JSON="output/branch-policy/policy.json" \
           ./scripts/ops/attendance-check-branch-protection.sh 2>&1 | tee "$log_file"
           rc="${PIPESTATUS[0]}"
 
           if [[ "${DRILL_FAIL}" == "true" ]]; then
-            echo "[attendance-branch-protection][drill] forcing failure after check" | tee -a "$log_file"
+            echo "[attendance-branch-policy-drift][drill] forcing failure after check" | tee -a "$log_file"
             rc=97
           fi
 
@@ -119,18 +119,18 @@ jobs:
           CHECK_REASON: ${{ steps.run_check.outputs.reason }}
         run: |
           set -euo pipefail
-          mkdir -p output/branch-protection
+          mkdir -p output/branch-policy
           status="PASS"
           if [[ "${CHECK_RC:-1}" != "0" ]]; then
             status="FAIL"
           fi
           reason="${CHECK_REASON:-UNKNOWN}"
-          artifact_name="attendance-branch-protection-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="attendance-branch-policy-drift-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
           {
-            echo "### Branch Protection"
+            echo "### Branch Policy Drift"
             echo ""
             echo "- Status: **${status}**"
             echo "- Failure reason: \`${reason}\`"
@@ -154,18 +154,18 @@ jobs:
             echo ""
             echo "#### Output tail"
             echo '```text'
-            tail -n 120 output/branch-protection/protection.log || true
+            tail -n 120 output/branch-policy/policy.log || true
             echo '```'
-          } | tee output/branch-protection/step-summary.md >> "$GITHUB_STEP_SUMMARY"
+          } | tee output/branch-policy/step-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: attendance-branch-protection-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          name: attendance-branch-policy-drift-prod-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
-            output/branch-protection/**
+            output/branch-policy/**
 
       - name: Fail workflow when check failed
         if: always()
@@ -179,16 +179,16 @@ jobs:
 
   issue:
     name: Track P1 Issue
-    needs: [protection]
+    needs: [policy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
       ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
-      CHECK_RESULT: ${{ needs.protection.result }}
-      CHECK_REASON: ${{ needs.protection.outputs.reason }}
-      CHECK_RC: ${{ needs.protection.outputs.rc }}
+      CHECK_RESULT: ${{ needs.policy.result }}
+      CHECK_REASON: ${{ needs.policy.outputs.reason }}
+      CHECK_RC: ${{ needs.policy.outputs.rc }}
     steps:
       - name: Create/reopen/close P1 issue
         uses: actions/github-script@v7
@@ -204,16 +204,16 @@ jobs:
 
             const owner = context.repo.owner
             const repo = context.repo.repo
-            const title = titleOverride || '[Attendance P1] Branch protection drift alert'
+            const title = titleOverride || '[Attendance P1] Branch policy drift alert'
             const failed = String(process.env.CHECK_RESULT || '').trim() === 'failure'
             const reason = String(process.env.CHECK_REASON || 'UNKNOWN').trim() || 'UNKNOWN'
             const rc = String(process.env.CHECK_RC || '1').trim() || '1'
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
             const runMarker = `actions/runs/${context.runId}`
-            const artifactName = `attendance-branch-protection-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+            const artifactName = `attendance-branch-policy-drift-prod-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
 
             const body = [
-              'Automated branch protection drift tracking (P1).',
+              'Automated branch policy drift tracking (P1).',
               '',
               `Run: ${runUrl}`,
               `Result: ${failed ? 'FAIL' : 'PASS'} (rc=${rc}, reason=${reason})`,
@@ -243,7 +243,7 @@ jobs:
                 owner,
                 repo,
                 issue_number: match.number,
-                body: `Branch protection gate recovered.\n\nRun: ${runUrl}`,
+                body: `Branch policy drift gate recovered.\n\nRun: ${runUrl}`,
               })
               await github.rest.issues.update({
                 owner,
