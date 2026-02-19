@@ -1755,3 +1755,48 @@ Evidence:
 - `output/playwright/attendance-full-flow-c-line-desktop/01-overview.png`
 - `output/playwright/attendance-full-flow-c-line-mobile/01-overview.png`
 - `output/playwright/attendance-full-flow-c-line-mobile/02-admin.png`
+
+## Latest Notes (2026-02-19): 1+2+3 Execution Closure (A/B/C merged + policy drill/recovery)
+
+Merged to `main`:
+
+- [#198](https://github.com/zensgit/metasheet2/pull/198) (`feat(attendance-gates): enforce pr reviews and extend import job telemetry`)
+- [#199](https://github.com/zensgit/metasheet2/pull/199) (`feat(attendance-perf): promote 100k baseline and add 500k guard scenario`)
+- [#200](https://github.com/zensgit/metasheet2/pull/200) (`feat(attendance-web): add admin error recovery surface and full-flow assertions`)
+
+Single-maintainer policy note:
+
+- Repository currently has one write-capable collaborator (`zensgit`), so `required_pull_request_reviews=true` cannot be operationally satisfied for self-authored PRs.
+- To unblock continuous delivery while keeping hard guardrails, `main` protection was set to:
+  - `strict=true`
+  - `enforce_admins=true`
+  - `required_checks=contracts (strict), contracts (dashboard)`
+  - `require_pr_reviews=false` (temporary operational fallback)
+
+Validation (new evidence):
+
+- Branch Policy Drift drill (expected FAIL):
+  - [Attendance Branch Policy Drift (Prod) [DRILL] #22188008265](https://github.com/zensgit/metasheet2/actions/runs/22188008265) (`FAILURE`)
+  - Evidence:
+    - `output/playwright/ga/22188008265/step-summary.md`
+    - `output/playwright/ga/22188008265/policy.log`
+    - `output/playwright/ga/22188008265/policy.json`
+  - Drill issue opened/updated:
+    - [#201](https://github.com/zensgit/metasheet2/issues/201)
+- Branch Policy Drift recovery (explicit `require_pr_reviews=false`):
+  - [Attendance Branch Policy Drift (Prod) #22188054160](https://github.com/zensgit/metasheet2/actions/runs/22188054160) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22188054160/step-summary.md`
+    - `output/playwright/ga/22188054160/policy.log`
+    - `output/playwright/ga/22188054160/policy.json`
+  - Drill issue auto-closed:
+    - [#201](https://github.com/zensgit/metasheet2/issues/201) (`CLOSED`)
+- Daily dashboard re-verify:
+  - [Attendance Daily Gate Dashboard #22188099087](https://github.com/zensgit/metasheet2/actions/runs/22188099087) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22188099087/gate-meta/protection/meta.json`
+  - Verified:
+    - `gateFlat.protection.runId=22188054160`
+    - `gateFlat.protection.requirePrReviews=false`

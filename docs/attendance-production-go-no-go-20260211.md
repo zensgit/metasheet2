@@ -1101,3 +1101,20 @@ Local verification:
 Pre-deploy note:
 
 - The desktop full-flow failure above is expected before this frontend branch is deployed to production, because the new assertion checks for a UX element that only exists in this branch.
+
+## Post-Go Validation (2026-02-19): 1+2+3 Completion (A/B/C merge + branch policy fallback re-verify)
+
+This record validates:
+
+- Parallel development PRs were merged in sequence:
+  - [#198](https://github.com/zensgit/metasheet2/pull/198)
+  - [#199](https://github.com/zensgit/metasheet2/pull/199)
+  - [#200](https://github.com/zensgit/metasheet2/pull/200)
+- Branch protection remains strict on checks/admins and is currently operated in single-maintainer fallback mode (`require_pr_reviews=false`) to keep release flow unblocked.
+- Policy drill/recovery and daily dashboard remain green with explicit evidence.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (single-maintainer fallback, expected FAIL) | [#22188008265](https://github.com/zensgit/metasheet2/actions/runs/22188008265) | FAIL (expected) | `output/playwright/ga/22188008265/step-summary.md`, `output/playwright/ga/22188008265/policy.log`, `output/playwright/ga/22188008265/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) |
+| Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22188054160](https://github.com/zensgit/metasheet2/actions/runs/22188054160) | PASS | `output/playwright/ga/22188054160/step-summary.md`, `output/playwright/ga/22188054160/policy.log`, `output/playwright/ga/22188054160/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) (`CLOSED`) |
+| Daily Dashboard post-merge re-verify | [#22188099087](https://github.com/zensgit/metasheet2/actions/runs/22188099087) | PASS | `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22188099087/gate-meta/protection/meta.json` (`runId=22188054160`, `requirePrReviews=false`) |
