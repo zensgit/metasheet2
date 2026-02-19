@@ -1001,3 +1001,25 @@ Evidence:
 | Branch Protection recovery (after anti-bypass apply) | [#22168353987](https://github.com/zensgit/metasheet2/actions/runs/22168353987) | PASS | `output/playwright/ga/22168353987/step-summary.md`, `output/playwright/ga/22168353987/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
 | Daily Dashboard post-hardening | [#22168373962](https://github.com/zensgit/metasheet2/actions/runs/22168373962) | PASS | `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
 | P1 branch-protection issue | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Remains closed after recovery |
+
+## Post-Go Validation (2026-02-19): Protected Main PR Required-Check Compatibility
+
+This record validates:
+
+- Required checks `contracts (strict)` + `contracts (dashboard)` are now satisfiable for all PRs to `main`.
+- Branch protection + dashboard remain green after the compatibility fix.
+
+Implementation:
+
+- Commit: `c68df5c7`
+- Change:
+  - `.github/workflows/attendance-gate-contract-matrix.yml` `pull_request` trigger removed path filtering to avoid unmergeable PRs under required-check policy.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Contract Matrix on PR (required checks contexts present) | [#22168460857](https://github.com/zensgit/metasheet2/actions/runs/22168460857) | PASS | `output/playwright/ga/22168460857/attendance-gate-contract-matrix-strict-22168460857-1/strict/gate-summary.valid.json`, `output/playwright/ga/22168460857/attendance-gate-contract-matrix-dashboard-22168460857-1/dashboard.valid.json` |
+| Branch Protection post-merge re-verify | [#22168482721](https://github.com/zensgit/metasheet2/actions/runs/22168482721) | PASS | `output/playwright/ga/22168482721/step-summary.md`, `output/playwright/ga/22168482721/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
+| Daily Dashboard post-merge re-verify | [#22168496046](https://github.com/zensgit/metasheet2/actions/runs/22168496046) | PASS | `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| Protected-main PR | [#191](https://github.com/zensgit/metasheet2/pull/191) | MERGED | Required checks satisfied under protected main policy |
