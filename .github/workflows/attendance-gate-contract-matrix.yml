@@ -7,17 +7,6 @@ on:
     - cron: '45 4 * * *'
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/attendance-gate-contract-matrix.yml'
-      - '.github/workflows/attendance-strict-gates-prod.yml'
-      - '.github/workflows/attendance-daily-gate-dashboard.yml'
-      - 'scripts/ops/attendance-validate-gate-summary.sh'
-      - 'scripts/ops/attendance-validate-gate-summary-schema.mjs'
-      - 'scripts/ops/attendance-validate-daily-dashboard-json.sh'
-      - 'scripts/ops/attendance-run-gate-contract-case.sh'
-      - 'scripts/ops/attendance-daily-gate-report.mjs'
-      - 'scripts/ops/attendance-run-gates.sh'
-      - 'schemas/attendance/strict-gate-summary.schema.json'
 
 concurrency:
   group: attendance-gate-contract-matrix-${{ github.ref }}
