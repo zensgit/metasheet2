@@ -1604,3 +1604,35 @@ Validation:
     - `requireCodeOwnerReviews="false"`
 - Local negative check (expected FAIL classification):
   - `REQUIRE_PR_REVIEWS=true` returns `reason=PR_REVIEWS_NOT_ENABLED` on current `main` policy.
+
+## Latest Notes (2026-02-19): Branch Policy Drift Drill Issue Lifecycle (OPEN -> CLOSED)
+
+Validation:
+
+- Drill FAIL (expected):
+  - [Attendance Branch Policy Drift (Prod) [DRILL] #22184382068](https://github.com/zensgit/metasheet2/actions/runs/22184382068) (`FAILURE`)
+  - Evidence:
+    - `output/playwright/ga/22184382068/step-summary.md`
+    - `output/playwright/ga/22184382068/policy.log`
+    - `output/playwright/ga/22184382068/policy.json`
+  - P1 drill issue opened:
+    - [#195](https://github.com/zensgit/metasheet2/issues/195) (`OPEN` at failure time)
+- Drill recovery PASS:
+  - [Attendance Branch Policy Drift (Prod) #22184421397](https://github.com/zensgit/metasheet2/actions/runs/22184421397) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22184421397/step-summary.md`
+    - `output/playwright/ga/22184421397/policy.log`
+    - `output/playwright/ga/22184421397/policy.json`
+  - P1 drill issue auto-closed:
+    - [#195](https://github.com/zensgit/metasheet2/issues/195) (`CLOSED`)
+- Daily dashboard re-verify (uses latest non-drill policy run):
+  - [Attendance Daily Gate Dashboard #22184452525](https://github.com/zensgit/metasheet2/actions/runs/22184452525) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json`
+  - Verified:
+    - `gateFlat.protection.runId=22184421397` (latest non-drill run)
+    - `gateFlat.protection.requirePrReviews=false`
+    - `gateFlat.protection.minApprovingReviews=1`
+    - `gateFlat.protection.requireCodeOwnerReviews=false`
