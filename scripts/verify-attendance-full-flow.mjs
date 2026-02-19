@@ -285,6 +285,15 @@ async function run() {
       await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
       await page.getByRole('heading', { name: 'Payroll Cycles', exact: true }).waitFor({ timeout: timeoutMs })
       await page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' }).waitFor({ timeout: timeoutMs })
+      await page.waitForTimeout(1500)
+      const importSection = page.locator('div.attendance__admin-section').filter({
+        has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)', exact: true }),
+      })
+      await importSection.locator('#attendance-import-payload').fill('{')
+      await importSection.getByRole('button', { name: 'Preview', exact: true }).click()
+      await page.getByText('Invalid JSON payload for import.', { exact: true }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('button', { name: 'Retry preview', exact: true }).first().waitFor({ timeout: timeoutMs })
+      logInfo('Admin status + retry action verified')
       logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
@@ -299,6 +308,8 @@ async function run() {
     await page.getByRole('button', { name: 'Workflow Designer' }).click()
     if (mobile) {
       await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('button', { name: 'Back to Overview', exact: true }).click()
+      await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
     } else {
       await page.locator('.workflow-designer').waitFor({ timeout: timeoutMs })
     }

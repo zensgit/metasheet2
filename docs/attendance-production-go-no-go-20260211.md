@@ -1073,3 +1073,31 @@ This record validates:
 | Branch Policy Drift drill (expected FAIL, issue open) | [#22184974691](https://github.com/zensgit/metasheet2/actions/runs/22184974691) | FAIL (expected) | `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/step-summary.md`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.log`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.json`, Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
 | Branch Policy Drift recovery (explicit review-policy inputs) | [#22185012785](https://github.com/zensgit/metasheet2/actions/runs/22185012785) | PASS | `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/step-summary.md`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.log`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.json` (`requirePrReviews=true`, `minApprovingReviewCount=1`, `requireCodeOwnerReviews=false`), Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
 | Daily Dashboard post-recovery re-verify | [#22185048468](https://github.com/zensgit/metasheet2/actions/runs/22185048468) | PASS | `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.json` (`gateFlat.protection.runId=22185012785`, `requirePrReviews=true`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+
+## Post-Go Validation (2026-02-19): C-Line Web UX Hardening + Regression Assertions
+
+This record validates:
+
+- Attendance admin operations now surface status in Admin Center (not only Overview).
+- Error messages include stable code/hint/action metadata for recovery (`Retry preview/import`, `Reload admin`, `Reload requests`).
+- Playwright full-flow script includes these UX assertions for future deploy verification.
+
+Implementation:
+
+- Branch: `codex/attendance-ws-c-web-ux`
+- Key files:
+  - `apps/web/src/views/AttendanceView.vue`
+  - `scripts/verify-attendance-full-flow.mjs`
+
+Local verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `pnpm --filter @metasheet/web build` | PASS | local build output (no TS/Vite errors) |
+| `pnpm --filter @metasheet/web exec vitest run --watch=false` | PASS | 4 files, 26 tests passed |
+| Full flow (mobile, production URL) | PASS | `output/playwright/attendance-full-flow-c-line-mobile/01-overview.png`, `output/playwright/attendance-full-flow-c-line-mobile/02-admin.png` |
+| Full flow (desktop, production URL, pre-deploy) | FAIL (expected) | `output/playwright/attendance-full-flow-c-line-desktop/01-overview.png` |
+
+Pre-deploy note:
+
+- The desktop full-flow failure above is expected before this frontend branch is deployed to production, because the new assertion checks for a UX element that only exists in this branch.
