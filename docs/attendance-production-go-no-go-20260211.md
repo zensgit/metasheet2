@@ -1058,3 +1058,31 @@ This record validates:
 | Branch Policy Drift drill (expected FAIL, issue open) | [#22184382068](https://github.com/zensgit/metasheet2/actions/runs/22184382068) | FAIL (expected) | `output/playwright/ga/22184382068/step-summary.md`, `output/playwright/ga/22184382068/policy.log`, `output/playwright/ga/22184382068/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
 | Branch Policy Drift recovery (issue auto-close) | [#22184421397](https://github.com/zensgit/metasheet2/actions/runs/22184421397) | PASS | `output/playwright/ga/22184421397/step-summary.md`, `output/playwright/ga/22184421397/policy.log`, `output/playwright/ga/22184421397/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
 | Daily Dashboard post-drill re-verify | [#22184452525](https://github.com/zensgit/metasheet2/actions/runs/22184452525) | PASS | `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json` (`gateFlat.protection.runId=22184421397`, `requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+
+## Post-Go Validation (2026-02-19): C-Line Web UX Hardening + Regression Assertions
+
+This record validates:
+
+- Attendance admin operations now surface status in Admin Center (not only Overview).
+- Error messages include stable code/hint/action metadata for recovery (`Retry preview/import`, `Reload admin`, `Reload requests`).
+- Playwright full-flow script includes these UX assertions for future deploy verification.
+
+Implementation:
+
+- Branch: `codex/attendance-ws-c-web-ux`
+- Key files:
+  - `apps/web/src/views/AttendanceView.vue`
+  - `scripts/verify-attendance-full-flow.mjs`
+
+Local verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `pnpm --filter @metasheet/web build` | PASS | local build output (no TS/Vite errors) |
+| `pnpm --filter @metasheet/web exec vitest run --watch=false` | PASS | 4 files, 26 tests passed |
+| Full flow (mobile, production URL) | PASS | `output/playwright/attendance-full-flow-c-line-mobile/01-overview.png`, `output/playwright/attendance-full-flow-c-line-mobile/02-admin.png` |
+| Full flow (desktop, production URL, pre-deploy) | FAIL (expected) | `output/playwright/attendance-full-flow-c-line-desktop/01-overview.png` |
+
+Pre-deploy note:
+
+- The desktop full-flow failure above is expected before this frontend branch is deployed to production, because the new assertion checks for a UX element that only exists in this branch.

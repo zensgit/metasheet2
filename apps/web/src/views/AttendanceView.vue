@@ -50,9 +50,26 @@
           />
         </label>
         <button class="attendance__btn" :disabled="loading" @click="refreshAll">Refresh</button>
-        <span v-if="statusMessage" class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
-          {{ statusMessage }}
-        </span>
+        <div v-if="statusMessage" class="attendance__status-block">
+          <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
+            {{ statusMessage }}
+          </span>
+          <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
+            Code: {{ statusCode }}
+          </span>
+          <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
+            {{ statusHint }}
+          </span>
+          <button
+            v-if="statusActionLabel"
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            :disabled="statusActionBusy"
+            @click="runStatusAction"
+          >
+            {{ statusActionBusy ? 'Working...' : statusActionLabel }}
+          </button>
+        </div>
       </section>
 
       <section class="attendance__grid" v-if="showOverview">
@@ -425,6 +442,26 @@
             <h3>Admin Console</h3>
             <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
               {{ settingsLoading || ruleLoading ? 'Loading...' : 'Reload admin' }}
+            </button>
+          </div>
+          <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
+            <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
+              {{ statusMessage }}
+            </span>
+            <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
+              Code: {{ statusCode }}
+            </span>
+            <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
+              {{ statusHint }}
+            </span>
+            <button
+              v-if="statusActionLabel"
+              class="attendance__btn attendance__btn--inline"
+              type="button"
+              :disabled="statusActionBusy"
+              @click="runStatusAction"
+            >
+              {{ statusActionBusy ? 'Working...' : statusActionLabel }}
             </button>
           </div>
           <div v-if="adminForbidden" class="attendance__empty">Admin permissions required to manage attendance settings.</div>
@@ -3205,6 +3242,31 @@ import { apiFetch } from '../utils/api'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
+type AttendanceStatusAction =
+  | 'refresh-overview'
+  | 'reload-admin'
+  | 'retry-save-settings'
+  | 'retry-save-rule'
+  | 'retry-preview-import'
+  | 'retry-run-import'
+  | 'retry-submit-request'
+  | 'reload-requests'
+type AttendanceStatusContext =
+  | 'refresh'
+  | 'admin'
+  | 'save-settings'
+  | 'save-rule'
+  | 'import-preview'
+  | 'import-run'
+  | 'request-submit'
+  | 'request-resolve'
+  | 'request-cancel'
+
+interface AttendanceStatusMeta {
+  code?: string
+  hint?: string
+  action?: AttendanceStatusAction
+}
 
 const props = withDefaults(
   defineProps<{
@@ -3718,6 +3780,11 @@ interface CalendarDay {
   tooltip: string
 }
 
+interface AttendanceApiError extends Error {
+  code?: string
+  status?: number
+}
+
 const loading = ref(false)
 const punching = ref(false)
 const requestSubmitting = ref(false)
@@ -3728,6 +3795,7 @@ const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
+const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
@@ -3932,6 +4000,36 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const statusCode = computed(() => statusMeta.value?.code || '')
+const statusHint = computed(() => statusMeta.value?.hint || '')
+
+const statusActionLabel = computed(() => {
+  const action = statusMeta.value?.action
+  if (!action) return ''
+  if (action === 'refresh-overview') return 'Retry refresh'
+  if (action === 'reload-admin') return 'Reload admin'
+  if (action === 'retry-save-settings') return 'Retry save settings'
+  if (action === 'retry-save-rule') return 'Retry save rule'
+  if (action === 'retry-preview-import') return 'Retry preview'
+  if (action === 'retry-run-import') return 'Retry import'
+  if (action === 'retry-submit-request') return 'Retry submit request'
+  if (action === 'reload-requests') return 'Reload requests'
+  return ''
+})
+
+const statusActionBusy = computed(() => {
+  const action = statusMeta.value?.action
+  if (!action) return false
+  if (action === 'refresh-overview') return loading.value
+  if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
+  if (action === 'retry-save-settings') return settingsLoading.value
+  if (action === 'retry-save-rule') return ruleLoading.value
+  if (action === 'retry-preview-import') return importLoading.value
+  if (action === 'retry-run-import') return importLoading.value
+  if (action === 'retry-submit-request') return requestSubmitting.value
+  if (action === 'reload-requests') return loading.value
+  return false
+})
 
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
@@ -4775,7 +4873,10 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
 
 async function applyImportCsvFile() {
   if (!importCsvFile.value) {
-    setStatus('Select a CSV file first.', 'error')
+    setStatus('Select a CSV file first.', 'error', {
+      hint: 'Choose a CSV file, then retry preview/import.',
+      action: 'retry-preview-import',
+    })
     return
   }
   try {
@@ -4821,7 +4922,7 @@ async function applyImportCsvFile() {
 
     importForm.payload = JSON.stringify(next, null, 2)
   } catch (error) {
-    setStatus((error as Error).message || 'Failed to load CSV', 'error')
+    setStatusFromError(error, 'Failed to load CSV', 'import-preview')
   }
 }
 
@@ -5006,7 +5107,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
   }
 
   if (!asyncResponse.ok || !asyncData?.ok) {
-    throw new Error(asyncData?.error?.message || 'Failed to queue async preview')
+    throw createApiError(asyncResponse, asyncData, 'Failed to queue async preview')
   }
 
   const job = asyncData.data?.job as AttendanceImportJob | undefined
@@ -5064,7 +5165,10 @@ async function previewImport() {
   clearImportAsyncJob()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus('Invalid JSON payload for import.', 'error')
+    setStatus('Invalid JSON payload for import.', 'error', {
+      hint: 'Fix JSON syntax in payload and retry preview.',
+      action: 'retry-preview-import',
+    })
     return
   }
   applyImportScalabilityHints(payload, { mode: 'preview' })
@@ -5110,7 +5214,7 @@ async function previewImport() {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to preview import')
+      throw createApiError(response, data, 'Failed to preview import')
     }
     importPreview.value = data.data?.items ?? []
     const rowCount = Number(data.data?.rowCount)
@@ -5149,7 +5253,7 @@ async function previewImport() {
         message: (error as Error).message || 'Preview failed',
       }
     }
-    setStatus((error as Error).message || 'Failed to preview import', 'error')
+    setStatusFromError(error, 'Failed to preview import', 'import-preview')
   } finally {
     importLoading.value = false
   }
@@ -5203,7 +5307,10 @@ async function runImport() {
   clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus('Invalid JSON payload for import.', 'error')
+    setStatus('Invalid JSON payload for import.', 'error', {
+      hint: 'Fix JSON syntax in payload and retry import.',
+      action: 'retry-run-import',
+    })
     return
   }
   applyImportScalabilityHints(payload, { mode: 'commit' })
@@ -5303,7 +5410,7 @@ async function runImport() {
       }
     }
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to import attendance')
+      throw createApiError(response, data, 'Failed to import attendance')
     }
     adminForbidden.value = false
     const importWarnings = [
@@ -5324,7 +5431,7 @@ async function runImport() {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    setStatus((error as Error).message || 'Failed to import attendance', 'error')
+    setStatusFromError(error, 'Failed to import attendance', 'import-run')
   } finally {
     importLoading.value = false
   }
@@ -5615,8 +5722,156 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
   }
 }
 
-function setStatus(message: string, kind: 'info' | 'error' = 'info') {
+function defaultStatusActionForContext(context: AttendanceStatusContext): AttendanceStatusAction | undefined {
+  if (context === 'refresh') return 'refresh-overview'
+  if (context === 'admin') return 'reload-admin'
+  if (context === 'save-settings') return 'retry-save-settings'
+  if (context === 'save-rule') return 'retry-save-rule'
+  if (context === 'import-preview') return 'retry-preview-import'
+  if (context === 'import-run') return 'retry-run-import'
+  if (context === 'request-submit') return 'retry-submit-request'
+  if (context === 'request-resolve' || context === 'request-cancel') return 'reload-requests'
+  return undefined
+}
+
+function normalizeErrorCode(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/[\s-]+/g, '_')
+    .toUpperCase()
+}
+
+function inferErrorCodeFromMessage(message: string): string {
+  const text = String(message || '')
+  const normalized = text.toUpperCase()
+  if (!normalized) return ''
+  if (normalized.includes('COMMIT_TOKEN_INVALID')) return 'COMMIT_TOKEN_INVALID'
+  if (normalized.includes('COMMIT_TOKEN_REQUIRED')) return 'COMMIT_TOKEN_REQUIRED'
+  if (normalized.includes('RATE_LIMIT')) return 'RATE_LIMITED'
+  if (normalized.includes('PUNCH_TOO_SOON')) return 'PUNCH_TOO_SOON'
+  if (normalized.includes('FORBIDDEN') || normalized.includes('PERMISSION')) return 'FORBIDDEN'
+  if (normalized.includes('UNAUTHORIZED') || normalized.includes('TOKEN_EXPIRED')) return 'UNAUTHORIZED'
+  if (normalized.includes('SERVICE_UNAVAILABLE') || normalized.includes('DB_NOT_READY')) return 'SERVICE_UNAVAILABLE'
+
+  const codeMatch = normalized.match(/\b[A-Z][A-Z0-9_]{2,}\b/)
+  return codeMatch ? codeMatch[0] : ''
+}
+
+function createApiError(response: { status: number }, payload: any, fallbackMessage: string): AttendanceApiError {
+  const errorNode = payload?.error
+  const message = typeof errorNode?.message === 'string' && errorNode.message.trim().length > 0
+    ? errorNode.message.trim()
+    : fallbackMessage
+  const error = new Error(message) as AttendanceApiError
+  error.status = Number(response?.status) || 0
+  if (typeof errorNode?.code === 'string' && errorNode.code.trim().length > 0) {
+    error.code = normalizeErrorCode(errorNode.code)
+  }
+  return error
+}
+
+function createForbiddenError(message = 'Admin permissions required'): AttendanceApiError {
+  const error = new Error(message) as AttendanceApiError
+  error.status = 403
+  error.code = 'FORBIDDEN'
+  return error
+}
+
+function classifyStatusError(
+  error: unknown,
+  fallbackMessage: string,
+  context: AttendanceStatusContext,
+): { message: string; meta: AttendanceStatusMeta } {
+  const err = error as Record<string, unknown> | null
+  const rawMessage = typeof err?.message === 'string' && err.message.trim().length > 0
+    ? String(err.message)
+    : fallbackMessage
+  const status = typeof err?.status === 'number' ? Number(err.status) : Number.NaN
+  const explicitCode = typeof err?.code === 'string' ? normalizeErrorCode(String(err.code)) : ''
+  const code = explicitCode || inferErrorCodeFromMessage(rawMessage)
+  const defaultAction = defaultStatusActionForContext(context)
+  const meta: AttendanceStatusMeta = {}
+  let message = rawMessage
+
+  if (code) meta.code = code
+
+  if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
+    message = 'Import token expired before request completed.'
+    meta.hint = 'Click retry to refresh commit token and submit again.'
+    meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
+  } else if (code === 'RATE_LIMITED' || status === 429) {
+    message = 'Request was rate-limited by the server.'
+    meta.hint = 'Wait a few seconds before retrying to avoid repeated throttling.'
+    meta.action = defaultAction
+  } else if (code === 'PUNCH_TOO_SOON') {
+    message = rawMessage
+    meta.hint = 'Minimum punch interval is enforced by policy. Retry after the interval.'
+    meta.action = 'refresh-overview'
+  } else if (status === 401 || code === 'UNAUTHORIZED' || code === 'INVALID_TOKEN' || code === 'TOKEN_EXPIRED') {
+    message = 'Session expired or token is invalid.'
+    meta.hint = 'Sign in again, then retry the action.'
+    meta.action = 'refresh-overview'
+  } else if (status === 403 || code === 'FORBIDDEN' || code === 'PERMISSION_DENIED') {
+    message = rawMessage === fallbackMessage ? 'Permission denied for this action.' : rawMessage
+    meta.hint = 'Use an account with required attendance permissions, then reload data.'
+    meta.action = context === 'request-submit' || context === 'request-resolve' || context === 'request-cancel'
+      ? 'reload-requests'
+      : 'reload-admin'
+  } else if (status >= 500 || code === 'SERVICE_UNAVAILABLE' || code === 'DB_NOT_READY') {
+    if (!message) message = fallbackMessage
+    meta.hint = 'Server may be warming up or temporarily unavailable. Retry in a moment.'
+    meta.action = defaultAction
+  } else {
+    meta.action = defaultAction
+  }
+
+  return { message, meta }
+}
+
+function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
+  const { message, meta } = classifyStatusError(error, fallbackMessage, context)
+  setStatus(message || fallbackMessage, 'error', meta)
+}
+
+async function runStatusAction() {
+  const action = statusMeta.value?.action
+  if (!action) return
+  if (action === 'refresh-overview') {
+    await refreshAll()
+    return
+  }
+  if (action === 'reload-admin') {
+    await loadAdminData()
+    return
+  }
+  if (action === 'retry-save-settings') {
+    await saveSettings()
+    return
+  }
+  if (action === 'retry-save-rule') {
+    await saveRule()
+    return
+  }
+  if (action === 'retry-preview-import') {
+    await previewImport()
+    return
+  }
+  if (action === 'retry-run-import') {
+    await runImport()
+    return
+  }
+  if (action === 'retry-submit-request') {
+    await submitRequest()
+    return
+  }
+  if (action === 'reload-requests') {
+    await loadRequests()
+  }
+}
+
+function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: AttendanceStatusMeta | null = null) {
   statusKind.value = kind
+  statusMeta.value = kind === 'error' ? meta : null
   if (statusMessage.value === message && message) {
     statusMessage.value = ''
     void nextTick(() => {
@@ -5626,11 +5881,17 @@ function setStatus(message: string, kind: 'info' | 'error' = 'info') {
     statusMessage.value = message
   }
   if (!message) return
+  const timeoutMs = kind === 'error'
+    ? (meta?.action || meta?.hint ? 10000 : 7000)
+    : 4000
   window.setTimeout(() => {
     if (statusMessage.value === message) {
       statusMessage.value = ''
+      if (statusMeta.value === meta) {
+        statusMeta.value = null
+      }
     }
-  }, 4000)
+  }, timeoutMs)
 }
 
 function setProvisionStatus(message: string, kind: 'info' | 'error' = 'info') {
@@ -6503,7 +6764,7 @@ async function refreshAll() {
   try {
     await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
-    setStatus(error?.message || 'Refresh failed', 'error')
+    setStatusFromError(error, 'Refresh failed', 'refresh')
   } finally {
     loading.value = false
   }
@@ -6595,12 +6856,12 @@ async function submitRequest() {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Request failed')
+      throw createApiError(response, data, 'Request failed')
     }
     setStatus('Request submitted.')
     await loadRequests()
   } catch (error: any) {
-    setStatus(error?.message || 'Request failed', 'error')
+    setStatusFromError(error, 'Request failed', 'request-submit')
   } finally {
     requestSubmitting.value = false
   }
@@ -6614,14 +6875,14 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Request update failed')
+      throw createApiError(response, data, 'Request update failed')
     }
     setStatus(`Request ${action}d.`)
     await loadRequests()
     await loadSummary()
     await loadRecords()
   } catch (error: any) {
-    setStatus(error?.message || 'Request update failed', 'error')
+    setStatusFromError(error, 'Request update failed', 'request-resolve')
   }
 }
 
@@ -6633,12 +6894,12 @@ async function cancelRequest(id: string) {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Request cancel failed')
+      throw createApiError(response, data, 'Request cancel failed')
     }
     setStatus('Request cancelled.')
     await loadRequests()
   } catch (error: any) {
-    setStatus(error?.message || 'Request cancel failed', 'error')
+    setStatusFromError(error, 'Request cancel failed', 'request-cancel')
   }
 }
 
@@ -6813,7 +7074,7 @@ async function loadSettings() {
     adminForbidden.value = false
     applySettingsToForm(data.data || {})
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load settings', 'error')
+    setStatusFromError(error, 'Failed to load settings', 'admin')
   } finally {
     settingsLoading.value = false
   }
@@ -6922,17 +7183,17 @@ async function saveSettings() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save settings')
+      throw createApiError(response, data, 'Failed to save settings')
     }
     adminForbidden.value = false
     applySettingsToForm(data.data || payload)
     setStatus('Settings updated.')
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save settings', 'error')
+    setStatusFromError(error, 'Failed to save settings', 'save-settings')
   } finally {
     settingsLoading.value = false
   }
@@ -7041,7 +7302,7 @@ async function loadRule() {
     ruleForm.roundingMinutes = rule.roundingMinutes ?? 5
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : '1,2,3,4,5'
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rule', 'error')
+    setStatusFromError(error, 'Failed to load rule', 'admin')
   } finally {
     ruleLoading.value = false
   }
@@ -7067,11 +7328,11 @@ async function saveRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save rule')
+      throw createApiError(response, data, 'Failed to save rule')
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || ruleForm.name
@@ -7084,7 +7345,7 @@ async function saveRule() {
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : ruleForm.workingDays
     setStatus('Rule updated.')
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save rule', 'error')
+    setStatusFromError(error, 'Failed to save rule', 'save-rule')
   } finally {
     ruleLoading.value = false
   }
@@ -8674,27 +8935,31 @@ async function exportPayrollCycleSummary() {
 }
 
 async function loadAdminData() {
-  await Promise.all([
-    loadSettings(),
-    loadProvisionRoleTemplates(),
-    loadAuditLogs(1),
-    loadAuditSummary(),
-    loadRule(),
-    loadRuleSets(),
-    loadRuleTemplates(),
-    loadAttendanceGroups(),
-    loadImportBatches(),
-    loadPayrollTemplates(),
-    loadPayrollCycles(),
-    loadLeaveTypes(),
-    loadOvertimeRules(),
-    loadApprovalFlows(),
-    loadRotationRules(),
-    loadShifts(),
-    loadAssignments(),
-    loadRotationAssignments(),
-    loadHolidays(),
-  ])
+  try {
+    await Promise.all([
+      loadSettings(),
+      loadProvisionRoleTemplates(),
+      loadAuditLogs(1),
+      loadAuditSummary(),
+      loadRule(),
+      loadRuleSets(),
+      loadRuleTemplates(),
+      loadAttendanceGroups(),
+      loadImportBatches(),
+      loadPayrollTemplates(),
+      loadPayrollCycles(),
+      loadLeaveTypes(),
+      loadOvertimeRules(),
+      loadApprovalFlows(),
+      loadRotationRules(),
+      loadShifts(),
+      loadAssignments(),
+      loadRotationAssignments(),
+      loadHolidays(),
+    ])
+  } catch (error) {
+    setStatusFromError(error, 'Failed to load admin data', 'admin')
+  }
 }
 
 onMounted(() => {
@@ -8844,6 +9109,22 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 .attendance__btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.attendance__btn--inline {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.attendance__status-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__status-block--admin {
+  margin-bottom: 12px;
 }
 
 .attendance__status {

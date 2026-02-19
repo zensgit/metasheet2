@@ -1636,3 +1636,44 @@ Validation:
     - `gateFlat.protection.requirePrReviews=false`
     - `gateFlat.protection.minApprovingReviews=1`
     - `gateFlat.protection.requireCodeOwnerReviews=false`
+
+## Latest Notes (2026-02-19): C-Line Web UX Hardening Pre-Deploy Validation
+
+Scope:
+
+- Added admin-visible status surface with classified error hints and recovery actions (`Retry preview/import`, `Reload admin`, `Reload requests`).
+- Extended Playwright full-flow assertions:
+  - Desktop: validates `Invalid JSON payload for import.` + `Retry preview` action.
+  - Mobile: validates Desktop-only workflow hint can return to Overview.
+
+Validation commands:
+
+```bash
+WEB_URL="http://142.171.239.56:8081/" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+ALLOW_EMPTY_RECORDS="true" \
+OUTPUT_DIR="output/playwright/attendance-full-flow-c-line-desktop" \
+node scripts/verify-attendance-full-flow.mjs
+
+WEB_URL="http://142.171.239.56:8081/" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+EXPECT_PRODUCT_MODE="attendance" \
+ALLOW_EMPTY_RECORDS="true" \
+UI_MOBILE="true" \
+OUTPUT_DIR="output/playwright/attendance-full-flow-c-line-mobile" \
+node scripts/verify-attendance-full-flow.mjs
+```
+
+Current result (before deploying this branch frontend bundle):
+
+- Desktop: expected FAIL on the new admin UX assertion (production site still running old bundle).
+- Mobile: PASS.
+
+Evidence:
+
+- `output/playwright/attendance-full-flow-c-line-desktop/01-overview.png`
+- `output/playwright/attendance-full-flow-c-line-mobile/01-overview.png`
+- `output/playwright/attendance-full-flow-c-line-mobile/02-admin.png`
