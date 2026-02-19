@@ -1480,3 +1480,48 @@ Validation:
     - `Branch Protection` row `PASS` (run `#22142247652`)
 - P1 issue closure:
   - [#190](https://github.com/zensgit/metasheet2/issues/190) auto-closed on recovery.
+
+## Latest Notes (2026-02-19): Enforce Admins Hardening (Anti-Bypass)
+
+Implementation:
+
+- Commit: `4aa4e2a2`
+  - Branch protection gate now supports and checks:
+    - `REQUIRE_ENFORCE_ADMINS=true|false`
+  - Workflow `.github/workflows/attendance-branch-protection-prod.yml` now defaults:
+    - `require_enforce_admins=true`
+  - Step summary now prints:
+    - `Require enforce admins`
+  - Daily dashboard enrichment includes this field when the gate fails.
+- `scripts/ops/attendance-ensure-branch-protection.sh` default changed:
+  - `ENFORCE_ADMINS=true` (anti-bypass baseline)
+
+Validation:
+
+- Branch Protection gate fails closed when admins are not enforced:
+  - [Attendance Branch Protection (Prod) #22168334875](https://github.com/zensgit/metasheet2/actions/runs/22168334875) (`FAILURE`, expected)
+  - Reason: `ENFORCE_ADMINS_DISABLED`
+  - Evidence:
+    - `output/playwright/ga/22168334875/step-summary.md`
+    - `output/playwright/ga/22168334875/protection.log`
+- Applied anti-bypass baseline on `main`:
+  - `APPLY=true ./scripts/ops/attendance-ensure-branch-protection.sh`
+  - Verified:
+    - `strict_current=true`
+    - `enforce_admins_current=true`
+    - `contexts_current=contracts (strict),contracts (dashboard)`
+- Branch Protection recovery:
+  - [Attendance Branch Protection (Prod) #22168353987](https://github.com/zensgit/metasheet2/actions/runs/22168353987) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22168353987/step-summary.md`
+    - `output/playwright/ga/22168353987/protection.log`
+- Daily Dashboard recovery:
+  - [Attendance Daily Gate Dashboard #22168373962](https://github.com/zensgit/metasheet2/actions/runs/22168373962) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.json`
+  - Verified:
+    - `Overall=PASS`
+    - Branch Protection row `PASS` (run `#22168353987`)
+- P1 issue:
+  - [#190](https://github.com/zensgit/metasheet2/issues/190) remained `CLOSED` after recovery update.
