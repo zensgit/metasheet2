@@ -1559,3 +1559,48 @@ Validation:
   - Verified:
     - `Overall=PASS`
     - Branch Protection row `PASS` (run `#22168482721`)
+
+## Latest Notes (2026-02-19): Branch Policy Drift Workflow + Dashboard `gateFlat.protection` Mapping
+
+Implementation:
+
+- PR: [#193](https://github.com/zensgit/metasheet2/pull/193) (`MERGED`)
+- Commit: `932223f3`
+- Added workflow:
+  - `.github/workflows/attendance-branch-policy-drift-prod.yml`
+- Daily dashboard now defaults to the new protection workflow source:
+  - `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - `PROTECTION_WORKFLOW=attendance-branch-policy-drift-prod.yml`
+- Branch protection check + ensure scripts now support review policy checks:
+  - `REQUIRE_PR_REVIEWS`
+  - `MIN_APPROVING_REVIEW_COUNT`
+  - `REQUIRE_CODE_OWNER_REVIEWS`
+- Dashboard parser + `gateFlat.protection` mapping now include:
+  - `requirePrReviews`
+  - `minApprovingReviews`
+  - `requireCodeOwnerReviews`
+
+Validation:
+
+- Branch Policy Drift workflow (non-drill):
+  - [Attendance Branch Policy Drift (Prod) #22183957768](https://github.com/zensgit/metasheet2/actions/runs/22183957768) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22183957768/step-summary.md`
+    - `output/playwright/ga/22183957768/policy.log`
+    - `output/playwright/ga/22183957768/policy.json`
+  - Verified summary fields:
+    - `Require PR reviews: false`
+    - `Min approving reviews: 1`
+    - `Require code owner reviews: false`
+- Daily Dashboard after switch to policy-drift workflow:
+  - [Attendance Daily Gate Dashboard #22183988363](https://github.com/zensgit/metasheet2/actions/runs/22183988363) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/gate-meta/protection/meta.json`
+  - Verified `gateFlat.protection` fields:
+    - `requirePrReviews="false"`
+    - `minApprovingReviews="1"`
+    - `requireCodeOwnerReviews="false"`
+- Local negative check (expected FAIL classification):
+  - `REQUIRE_PR_REVIEWS=true` returns `reason=PR_REVIEWS_NOT_ENABLED` on current `main` policy.
