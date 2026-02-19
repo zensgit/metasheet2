@@ -5,7 +5,7 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-zensgit/metasheet2}}"
 BRANCH="${BRANCH:-main}"
 REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV:-contracts (strict),contracts (dashboard)}"
 REQUIRE_STRICT="${REQUIRE_STRICT:-true}"
-ENFORCE_ADMINS="${ENFORCE_ADMINS:-false}"
+ENFORCE_ADMINS="${ENFORCE_ADMINS:-true}"
 APPLY="${APPLY:-false}"
 
 function die() {
@@ -97,6 +97,7 @@ REPO="$REPO" \
 BRANCH="$BRANCH" \
 REQUIRED_CHECKS_CSV="$REQUIRED_CHECKS_CSV" \
 REQUIRE_STRICT="$REQUIRE_STRICT" \
+REQUIRE_ENFORCE_ADMINS="$ENFORCE_ADMINS" \
 ./scripts/ops/attendance-check-branch-protection.sh
 
 info "OK: branch protection applied and verified"

@@ -272,11 +272,13 @@ function parseBranchProtectionStepSummary(text) {
   const branch = text.match(/^- Branch: `([^`]+)`/m)?.[1] || null
   const checks = text.match(/^- Required checks: `([^`]+)`/m)?.[1] || null
   const strict = text.match(/^- Require strict: `([^`]+)`/m)?.[1] || null
+  const enforceAdmins = text.match(/^- Require enforce admins: `([^`]+)`/m)?.[1] || null
   return {
     reason,
     branch,
     checks,
     strict,
+    enforceAdmins,
   }
 }
 
@@ -633,6 +635,7 @@ function renderMarkdown({
         if (meta.branch) extra.push(`branch=${meta.branch}`)
         if (meta.checks) extra.push(`checks=${meta.checks}`)
         if (meta.strict) extra.push(`strict=${meta.strict}`)
+        if (meta.enforceAdmins) extra.push(`enforce_admins=${meta.enforceAdmins}`)
       }
       if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) extra.push(`missing=${meta.missingMetrics}`)
@@ -729,6 +732,7 @@ function renderMarkdown({
         if (meta?.branch) metaBits.push(`branch=${meta.branch}`)
         if (meta?.checks) metaBits.push(`checks=${meta.checks}`)
         if (meta?.strict) metaBits.push(`strict=${meta.strict}`)
+        if (meta?.enforceAdmins) metaBits.push(`enforce_admins=${meta.enforceAdmins}`)
       }
       if (finding.gate === 'Host Metrics') {
         if (meta?.missingMetrics) metaBits.push(`missing=${meta.missingMetrics}`)
@@ -854,6 +858,8 @@ function renderMarkdown({
         lines.push('- Branch Protection: one or more required checks are missing. Restore required contexts and rerun.')
       } else if (reason === 'STRICT_NOT_ENABLED') {
         lines.push('- Branch Protection: `required_status_checks.strict` is disabled. Re-enable strict mode and rerun.')
+      } else if (reason === 'ENFORCE_ADMINS_DISABLED') {
+        lines.push('- Branch Protection: `enforce_admins.enabled` is disabled. Enable enforce-admins and rerun to prevent bypass pushes.')
       } else if (reason === 'API_FORBIDDEN') {
         lines.push('- Branch Protection: workflow token lacks branch-protection read permission. Configure an admin-capable token secret (for example `ATTENDANCE_ADMIN_GH_TOKEN`) and rerun.')
       }
@@ -1484,6 +1490,7 @@ async function run() {
         if (meta.branch) summaryBits.push(`branch=${meta.branch}`)
         if (meta.checks) summaryBits.push(`checks=${meta.checks}`)
         if (meta.strict) summaryBits.push(`strict=${meta.strict}`)
+        if (meta.enforceAdmins) summaryBits.push(`enforce_admins=${meta.enforceAdmins}`)
       } else if (gate.name === 'Host Metrics') {
         if (meta.missingMetrics) summaryBits.push(`missing=${meta.missingMetrics}`)
         if (meta.metricsUrl) summaryBits.push(`metrics_url=${meta.metricsUrl}`)
@@ -1537,6 +1544,7 @@ async function run() {
         flat.branch = meta.branch ?? null
         flat.requiredChecks = meta.checks ?? null
         flat.requireStrict = meta.strict ?? null
+        flat.requireEnforceAdmins = meta.enforceAdmins ?? null
       } else if (gate.name === 'Host Metrics') {
         flat.missingMetrics = meta.missingMetrics ?? null
         flat.metricsUrl = meta.metricsUrl ?? null

@@ -5,6 +5,7 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-zensgit/metasheet2}}"
 BRANCH="${BRANCH:-main}"
 REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV:-contracts (strict),contracts (dashboard)}"
 REQUIRE_STRICT="${REQUIRE_STRICT:-true}"
+REQUIRE_ENFORCE_ADMINS="${REQUIRE_ENFORCE_ADMINS:-false}"
 OUTPUT_JSON="${OUTPUT_JSON:-}"
 
 function die() {
@@ -42,6 +43,7 @@ owner="${REPO%%/*}"
 repo_name="${REPO##*/}"
 
 require_strict="$(bool_normalize "$REQUIRE_STRICT")"
+require_enforce_admins="$(bool_normalize "$REQUIRE_ENFORCE_ADMINS")"
 
 required_checks=()
 IFS=',' read -r -a raw_required_checks <<< "$REQUIRED_CHECKS_CSV"
@@ -55,7 +57,7 @@ if (( ${#required_checks[@]} == 0 )); then
 fi
 
 info "repo=${REPO} branch=${BRANCH}"
-info "required_checks=$(IFS=,; echo "${required_checks[*]}") require_strict=${require_strict}"
+info "required_checks=$(IFS=,; echo "${required_checks[*]}") require_strict=${require_strict} require_enforce_admins=${require_enforce_admins}"
 
 tmp_dir="$(mktemp -d)"
 cleanup() { rm -rf "$tmp_dir"; }
@@ -67,6 +69,7 @@ graphql_json="${tmp_dir}/graphql.json"
 graphql_err="${tmp_dir}/graphql.err"
 
 strict_current=""
+enforce_admins_current=""
 contexts_current=()
 
 function try_graphql_fallback() {
@@ -85,16 +88,17 @@ function try_graphql_fallback() {
   local lines_path="${tmp_dir}/graphql-rules.tsv"
   jq -r '
     .data.repository.branchProtectionRules.nodes[]? |
-    [.pattern, ((.requiresStrictStatusChecks // false) | tostring), ((.requiredStatusCheckContexts // []) | join("\u001f"))] |
+    [.pattern, ((.requiresStrictStatusChecks // false) | tostring), ((.isAdminEnforced // false) | tostring), ((.requiredStatusCheckContexts // []) | join("\u001f"))] |
     @tsv
   ' "$graphql_json" >"$lines_path"
 
   local best_score=-1
   local best_pattern=""
   local best_strict=""
+  local best_enforce_admins=""
   local best_contexts_join=""
 
-  while IFS=$'\t' read -r pattern strict_value contexts_join; do
+  while IFS=$'\t' read -r pattern strict_value enforce_admins_value contexts_join; do
     [[ -n "${pattern:-}" ]] || continue
     local match=false
     local score=-1
@@ -111,6 +115,7 @@ function try_graphql_fallback() {
       best_score="$score"
       best_pattern="$pattern"
       best_strict="$strict_value"
+      best_enforce_admins="$enforce_admins_value"
       best_contexts_join="$contexts_join"
     fi
   done <"$lines_path"
@@ -120,6 +125,7 @@ function try_graphql_fallback() {
   fi
 
   strict_current="${best_strict:-false}"
+  enforce_admins_current="${best_enforce_admins:-false}"
   contexts_current=()
   if [[ -n "${best_contexts_join:-}" ]]; then
     IFS=$'\x1f' read -r -a contexts_current <<< "$best_contexts_join"
@@ -156,6 +162,7 @@ if (( rc != 0 )); then
   fi
 else
   strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
+  enforce_admins_current="$(jq -r '.enforce_admins.enabled // false' "$protection_json")"
   mapfile -t contexts_current < <(jq -r '.required_status_checks.contexts[]? // empty' "$protection_json")
 fi
 
@@ -177,6 +184,10 @@ if [[ "$require_strict" == "true" && "$strict_current" != "true" ]]; then
   die "STRICT_NOT_ENABLED" "required_status_checks.strict=false but REQUIRE_STRICT=true"
 fi
 
+if [[ "$require_enforce_admins" == "true" && "$enforce_admins_current" != "true" ]]; then
+  die "ENFORCE_ADMINS_DISABLED" "enforce_admins.enabled=false but REQUIRE_ENFORCE_ADMINS=true"
+fi
+
 if (( ${#missing_checks[@]} > 0 )); then
   die "REQUIRED_CHECKS_MISSING" "missing required checks: $(IFS=,; echo "${missing_checks[*]}")"
 fi
@@ -188,6 +199,8 @@ if [[ -n "$OUTPUT_JSON" ]]; then
     --arg branch "$BRANCH" \
     --arg requireStrict "$require_strict" \
     --arg strictCurrent "$strict_current" \
+    --arg requireEnforceAdmins "$require_enforce_admins" \
+    --arg enforceAdminsCurrent "$enforce_admins_current" \
     --argjson requiredChecks "$(printf '%s\n' "${required_checks[@]}" | jq -R . | jq -s .)" \
     --argjson contextsCurrent "$(printf '%s\n' "${contexts_current[@]}" | jq -R . | jq -s .)" \
     '{
@@ -195,6 +208,8 @@ if [[ -n "$OUTPUT_JSON" ]]; then
       branch: $branch,
       requireStrict: ($requireStrict == "true"),
       strictCurrent: ($strictCurrent == "true"),
+      requireEnforceAdmins: ($requireEnforceAdmins == "true"),
+      enforceAdminsCurrent: ($enforceAdminsCurrent == "true"),
       requiredChecks: $requiredChecks,
       contextsCurrent: $contextsCurrent,
       ok: true
@@ -202,5 +217,6 @@ if [[ -n "$OUTPUT_JSON" ]]; then
 fi
 
 info "strict_current=${strict_current}"
+info "enforce_admins_current=${enforce_admins_current}"
 info "contexts_current=$(IFS=,; echo "${contexts_current[*]}")"
-info "OK: required checks present and strict setting is acceptable"
+info "OK: required checks present and strict/admin settings are acceptable"

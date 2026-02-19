@@ -17,6 +17,10 @@ on:
         description: 'Require required_status_checks.strict=true (true/false)'
         required: false
         default: 'true'
+      require_enforce_admins:
+        description: 'Require enforce_admins.enabled=true (true/false)'
+        required: false
+        default: 'true'
       drill_fail:
         description: 'Optional: force failure after check for FAIL-path validation (true/false)'
         required: false
@@ -49,6 +53,7 @@ jobs:
       BRANCH: ${{ inputs.branch || 'main' }}
       REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
       REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}
+      REQUIRE_ENFORCE_ADMINS: ${{ inputs.require_enforce_admins || 'true' }}
       DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
     steps:
       - name: Checkout
@@ -67,6 +72,7 @@ jobs:
           BRANCH="${BRANCH}" \
           REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV}" \
           REQUIRE_STRICT="${REQUIRE_STRICT}" \
+          REQUIRE_ENFORCE_ADMINS="${REQUIRE_ENFORCE_ADMINS}" \
           OUTPUT_JSON="output/branch-protection/protection.json" \
           ./scripts/ops/attendance-check-branch-protection.sh 2>&1 | tee "$log_file"
           rc="${PIPESTATUS[0]}"
@@ -113,6 +119,7 @@ jobs:
             echo "- Branch: \`${BRANCH}\`"
             echo "- Required checks: \`${REQUIRED_CHECKS_CSV}\`"
             echo "- Require strict: \`${REQUIRE_STRICT}\`"
+            echo "- Require enforce admins: \`${REQUIRE_ENFORCE_ADMINS}\`"
             echo "- Run: ${run_url}"
             echo ""
             echo "#### Runbook"
