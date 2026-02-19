@@ -43,6 +43,10 @@ const previewLimit = previewLimitRaw ? Number(previewLimitRaw) : (rows > 2000 ? 
 const returnItems = process.env.RETURN_ITEMS ? process.env.RETURN_ITEMS === 'true' : rows <= 2000
 const itemsLimitRaw = process.env.ITEMS_LIMIT
 const itemsLimit = itemsLimitRaw ? Number(itemsLimitRaw) : 200
+const bulkEngineThresholdRaw = Number(process.env.BULK_ENGINE_THRESHOLD || 50_000)
+const bulkEngineThreshold = Number.isFinite(bulkEngineThresholdRaw)
+  ? Math.max(1000, Math.floor(bulkEngineThresholdRaw))
+  : 50_000
 
 function die(message) {
   console.error(`[attendance-import-perf] ERROR: ${message}`)
@@ -179,6 +183,10 @@ function toDateOnly(date) {
 function makeId() {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   return `attendance-perf-${suffix}`
+}
+
+function resolveEngineByRows(rowCount) {
+  return Number(rowCount) >= bulkEngineThreshold ? 'bulk' : 'standard'
 }
 
 function makeCsv({ startDate, userId, groupName }) {
@@ -339,6 +347,7 @@ async function run() {
       apiBase,
       orgId,
       rows,
+      engine: resolveEngineByRows(rows),
       uploadCsv,
       previewMs: tPreview1 - tPreview0,
       commitMs: null,
@@ -374,15 +383,24 @@ async function run() {
 
   let batchId = null
   let jobId = null
+  let engine = resolveEngineByRows(rows)
+  let processedRows = null
+  let failedRows = null
+  let jobElapsedMs = null
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = job?.id
     if (!jobId) die('commit-async did not return job.id')
     const finalJob = await pollImportJob(jobId)
     batchId = finalJob?.batchId
+    if (typeof finalJob?.engine === 'string' && finalJob.engine) engine = finalJob.engine
+    if (Number.isFinite(Number(finalJob?.processedRows))) processedRows = Number(finalJob.processedRows)
+    if (Number.isFinite(Number(finalJob?.failedRows))) failedRows = Number(finalJob.failedRows)
+    if (Number.isFinite(Number(finalJob?.elapsedMs))) jobElapsedMs = Number(finalJob.elapsedMs)
     if (!batchId) die('commit-async job did not return batchId')
   } else {
     batchId = commit.body?.data?.batchId
+    if (typeof commit.body?.data?.engine === 'string' && commit.body.data.engine) engine = commit.body.data.engine
     if (!batchId) die('commit did not return batchId')
   }
   const tCommit1 = nowMs()
@@ -422,6 +440,10 @@ async function run() {
     orgId,
     rows,
     commitAsync,
+    engine,
+    processedRows,
+    failedRows,
+    jobElapsedMs,
     uploadCsv,
     jobId,
     previewMs: tPreview1 - tPreview0,

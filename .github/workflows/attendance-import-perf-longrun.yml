@@ -151,6 +151,15 @@ jobs:
             max_commit_ms: ''
             max_export_ms: ''
             max_rollback_ms: ''
+          - id: rows500k-preview
+            rows: '500000'
+            mode: 'preview'
+            export_csv: 'false'
+            rollback: 'false'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_500K_MAX_PREVIEW_MS || '480000' }}
+            max_commit_ms: ''
+            max_export_ms: ''
+            max_rollback_ms: ''
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}

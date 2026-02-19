@@ -23,9 +23,9 @@ on:
         required: false
         default: 'http://142.171.239.56:8081/api'
       rows:
-        description: 'CSV rows to generate (default 10000)'
+        description: 'CSV rows to generate (default 100000)'
         required: false
-        default: '10000'
+        default: '100000'
       mode:
         description: 'preview or commit'
         required: false
@@ -97,7 +97,7 @@ jobs:
             "mode": "commit",
             "apiBase": "<DRILL>",
             "orgId": "default",
-            "rows": 10000,
+            "rows": 100000,
             "commitAsync": true,
             "uploadCsv": true,
             "previewMs": 1111,
@@ -137,7 +137,7 @@ jobs:
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      ROWS: ${{ inputs.rows || '10000' }}
+      ROWS: ${{ inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '100000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
       COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
