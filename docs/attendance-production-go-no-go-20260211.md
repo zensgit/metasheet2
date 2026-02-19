@@ -1023,3 +1023,24 @@ Evidence:
 | Branch Protection post-merge re-verify | [#22168482721](https://github.com/zensgit/metasheet2/actions/runs/22168482721) | PASS | `output/playwright/ga/22168482721/step-summary.md`, `output/playwright/ga/22168482721/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
 | Daily Dashboard post-merge re-verify | [#22168496046](https://github.com/zensgit/metasheet2/actions/runs/22168496046) | PASS | `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
 | Protected-main PR | [#191](https://github.com/zensgit/metasheet2/pull/191) | MERGED | Required checks satisfied under protected main policy |
+
+## Post-Go Validation (2026-02-19): Branch Policy Drift Gate + Protection Review Mapping
+
+This record validates:
+
+- Branch protection drift monitoring is decoupled into a lightweight policy workflow.
+- Daily dashboard `gateFlat.protection` now carries review-policy status fields.
+- Review-policy failures are classified with explicit reason codes.
+
+Implementation:
+
+- PR: [#193](https://github.com/zensgit/metasheet2/pull/193)
+- Commit: `932223f3`
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (Prod) non-drill | [#22183957768](https://github.com/zensgit/metasheet2/actions/runs/22183957768) | PASS | `output/playwright/ga/22183957768/step-summary.md`, `output/playwright/ga/22183957768/policy.log`, `output/playwright/ga/22183957768/policy.json` |
+| Daily Dashboard (uses policy-drift workflow source) | [#22183988363](https://github.com/zensgit/metasheet2/actions/runs/22183988363) | PASS | `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/gate-meta/protection/meta.json` (`gateFlat.protection.requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+| Local script negative check (`REQUIRE_PR_REVIEWS=true`) | N/A | FAIL (expected) | `attendance-check-branch-protection` returns `reason=PR_REVIEWS_NOT_ENABLED` (classification verified) |
