@@ -978,3 +978,26 @@ Evidence:
 | Branch Protection recovery (after apply) | [#22142247652](https://github.com/zensgit/metasheet2/actions/runs/22142247652) | PASS | `output/playwright/ga/22142247652/step-summary.md`, `output/playwright/ga/22142247652/protection.log` (`strict_current=true`, required checks present) |
 | Daily Dashboard (includes Branch Protection, post recovery) | [#22142280338](https://github.com/zensgit/metasheet2/actions/runs/22142280338) | PASS | `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
 | P1 issue closure | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Auto-closed by Branch Protection workflow recovery path |
+
+## Post-Go Validation (2026-02-19): Enforce Admins Anti-Bypass Baseline
+
+This record validates:
+
+- Branch protection gate now fails if `enforce_admins.enabled` is disabled.
+- Anti-bypass baseline is applied and recovered to PASS.
+- Daily dashboard remains PASS after hardening.
+
+Implementation:
+
+- Commit: `4aa4e2a2`
+- Ops apply:
+  - `APPLY=true ./scripts/ops/attendance-ensure-branch-protection.sh` (defaults to `ENFORCE_ADMINS=true`)
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Protection (require_enforce_admins=true; expected FAIL before apply) | [#22168334875](https://github.com/zensgit/metasheet2/actions/runs/22168334875) | FAIL (expected) | `output/playwright/ga/22168334875/step-summary.md`, `output/playwright/ga/22168334875/protection.log` (`reason=ENFORCE_ADMINS_DISABLED`) |
+| Branch Protection recovery (after anti-bypass apply) | [#22168353987](https://github.com/zensgit/metasheet2/actions/runs/22168353987) | PASS | `output/playwright/ga/22168353987/step-summary.md`, `output/playwright/ga/22168353987/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
+| Daily Dashboard post-hardening | [#22168373962](https://github.com/zensgit/metasheet2/actions/runs/22168373962) | PASS | `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| P1 branch-protection issue | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Remains closed after recovery |
