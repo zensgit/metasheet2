@@ -1044,3 +1044,17 @@ Evidence:
 | Branch Policy Drift (Prod) non-drill | [#22183957768](https://github.com/zensgit/metasheet2/actions/runs/22183957768) | PASS | `output/playwright/ga/22183957768/step-summary.md`, `output/playwright/ga/22183957768/policy.log`, `output/playwright/ga/22183957768/policy.json` |
 | Daily Dashboard (uses policy-drift workflow source) | [#22183988363](https://github.com/zensgit/metasheet2/actions/runs/22183988363) | PASS | `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/gate-meta/protection/meta.json` (`gateFlat.protection.requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
 | Local script negative check (`REQUIRE_PR_REVIEWS=true`) | N/A | FAIL (expected) | `attendance-check-branch-protection` returns `reason=PR_REVIEWS_NOT_ENABLED` (classification verified) |
+
+## Post-Go Validation (2026-02-19): Branch Policy Drift Drill + Recovery + Dashboard Re-Verify
+
+This record validates:
+
+- Branch policy drift drill failures keep artifacts and open the drill issue.
+- Recovery closes the same drill issue.
+- Daily dashboard continues to use the latest non-drill run and keeps `gateFlat.protection` review-policy fields populated.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (expected FAIL, issue open) | [#22184382068](https://github.com/zensgit/metasheet2/actions/runs/22184382068) | FAIL (expected) | `output/playwright/ga/22184382068/step-summary.md`, `output/playwright/ga/22184382068/policy.log`, `output/playwright/ga/22184382068/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
+| Branch Policy Drift recovery (issue auto-close) | [#22184421397](https://github.com/zensgit/metasheet2/actions/runs/22184421397) | PASS | `output/playwright/ga/22184421397/step-summary.md`, `output/playwright/ga/22184421397/policy.log`, `output/playwright/ga/22184421397/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
+| Daily Dashboard post-drill re-verify | [#22184452525](https://github.com/zensgit/metasheet2/actions/runs/22184452525) | PASS | `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json` (`gateFlat.protection.runId=22184421397`, `requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
