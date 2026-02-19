@@ -824,6 +824,11 @@ const ATTENDANCE_IMPORT_CSV_MAX_ROWS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_
   min: 1000,
 })
 
+const ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD', 50000, {
+  min: 1000,
+  max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
+})
+
 const ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE', 300, {
   min: 50,
   max: 1000,
@@ -5447,9 +5452,43 @@ module.exports = {
 	      return next
 	    }
 
+	    const resolveImportEngineByRowCount = (rowCount) => {
+	      const numeric = Number(rowCount ?? 0)
+	      if (Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD) return 'bulk'
+	      return 'standard'
+	    }
+
+	    const resolveImportEngineFromMeta = (meta, rowCountHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const explicit = typeof payload?.__importEngine === 'string' ? payload.__importEngine.trim().toLowerCase() : ''
+	      if (explicit === 'bulk' || explicit === 'standard') return explicit
+	      const hint = Number(rowCountHint ?? payload?.summary?.processedRows ?? payload?.rowCount ?? payload?.total ?? 0)
+	      return resolveImportEngineByRowCount(Number.isFinite(hint) ? hint : 0)
+	    }
+
+	    const computeImportJobElapsedMs = (startedAt, finishedAt, status) => {
+	      const startMs = startedAt ? Date.parse(String(startedAt)) : Number.NaN
+	      if (!Number.isFinite(startMs)) return 0
+	      const finishedMs = finishedAt ? Date.parse(String(finishedAt)) : Number.NaN
+	      const terminal = status === 'completed' || status === 'failed'
+	      const endMs = terminal && Number.isFinite(finishedMs) ? finishedMs : Date.now()
+	      return Math.max(0, Math.floor(endMs - startMs))
+	    }
+
 	    const mapImportJobRow = (row) => {
 	      const payload = normalizeMetadata(row.payload)
 	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
+	      const status = normalizeImportJobStatus(row.status)
+	      const progress = Number(row.progress ?? 0)
+	      const total = Number(row.total ?? 0)
+	      const processedRowsRaw = Number(payload?.summary?.processedRows)
+	      const failedRowsRaw = Number(payload?.summary?.failedRows)
+	      const processedRows = Number.isFinite(processedRowsRaw)
+	        ? Math.max(0, Math.floor(processedRowsRaw))
+	        : (status === 'completed' ? Math.max(0, Math.floor(total)) : Math.max(0, Math.floor(progress)))
+	      const failedRows = Number.isFinite(failedRowsRaw)
+	        ? Math.max(0, Math.floor(failedRowsRaw))
+	        : Math.max(0, Math.floor(total) - processedRows)
 	      const preview = kind === 'preview' && payload?.previewResult && typeof payload.previewResult === 'object'
 	        ? payload.previewResult
 	        : null
@@ -5466,9 +5505,13 @@ module.exports = {
 	        createdBy: row.created_by,
 	        idempotencyKey,
 	        kind,
-	        status: row.status ?? 'queued',
-	        progress: Number(row.progress ?? 0),
-	        total: Number(row.total ?? 0),
+	        status,
+	        engine: resolveImportEngineFromMeta(payload, total),
+	        progress,
+	        total,
+	        processedRows,
+	        failedRows,
+	        elapsedMs: computeImportJobElapsedMs(row.started_at, row.finished_at, status),
 	        error: row.error ?? null,
 	        preview,
 	        startedAt: row.started_at ?? null,
@@ -5723,11 +5766,12 @@ module.exports = {
 	          orgId,
 	          result.rowCount,
 	          result.rowCount,
-	          JSON.stringify({
-	            __jobType: 'preview',
-	            idempotencyKey: payload.idempotencyKey ?? null,
-	            previewResult: result,
-	          }),
+		          JSON.stringify({
+		            __jobType: 'preview',
+		            idempotencyKey: payload.idempotencyKey ?? null,
+		            __importEngine: resolveImportEngineFromMeta(payload, result.rowCount),
+		            previewResult: result,
+		          }),
 	        ]
 	      )
 	    }
@@ -5837,10 +5881,19 @@ module.exports = {
 	          finishedAt: true,
 	        })
 
-	        // Drop large payload after completion (retention can rely on batch tables instead).
+	        // Drop large payload after completion while preserving compact progress metadata.
+	        const summaryPayload = {
+	          __jobType: 'commit',
+	          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
+	          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+	          summary: {
+	            processedRows: Number(commitResult.rowCount ?? 0),
+	            failedRows: Math.max(0, Number(commitResult.skippedCount ?? 0)),
+	          },
+	        }
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
-	          [rowId, orgId, JSON.stringify({})]
+	          [rowId, orgId, JSON.stringify(summaryPayload)]
 	        )
 	      } catch (error) {
 	        const message = String(error?.message ?? error ?? 'Unknown error')
@@ -5867,6 +5920,8 @@ module.exports = {
 	            batchId: existing.batchId,
 	            imported: existing.imported,
 	            rowCount: existing.imported + existing.skipped,
+	            skippedCount: existing.skipped,
+	            engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
 	            meta: existing.meta,
 	            idempotent: true,
 	          }
@@ -5902,6 +5957,7 @@ module.exports = {
 		      if (rows.length === 0) {
 		        throw new Error('No rows to import')
 		      }
+		      const importEngine = resolveImportEngineByRowCount(rows.length)
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
@@ -5969,12 +6025,13 @@ module.exports = {
 	          }
 	        }
 	        const groupMembersToInsert = new Map()
-	        batchMeta = {
-	          ...(payload.batchMeta ?? {}),
-	          idempotencyKey: cleanIdempotency || undefined,
-	          mappingProfileId: payload.mappingProfileId ?? null,
-	          groupSync: groupSync
-	            ? {
+		        batchMeta = {
+		          ...(payload.batchMeta ?? {}),
+		          idempotencyKey: cleanIdempotency || undefined,
+		          engine: importEngine,
+		          mappingProfileId: payload.mappingProfileId ?? null,
+		          groupSync: groupSync
+		            ? {
 	                autoCreate: groupSync.autoCreate,
 	                autoAssignMembers: groupSync.autoAssignMembers,
 	                ruleSetId: groupSync.ruleSetId,
@@ -6602,23 +6659,30 @@ module.exports = {
 		        return {
 		          batchId: idempotentInTransaction.batchId,
 		          imported: idempotentInTransaction.imported,
-	          rowCount: idempotentInTransaction.imported + idempotentInTransaction.skipped,
-	          items: [],
-	          skipped: [],
-	          csvWarnings: [],
+		          rowCount: idempotentInTransaction.imported + idempotentInTransaction.skipped,
+		          skippedCount: idempotentInTransaction.skipped,
+		          engine: resolveImportEngineFromMeta(
+		            idempotentInTransaction.meta,
+		            idempotentInTransaction.imported + idempotentInTransaction.skipped
+		          ),
+		          items: [],
+		          skipped: [],
+		          csvWarnings: [],
 	          groupWarnings: [],
 	          meta: idempotentInTransaction.meta,
 	          idempotent: true,
 	        }
 	      }
 
-	      return {
-	        batchId: resolvedBatchId,
-	        imported: importedCount,
-	        rowCount: rows.length,
-	        items: returnItems ? results : [],
-	        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
-	        skipped,
+		      return {
+		        batchId: resolvedBatchId,
+		        imported: importedCount,
+		        rowCount: rows.length,
+		        skippedCount: skipped.length,
+		        engine: importEngine,
+		        items: returnItems ? results : [],
+		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
+		        skipped,
 	        csvWarnings: [...csvWarnings, ...groupWarnings],
 	        groupWarnings,
 	        meta: batchMeta,
@@ -10323,6 +10387,7 @@ module.exports = {
 	              data: {
 	                batchId: existing.batchId,
 	                imported: existing.imported,
+	                engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
 	                items: [],
 	                skipped: [],
 	                csvWarnings: [],
@@ -10393,6 +10458,7 @@ module.exports = {
 	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
 	            return
 	          }
+	          const importEngine = resolveImportEngineByRowCount(rows.length)
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -10469,6 +10535,7 @@ module.exports = {
 	            batchMeta = {
 	              ...(parsed.data.batchMeta ?? {}),
 	              idempotencyKey: idempotencyKey || undefined,
+	              engine: importEngine,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -11109,10 +11176,14 @@ module.exports = {
 	            res.json({
 	              ok: true,
 	              data: {
-                batchId: idempotentInTransaction.batchId,
-                imported: idempotentInTransaction.imported,
-                items: [],
-                skipped: [],
+	                batchId: idempotentInTransaction.batchId,
+	                imported: idempotentInTransaction.imported,
+	                engine: resolveImportEngineFromMeta(
+	                  idempotentInTransaction.meta,
+	                  idempotentInTransaction.imported + idempotentInTransaction.skipped
+	                ),
+	                items: [],
+	                skipped: [],
                 csvWarnings: [],
                 groupWarnings: [],
                 meta: idempotentInTransaction.meta,
@@ -11122,12 +11193,13 @@ module.exports = {
             return
           }
 
-          res.json({
-            ok: true,
-            data: {
-              batchId,
-              imported: importedCount,
-              items: returnItems ? results : [],
+	          res.json({
+	            ok: true,
+	            data: {
+	              batchId,
+	              imported: importedCount,
+	              engine: importEngine,
+	              items: returnItems ? results : [],
               itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
               skipped,
               csvWarnings: [...csvWarnings, ...groupWarnings],
@@ -11151,15 +11223,16 @@ module.exports = {
 	          if (isIdempotencyUnique && await hasImportBatchIdempotencyColumn(db)) {
 	            try {
 	              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
-	              if (existing) {
-	                res.json({
-	                  ok: true,
-	                  data: {
-	                    batchId: existing.batchId,
-	                    imported: existing.imported,
-	                    items: [],
-	                    skipped: [],
-	                    csvWarnings: [],
+		              if (existing) {
+		                res.json({
+		                  ok: true,
+		                  data: {
+		                    batchId: existing.batchId,
+		                    imported: existing.imported,
+		                    engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
+		                    items: [],
+		                    skipped: [],
+		                    csvWarnings: [],
 	                    groupWarnings: [],
 	                    meta: existing.meta,
 	                    idempotent: true,
@@ -11248,16 +11321,9 @@ module.exports = {
           }
         }
 
-        try {
-          const jobId = randomUUID()
-          const batchId = randomUUID()
-          const sanitizedPayload = sanitizeImportJobPayload({
-            ...parsed.data,
-            __jobType: 'preview',
-            previewLimit: normalizePreviewAsyncLimit(parsed.data.previewLimit),
-            idempotencyKey: rawIdempotencyKey || undefined,
-          })
-
+	        try {
+	          const jobId = randomUUID()
+	          const batchId = randomUUID()
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
@@ -11270,6 +11336,14 @@ module.exports = {
 	            total = Number.isFinite(hint) && hint > 0 ? hint : 0
 	          }
 	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
+
+	          const sanitizedPayload = sanitizeImportJobPayload({
+	            ...parsed.data,
+	            __jobType: 'preview',
+	            __importEngine: resolveImportEngineByRowCount(total),
+	            previewLimit: normalizePreviewAsyncLimit(parsed.data.previewLimit),
+	            idempotencyKey: rawIdempotencyKey || undefined,
+	          })
 
           await db.query(
             `INSERT INTO attendance_import_jobs
@@ -11397,11 +11471,9 @@ module.exports = {
           }
         }
 
-        try {
-          const jobId = randomUUID()
-          const batchId = randomUUID()
-          const sanitizedPayload = sanitizeImportJobPayload(parsed.data)
-
+	        try {
+	          const jobId = randomUUID()
+	          const batchId = randomUUID()
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
@@ -11414,6 +11486,11 @@ module.exports = {
 	            total = Number.isFinite(hint) && hint > 0 ? hint : 0
 	          }
 	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
+
+	          const sanitizedPayload = sanitizeImportJobPayload({
+	            ...parsed.data,
+	            __importEngine: resolveImportEngineByRowCount(total),
+	          })
 
           const status = 'queued'
           await db.query(

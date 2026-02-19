@@ -1649,3 +1649,68 @@ Validation:
     - `gateFlat.protection.requirePrReviews=false`
     - `gateFlat.protection.minApprovingReviews=1`
     - `gateFlat.protection.requireCodeOwnerReviews=false`
+
+## Latest Notes (2026-02-19): Branch Review Policy Upgrade (`require_pr_reviews=true`) + Drill/Recovery
+
+Policy target applied on protected `main`:
+
+- `required_pull_request_reviews.enabled=true`
+- `required_approving_review_count=1`
+- `require_code_owner_reviews=false`
+
+Ops apply command (token only from runtime env, never committed):
+
+```bash
+REPO=zensgit/metasheet2 \
+BRANCH=main \
+REQUIRED_CHECKS_CSV='contracts (strict),contracts (dashboard)' \
+REQUIRE_STRICT=true \
+ENFORCE_ADMINS=true \
+REQUIRE_PR_REVIEWS=true \
+MIN_APPROVING_REVIEW_COUNT=1 \
+REQUIRE_CODE_OWNER_REVIEWS=false \
+APPLY=true \
+./scripts/ops/attendance-ensure-branch-protection.sh
+```
+
+Verification:
+
+- GitHub branch protection API now returns:
+  - `pr_reviews=true`
+  - `approving_count=1`
+  - `code_owner=false`
+
+Drill/recovery + dashboard:
+
+- Branch Policy Drift drill (expected FAIL):
+  - [Attendance Branch Policy Drift (Prod) [DRILL] #22184974691](https://github.com/zensgit/metasheet2/actions/runs/22184974691) (`FAILURE`)
+  - Evidence:
+    - `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/step-summary.md`
+    - `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.log`
+    - `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.json`
+  - Drill issue opened:
+    - [#197](https://github.com/zensgit/metasheet2/issues/197) (`OPEN` at failure time)
+- Branch Policy Drift recovery (explicit review-policy inputs):
+  - [Attendance Branch Policy Drift (Prod) #22185012785](https://github.com/zensgit/metasheet2/actions/runs/22185012785) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/step-summary.md`
+    - `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.log`
+    - `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.json`
+  - Verified `policy.json`:
+    - `requirePrReviews=true`
+    - `minApprovingReviewCount=1`
+    - `requireCodeOwnerReviews=false`
+    - `prReviewsRequiredCurrent=true`
+    - `approvingReviewCountCurrent=1`
+  - Drill issue auto-closed:
+    - [#197](https://github.com/zensgit/metasheet2/issues/197) (`CLOSED`)
+- Daily dashboard re-verify (uses latest non-drill policy run):
+  - [Attendance Daily Gate Dashboard #22185048468](https://github.com/zensgit/metasheet2/actions/runs/22185048468) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.md`
+    - `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.json`
+  - Verified `gateFlat.protection`:
+    - `runId=22185012785` (latest non-drill policy run)
+    - `requirePrReviews="true"`
+    - `minApprovingReviews="1"`
+    - `requireCodeOwnerReviews="false"`

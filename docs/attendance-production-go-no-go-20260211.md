@@ -1058,3 +1058,18 @@ This record validates:
 | Branch Policy Drift drill (expected FAIL, issue open) | [#22184382068](https://github.com/zensgit/metasheet2/actions/runs/22184382068) | FAIL (expected) | `output/playwright/ga/22184382068/step-summary.md`, `output/playwright/ga/22184382068/policy.log`, `output/playwright/ga/22184382068/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
 | Branch Policy Drift recovery (issue auto-close) | [#22184421397](https://github.com/zensgit/metasheet2/actions/runs/22184421397) | PASS | `output/playwright/ga/22184421397/step-summary.md`, `output/playwright/ga/22184421397/policy.log`, `output/playwright/ga/22184421397/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
 | Daily Dashboard post-drill re-verify | [#22184452525](https://github.com/zensgit/metasheet2/actions/runs/22184452525) | PASS | `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json` (`gateFlat.protection.runId=22184421397`, `requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+
+## Post-Go Validation (2026-02-19): Branch Review Policy Upgrade (`pr_reviews=true`) + Drill Recovery
+
+This record validates:
+
+- Protected `main` branch policy is now upgraded to require PR reviews.
+- Branch policy drift drill/recovery lifecycle still works after policy upgrade.
+- Daily dashboard `gateFlat.protection` maps the upgraded review-policy fields from the latest non-drill run.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch protection policy apply (`require_pr_reviews=true`, `min=1`, `code_owner=false`) | N/A | PASS | Verified via `gh api repos/zensgit/metasheet2/branches/main/protection`: `pr_reviews=true`, `approving_count=1`, `code_owner=false` |
+| Branch Policy Drift drill (expected FAIL, issue open) | [#22184974691](https://github.com/zensgit/metasheet2/actions/runs/22184974691) | FAIL (expected) | `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/step-summary.md`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.log`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.json`, Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
+| Branch Policy Drift recovery (explicit review-policy inputs) | [#22185012785](https://github.com/zensgit/metasheet2/actions/runs/22185012785) | PASS | `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/step-summary.md`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.log`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.json` (`requirePrReviews=true`, `minApprovingReviewCount=1`, `requireCodeOwnerReviews=false`), Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
+| Daily Dashboard post-recovery re-verify | [#22185048468](https://github.com/zensgit/metasheet2/actions/runs/22185048468) | PASS | `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.json` (`gateFlat.protection.runId=22185012785`, `requirePrReviews=true`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
