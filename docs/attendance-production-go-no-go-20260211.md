@@ -1118,3 +1118,41 @@ This record validates:
 | Branch Policy Drift drill (single-maintainer fallback, expected FAIL) | [#22188008265](https://github.com/zensgit/metasheet2/actions/runs/22188008265) | FAIL (expected) | `output/playwright/ga/22188008265/step-summary.md`, `output/playwright/ga/22188008265/policy.log`, `output/playwright/ga/22188008265/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) |
 | Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22188054160](https://github.com/zensgit/metasheet2/actions/runs/22188054160) | PASS | `output/playwright/ga/22188054160/step-summary.md`, `output/playwright/ga/22188054160/policy.log`, `output/playwright/ga/22188054160/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) (`CLOSED`) |
 | Daily Dashboard post-merge re-verify | [#22188099087](https://github.com/zensgit/metasheet2/actions/runs/22188099087) | PASS | `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22188099087/gate-meta/protection/meta.json` (`runId=22188054160`, `requirePrReviews=false`) |
+
+## Post-Go Validation (2026-02-20): Next-Stage Script Hardening (Perf + Full-Flow + Dashboard Meta)
+
+This record validates:
+
+- Perf script emits stable telemetry for 100k+ trend consumption:
+  - `schemaVersion=2`
+  - `requestedImportEngine/resolvedImportEngine`
+  - `processedRows/failedRows/elapsedMs`
+  - `perfMetrics` aggregate block
+- Full-flow script has lower flake risk in Admin Center assertions:
+  - explicit readiness checks
+  - debug screenshot on missing admin section
+  - optional strict retry assertion switch (`ASSERT_ADMIN_RETRY`)
+- Daily dashboard enrichment now loads perf metadata for successful runs (not only failures), and includes `PERF_SUMMARY_MISSING` classification when summary artifacts are missing.
+
+Implementation:
+
+- Branch: `codex/attendance-next-stage`
+- Key files:
+  - `scripts/ops/attendance-import-perf.mjs`
+  - `scripts/verify-attendance-full-flow.mjs`
+  - `scripts/ops/attendance-daily-gate-report.mjs`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `node --check scripts/ops/attendance-import-perf.mjs` | PASS | local syntax check |
+| `node --check scripts/verify-attendance-full-flow.mjs` | PASS | local syntax check |
+| `node --check scripts/ops/attendance-daily-gate-report.mjs` | PASS | local syntax check |
+| `GH_TOKEN=\"$(gh auth token)\" BRANCH=main LOOKBACK_HOURS=48 node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260220-023517/attendance-daily-gate-dashboard.md`, `output/playwright/attendance-daily-gate-dashboard/20260220-023517/attendance-daily-gate-dashboard.json` |
+
+Observed from generated report:
+
+- `overallStatus=pass`, `p0Status=pass`
+- `gateFlat.strict.summaryPresent=true`, `gateFlat.strict.summaryValid=true`
+- `gateFlat.perf.status=PASS`, `gateFlat.longrun.status=PASS`

@@ -1800,3 +1800,50 @@ Validation (new evidence):
   - Verified:
     - `gateFlat.protection.runId=22188054160`
     - `gateFlat.protection.requirePrReviews=false`
+
+## Latest Notes (2026-02-20): Next-Stage Hardening (Perf Telemetry + Full-Flow Stability + Dashboard Meta)
+
+Scope (implemented):
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - Added `schemaVersion=2` output in `perf-summary.json`.
+  - Added standardized perf telemetry fields:
+    - `requestedImportEngine`, `resolvedImportEngine`
+    - `processedRows`, `failedRows`, `elapsedMs`
+    - `perfMetrics.{previewMs,commitMs,exportMs,rollbackMs,processedRows,failedRows,elapsedMs}`
+  - Added explicit engine selection log (`rows`, `bulk_engine_threshold`, `requested_engine`) for 100k+ traceability.
+- `scripts/verify-attendance-full-flow.mjs`
+  - Replaced fixed admin wait with explicit readiness checks.
+  - Added debug screenshot capture on admin-section readiness failure:
+    - `02-admin-section-missing.png`
+  - Added configurable retry assertion switch:
+    - `ASSERT_ADMIN_RETRY=false` to skip strict retry assertion during degraded UI debug.
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - Artifact enrichment now supports multi-prefix matching and optional fallback to any artifact in the run.
+  - Perf baseline / longrun now enrich metadata on successful runs (not only failure runs).
+  - Dashboard `gateFlat.perf` / `gateFlat.longrun` now carries stable perf summary metadata when available:
+    - `summarySchemaVersion`, `engine`, `requestedEngine`, `processedRows`, `failedRows`, `elapsedMs`.
+  - Added `PERF_SUMMARY_MISSING` classification when a successful perf run lacks `perf-summary.json`.
+
+Validation:
+
+```bash
+node --check scripts/ops/attendance-import-perf.mjs
+node --check scripts/verify-attendance-full-flow.mjs
+node --check scripts/ops/attendance-daily-gate-report.mjs
+
+GH_TOKEN="$(gh auth token)" \
+BRANCH="main" \
+LOOKBACK_HOURS="48" \
+node scripts/ops/attendance-daily-gate-report.mjs
+```
+
+Evidence:
+
+- Local dashboard report output:
+  - `output/playwright/attendance-daily-gate-dashboard/20260220-023517/attendance-daily-gate-dashboard.md`
+  - `output/playwright/attendance-daily-gate-dashboard/20260220-023517/attendance-daily-gate-dashboard.json`
+- Verified report fields:
+  - `gateFlat.strict.summaryPresent=true`
+  - `gateFlat.perf.status=PASS`
+  - `gateFlat.longrun.status=PASS`
