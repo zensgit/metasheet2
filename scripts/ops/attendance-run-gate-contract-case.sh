@@ -108,7 +108,9 @@ fi
 
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
-  dashboard_invalid="${case_dir}/dashboard.invalid.json"
+  dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
+  dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
+  dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -117,6 +119,19 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   "gates": {
     "strict": {
       "completed": {
+        "id": 200001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 200002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 200003,
         "conclusion": "success"
       }
     }
@@ -126,6 +141,30 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "previewMs": "33000",
+      "regressionsCount": "0"
     }
   },
   "escalationIssue": {
@@ -135,13 +174,26 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
 }
 EOF
 
-  cat >"$dashboard_invalid" <<'EOF'
+  cat >"$dashboard_invalid_strict" <<'EOF'
 {
   "p0Status": "fail",
   "overallStatus": "fail",
   "gates": {
     "strict": {
       "completed": {
+        "id": 300001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 300002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 300003,
         "conclusion": "success"
       }
     }
@@ -151,6 +203,28 @@ EOF
     "strict": {
       "summaryPresent": true,
       "summaryValid": false
+    },
+    "perf": {
+      "status": "PASS",
+      "runId": 300002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "runId": 300003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "previewMs": "33000",
+      "regressionsCount": "0"
     }
   },
   "escalationIssue": {
@@ -160,9 +234,137 @@ EOF
 }
 EOF
 
+  cat >"$dashboard_invalid_perf" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 400001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 400002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 400003,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 2,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400002,
+      "summarySchemaVersion": 1,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
+  cat >"$dashboard_invalid_longrun" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 500001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 500002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 500003,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 2,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "maybe",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
   expect_fail "dashboard strict-summary-validity contract" \
-    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid"
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_strict"
+  expect_fail "dashboard perf gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_perf"
+  expect_fail "dashboard longrun gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
 
   info "OK: dashboard contract case passed"
   exit 0
