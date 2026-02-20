@@ -1918,3 +1918,31 @@ Verified in final dashboard run (`#22225484921`):
 - `gateFlat.protection.requirePrReviews=false`
 - `gateFlat.perf.summarySchemaVersion=2`
 - `gateFlat.longrun.summarySchemaVersion=2`
+
+## Latest Notes (2026-02-20): Branch Policy Default Alignment + Drill Tag Verification (PR #207)
+
+Implementation:
+
+- PR [#207](https://github.com/zensgit/metasheet2/pull/207) merged to `main`.
+- Aligned defaults in both workflows:
+  - `.github/workflows/attendance-branch-policy-drift-prod.yml`
+  - `.github/workflows/attendance-branch-protection-prod.yml`
+  - `require_pr_reviews=false` (single-maintainer fallback baseline)
+- Unified drill run tagging:
+  - run-name now appends `[DRILL]` when `workflow_dispatch` and `drill_fail=true`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (expected FAIL) | [#22226847016](https://github.com/zensgit/metasheet2/actions/runs/22226847016) | FAIL (expected) | `output/playwright/ga/22226847016/step-summary.md`, `output/playwright/ga/22226847016/policy.log`, `output/playwright/ga/22226847016/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) |
+| Branch Policy Drift recovery (same policy baseline) | [#22226864599](https://github.com/zensgit/metasheet2/actions/runs/22226864599) | PASS | `output/playwright/ga/22226864599/step-summary.md`, `output/playwright/ga/22226864599/policy.log`, `output/playwright/ga/22226864599/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) (`CLOSED`) |
+| Daily Dashboard (post-recovery; non-drill source) | [#22226886691](https://github.com/zensgit/metasheet2/actions/runs/22226886691) | PASS | `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22226886691/gate-meta/protection/meta.json` |
+
+Verified from dashboard JSON (`#22226886691`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22226864599`
+- `gateFlat.protection.requirePrReviews=false`
