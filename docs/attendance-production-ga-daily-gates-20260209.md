@@ -1847,3 +1847,39 @@ Evidence:
   - `gateFlat.strict.summaryPresent=true`
   - `gateFlat.perf.status=PASS`
   - `gateFlat.longrun.status=PASS`
+
+## Latest Notes (2026-02-20): 1+2+3 Execution (Perf 100k/500k + Deploy + Full-Flow + Dashboard Contract)
+
+Scope (executed):
+
+1. Perf validation:
+   - 100k baseline (`upload_csv=true`)
+   - longrun (includes `rows500k-preview`, `upload_csv=true`)
+2. Deploy + full Playwright strict gates:
+   - `docker-build.yml` deploy
+   - `attendance-strict-gates-prod.yml` non-drill (desktop/mobile full-flow)
+3. Dashboard contract strengthening for `gateFlat.perf/longrun`:
+   - `scripts/ops/attendance-validate-daily-dashboard-json.sh` now enforces:
+     - `gateFlat.perf.status` / `gateFlat.longrun.status` in `PASS|FAIL`
+     - when status=PASS: `summarySchemaVersion>=2`, `scenario`, `rows>0`, `mode`, `uploadCsv`, `regressionsCount`, `previewMs`
+   - `scripts/ops/attendance-run-gate-contract-case.sh` now includes perf/longrun invalid fixtures.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline (100k, upload_csv=true) | [#22209313715](https://github.com/zensgit/metasheet2/actions/runs/22209313715) | PASS | `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/attendance-perf-mluam641-we0pa2/perf-summary.json`, `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/perf.log` |
+| Perf longrun (includes 500k preview, upload_csv=true) | [#22209380938](https://github.com/zensgit/metasheet2/actions/runs/22209380938) | PASS | `output/playwright/ga/22209380938/attendance-import-perf-longrun-rows500k-preview-22209380938-1/current/rows500k-preview/attendance-perf-mluaqf7z-vu4lo6/perf-summary.json`, `output/playwright/ga/22209380938/attendance-import-perf-longrun-trend-22209380938-1/20260220-025510/attendance-import-perf-longrun-trend.md` |
+| Build + deploy (frontend/backend) | [#22209420172](https://github.com/zensgit/metasheet2/actions/runs/22209420172) | PASS | `output/playwright/ga/22209420172/deploy-logs-22209420172-1/deploy.log`, `output/playwright/ga/22209420172/deploy-logs-22209420172-1/step-summary.md` |
+| Strict gates non-drill (desktop+mobile full-flow) | [#22209492697](https://github.com/zensgit/metasheet2/actions/runs/22209492697) | PASS | `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-1/gate-summary.json`, `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-2/gate-summary.json` |
+| Gate Contract Matrix (new perf/longrun contract cases) | [#22209625568](https://github.com/zensgit/metasheet2/actions/runs/22209625568) | PASS | `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.valid.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.perf.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.longrun.json` |
+| Daily dashboard (new perf/longrun contract validation enabled) | [#22209648198](https://github.com/zensgit/metasheet2/actions/runs/22209648198) | PASS | `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/perf/meta.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/longrun/meta.json` |
+
+Observed contract fields in dashboard JSON (`#22209648198`):
+
+- `gateFlat.perf.summarySchemaVersion=2`
+- `gateFlat.perf.engine=bulk`
+- `gateFlat.perf.processedRows=100000`
+- `gateFlat.longrun.summarySchemaVersion=2`
+- `gateFlat.longrun.scenario=rows500k-preview`
+- `gateFlat.longrun.uploadCsv=true`
