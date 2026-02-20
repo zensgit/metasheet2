@@ -1120,6 +1120,8 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof job?.processedRows).toBe('number')
     expect(typeof job?.failedRows).toBe('number')
     expect(typeof job?.elapsedMs).toBe('number')
+    expect(typeof job?.progressPercent).toBe('number')
+    expect(typeof job?.throughputRowsPerSec).toBe('number')
 
     // Retry should return the same job without requiring a new commitToken.
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
@@ -1167,6 +1169,8 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof completedJob?.failedRows).toBe('number')
     expect(completedJob?.processedRows).toBeGreaterThanOrEqual(1)
     expect(typeof completedJob?.elapsedMs).toBe('number')
+    expect(typeof completedJob?.progressPercent).toBe('number')
+    expect(typeof completedJob?.throughputRowsPerSec).toBe('number')
 
     const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
       method: 'POST',
@@ -1246,6 +1250,8 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof job?.processedRows).toBe('number')
     expect(typeof job?.failedRows).toBe('number')
     expect(typeof job?.elapsedMs).toBe('number')
+    expect(typeof job?.progressPercent).toBe('number')
+    expect(typeof job?.throughputRowsPerSec).toBe('number')
 
     const { commitToken: _commitToken, ...retryPayload } = previewPayload
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
@@ -1296,6 +1302,8 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof completedPreviewJob?.failedRows).toBe('number')
     expect(completedPreviewJob?.processedRows).toBeGreaterThanOrEqual(2)
     expect(typeof completedPreviewJob?.elapsedMs).toBe('number')
+    expect(typeof completedPreviewJob?.progressPercent).toBe('number')
+    expect(typeof completedPreviewJob?.throughputRowsPerSec).toBe('number')
   })
 
   it('exports attendance admin audit logs as CSV', async () => {
