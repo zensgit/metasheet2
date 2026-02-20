@@ -1262,3 +1262,28 @@ Confirmed in `attendance-daily-gate-dashboard.json` (`#22226886691`):
 - `gateFlat.protection.status=PASS`
 - `gateFlat.protection.runId=22226864599`
 - `gateFlat.protection.requirePrReviews=false`
+
+## Post-Go Validation (2026-02-20): Import Async Job Telemetry + Recovery UX (`B+C` local)
+
+This record validates the next parallel-delivery increment:
+
+- Backend import job API adds non-breaking telemetry fields:
+  - `progressPercent`
+  - `throughputRowsPerSec`
+- Web attendance admin import panel supports recovery-first operations:
+  - `Reload job`
+  - `Resume polling`
+  - error classification/action for `IMPORT_JOB_TIMEOUT|FAILED|CANCELED`.
+
+Validation evidence:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `pnpm --filter @metasheet/core-backend test:integration:attendance` | PASS | `output/playwright/attendance-next-phase/20260220-230856-import-job-ux/backend-attendance-integration.log` |
+| `pnpm --filter @metasheet/web build` | PASS | `output/playwright/attendance-next-phase/20260220-230856-import-job-ux/web-build.log` |
+
+Files changed:
+
+- `plugins/plugin-attendance/index.cjs`
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+- `apps/web/src/views/AttendanceView.vue`

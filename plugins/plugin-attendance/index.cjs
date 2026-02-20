@@ -5498,6 +5498,15 @@ module.exports = {
 	        && rawIdempotencyKey.startsWith('preview:')
 	        ? rawIdempotencyKey.slice('preview:'.length)
 	        : rawIdempotencyKey
+	      const progressPercent = total > 0
+	        ? Math.max(0, Math.min(100, Math.round((Math.max(0, progress) / total) * 100)))
+	        : 0
+	      const elapsedMs = computeImportJobElapsedMs(row.started_at, row.finished_at, status)
+	      const throughputRowsPerSec = (() => {
+	        if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0
+	        const rows = Math.max(0, processedRows)
+	        return Number((rows / (elapsedMs / 1000)).toFixed(2))
+	      })()
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5509,9 +5518,11 @@ module.exports = {
 	        engine: resolveImportEngineFromMeta(payload, total),
 	        progress,
 	        total,
+	        progressPercent,
 	        processedRows,
 	        failedRows,
-	        elapsedMs: computeImportJobElapsedMs(row.started_at, row.finished_at, status),
+	        elapsedMs,
+	        throughputRowsPerSec,
 	        error: row.error ?? null,
 	        preview,
 	        startedAt: row.started_at ?? null,

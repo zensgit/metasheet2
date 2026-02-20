@@ -67,6 +67,52 @@
 - 导入 UI 的“进度/重试/恢复入口”一致化。
 - 移动端 Desktop-only 区域降级文案统一并回归 Playwright。
 
+## Latest Progress (2026-02-20): B/C 并行增量（Import Async Job Telemetry + Recovery UX）
+
+### B 线（后端）
+
+- `plugins/plugin-attendance/index.cjs`
+  - `GET /api/attendance/import/jobs/:id` 新增非破坏性字段：
+    - `progressPercent`（0-100）
+    - `throughputRowsPerSec`（基于 `processedRows/elapsedMs`）
+  - 原有字段保持不变：`engine`, `processedRows`, `failedRows`, `elapsedMs`。
+
+### C 线（前端）
+
+- `apps/web/src/views/AttendanceView.vue`
+  - Async job 卡片新增可恢复操作：
+    - `Reload job`（重新拉取当前 job 状态）
+    - `Resume polling`（对 queued/running job 继续轮询）
+  - Async job 展示增强：
+    - `progressPercent`
+    - `processedRows / failedRows`
+    - `elapsedMs`
+    - `throughputRowsPerSec`
+  - 状态错误分类新增 async job 语义码：
+    - `IMPORT_JOB_TIMEOUT`
+    - `IMPORT_JOB_FAILED`
+    - `IMPORT_JOB_CANCELED`
+  - 对应状态动作新增：
+    - `reload-import-job`（避免超时后误触发重复导入）
+
+### 验证（本地）
+
+- 后端 integration：
+  - `pnpm --filter @metasheet/core-backend test:integration:attendance`
+  - 结果：PASS（14/14）
+- 前端构建：
+  - `pnpm --filter @metasheet/web build`
+  - 结果：PASS
+- 证据目录：
+  - `output/playwright/attendance-next-phase/20260220-230856-import-job-ux/backend-attendance-integration.log`
+  - `output/playwright/attendance-next-phase/20260220-230856-import-job-ux/web-build.log`
+
+### 下一步（并行）
+
+1. B 线：把 `progressPercent/throughputRowsPerSec` 纳入 perf summary 与 trend report（GA artifacts 可直接观测）。
+2. C 线：补 Playwright 用例覆盖“async job timeout -> reload job -> resume polling”恢复链路。
+3. A 线：将上述新恢复链路纳入 strict/full-flow 验收脚本并写入 daily handbook。
+
 ## D8-D10 封板标准（Go/No-Go）
 
 - Strict Gates twice 连续 PASS（2 轮）。

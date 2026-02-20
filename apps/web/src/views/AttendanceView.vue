@@ -1907,9 +1907,28 @@
               >
                 <div class="attendance__requests-header">
                   <span>{{ importAsyncJob.kind === 'preview' ? 'Async preview job' : 'Async import job' }}</span>
-                  <button class="attendance__btn" type="button" @click="clearImportAsyncJob">
-                    Clear
-                  </button>
+                  <div class="attendance__table-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="importAsyncPolling"
+                      @click="refreshImportAsyncJob()"
+                    >
+                      Reload job
+                    </button>
+                    <button
+                      v-if="importAsyncJob.status === 'queued' || importAsyncJob.status === 'running'"
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="importAsyncPolling"
+                      @click="resumeImportAsyncJobPolling"
+                    >
+                      {{ importAsyncPolling ? 'Polling...' : 'Resume polling' }}
+                    </button>
+                    <button class="attendance__btn" type="button" @click="clearImportAsyncJob">
+                      Clear
+                    </button>
+                  </div>
                 </div>
                 <div>
                   Status: <strong>{{ importAsyncJob.status }}</strong>
@@ -1917,6 +1936,18 @@
                 </div>
                 <div v-if="importAsyncJob.total">
                   Progress: {{ importAsyncJob.progress }} / {{ importAsyncJob.total }}
+                  <span v-if="typeof importAsyncJob.progressPercent === 'number'">
+                    ({{ importAsyncJob.progressPercent }}%)
+                  </span>
+                </div>
+                <div v-if="typeof importAsyncJob.processedRows === 'number' || typeof importAsyncJob.failedRows === 'number'">
+                  Processed: {{ importAsyncJob.processedRows ?? 0 }} · Failed: {{ importAsyncJob.failedRows ?? 0 }}
+                </div>
+                <div v-if="typeof importAsyncJob.elapsedMs === 'number' || typeof importAsyncJob.throughputRowsPerSec === 'number'">
+                  Elapsed: {{ importAsyncJob.elapsedMs ?? 0 }} ms
+                  <span v-if="typeof importAsyncJob.throughputRowsPerSec === 'number'">
+                    · Throughput: {{ importAsyncJob.throughputRowsPerSec }} rows/s
+                  </span>
                 </div>
                 <div v-if="importAsyncJob.kind !== 'preview' && importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
                 <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
@@ -3245,6 +3276,7 @@ type ProvisionRole = 'employee' | 'approver' | 'admin'
 type AttendanceStatusAction =
   | 'refresh-overview'
   | 'reload-admin'
+  | 'reload-import-job'
   | 'retry-save-settings'
   | 'retry-save-rule'
   | 'retry-preview-import'
@@ -3628,6 +3660,11 @@ interface AttendanceImportJob {
   status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string
   progress: number
   total: number
+  processedRows?: number
+  failedRows?: number
+  elapsedMs?: number
+  progressPercent?: number
+  throughputRowsPerSec?: number
   error?: string | null
   preview?: {
     items?: AttendanceImportPreviewItem[]
@@ -4008,6 +4045,7 @@ const statusActionLabel = computed(() => {
   if (!action) return ''
   if (action === 'refresh-overview') return 'Retry refresh'
   if (action === 'reload-admin') return 'Reload admin'
+  if (action === 'reload-import-job') return 'Reload import job'
   if (action === 'retry-save-settings') return 'Retry save settings'
   if (action === 'retry-save-rule') return 'Retry save rule'
   if (action === 'retry-preview-import') return 'Retry preview'
@@ -4022,6 +4060,7 @@ const statusActionBusy = computed(() => {
   if (!action) return false
   if (action === 'refresh-overview') return loading.value
   if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
+  if (action === 'reload-import-job') return importAsyncPolling.value
   if (action === 'retry-save-settings') return settingsLoading.value
   if (action === 'retry-save-rule') return ruleLoading.value
   if (action === 'retry-preview-import') return importLoading.value
@@ -5265,9 +5304,15 @@ async function fetchImportJob(jobId: string): Promise<AttendanceImportJob> {
   const response = await apiFetch(`/api/attendance/import/jobs/${encodeURIComponent(jobId)}`)
   const data = await response.json().catch(() => ({}))
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || 'Failed to load import job')
+    throw createApiError(response, data, 'Failed to load import job')
   }
   return (data.data ?? data) as AttendanceImportJob
+}
+
+function createImportJobStateError(code: string, message: string): AttendanceApiError {
+  const error = new Error(message) as AttendanceApiError
+  error.code = code
+  return error
 }
 
 async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
@@ -5280,19 +5325,66 @@ async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
       importAsyncJob.value = job
       if (job.status === 'completed') return job
       if (job.status === 'failed') {
-        throw new Error(job.error || 'Import job failed')
+        throw createImportJobStateError('IMPORT_JOB_FAILED', job.error || 'Import job failed')
       }
       if (job.status === 'canceled') {
-        throw new Error('Import job canceled')
+        throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job canceled')
       }
       if (Date.now() - startedAt > IMPORT_ASYNC_POLL_TIMEOUT_MS) {
-        throw new Error('Import job timed out')
+        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', 'Import job timed out')
       }
       await sleep(IMPORT_ASYNC_POLL_INTERVAL_MS)
     }
-    throw new Error('Import job polling canceled')
+    throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job polling canceled')
   } finally {
     if (seq === importJobPollSeq) importAsyncPolling.value = false
+  }
+}
+
+async function refreshImportAsyncJob(options: { silent?: boolean } = {}) {
+  const jobId = String(importAsyncJob.value?.id || '').trim()
+  if (!jobId) {
+    if (!options.silent) setStatus('No async import job selected.', 'error')
+    return
+  }
+  try {
+    const job = await fetchImportJob(jobId)
+    importAsyncJob.value = job
+    if (!options.silent) setStatus(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`)
+  } catch (error) {
+    if (!options.silent) {
+      setStatusFromError(error, 'Failed to reload import job', 'import-run')
+    }
+  }
+}
+
+async function resumeImportAsyncJobPolling() {
+  const jobId = String(importAsyncJob.value?.id || '').trim()
+  if (!jobId) {
+    setStatus('No async import job selected.', 'error')
+    return
+  }
+  try {
+    const finalJob = await pollImportJob(jobId)
+    if (finalJob.kind === 'preview') {
+      const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
+      if (previewData) {
+        importPreview.value = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
+      }
+      setStatus(`Preview job completed (${jobId.slice(0, 8)}).`)
+      return
+    }
+    const imported = Number(finalJob.progress ?? 0)
+    const total = Number(finalJob.total ?? 0)
+    if (total && imported !== total) {
+      setStatus(`Imported ${imported}/${total} rows (async job).`)
+    } else {
+      setStatus(`Imported ${imported} rows (async job).`)
+    }
+    await loadRecords()
+    await loadImportBatches()
+  } catch (error) {
+    setStatusFromError(error, 'Failed while polling import job', 'import-run')
   }
 }
 
@@ -5799,6 +5891,18 @@ function classifyStatusError(
     message = 'Import token expired before request completed.'
     meta.hint = 'Click retry to refresh commit token and submit again.'
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
+  } else if (code === 'IMPORT_JOB_TIMEOUT') {
+    message = 'Async import job is still running in background.'
+    meta.hint = 'Use "Reload import job" to continue tracking progress without submitting again.'
+    meta.action = 'reload-import-job'
+  } else if (code === 'IMPORT_JOB_FAILED') {
+    message = rawMessage
+    meta.hint = 'Inspect job error details, then retry import after fixing payload or server condition.'
+    meta.action = 'reload-import-job'
+  } else if (code === 'IMPORT_JOB_CANCELED') {
+    message = 'Async import job was canceled before completion.'
+    meta.hint = 'Reload job status or submit a new import when ready.'
+    meta.action = 'reload-import-job'
   } else if (code === 'RATE_LIMITED' || status === 429) {
     message = 'Request was rate-limited by the server.'
     meta.hint = 'Wait a few seconds before retrying to avoid repeated throttling.'
@@ -5842,6 +5946,10 @@ async function runStatusAction() {
   }
   if (action === 'reload-admin') {
     await loadAdminData()
+    return
+  }
+  if (action === 'reload-import-job') {
+    await refreshImportAsyncJob()
     return
   }
   if (action === 'retry-save-settings') {
