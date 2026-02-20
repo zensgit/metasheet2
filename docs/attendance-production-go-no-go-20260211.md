@@ -1238,3 +1238,27 @@ Final state (from `#22225484921`):
 - `gateFlat.protection.requirePrReviews=false`
 - `gateFlat.perf.summarySchemaVersion=2`
 - `gateFlat.longrun.summarySchemaVersion=2`
+
+## Post-Go Validation (2026-02-20): PR #207 Branch Policy Default Alignment + Drill/Recovery (`1+2`)
+
+This record validates:
+
+- PR [#207](https://github.com/zensgit/metasheet2/pull/207) merged to `main` (merge commit: `dafdb604`).
+- Branch policy workflows now default to `require_pr_reviews=false` for the current single-maintainer fallback mode.
+- Drill tagging is normalized to `[DRILL]` for `drill_fail=true`, and dashboard selects the latest non-drill protection run.
+
+Validation evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (expected FAIL) | [#22226847016](https://github.com/zensgit/metasheet2/actions/runs/22226847016) | FAIL (expected) | `output/playwright/ga/22226847016/step-summary.md`, `output/playwright/ga/22226847016/policy.log`, `output/playwright/ga/22226847016/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) |
+| Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22226864599](https://github.com/zensgit/metasheet2/actions/runs/22226864599) | PASS | `output/playwright/ga/22226864599/step-summary.md`, `output/playwright/ga/22226864599/policy.log`, `output/playwright/ga/22226864599/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) (`CLOSED`) |
+| Daily Dashboard (uses latest non-drill protection run) | [#22226886691](https://github.com/zensgit/metasheet2/actions/runs/22226886691) | PASS | `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22226886691/gate-meta/protection/meta.json` |
+
+Confirmed in `attendance-daily-gate-dashboard.json` (`#22226886691`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22226864599`
+- `gateFlat.protection.requirePrReviews=false`
