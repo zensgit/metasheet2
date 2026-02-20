@@ -1883,3 +1883,38 @@ Observed contract fields in dashboard JSON (`#22209648198`):
 - `gateFlat.longrun.summarySchemaVersion=2`
 - `gateFlat.longrun.scenario=rows500k-preview`
 - `gateFlat.longrun.uploadCsv=true`
+
+## Latest Notes (2026-02-20): Main Post-Merge Re-Verify (`1+2`)
+
+Scope:
+
+- PR [#204](https://github.com/zensgit/metasheet2/pull/204) merged into `main`.
+- Triggered `Attendance Daily Gate Dashboard` on `main` for post-merge verification.
+- Recovered transient `Branch Protection` mismatch by refreshing the active policy source workflow.
+
+Observed behavior:
+
+- Dashboard on `main` reads branch protection from:
+  - `PROTECTION_WORKFLOW=attendance-branch-policy-drift-prod.yml`
+- Two initial dashboard runs failed with:
+  - `Branch Protection / PR_REVIEWS_NOT_ENABLED`
+  - because latest policy-drift run still reflected `require_pr_reviews=true`.
+- Current production fallback target remains:
+  - `require_pr_reviews=false` (single-maintainer mode)
+
+Recovery + final PASS:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard (post-merge first run) | [#22225250295](https://github.com/zensgit/metasheet2/actions/runs/22225250295) | FAIL (expected during recovery) | `output/playwright/ga/22225250295/attendance-daily-gate-dashboard-22225250295-1/attendance-daily-gate-dashboard.json` |
+| Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22225453528](https://github.com/zensgit/metasheet2/actions/runs/22225453528) | PASS | `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/step-summary.md`, `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/policy.json` |
+| Daily Dashboard final re-run | [#22225484921](https://github.com/zensgit/metasheet2/actions/runs/22225484921) | PASS | `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/gate-meta/protection/meta.json` |
+
+Verified in final dashboard run (`#22225484921`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.requirePrReviews=false`
+- `gateFlat.perf.summarySchemaVersion=2`
+- `gateFlat.longrun.summarySchemaVersion=2`

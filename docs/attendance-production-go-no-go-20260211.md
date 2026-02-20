@@ -1193,3 +1193,48 @@ Confirmed fields from `#22209648198`:
 - `gateFlat.longrun.summarySchemaVersion=2`
 - `gateFlat.longrun.scenario=rows500k-preview`
 - `gateFlat.longrun.uploadCsv=true`
+
+## Post-Go Validation (2026-02-20): Main Re-Verify After PR #204 Merge (`1+2`)
+
+This record validates:
+
+- PR [#204](https://github.com/zensgit/metasheet2/pull/204) was merged to `main` (merge commit: `6132b554`).
+- Daily dashboard was re-run on `main` and reached a final `PASS`.
+- Intermediate dashboard failures were triaged and recovered through the active protection source workflow.
+
+Root cause of intermediate failures:
+
+- `Attendance Daily Gate Dashboard` on `main` currently reads branch protection from:
+  - `PROTECTION_WORKFLOW=attendance-branch-policy-drift-prod.yml`
+- The latest completed policy-drift run before recovery had:
+  - `require_pr_reviews=true`
+  - reason: `PR_REVIEWS_NOT_ENABLED`
+- Since current production fallback policy is `require_pr_reviews=false`, dashboard initially failed on `Branch Protection` (`P1`).
+
+Recovery path executed:
+
+- Ran `attendance-branch-policy-drift-prod.yml` with:
+  - `require_pr_reviews=false`
+  - `require_strict=true`
+  - `require_enforce_admins=true`
+  - `required_checks_csv='contracts (strict),contracts (dashboard)'`
+- Re-ran daily dashboard after policy-drift recovery.
+
+Validation evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Dashboard (first re-run after merge) | [#22225250295](https://github.com/zensgit/metasheet2/actions/runs/22225250295) | FAIL (expected during recovery) | `output/playwright/ga/22225250295/attendance-daily-gate-dashboard-22225250295-1/attendance-daily-gate-dashboard.json` (`findings: Branch Protection / PR_REVIEWS_NOT_ENABLED`) |
+| Branch Protection (new workflow, non-source check, explicit fallback) | [#22225351875](https://github.com/zensgit/metasheet2/actions/runs/22225351875) | PASS | `output/playwright/ga/22225351875/attendance-branch-protection-prod-22225351875-1/step-summary.md` |
+| Daily Dashboard (second re-run, still reading old policy-drift source) | [#22225385423](https://github.com/zensgit/metasheet2/actions/runs/22225385423) | FAIL (expected during recovery) | `output/playwright/ga/22225385423/attendance-daily-gate-dashboard-22225385423-1/attendance-daily-gate-dashboard.json` (`protection.runId=22211954919`) |
+| Branch Policy Drift recovery (dashboard source workflow) | [#22225453528](https://github.com/zensgit/metasheet2/actions/runs/22225453528) | PASS | `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/step-summary.md`, `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/policy.json` |
+| Daily Dashboard final re-run (post-recovery) | [#22225484921](https://github.com/zensgit/metasheet2/actions/runs/22225484921) | PASS | `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/gate-meta/protection/meta.json` |
+
+Final state (from `#22225484921`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.requirePrReviews=false`
+- `gateFlat.perf.summarySchemaVersion=2`
+- `gateFlat.longrun.summarySchemaVersion=2`
