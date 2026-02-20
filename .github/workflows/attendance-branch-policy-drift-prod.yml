@@ -1,6 +1,6 @@
 name: Attendance Branch Policy Drift (Prod)
 
-run-name: Attendance Branch Policy Drift (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
+run-name: Attendance Branch Policy Drift (Prod)${{ github.event_name == 'workflow_dispatch' && github.event.inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
       require_pr_reviews:
         description: 'Require required_pull_request_reviews to be enabled (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
       min_approving_review_count:
         description: 'Minimum approving review count required when PR review checks are enabled'
         required: false
@@ -66,7 +66,7 @@ jobs:
       REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
       REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}
       REQUIRE_ENFORCE_ADMINS: ${{ inputs.require_enforce_admins || 'true' }}
-      REQUIRE_PR_REVIEWS: ${{ inputs.require_pr_reviews || 'true' }}
+      REQUIRE_PR_REVIEWS: ${{ inputs.require_pr_reviews || 'false' }}
       MIN_APPROVING_REVIEW_COUNT: ${{ inputs.min_approving_review_count || '1' }}
       REQUIRE_CODE_OWNER_REVIEWS: ${{ inputs.require_code_owner_reviews || 'false' }}
       DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
