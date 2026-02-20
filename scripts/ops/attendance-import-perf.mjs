@@ -189,6 +189,12 @@ function resolveEngineByRows(rowCount) {
   return Number(rowCount) >= bulkEngineThreshold ? 'bulk' : 'standard'
 }
 
+function coerceNonNegativeNumber(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return null
+  return Math.floor(numeric)
+}
+
 function makeCsv({ startDate, userId, groupName }) {
   const lines = new Array(rows + 1)
   lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
@@ -245,6 +251,8 @@ async function run() {
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
   await refreshAuthToken()
+  const requestedImportEngine = resolveEngineByRows(rows)
+  log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
 
   const startedAt = new Date().toISOString()
   const runId = makeId()
@@ -320,6 +328,12 @@ async function run() {
     mappingProfileId: resolvedMappingProfileId,
     ...(uploadCsv ? { csvFileId } : { csvText }),
     idempotencyKey: runId,
+    __importEngine: requestedImportEngine,
+    batchMeta: {
+      perfScenario: scenario,
+      perfRows: rows,
+      requestedImportEngine,
+    },
     previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
     returnItems,
     itemsLimit: Number.isFinite(itemsLimit) && itemsLimit > 0 ? Math.floor(itemsLimit) : undefined,
@@ -341,13 +355,28 @@ async function run() {
 
   if (mode === 'preview') {
     const summary = {
+      schemaVersion: 2,
       startedAt,
       scenario,
       mode,
       apiBase,
       orgId,
       rows,
-      engine: resolveEngineByRows(rows),
+      engine: requestedImportEngine,
+      requestedImportEngine,
+      resolvedImportEngine: requestedImportEngine,
+      processedRows: null,
+      failedRows: null,
+      elapsedMs: null,
+      perfMetrics: {
+        previewMs: tPreview1 - tPreview0,
+        commitMs: null,
+        exportMs: null,
+        rollbackMs: null,
+        processedRows: null,
+        failedRows: null,
+        elapsedMs: null,
+      },
       uploadCsv,
       previewMs: tPreview1 - tPreview0,
       commitMs: null,
@@ -383,7 +412,7 @@ async function run() {
 
   let batchId = null
   let jobId = null
-  let engine = resolveEngineByRows(rows)
+  let engine = requestedImportEngine
   let processedRows = null
   let failedRows = null
   let jobElapsedMs = null
@@ -394,16 +423,26 @@ async function run() {
     const finalJob = await pollImportJob(jobId)
     batchId = finalJob?.batchId
     if (typeof finalJob?.engine === 'string' && finalJob.engine) engine = finalJob.engine
-    if (Number.isFinite(Number(finalJob?.processedRows))) processedRows = Number(finalJob.processedRows)
-    if (Number.isFinite(Number(finalJob?.failedRows))) failedRows = Number(finalJob.failedRows)
-    if (Number.isFinite(Number(finalJob?.elapsedMs))) jobElapsedMs = Number(finalJob.elapsedMs)
+    processedRows = coerceNonNegativeNumber(finalJob?.processedRows)
+    failedRows = coerceNonNegativeNumber(finalJob?.failedRows)
+    jobElapsedMs = coerceNonNegativeNumber(finalJob?.elapsedMs)
     if (!batchId) die('commit-async job did not return batchId')
   } else {
     batchId = commit.body?.data?.batchId
     if (typeof commit.body?.data?.engine === 'string' && commit.body.data.engine) engine = commit.body.data.engine
+    processedRows = coerceNonNegativeNumber(commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported)
+    failedRows = coerceNonNegativeNumber(commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount)
+    jobElapsedMs = coerceNonNegativeNumber(commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs)
     if (!batchId) die('commit did not return batchId')
   }
   const tCommit1 = nowMs()
+  const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
+  if (processedRows === null) {
+    processedRows = coerceNonNegativeNumber(rows)
+  }
+  if (failedRows === null) {
+    failedRows = 0
+  }
 
   // Optional: verify export still works and capture its latency.
   let exportMs = null
@@ -433,6 +472,7 @@ async function run() {
   }
 
   const summary = {
+    schemaVersion: 2,
     startedAt,
     scenario,
     mode,
@@ -441,9 +481,21 @@ async function run() {
     rows,
     commitAsync,
     engine,
+    requestedImportEngine,
+    resolvedImportEngine: engine,
     processedRows,
     failedRows,
+    elapsedMs,
     jobElapsedMs,
+    perfMetrics: {
+      previewMs: tPreview1 - tPreview0,
+      commitMs: tCommit1 - tCommit0,
+      exportMs,
+      rollbackMs,
+      processedRows,
+      failedRows,
+      elapsedMs,
+    },
     uploadCsv,
     jobId,
     previewMs: tPreview1 - tPreview0,

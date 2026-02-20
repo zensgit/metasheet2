@@ -328,12 +328,37 @@ function parsePerfSummaryJson(text) {
   const scenario = typeof value?.scenario === 'string' ? value.scenario : null
   const mode = typeof value?.mode === 'string' ? value.mode : null
   const uploadCsv = typeof value?.uploadCsv === 'boolean' ? value.uploadCsv : null
+  const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+    ? schemaVersionRaw
+    : null
+  const engine = typeof value?.resolvedImportEngine === 'string'
+    ? value.resolvedImportEngine
+    : (typeof value?.engine === 'string' ? value.engine : null)
+  const requestedEngine = typeof value?.requestedImportEngine === 'string' ? value.requestedImportEngine : null
+  const processedRows = typeof value?.processedRows === 'number'
+    ? value.processedRows
+    : (typeof value?.perfMetrics?.processedRows === 'number' ? value.perfMetrics.processedRows : null)
+  const failedRows = typeof value?.failedRows === 'number'
+    ? value.failedRows
+    : (typeof value?.perfMetrics?.failedRows === 'number' ? value.perfMetrics.failedRows : null)
+  const elapsedMs = typeof value?.elapsedMs === 'number'
+    ? value.elapsedMs
+    : (typeof value?.jobElapsedMs === 'number'
+      ? value.jobElapsedMs
+      : (typeof value?.perfMetrics?.elapsedMs === 'number' ? value.perfMetrics.elapsedMs : null))
 
   return {
     reason: regressionsRaw.length > 0 ? 'REGRESSION' : null,
+    schemaVersion,
     scenario,
     rows,
     mode,
+    engine,
+    requestedEngine,
+    processedRows: processedRows === null ? null : String(processedRows),
+    failedRows: failedRows === null ? null : String(failedRows),
+    elapsedMs: elapsedMs === null ? null : String(elapsedMs),
     uploadCsv: uploadCsv === null ? null : uploadCsv ? 'true' : 'false',
     previewMs: previewMs === null ? null : String(previewMs),
     commitMs: commitMs === null ? null : String(commitMs),
@@ -415,7 +440,9 @@ async function tryEnrichGateFromStepSummary({
   ownerValue,
   repoValue,
   runId,
-  artifactNamePrefix,
+  artifactNamePrefix = '',
+  artifactNamePrefixes = [],
+  allowAnyArtifactFallback = false,
   metaOutDir,
   innerSuffix = null,
   innerPath = 'step-summary.md',
@@ -425,34 +452,49 @@ async function tryEnrichGateFromStepSummary({
   if (artifacts.error) return null
   const list = Array.isArray(artifacts.list) ? artifacts.list : []
 
-  const match = list.find((a) => a && typeof a.name === 'string' && a.name.startsWith(artifactNamePrefix)) || null
-  if (!match || !match.archive_download_url) return null
+  const prefixes = [...artifactNamePrefixes, artifactNamePrefix]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+  let candidates = list.filter((artifact) => {
+    if (!artifact || typeof artifact.name !== 'string') return false
+    if (prefixes.length === 0) return true
+    return prefixes.some((prefix) => artifact.name.startsWith(prefix))
+  })
+  if (candidates.length === 0 && allowAnyArtifactFallback) {
+    candidates = list.filter((artifact) => artifact && typeof artifact.name === 'string')
+  }
+  if (candidates.length === 0) return null
 
   const tmpDir = path.join(metaOutDir, '.tmp')
-  const zipPath = path.join(tmpDir, `${match.name}.zip`)
   await fs.mkdir(tmpDir, { recursive: true })
 
   try {
-    const ok = await tryDownloadArtifactZip({ archiveUrl: match.archive_download_url, zipPath })
-    if (!ok) return null
+    for (const candidate of candidates) {
+      if (!candidate?.archive_download_url) continue
+      const safeName = String(candidate.name || 'artifact').replace(/[^a-zA-Z0-9_.-]/g, '_')
+      const zipPath = path.join(tmpDir, `${safeName}-${candidate.id ?? 'na'}.zip`)
+      const ok = await tryDownloadArtifactZip({ archiveUrl: candidate.archive_download_url, zipPath })
+      if (!ok) continue
 
-    const text = innerSuffix
-      ? await tryReadZipTextBySuffix({ zipPath, suffix: innerSuffix })
-      : await tryReadZipText({ zipPath, innerPath })
-    if (!text) return null
+      const text = innerSuffix
+        ? await tryReadZipTextBySuffix({ zipPath, suffix: innerSuffix })
+        : await tryReadZipText({ zipPath, innerPath })
+      if (!text) continue
 
-    const parsed = parse(text)
-    if (!parsed) return null
+      const parsed = parse(text)
+      if (!parsed) continue
 
-    const meta = {
-      runId,
-      artifactId: match.id ?? null,
-      artifactName: match.name,
-      ...parsed,
+      const meta = {
+        runId,
+        artifactId: candidate.id ?? null,
+        artifactName: candidate.name,
+        ...parsed,
+      }
+      await fs.mkdir(metaOutDir, { recursive: true })
+      await fs.writeFile(path.join(metaOutDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+      return meta
     }
-    await fs.mkdir(metaOutDir, { recursive: true })
-    await fs.writeFile(path.join(metaOutDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
-    return meta
+    return null
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     info(`WARN: gate meta enrichment failed: ${message}`)
@@ -673,6 +715,11 @@ function renderMarkdown({
         }
       }
       if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        if (meta.schemaVersion) extra.push(`schema=${meta.schemaVersion}`)
+        if (meta.engine) extra.push(`engine=${meta.engine}`)
+        if (meta.processedRows) extra.push(`processed=${meta.processedRows}`)
+        if (meta.failedRows) extra.push(`failed=${meta.failedRows}`)
+        if (meta.elapsedMs) extra.push(`elapsed=${meta.elapsedMs}`)
         if (meta.rows) extra.push(`rows=${meta.rows}`)
         if (meta.mode) extra.push(`mode=${meta.mode}`)
         if (meta.uploadCsv) extra.push(`upload=${meta.uploadCsv}`)
@@ -762,6 +809,11 @@ function renderMarkdown({
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
       if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
+        if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
+        if (meta?.engine) metaBits.push(`engine=${meta.engine}`)
+        if (meta?.processedRows) metaBits.push(`processed_rows=${meta.processedRows}`)
+        if (meta?.failedRows) metaBits.push(`failed_rows=${meta.failedRows}`)
+        if (meta?.elapsedMs) metaBits.push(`elapsed_ms=${meta.elapsedMs}`)
         if (meta?.rows) metaBits.push(`rows=${meta.rows}`)
         if (meta?.mode) metaBits.push(`mode=${meta.mode}`)
         if (meta?.uploadCsv) metaBits.push(`upload_csv=${meta.uploadCsv}`)
@@ -913,6 +965,9 @@ function renderMarkdown({
         lines.push('- Perf Baseline: inspect perf artifacts (`perf.log`, `perf-summary.json`) for the first error and threshold evaluation.')
       }
     }
+    if (findings.some((f) => f && f.gate === 'Perf Baseline' && f.code === 'PERF_SUMMARY_MISSING')) {
+      lines.push('- Perf Baseline: run succeeded but `perf-summary.json` is missing from artifacts. Check workflow upload paths and rerun baseline.')
+    }
 
     if (findings.some((f) => f && f.gate === 'Perf Long Run' && f.code === 'RUN_FAILED')) {
       if (longrunGate?.meta?.regressionsCount && longrunGate.meta.regressionsCount !== '0') {
@@ -923,6 +978,9 @@ function renderMarkdown({
       } else {
         lines.push('- Perf Long Run: inspect perf artifacts (`perf.log`, scenario summaries) for the first error and threshold evaluation.')
       }
+    }
+    if (findings.some((f) => f && f.gate === 'Perf Long Run' && f.code === 'PERF_SUMMARY_MISSING')) {
+      lines.push('- Perf Long Run: run succeeded but `perf-summary.json` is missing from artifacts. Check scenario artifact upload paths and rerun longrun.')
     }
 
     if (findings.some((f) => f && f.gate === 'Gate Contract Matrix' && f.code === 'RUN_FAILED')) {
@@ -1318,7 +1376,7 @@ async function run() {
 
   const hasRunFailed = (gate) => Array.isArray(gate?.findings) && gate.findings.some((f) => f && f.code === 'RUN_FAILED')
 
-  // Best-effort: enrich failing remote gates by parsing their step-summary artifacts.
+  // Best-effort: enrich gate metadata from workflow artifacts.
   // Never fail the dashboard on enrichment errors.
   const metaRoot = path.join(outDir, 'gate-meta')
   try {
@@ -1389,10 +1447,14 @@ async function run() {
         ownerValue: owner,
         repoValue: repoName,
         runId,
-        artifactNamePrefix: `attendance-strict-gates-prod-${runId}-`,
+        artifactNamePrefixes: [
+          `attendance-strict-gates-prod-${runId}-`,
+          `attendance-prod-acceptance-${runId}-`,
+        ],
         metaOutDir: path.join(metaRoot, 'strict'),
         innerSuffix: 'gate-summary.json',
         parse: parseStrictGateSummaryJson,
+        allowAnyArtifactFallback: true,
       })
       if (meta) {
         strictGate.meta = meta
@@ -1417,43 +1479,63 @@ async function run() {
         })
       }
     }
-    if (hasRunFailed(perfGate) && perfGate.completed?.id) {
+    if (perfGate.completed?.id) {
       const runId = perfGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
         ownerValue: owner,
         repoValue: repoName,
         runId,
-        artifactNamePrefix: `attendance-import-perf-${runId}-`,
+        artifactNamePrefixes: [
+          `attendance-import-perf-${runId}-`,
+          `attendance-import-perf-baseline-${runId}-`,
+          `attendance-import-perf-drill-${runId}-`,
+        ],
         metaOutDir: path.join(metaRoot, 'perf'),
         innerSuffix: 'perf-summary.json',
         parse: parsePerfSummaryJson,
+        allowAnyArtifactFallback: true,
       })
-      if (meta) perfGate.meta = meta
+      if (meta) {
+        perfGate.meta = meta
+      } else if (perfGate.completed?.conclusion === 'success') {
+        perfGate.ok = false
+        perfGate.findings.push({
+          severity: 'P1',
+          code: 'PERF_SUMMARY_MISSING',
+          gate: 'Perf Baseline',
+          message: 'Perf Baseline: latest completed run succeeded but perf-summary.json is missing from artifacts',
+          runUrl: perfGate.completed.url,
+        })
+      }
     }
-    if (hasRunFailed(longrunGate) && longrunGate.completed?.id) {
+    if (longrunGate.completed?.id) {
       const runId = longrunGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
         ownerValue: owner,
         repoValue: repoName,
         runId,
-        artifactNamePrefix: `attendance-import-perf-longrun-rows10k-commit-${runId}-`,
+        artifactNamePrefixes: [
+          `attendance-import-perf-longrun-rows100k-commit-${runId}-`,
+          `attendance-import-perf-longrun-rows10k-commit-${runId}-`,
+          `attendance-import-perf-longrun-rows500k-preview-${runId}-`,
+          `attendance-import-perf-longrun-drill-${runId}-`,
+        ],
         metaOutDir: path.join(metaRoot, 'longrun'),
-        innerSuffix: 'rows10000-commit.json',
+        innerSuffix: 'perf-summary.json',
         parse: parsePerfSummaryJson,
+        allowAnyArtifactFallback: true,
       })
       if (meta) {
         longrunGate.meta = meta
-      } else {
-        const drillMeta = await tryEnrichGateFromStepSummary({
-          ownerValue: owner,
-          repoValue: repoName,
-          runId,
-          artifactNamePrefix: `attendance-import-perf-longrun-drill-${runId}-`,
-          metaOutDir: path.join(metaRoot, 'longrun'),
-          innerSuffix: 'rows10000-commit.json',
-          parse: parsePerfSummaryJson,
+      } else if (longrunGate.completed?.conclusion === 'success') {
+        longrunGate.ok = false
+        longrunGate.findings.push({
+          severity: 'P1',
+          code: 'PERF_SUMMARY_MISSING',
+          gate: 'Perf Long Run',
+          message: 'Perf Long Run: latest completed run succeeded but perf-summary.json is missing from artifacts',
+          runUrl: longrunGate.completed.url,
         })
-        if (drillMeta) longrunGate.meta = drillMeta
       }
     }
   } catch (error) {
@@ -1531,6 +1613,11 @@ async function run() {
           summaryBits.push(`reasons=${pairs.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ')}`)
         }
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
+        if (meta.processedRows) summaryBits.push(`processed=${meta.processedRows}`)
+        if (meta.failedRows) summaryBits.push(`failed=${meta.failedRows}`)
+        if (meta.elapsedMs) summaryBits.push(`elapsed=${meta.elapsedMs}`)
         if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
         if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
         if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
@@ -1586,6 +1673,12 @@ async function run() {
         flat.failedGates = meta.failedGates ?? null
         flat.failedGateReasons = meta.failedGateReasons ?? null
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+        flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.engine = meta.engine ?? null
+        flat.requestedEngine = meta.requestedEngine ?? null
+        flat.processedRows = meta.processedRows ?? null
+        flat.failedRows = meta.failedRows ?? null
+        flat.elapsedMs = meta.elapsedMs ?? null
         flat.scenario = meta.scenario ?? null
         flat.rows = meta.rows ?? null
         flat.mode = meta.mode ?? null

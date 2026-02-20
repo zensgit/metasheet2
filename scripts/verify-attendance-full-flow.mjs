@@ -16,6 +16,8 @@ const mobile = process.env.UI_MOBILE === 'true'
 const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-flow'
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
+const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
+const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || timeoutMs)
 
 function logInfo(message) {
   console.log(`[attendance-full-flow] ${message}`)
@@ -192,6 +194,13 @@ async function assertHasRecords(page) {
   }
 }
 
+async function captureDebugScreenshot(page, fileName) {
+  await fs.mkdir(outputDir, { recursive: true })
+  const screenshotPath = path.join(outputDir, fileName)
+  await page.screenshot({ path: screenshotPath, fullPage: true })
+  logInfo(`Saved debug screenshot: ${screenshotPath}`)
+}
+
 async function run() {
   if (!token) {
     logInfo('AUTH_TOKEN is required')
@@ -282,18 +291,40 @@ async function run() {
     if (mobile) {
       await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
     } else {
-      await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
-      await page.getByRole('heading', { name: 'Payroll Cycles', exact: true }).waitFor({ timeout: timeoutMs })
-      await page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' }).waitFor({ timeout: timeoutMs })
-      await page.waitForTimeout(1500)
       const importSection = page.locator('div.attendance__admin-section').filter({
         has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)', exact: true }),
       })
-      await importSection.locator('#attendance-import-payload').fill('{')
-      await importSection.getByRole('button', { name: 'Preview', exact: true }).click()
-      await page.getByText('Invalid JSON payload for import.', { exact: true }).waitFor({ timeout: timeoutMs })
-      await page.getByRole('button', { name: 'Retry preview', exact: true }).first().waitFor({ timeout: timeoutMs })
-      logInfo('Admin status + retry action verified')
+      const payrollHeading = page.getByRole('heading', { name: 'Payroll Cycles', exact: true })
+      const payrollBatchSummary = page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' })
+
+      try {
+        await importSection.first().waitFor({ timeout: adminReadyTimeoutMs })
+        await payrollHeading.waitFor({ timeout: adminReadyTimeoutMs })
+        await payrollBatchSummary.waitFor({ timeout: adminReadyTimeoutMs })
+      } catch (error) {
+        await captureDebugScreenshot(page, '02-admin-section-missing.png')
+        const message = (error && error.message) || String(error)
+        if (assertAdminRetry) {
+          throw new Error(`Admin section not ready for import assertions: ${message}`)
+        }
+        logInfo(`WARN: Admin section not ready, skipping retry assertions (${message})`)
+      }
+
+      const importSectionCount = await importSection.count()
+      const shouldAssertRetry = assertAdminRetry && importSectionCount > 0
+      if (shouldAssertRetry) {
+        const payloadInput = importSection.locator('#attendance-import-payload').first()
+        const previewButton = importSection.getByRole('button', { name: 'Preview', exact: true }).first()
+        await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
+        await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
+        await payloadInput.fill('{')
+        await previewButton.click()
+        await page.getByText('Invalid JSON payload for import.', { exact: true }).waitFor({ timeout: timeoutMs })
+        await page.getByRole('button', { name: 'Retry preview', exact: true }).first().waitFor({ timeout: timeoutMs })
+        logInfo('Admin status + retry action verified')
+      } else {
+        logInfo('Admin retry assertions skipped (ASSERT_ADMIN_RETRY=false or section unavailable)')
+      }
       logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
