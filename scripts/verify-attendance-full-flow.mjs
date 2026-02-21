@@ -240,6 +240,15 @@ async function waitForImportPayload(page) {
   }, null, { timeout: timeoutMs })
 }
 
+function buildRecoveryCsv(workDate, rowCount) {
+  const lines = new Array(rowCount + 1)
+  lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+  for (let i = 0; i < rowCount; i += 1) {
+    lines[i + 1] = `${workDate},recovery-user-${i},recovery-group,09:00,18:00,正常`
+  }
+  return lines.join('\n')
+}
+
 async function assertImportJobRecoveryFlow(page, importSection) {
   logInfo('Admin import recovery assertion started')
   const payloadInput = importSection.locator('#attendance-import-payload').first()
@@ -263,14 +272,22 @@ async function assertImportJobRecoveryFlow(page, importSection) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
   try {
     const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
-    const csvText = [
-      '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
-      `${workDate},recovery-user,recovery-group,09:00,18:00,正常`,
-    ].join('\n')
-    await fs.writeFile(csvPath, csvText, 'utf8')
-  await csvInput.setInputFiles(csvPath)
-  await loadCsvButton.click()
-  await waitForImportPayload(page)
+    await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1), 'utf8')
+    await csvInput.setInputFiles(csvPath)
+    await loadCsvButton.click()
+    await waitForImportPayload(page)
+    let payload = await payloadInput.inputValue()
+    if (!payload.includes('"csvFileId"')) {
+      logInfo('Recovery assertion fallback: forcing upload channel with large CSV payload')
+      await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000), 'utf8')
+      await csvInput.setInputFiles(csvPath)
+      await loadCsvButton.click()
+      await waitForImportPayload(page)
+      payload = await payloadInput.inputValue()
+      if (!payload.includes('"csvFileId"')) {
+        throw new Error('Recovery assertion could not force csvFileId upload payload')
+      }
+    }
 
     await importButton.click()
     const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
