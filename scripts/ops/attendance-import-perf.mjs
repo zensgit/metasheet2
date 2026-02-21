@@ -327,7 +327,19 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
   const started = Date.now()
   let transientErrors = 0
   while (true) {
-    const job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+    let job = null
+    try {
+      job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+    } catch (error) {
+      transientErrors += 1
+      const message = (error && error.message) || String(error)
+      log(`WARN: transient job poll network error (attempt=${transientErrors}); retrying (${message})`)
+      if (Date.now() - started > timeoutMs) {
+        throw new Error(`async commit job poll timed out after network errors: ${message}`)
+      }
+      await sleep(intervalMs)
+      continue
+    }
     if (!job.res.ok) {
       const status = Number(job.res.status || 0)
       const transient = status === 429 || (status >= 500 && status <= 504)
