@@ -31,6 +31,9 @@ const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
 const maxExportMs = parseOptionalPositiveInt('MAX_EXPORT_MS')
 const maxRollbackMs = parseOptionalPositiveInt('MAX_ROLLBACK_MS')
+const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
+const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -67,6 +70,50 @@ function nowMs() {
   return Number(process.hrtime.bigint() / 1_000_000n)
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRetriableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504)
+}
+
+async function fetchWithRetry(url, init = {}, options = {}) {
+  const label = options.label || url
+  const allowRefresh = options.allowRefresh !== false
+
+  for (let attempt = 1; attempt <= apiRetryAttempts; attempt += 1) {
+    try {
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(apiTimeoutMs)
+        : undefined
+      const res = await fetch(url, { ...init, signal })
+      if (res.status === 401 && allowRefresh && attempt < apiRetryAttempts) {
+        const refreshed = await refreshAuthToken()
+        if (refreshed) {
+          const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+          log(`WARN: ${label} got 401; refreshed token and retrying in ${delayMs}ms`)
+          await sleep(delayMs)
+          continue
+        }
+      }
+      if (isRetriableStatus(res.status) && attempt < apiRetryAttempts) {
+        const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+        log(`WARN: ${label} returned HTTP ${res.status}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+        await sleep(delayMs)
+        continue
+      }
+      return res
+    } catch (error) {
+      if (attempt >= apiRetryAttempts) throw error
+      const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+      log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
+  }
+  throw new Error(`${label}: exhausted retries`)
+}
+
 function decodeJwtPayload(jwt) {
   if (!jwt || typeof jwt !== 'string') return null
   const parts = jwt.split('.')
@@ -90,11 +137,11 @@ async function writeJson(filePath, data) {
 async function refreshAuthToken() {
   const url = `${apiBase}/auth/refresh-token`
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
-    })
+    }, { label: 'POST /auth/refresh-token', allowRefresh: false })
     const raw = await res.text()
     let body = null
     try {
@@ -129,14 +176,14 @@ async function refreshAuthToken() {
 
 async function apiFetch(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-  })
+  }, { label: `${init.method || 'GET'} ${pathname}` })
   const raw = await res.text()
   let body = null
   try {
@@ -149,13 +196,13 @@ async function apiFetch(pathname, init = {}) {
 
 async function apiFetchText(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
     },
-  })
+  }, { label: `${init.method || 'GET'} ${pathname}` })
   const text = await res.text()
   return { url, res, text }
 }
@@ -207,7 +254,7 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
         if (Date.now() - started > timeoutMs) {
           throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
         }
-        await new Promise((r) => setTimeout(r, intervalMs))
+        await sleep(intervalMs)
         continue
       }
       throw new Error(`GET /attendance/import/jobs/:id failed: HTTP ${status} ${job.raw.slice(0, 200)}`)
@@ -226,7 +273,7 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
     if (Date.now() - started > timeoutMs) {
       throw new Error('async commit job timed out')
     }
-    await new Promise((r) => setTimeout(r, intervalMs))
+    await sleep(intervalMs)
   }
 }
 

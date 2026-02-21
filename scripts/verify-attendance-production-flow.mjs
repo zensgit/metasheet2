@@ -12,6 +12,9 @@ const timeoutMs = Number(process.env.UI_TIMEOUT || 60000)
 const mobile = process.env.UI_MOBILE === 'true'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-production-flow'
 const allowLegacyImport = process.env.ALLOW_LEGACY_IMPORT === '1'
+const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
+const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
 
 function logInfo(message) {
   console.log(`[attendance-production-flow] ${message}`)
@@ -39,15 +42,60 @@ function deriveApiBase(rawWebUrl) {
   return `${url.origin}/api`
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRetriableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504)
+}
+
+async function fetchWithRetry(url, init = {}, options = {}) {
+  const label = options.label || url
+  const allowRefresh = options.allowRefresh !== false
+  const refreshFn = typeof options.refreshFn === 'function' ? options.refreshFn : null
+
+  for (let attempt = 1; attempt <= apiRetryAttempts; attempt += 1) {
+    try {
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(apiTimeoutMs)
+        : undefined
+      const res = await fetch(url, { ...init, signal })
+      if (res.status === 401 && allowRefresh && refreshFn && attempt < apiRetryAttempts) {
+        const refreshed = await refreshFn()
+        if (refreshed) {
+          const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+          logWarn(`${label} got 401; refreshed token and retrying in ${delayMs}ms`)
+          await sleep(delayMs)
+          continue
+        }
+      }
+      if (isRetriableStatus(res.status) && attempt < apiRetryAttempts) {
+        const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+        logWarn(`${label} returned HTTP ${res.status}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+        await sleep(delayMs)
+        continue
+      }
+      return res
+    } catch (error) {
+      if (attempt >= apiRetryAttempts) throw error
+      const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+      logWarn(`${label} network error: ${(error && error.message) || String(error)}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
+  }
+  throw new Error(`${label}: exhausted retries`)
+}
+
 async function refreshAuthToken(apiBase) {
   if (!apiBase || !token) return false
   const url = `${apiBase.replace(/\/+$/, '')}/auth/refresh-token`
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
-    })
+    }, { label: 'POST /auth/refresh-token', allowRefresh: false })
     const raw = await res.text()
     let body = null
     try {
@@ -73,10 +121,20 @@ async function refreshAuthToken(apiBase) {
 }
 
 async function apiGetJson(url, tokenValue) {
-  const res = await fetch(url, {
+  const refreshBase = apiBaseEnv ? apiBaseEnv.replace(/\/+$/, '') : deriveApiBase(webUrl)
+  const res = await fetchWithRetry(url, {
     headers: {
       Authorization: `Bearer ${tokenValue}`,
     },
+  }, {
+    label: `GET ${(() => {
+      try {
+        return new URL(url).pathname
+      } catch {
+        return url
+      }
+    })()}`,
+    refreshFn: async () => refreshAuthToken(refreshBase),
   })
   const raw = await res.text()
   let body = null
