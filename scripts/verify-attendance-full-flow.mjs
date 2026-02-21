@@ -245,11 +245,11 @@ async function assertImportJobRecoveryFlow(page, importSection) {
   const payloadInput = importSection.locator('#attendance-import-payload').first()
   const csvInput = importSection.locator('#attendance-import-csv').first()
   const loadCsvButton = importSection.getByRole('button', { name: 'Load CSV', exact: true }).first()
-  const previewButton = importSection.getByRole('button', { name: 'Preview', exact: true }).first()
+  const importButton = importSection.getByRole('button', { name: 'Import', exact: true }).first()
   await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
   await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
   await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
-  await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
+  await importButton.waitFor({ timeout: adminReadyTimeoutMs })
 
   const profileSelect = importSection.locator('#attendance-import-profile').first()
   if (await profileSelect.count()) {
@@ -272,12 +272,12 @@ async function assertImportJobRecoveryFlow(page, importSection) {
   await loadCsvButton.click()
   await waitForImportPayload(page)
 
-  await previewButton.click()
-  const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
-  const timeoutMessage = page.getByText('Async import job is still running in background.', { exact: true }).first()
-  await Promise.any([
-    timeoutMessage.waitFor({ timeout: timeoutMs }),
-    asyncCard.waitFor({ timeout: timeoutMs }),
+    await importButton.click()
+    const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
+    const timeoutMessage = page.getByText('Async import job is still running in background.', { exact: true }).first()
+    await Promise.any([
+      timeoutMessage.waitFor({ timeout: timeoutMs }),
+      asyncCard.waitFor({ timeout: timeoutMs }),
   ])
 
   const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
@@ -309,6 +309,7 @@ async function assertImportJobRecoveryFlow(page, importSection) {
     await Promise.any([
       asyncCard.getByText(/Status:\s*completed/i).first().waitFor({ timeout: timeoutMs }),
       page.getByText(/Preview job completed \(/).first().waitFor({ timeout: timeoutMs }),
+      page.getByText(/Imported \d+(\/\d+)? rows \(async job\)\./).first().waitFor({ timeout: timeoutMs }),
     ])
     logInfo('Admin import recovery assertion passed')
   } finally {

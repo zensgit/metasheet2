@@ -221,7 +221,7 @@ async function run() {
 
   // Ensure records can be refreshed before any mutations.
   logInfo('Refreshing records')
-  await page.getByRole('button', { name: 'Refresh' }).click()
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
   const recordsCard = getRecordsCard(page)
   await recordsCard.getByRole('button', { name: 'Reload' }).click()
 
