@@ -209,7 +209,7 @@ async function setDateRange(page, from, to) {
 }
 
 async function refreshRecords(page) {
-  await page.getByRole('button', { name: 'Refresh' }).click()
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
   const recordsSection = page.locator('section.attendance__card').filter({
     has: page.getByRole('heading', { name: 'Records' }),
   })
@@ -232,12 +232,15 @@ async function captureDebugScreenshot(page, fileName) {
   logInfo(`Saved debug screenshot: ${screenshotPath}`)
 }
 
-async function waitForImportPayload(page) {
-  await page.waitForFunction(() => {
+async function waitForImportPayload(page, previousValue = null) {
+  await page.waitForFunction((prevValue) => {
     const el = document.querySelector('#attendance-import-payload')
     const value = el && 'value' in el ? el.value : ''
-    return typeof value === 'string' && (value.includes('csvFileId') || value.includes('csvText'))
-  }, null, { timeout: timeoutMs })
+    if (typeof value !== 'string') return false
+    if (!(value.includes('csvFileId') || value.includes('csvText'))) return false
+    if (typeof prevValue === 'string') return value !== prevValue
+    return true
+  }, previousValue, { timeout: timeoutMs })
 }
 
 function buildRecoveryCsv(workDate, rowCount) {
@@ -272,17 +275,19 @@ async function assertImportJobRecoveryFlow(page, importSection) {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
   try {
     const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
+    const initialPayload = await payloadInput.inputValue()
     await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1), 'utf8')
     await csvInput.setInputFiles(csvPath)
     await loadCsvButton.click()
-    await waitForImportPayload(page)
+    await waitForImportPayload(page, initialPayload)
     let payload = await payloadInput.inputValue()
     if (!payload.includes('"csvFileId"')) {
       logInfo('Recovery assertion fallback: forcing upload channel with large CSV payload')
+      const previousPayload = payload
       await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000), 'utf8')
       await csvInput.setInputFiles(csvPath)
       await loadCsvButton.click()
-      await waitForImportPayload(page)
+      await waitForImportPayload(page, previousPayload)
       payload = await payloadInput.inputValue()
       if (!payload.includes('"csvFileId"')) {
         logInfo('WARN: csvFileId payload unavailable in UI; continuing with forced async debug mode')
