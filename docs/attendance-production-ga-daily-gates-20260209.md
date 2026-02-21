@@ -1954,3 +1954,29 @@ Verified from dashboard JSON (`#22226886691`):
 - `gateFlat.protection.status=PASS`
 - `gateFlat.protection.runId=22226864599`
 - `gateFlat.protection.requirePrReviews=false`
+
+## Latest Notes (2026-02-21): Parallel Runbook Execution (Strict/Perf/Longrun/Dashboard)
+
+Execution summary:
+
+1. Ran strict/perf baseline/perf longrun/branch-policy in parallel on `codex/attendance-next-actions`.
+2. Observed one longrun failure (`rows10k-commit` rollback transient `500`), fixed by adding rollback retries in `scripts/ops/attendance-import-perf.mjs`.
+3. Re-ran longrun and recovered to PASS; corresponding P1 issue auto-closed.
+4. Re-ran daily dashboard on `main` after replacing a cancelled strict run with a successful strict run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch policy drift | [#22249647577](https://github.com/zensgit/metasheet2/actions/runs/22249647577) | PASS | `output/playwright/ga/22249647577/attendance-branch-policy-drift-prod-22249647577-1/policy.json` |
+| Strict gates (branch) | [#22249647567](https://github.com/zensgit/metasheet2/actions/runs/22249647567) | PASS | `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-2/gate-summary.json` |
+| Perf baseline 100k | [#22249647556](https://github.com/zensgit/metasheet2/actions/runs/22249647556) | PASS | `output/playwright/ga/22249647556/attendance-import-perf-22249647556-1/attendance-perf-mlvruyei-thwrf9/perf-summary.json` |
+| Perf longrun pre-fix | [#22249647566](https://github.com/zensgit/metasheet2/actions/runs/22249647566) | FAIL (expected during fix) | `output/playwright/ga/22249647566/attendance-import-perf-longrun-rows10k-commit-22249647566-1/current/rows10k-commit/perf.log` |
+| Perf longrun post-fix | [#22249759637](https://github.com/zensgit/metasheet2/actions/runs/22249759637) | PASS | `output/playwright/ga/22249759637/attendance-import-perf-longrun-rows10k-commit-22249759637-1/current-flat/rows10000-commit.json` |
+| Strict gates (main) | [#22249826030](https://github.com/zensgit/metasheet2/actions/runs/22249826030) | PASS | `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-2/gate-summary.json` |
+| Daily dashboard (main, final) | [#22249881772](https://github.com/zensgit/metasheet2/actions/runs/22249881772) | PASS | `output/playwright/ga/22249881772/attendance-daily-gate-dashboard-22249881772-1/attendance-daily-gate-dashboard.json` |
+
+Runbook note:
+
+- `branch=feature-branch` 的 dashboard 通常会出现 `NO_COMPLETED_RUN`（remote-only gates按 `main` 调度）。这类 run 只用于脚本回归，不用于生产门禁判定。
+- 生产门禁请固定使用：`branch=main`。

@@ -203,3 +203,39 @@
 - 统一落盘：`output/playwright/ga/<runId>/...`
 - 本地开发验证：`output/playwright/attendance-next-phase/<timestamp>-*/...`
 - 文档中仅记录 runId、issue 链接、evidence 路径；禁止写真实 token/secret。
+
+## Latest Progress (2026-02-21): 并线收口（A/B/C + 封板回归）
+
+本轮按并行模式直接执行并完成：
+
+- A 线：strict/review-policy 复跑与 dashboard 回绿闭环。
+- B 线：修复 longrun 10k commit 场景中 rollback 瞬时 500 导致的假失败。
+- C 线：full-flow 恢复链路稳定化（避免选择器冲突、禁用按钮误点击、payload 未变卡死）。
+
+代码变更（本轮）：
+
+- `scripts/verify-attendance-full-flow.mjs`
+  - `Refresh` 选择器改为 `exact: true`，避免与 `Retry refresh` 冲突。
+  - import recovery 断言改为优先走 API upload 预置 `csvFileId`，并对禁用 `Reload job` 按钮做容错。
+  - recovery 压测样本降到可在门禁时限内完成的规模，减少 timeout 假失败。
+- `scripts/ops/attendance-import-perf.mjs`
+  - rollback 增加瞬时错误重试（500/429/锁冲突等），默认 `ROLLBACK_RETRY_ATTEMPTS=3`。
+
+并行执行与结果：
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict gates (branch, recovery enabled) | [#22249548985](https://github.com/zensgit/metasheet2/actions/runs/22249548985) | PASS | `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-1/gate-summary.json`, `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-2/gate-summary.json` |
+| Strict gates (branch, stability re-run) | [#22249647567](https://github.com/zensgit/metasheet2/actions/runs/22249647567) | PASS | `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-1/gate-summary.json`, `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-2/gate-summary.json` |
+| Perf baseline 100k (`upload_csv=true`) | [#22249647556](https://github.com/zensgit/metasheet2/actions/runs/22249647556) | PASS | `output/playwright/ga/22249647556/attendance-import-perf-22249647556-1/attendance-perf-mlvruyei-thwrf9/perf-summary.json` |
+| Perf longrun (pre-fix) | [#22249647566](https://github.com/zensgit/metasheet2/actions/runs/22249647566) | FAIL (expected during fix) | `output/playwright/ga/22249647566/attendance-import-perf-longrun-rows10k-commit-22249647566-1/current/rows10k-commit/perf.log` (`rollback 500`) |
+| Perf longrun (post-fix, `upload_csv=true`) | [#22249759637](https://github.com/zensgit/metasheet2/actions/runs/22249759637) | PASS | `output/playwright/ga/22249759637/attendance-import-perf-longrun-rows10k-commit-22249759637-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22249759637/attendance-import-perf-longrun-trend-22249759637-1/20260221-035016/attendance-import-perf-longrun-trend.md` |
+| Branch policy drift | [#22249647577](https://github.com/zensgit/metasheet2/actions/runs/22249647577) | PASS | `output/playwright/ga/22249647577/attendance-branch-policy-drift-prod-22249647577-1/policy.json` |
+| Strict gates (main, recover cancelled history) | [#22249826030](https://github.com/zensgit/metasheet2/actions/runs/22249826030) | PASS | `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-1/gate-summary.json`, `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-2/gate-summary.json` |
+| Daily dashboard (`branch=main`, final) | [#22249881772](https://github.com/zensgit/metasheet2/actions/runs/22249881772) | PASS | `output/playwright/ga/22249881772/attendance-daily-gate-dashboard-22249881772-1/attendance-daily-gate-dashboard.json` |
+
+闭环说明：
+
+- `branch=codex/...` 的 dashboard run `#22249788534` 失败是预期（remote-only gates 在该分支无 completed run），对应误报 issue `#211` 已关闭。
+- longrun 默认 P1 issue `#157` 在 post-fix PASS 后已自动关闭。
+- 当前 open 的 `[Attendance Gate]/[Attendance P0]/[Attendance P1]/[Attendance P2]` issue 数量为 `0`。

@@ -1322,3 +1322,40 @@ Files changed:
 - `scripts/verify-attendance-full-flow.mjs`
 - `docs/attendance-production-ga-daily-gates-20260209.md`
 - `docs/attendance-parallel-delivery-plan-20260219.md`
+
+## Post-Go Validation (2026-02-21): Parallel Closure (A/B/C + Strict/Perf/Dashboard)
+
+This record closes the requested parallel execution loop with live GA evidence:
+
+- C-line e2e recovery assertions stabilized (`verify-attendance-full-flow`).
+- B-line perf longrun rollback transient failure fixed with retry (`attendance-import-perf`).
+- A-line gate chain recovered on `main` by replacing a cancelled strict run with a successful strict run, then re-running dashboard.
+
+Key runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict gates (branch, recovery enabled) | [#22249548985](https://github.com/zensgit/metasheet2/actions/runs/22249548985) | PASS | `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-1/gate-summary.json`, `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-2/gate-summary.json` |
+| Strict gates (branch, stability re-run) | [#22249647567](https://github.com/zensgit/metasheet2/actions/runs/22249647567) | PASS | `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-1/gate-summary.json`, `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-2/gate-summary.json` |
+| Perf baseline 100k (`upload_csv=true`) | [#22249647556](https://github.com/zensgit/metasheet2/actions/runs/22249647556) | PASS | `output/playwright/ga/22249647556/attendance-import-perf-22249647556-1/attendance-perf-mlvruyei-thwrf9/perf-summary.json` |
+| Perf longrun pre-fix (rollback transient error) | [#22249647566](https://github.com/zensgit/metasheet2/actions/runs/22249647566) | FAIL (expected during fix) | `output/playwright/ga/22249647566/attendance-import-perf-longrun-rows10k-commit-22249647566-1/current/rows10k-commit/perf.log` |
+| Perf longrun post-fix (`upload_csv=true`) | [#22249759637](https://github.com/zensgit/metasheet2/actions/runs/22249759637) | PASS | `output/playwright/ga/22249759637/attendance-import-perf-longrun-rows10k-commit-22249759637-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22249759637/attendance-import-perf-longrun-trend-22249759637-1/20260221-035016/attendance-import-perf-longrun-trend.md` |
+| Branch policy drift | [#22249647577](https://github.com/zensgit/metasheet2/actions/runs/22249647577) | PASS | `output/playwright/ga/22249647577/attendance-branch-policy-drift-prod-22249647577-1/policy.json` |
+| Strict gates (main, replace cancelled latest) | [#22249826030](https://github.com/zensgit/metasheet2/actions/runs/22249826030) | PASS | `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-1/gate-summary.json`, `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-2/gate-summary.json` |
+| Daily dashboard (`branch=main`, final) | [#22249881772](https://github.com/zensgit/metasheet2/actions/runs/22249881772) | PASS | `output/playwright/ga/22249881772/attendance-daily-gate-dashboard-22249881772-1/attendance-daily-gate-dashboard.json` |
+
+Issue lifecycle:
+
+- `[Attendance P1] Perf longrun alert` issue [#157](https://github.com/zensgit/metasheet2/issues/157): now `CLOSED` (auto-closed by longrun recovery run).
+- Non-production branch dashboard false alarm issue [#211](https://github.com/zensgit/metasheet2/issues/211): manually closed with explanation.
+- Current open `[Attendance Gate]/[Attendance P0]/[Attendance P1]/[Attendance P2]`: none.
+
+Go/No-Go snapshot:
+
+- Strict twice: PASS (branch + main).
+- Playwright desktop/mobile under strict: PASS.
+- Perf baseline (100k upload path): PASS.
+- Perf longrun (upload path): PASS after rollback retry hardening.
+- Dashboard (production branch view): PASS.
+
+Decision: `GO` (no open P0/P1 attendance tracking issues; all required gates green with reproducible evidence paths).
