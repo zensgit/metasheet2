@@ -258,6 +258,30 @@ This record validates:
 | Remote Upload Cleanup (dry-run, safety limits inputs) | [#22010499353](https://github.com/zensgit/metasheet2/actions/runs/22010499353) | PASS | `output/playwright/ga/22010499353/cleanup.log`, `output/playwright/ga/22010499353/step-summary.md` |
 | Daily Gate Dashboard (includes Upload Cleanup gate) | [#22010519536](https://github.com/zensgit/metasheet2/actions/runs/22010519536) | PASS | `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.json` |
 | Remote Upload Cleanup drill (P2 issue open, expected FAIL) | [#22011899798](https://github.com/zensgit/metasheet2/actions/runs/22011899798) | FAIL (expected) | `output/playwright/ga/22011899798/cleanup.log`, `output/playwright/ga/22011899798/step-summary.md`, Issue: [#160](https://github.com/zensgit/metasheet2/issues/160) |
+
+## Post-Go Validation (2026-02-21): Gate Stabilization Recovery
+
+This record captures the final stabilization after transient `502/ECONNREFUSED/fetch failed` regressions seen in strict/perf gates.
+
+### Code changes merged
+
+- [#217](https://github.com/zensgit/metasheet2/pull/217): harden `/auth/me` retry in full-flow verification and reduce longrun rollback cleanup flake.
+- [#218](https://github.com/zensgit/metasheet2/pull/218): add transient network retries for smoke/provision/perf/production-flow scripts.
+- [#220](https://github.com/zensgit/metasheet2/pull/220): stabilize perf import mutation retries with fresh `commitToken` per attempt, and baseline rollback threshold default alignment.
+- [#221](https://github.com/zensgit/metasheet2/pull/221): keep async import job polling alive across transient network failures.
+
+### Final verification snapshot
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict gates twice | [#22257658383](https://github.com/zensgit/metasheet2/actions/runs/22257658383) | PASS | `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-1/gate-summary.json`, `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-2/gate-summary.json` |
+| Perf baseline (100k, upload_csv=true, commit_async=false) | [#22257793629](https://github.com/zensgit/metasheet2/actions/runs/22257793629) | PASS | `output/playwright/ga/22257793629/attendance-import-perf-22257793629-1/attendance-perf-mlwd8aeo-7mygl2/perf-summary.json` |
+| Perf long run (upload path default) | [#22257658595](https://github.com/zensgit/metasheet2/actions/runs/22257658595) | PASS | `output/playwright/ga/22257658595/attendance-import-perf-longrun-rows10k-commit-22257658595-1/current/rows10k-commit/attendance-perf-mlwcvds0-3ttvdu/perf-summary.json` |
+| Daily gate dashboard | [#22257840707](https://github.com/zensgit/metasheet2/actions/runs/22257840707) | PASS | `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.json` |
+
+### Final decision
+
+- **GO (maintained)**: no open P0/P1 blocker in the latest gate snapshot, and dashboard overall status is PASS.
 | Remote Upload Cleanup drill recovery (P2 issue auto-close) | [#22011916523](https://github.com/zensgit/metasheet2/actions/runs/22011916523) | PASS | `output/playwright/ga/22011916523/cleanup.log`, `output/playwright/ga/22011916523/step-summary.md`, Issue: [#160](https://github.com/zensgit/metasheet2/issues/160) |
 | Daily Gate Dashboard (Upload Cleanup latest run, ignores `[DRILL]`) | [#22011935825](https://github.com/zensgit/metasheet2/actions/runs/22011935825) | PASS | `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.json` |
 | Remote Upload Cleanup (forced fail, default P2 issue open) | [#22013431489](https://github.com/zensgit/metasheet2/actions/runs/22013431489) | FAIL (expected) | `output/playwright/ga/22013431489/cleanup.log`, `output/playwright/ga/22013431489/step-summary.md`, Issue: [#161](https://github.com/zensgit/metasheet2/issues/161) |
