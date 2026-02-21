@@ -31,6 +31,8 @@ const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
 const maxExportMs = parseOptionalPositiveInt('MAX_EXPORT_MS')
 const maxRollbackMs = parseOptionalPositiveInt('MAX_ROLLBACK_MS')
+const rollbackRetryAttempts = Math.max(1, Number(process.env.ROLLBACK_RETRY_ATTEMPTS || 3))
+const rollbackRetryDelayMs = Math.max(100, Number(process.env.ROLLBACK_RETRY_DELAY_MS || 1500))
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -162,6 +164,38 @@ async function apiFetchText(pathname, init = {}) {
   })
   const text = await res.text()
   return { url, res, text }
+}
+
+function isTransientRollbackError(resp) {
+  const status = Number(resp?.res?.status || 0)
+  if (status === 429 || (status >= 500 && status <= 504)) return true
+  const code = String(resp?.body?.error?.code || '')
+  if (code === 'INTERNAL_ERROR' || code === 'DB_CONFLICT' || code === 'LOCK_TIMEOUT') return true
+  return false
+}
+
+async function rollbackImportBatch(batchId) {
+  const startedAtMs = nowMs()
+  let lastError = null
+  for (let attempt = 1; attempt <= rollbackRetryAttempts; attempt += 1) {
+    const rb = await apiFetch(`/attendance/import/rollback/${batchId}`, { method: 'POST', body: '{}' })
+    const ok = rb.res.ok && !(rb.body && typeof rb.body === 'object' && (rb.body.success === false || rb.body.ok === false))
+    if (ok) {
+      return {
+        attempts: attempt,
+        rollbackMs: Math.max(0, nowMs() - startedAtMs),
+      }
+    }
+
+    const transient = isTransientRollbackError(rb)
+    lastError = new Error(`POST /attendance/import/rollback/:id: HTTP ${rb.res.status} ${rb.raw.slice(0, 200)}`)
+    if (!transient || attempt >= rollbackRetryAttempts) {
+      throw lastError
+    }
+    log(`WARN: rollback transient failure (attempt=${attempt}/${rollbackRetryAttempts}); retrying in ${rollbackRetryDelayMs}ms`)
+    await new Promise((resolve) => setTimeout(resolve, rollbackRetryDelayMs))
+  }
+  throw lastError || new Error('rollback failed')
 }
 
 function assertOk(resp, label) {
@@ -487,12 +521,12 @@ async function run() {
   let rolledBack = false
   let rollbackMs = null
   if (doRollback) {
-    const tRb0 = nowMs()
-    const rb = await apiFetch(`/attendance/import/rollback/${batchId}`, { method: 'POST', body: '{}' })
-    const tRb1 = nowMs()
-    assertOk(rb, 'POST /attendance/import/rollback/:id')
+    const rollback = await rollbackImportBatch(batchId)
     rolledBack = true
-    rollbackMs = tRb1 - tRb0
+    rollbackMs = rollback.rollbackMs
+    if (rollback.attempts > 1) {
+      log(`rollback recovered after retry attempts=${rollback.attempts}`)
+    }
   }
 
   const summary = {
