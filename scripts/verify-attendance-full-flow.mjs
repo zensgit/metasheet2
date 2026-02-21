@@ -21,7 +21,7 @@ const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
-const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || timeoutMs)
+const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
 
 function logInfo(message) {
   console.log(`[attendance-full-flow] ${message}`)
