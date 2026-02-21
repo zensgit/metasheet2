@@ -31,6 +31,9 @@ const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
 const maxExportMs = parseOptionalPositiveInt('MAX_EXPORT_MS')
 const maxRollbackMs = parseOptionalPositiveInt('MAX_ROLLBACK_MS')
+const previewRetryAttempts = Math.max(1, Number(process.env.PREVIEW_RETRIES || 3))
+const commitRetryAttempts = Math.max(1, Number(process.env.COMMIT_RETRIES || 3))
+const mutationRetryDelayMs = Math.max(100, Number(process.env.MUTATION_RETRY_DELAY_MS || 1000))
 const rollbackRetryAttempts = Math.max(1, Number(process.env.ROLLBACK_RETRY_ATTEMPTS || 3))
 const rollbackRetryDelayMs = Math.max(100, Number(process.env.ROLLBACK_RETRY_DELAY_MS || 1500))
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
@@ -84,17 +87,38 @@ function isRetriableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 504)
 }
 
+function isTokenizedImportEndpoint(pathname, method) {
+  const upper = String(method || 'GET').toUpperCase()
+  if (upper !== 'POST') return false
+  return /^\/attendance\/import\/(preview|preview-async|commit|commit-async)(?:\/|$)/.test(String(pathname || ''))
+}
+
+function isResponseOk(resp) {
+  if (!resp?.res?.ok) return false
+  if (resp.body && typeof resp.body === 'object' && (resp.body.success === false || resp.body.ok === false)) return false
+  return true
+}
+
+function isRetryableMutationFailure(resp) {
+  const status = Number(resp?.res?.status || 0)
+  if (status === 408 || status === 429 || status >= 500) return true
+  const code = String(resp?.body?.error?.code || '')
+  if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') return true
+  return false
+}
+
 async function fetchWithRetry(url, init = {}, options = {}) {
   const label = options.label || url
   const allowRefresh = options.allowRefresh !== false
+  const attempts = Math.max(1, Number(options.attempts || apiRetryAttempts))
 
-  for (let attempt = 1; attempt <= apiRetryAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
         ? AbortSignal.timeout(apiTimeoutMs)
         : undefined
       const res = await fetch(url, { ...init, signal })
-      if (res.status === 401 && allowRefresh && attempt < apiRetryAttempts) {
+      if (res.status === 401 && allowRefresh && attempt < attempts) {
         const refreshed = await refreshAuthToken()
         if (refreshed) {
           const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
@@ -103,17 +127,17 @@ async function fetchWithRetry(url, init = {}, options = {}) {
           continue
         }
       }
-      if (isRetriableStatus(res.status) && attempt < apiRetryAttempts) {
+      if (isRetriableStatus(res.status) && attempt < attempts) {
         const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
-        log(`WARN: ${label} returned HTTP ${res.status}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+        log(`WARN: ${label} returned HTTP ${res.status}; retry ${attempt}/${attempts} in ${delayMs}ms`)
         await sleep(delayMs)
         continue
       }
       return res
     } catch (error) {
-      if (attempt >= apiRetryAttempts) throw error
+      if (attempt >= attempts) throw error
       const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
-      log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+      log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${attempts} in ${delayMs}ms`)
       await sleep(delayMs)
     }
   }
@@ -182,6 +206,8 @@ async function refreshAuthToken() {
 
 async function apiFetch(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
+  const method = String(init.method || 'GET').toUpperCase()
+  const attempts = isTokenizedImportEndpoint(pathname, method) ? 1 : apiRetryAttempts
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -189,7 +215,7 @@ async function apiFetch(pathname, init = {}) {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-  }, { label: `${init.method || 'GET'} ${pathname}` })
+  }, { label: `${method} ${pathname}`, attempts })
   const raw = await res.text()
   let body = null
   try {
@@ -202,13 +228,15 @@ async function apiFetch(pathname, init = {}) {
 
 async function apiFetchText(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
+  const method = String(init.method || 'GET').toUpperCase()
+  const attempts = isTokenizedImportEndpoint(pathname, method) ? 1 : apiRetryAttempts
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
     },
-  }, { label: `${init.method || 'GET'} ${pathname}` })
+  }, { label: `${method} ${pathname}`, attempts })
   const text = await res.text()
   return { url, res, text }
 }
@@ -371,12 +399,6 @@ async function run() {
     String(payloadExample.mappingProfileId || '') ||
     'dingtalk_csv_daily_summary'
 
-  // Prepare preview token.
-  const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
-  assertOk(prepPreview, 'POST /attendance/import/prepare (preview)')
-  const commitTokenPreview = prepPreview.body?.data?.commitToken
-  if (!commitTokenPreview) die('prepare (preview) did not return commitToken')
-
   const groupName = `Perf Group ${Date.now().toString(36)}`
   const csvText = makeCsv({ startDate: new Date(), userId, groupName })
 
@@ -430,13 +452,41 @@ async function run() {
       : undefined,
   }
 
-  // Preview.
-  const tPreview0 = nowMs()
-  const preview = await apiFetch('/attendance/import/preview', {
-    method: 'POST',
-    body: JSON.stringify({ ...basePayload, commitToken: commitTokenPreview }),
-  })
-  const tPreview1 = nowMs()
+  // Preview (token can expire/be consumed when upstream returns transient failures).
+  let preview = null
+  let tPreview0 = nowMs()
+  let tPreview1 = tPreview0
+  for (let attempt = 1; attempt <= previewRetryAttempts; attempt += 1) {
+    const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    assertOk(prepPreview, `POST /attendance/import/prepare (preview attempt ${attempt})`)
+    const commitTokenPreview = prepPreview.body?.data?.commitToken
+    if (!commitTokenPreview) die(`prepare (preview attempt ${attempt}) did not return commitToken`)
+
+    try {
+      tPreview0 = nowMs()
+      preview = await apiFetch('/attendance/import/preview', {
+        method: 'POST',
+        body: JSON.stringify({ ...basePayload, commitToken: commitTokenPreview }),
+      })
+      tPreview1 = nowMs()
+    } catch (error) {
+      if (attempt >= previewRetryAttempts) throw error
+      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      log(`WARN: preview attempt ${attempt}/${previewRetryAttempts} network error (${(error && error.message) || String(error)}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+      continue
+    }
+
+    if (!isResponseOk(preview) && isRetryableMutationFailure(preview) && attempt < previewRetryAttempts) {
+      const code = String(preview.body?.error?.code || '')
+      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      log(`WARN: preview attempt ${attempt}/${previewRetryAttempts} failed (HTTP ${preview.res.status} code=${code || 'n/a'}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+      continue
+    }
+    break
+  }
+  if (!preview) die('preview response missing after retries')
   assertOk(preview, 'POST /attendance/import/preview')
   const previewItems = preview.body?.data?.items
   if (!Array.isArray(previewItems) || previewItems.length === 0) die('preview returned 0 items')
@@ -487,19 +537,39 @@ async function run() {
     return
   }
 
-  // Prepare commit token (preview consumes tokens by design).
-  const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
-  assertOk(prepCommit, 'POST /attendance/import/prepare (commit)')
-  const commitTokenCommit = prepCommit.body?.data?.commitToken
-  if (!commitTokenCommit) die('prepare (commit) did not return commitToken')
-
-  // Commit.
+  // Commit (retry with fresh commitToken when transient/token errors happen).
   const tCommit0 = nowMs()
   const commitEndpoint = commitAsync ? '/attendance/import/commit-async' : '/attendance/import/commit'
-  const commit = await apiFetch(commitEndpoint, {
-    method: 'POST',
-    body: JSON.stringify({ ...basePayload, commitToken: commitTokenCommit }),
-  })
+  let commit = null
+  for (let attempt = 1; attempt <= commitRetryAttempts; attempt += 1) {
+    const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    assertOk(prepCommit, `POST /attendance/import/prepare (commit attempt ${attempt})`)
+    const commitTokenCommit = prepCommit.body?.data?.commitToken
+    if (!commitTokenCommit) die(`prepare (commit attempt ${attempt}) did not return commitToken`)
+
+    try {
+      commit = await apiFetch(commitEndpoint, {
+        method: 'POST',
+        body: JSON.stringify({ ...basePayload, commitToken: commitTokenCommit }),
+      })
+    } catch (error) {
+      if (attempt >= commitRetryAttempts) throw error
+      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      log(`WARN: commit attempt ${attempt}/${commitRetryAttempts} network error (${(error && error.message) || String(error)}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+      continue
+    }
+
+    if (!isResponseOk(commit) && isRetryableMutationFailure(commit) && attempt < commitRetryAttempts) {
+      const code = String(commit.body?.error?.code || '')
+      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      log(`WARN: commit attempt ${attempt}/${commitRetryAttempts} failed (HTTP ${commit.res.status} code=${code || 'n/a'}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+      continue
+    }
+    break
+  }
+  if (!commit) die('commit response missing after retries')
   assertOk(commit, `POST ${commitEndpoint}`)
 
   let batchId = null

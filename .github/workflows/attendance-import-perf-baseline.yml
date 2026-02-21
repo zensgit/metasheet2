@@ -108,7 +108,7 @@ jobs:
               "maxPreviewMs": 100000,
               "maxCommitMs": 150000,
               "maxExportMs": 25000,
-              "maxRollbackMs": 8000
+              "maxRollbackMs": 30000
             },
             "regressions": [
               "DRILL: synthetic regression entry"
@@ -146,7 +146,7 @@ jobs:
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
-      MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_MAX_ROLLBACK_MS || '' }}
+      MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_BASELINE_MAX_ROLLBACK_MS || '30000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
