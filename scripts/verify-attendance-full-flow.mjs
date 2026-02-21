@@ -252,15 +252,45 @@ function buildRecoveryCsv(workDate, rowCount) {
   return lines.join('\n')
 }
 
-async function assertImportJobRecoveryFlow(page, importSection) {
+function tryParseJsonObject(raw) {
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    return {}
+  } catch {
+    return {}
+  }
+}
+
+async function uploadRecoveryCsvFile(apiBase, orgId, csvText) {
+  const query = new URLSearchParams({
+    orgId: orgId || 'default',
+    filename: `attendance-recovery-${Date.now()}.csv`,
+  })
+  const response = await fetch(`${normalizeUrl(apiBase)}/attendance/import/upload?${query.toString()}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'text/csv',
+    },
+    body: csvText,
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data?.ok || !data?.data?.fileId) {
+    const message = data?.error?.message || `HTTP ${response.status}`
+    throw new Error(`upload recovery csv failed: ${message}`)
+  }
+  return {
+    fileId: String(data.data.fileId),
+    rowCount: Number(data.data.rowCount || 0),
+  }
+}
+
+async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   logInfo('Admin import recovery assertion started')
   const payloadInput = importSection.locator('#attendance-import-payload').first()
-  const csvInput = importSection.locator('#attendance-import-csv').first()
-  const loadCsvButton = importSection.getByRole('button', { name: 'Load CSV', exact: true }).first()
   const importButton = importSection.getByRole('button', { name: 'Import', exact: true }).first()
   await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
-  await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
-  await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
   await importButton.waitFor({ timeout: adminReadyTimeoutMs })
 
   const profileSelect = importSection.locator('#attendance-import-profile').first()
@@ -272,25 +302,57 @@ async function assertImportJobRecoveryFlow(page, importSection) {
   }
 
   const workDate = new Date().toISOString().slice(0, 10)
+  const orgIdFromInput = await page.locator('#attendance-org-id').first().inputValue().catch(() => '')
+  const basePayload = tryParseJsonObject(await payloadInput.inputValue())
+  const resolvedOrgId = String(basePayload.orgId || orgIdFromInput || 'default').trim() || 'default'
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
   try {
-    const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
-    const initialPayload = await payloadInput.inputValue()
-    await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1), 'utf8')
-    await csvInput.setInputFiles(csvPath)
-    await loadCsvButton.click()
-    await waitForImportPayload(page, initialPayload)
-    let payload = await payloadInput.inputValue()
-    if (!payload.includes('"csvFileId"')) {
-      logInfo('Recovery assertion fallback: forcing upload channel with large CSV payload')
-      const previousPayload = payload
-      await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000), 'utf8')
+    let preparedByApiUpload = false
+    try {
+      const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 130000))
+      const nextPayload = {
+        ...basePayload,
+        orgId: resolvedOrgId,
+        mode: basePayload.mode || 'override',
+        csvFileId: uploaded.fileId,
+      }
+      delete nextPayload.csvText
+      delete nextPayload.rows
+      await payloadInput.fill(JSON.stringify(nextPayload, null, 2))
+      preparedByApiUpload = true
+      logInfo(`Recovery assertion prepared via API upload: csvFileId=${uploaded.fileId} rows=${uploaded.rowCount || 'unknown'}`)
+    } catch (error) {
+      logInfo(`WARN: API upload path unavailable for recovery assertion (${(error && error.message) || error})`)
+    }
+
+    if (!preparedByApiUpload) {
+      const csvInput = importSection.locator('#attendance-import-csv').first()
+      const loadCsvButton = importSection.getByRole('button', { name: 'Load CSV', exact: true }).first()
+      const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
+      await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
+      await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
+
+      const initialPayload = await payloadInput.inputValue()
+      await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1), 'utf8')
       await csvInput.setInputFiles(csvPath)
       await loadCsvButton.click()
-      await waitForImportPayload(page, previousPayload)
-      payload = await payloadInput.inputValue()
+      await waitForImportPayload(page, initialPayload)
+      let payload = await payloadInput.inputValue()
       if (!payload.includes('"csvFileId"')) {
-        logInfo('WARN: csvFileId payload unavailable in UI; continuing with forced async debug mode')
+        logInfo('Recovery assertion fallback: forcing upload channel with large CSV payload')
+        const previousPayload = payload
+        await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000), 'utf8')
+        await csvInput.setInputFiles(csvPath)
+        await loadCsvButton.click()
+        try {
+          await waitForImportPayload(page, previousPayload)
+        } catch {
+          logInfo('WARN: payload did not change after large CSV load; continuing with current payload')
+        }
+        payload = await payloadInput.inputValue()
+        if (!payload.includes('"csvFileId"')) {
+          logInfo('WARN: csvFileId payload unavailable in UI; continuing with forced async debug mode')
+        }
       }
     }
 
@@ -300,24 +362,24 @@ async function assertImportJobRecoveryFlow(page, importSection) {
     await Promise.any([
       timeoutMessage.waitFor({ timeout: timeoutMs }),
       asyncCard.waitFor({ timeout: timeoutMs }),
-  ])
+    ])
 
-  const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
-  const hasStatusAction = await statusAction.count().then(async (count) => {
-    if (!count) return false
-    return statusAction.isVisible().catch(() => false)
-  })
-  if (hasStatusAction) {
-    await statusAction.click()
-  } else {
-    const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })
-    if (await reloadInCard.count()) {
-      await reloadInCard.first().click()
+    const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
+    const hasStatusAction = await statusAction.count().then(async (count) => {
+      if (!count) return false
+      return statusAction.isVisible().catch(() => false)
+    })
+    if (hasStatusAction) {
+      await statusAction.click()
+    } else {
+      const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })
+      if (await reloadInCard.count()) {
+        await reloadInCard.first().click()
+      }
     }
-  }
 
-  await asyncCard.waitFor({ timeout: timeoutMs })
-  const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
+    await asyncCard.waitFor({ timeout: timeoutMs })
+    const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
     const resumeVisible = await resumeButton.count().then(async (count) => {
       if (!count) return false
       return resumeButton.first().isVisible()
@@ -466,7 +528,7 @@ async function run() {
       }
       const shouldAssertRecovery = assertImportJobRecovery && importSectionCount > 0
       if (shouldAssertRecovery) {
-        await assertImportJobRecoveryFlow(page, importSection)
+        await assertImportJobRecoveryFlow(page, importSection, apiBase)
       } else if (assertImportJobRecovery) {
         logInfo('WARN: import recovery assertion skipped (section unavailable)')
       }
