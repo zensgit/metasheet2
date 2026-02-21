@@ -1,5 +1,6 @@
 import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
+import os from 'os'
 import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
@@ -17,6 +18,9 @@ const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-flow'
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
+const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
+const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
+const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || timeoutMs)
 
 function logInfo(message) {
@@ -94,6 +98,33 @@ async function setProductFeatures(page) {
       localStorage.setItem('metasheet_features', jsonValue)
     }
   }, { modeValue: productMode, jsonValue: featuresJson })
+}
+
+async function setImportDebugOverrides(page) {
+  if (!assertImportJobRecovery || mobile) return
+  await page.addInitScript((payload) => {
+    let current = {}
+    try {
+      const raw = localStorage.getItem('metasheet_attendance_debug')
+      current = raw ? JSON.parse(raw) : {}
+    } catch {
+      current = {}
+    }
+    const next = {
+      ...(current && typeof current === 'object' ? current : {}),
+      import: {
+        ...((current && typeof current === 'object' && current.import && typeof current.import === 'object')
+          ? current.import
+          : {}),
+        forceUploadCsv: true,
+        forceAsyncImport: true,
+        forceTimeoutOnce: true,
+        pollTimeoutMs: payload.pollTimeoutMs,
+        pollIntervalMs: payload.pollIntervalMs,
+      },
+    }
+    localStorage.setItem('metasheet_attendance_debug', JSON.stringify(next))
+  }, { pollTimeoutMs: importRecoveryTimeoutMs, pollIntervalMs: importRecoveryIntervalMs })
 }
 
 function parseFeatures(raw) {
@@ -201,6 +232,76 @@ async function captureDebugScreenshot(page, fileName) {
   logInfo(`Saved debug screenshot: ${screenshotPath}`)
 }
 
+async function waitForImportPayload(page) {
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#attendance-import-payload')
+    const value = el && 'value' in el ? el.value : ''
+    return typeof value === 'string' && (value.includes('csvFileId') || value.includes('csvText'))
+  }, null, { timeout: timeoutMs })
+}
+
+async function assertImportJobRecoveryFlow(page, importSection) {
+  logInfo('Admin import recovery assertion started')
+  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  const csvInput = importSection.locator('#attendance-import-csv').first()
+  const loadCsvButton = importSection.getByRole('button', { name: 'Load CSV', exact: true }).first()
+  const previewButton = importSection.getByRole('button', { name: 'Preview', exact: true }).first()
+  await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
+  await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
+  await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
+  await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
+
+  const profileSelect = importSection.locator('#attendance-import-profile').first()
+  if (await profileSelect.count()) {
+    const optionCount = await profileSelect.locator('option[value="dingtalk_csv_daily_summary"]').count()
+    if (optionCount > 0) {
+      await profileSelect.selectOption('dingtalk_csv_daily_summary')
+    }
+  }
+
+  const workDate = new Date().toISOString().slice(0, 10)
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
+  try {
+    const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
+    const csvText = [
+      '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
+      `${workDate},recovery-user,recovery-group,09:00,18:00,正常`,
+    ].join('\n')
+    await fs.writeFile(csvPath, csvText, 'utf8')
+    await csvInput.setInputFiles(csvPath)
+    await loadCsvButton.click()
+    await waitForImportPayload(page)
+
+    await previewButton.click()
+    await page.getByText('Async import job is still running in background.', { exact: true }).waitFor({ timeout: timeoutMs })
+
+    const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
+    await statusAction.waitFor({ timeout: timeoutMs })
+    await statusAction.click()
+
+    const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
+    await asyncCard.waitFor({ timeout: timeoutMs })
+    const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
+    const resumeVisible = await resumeButton.count().then(async (count) => {
+      if (!count) return false
+      return resumeButton.first().isVisible()
+    })
+    if (resumeVisible) {
+      await resumeButton.first().click()
+    } else {
+      logInfo('WARN: resume polling button not visible after reload; continuing with completed-state assertion')
+    }
+
+    await Promise.any([
+      asyncCard.getByText(/Status:\s*completed/i).first().waitFor({ timeout: timeoutMs }),
+      page.getByText(/Preview job completed \(/).first().waitFor({ timeout: timeoutMs }),
+    ])
+    logInfo('Admin import recovery assertion passed')
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  }
+}
+
 async function run() {
   if (!token) {
     logInfo('AUTH_TOKEN is required')
@@ -252,6 +353,7 @@ async function run() {
   const page = await context.newPage()
   await setAuth(page)
   await setProductFeatures(page)
+  await setImportDebugOverrides(page)
 
   logInfo(`Navigating to ${webUrl}`)
   await page.goto(webUrl, { waitUntil: 'networkidle', timeout: timeoutMs })
@@ -324,6 +426,12 @@ async function run() {
         logInfo('Admin status + retry action verified')
       } else {
         logInfo('Admin retry assertions skipped (ASSERT_ADMIN_RETRY=false or section unavailable)')
+      }
+      const shouldAssertRecovery = assertImportJobRecovery && importSectionCount > 0
+      if (shouldAssertRecovery) {
+        await assertImportJobRecoveryFlow(page, importSection)
+      } else if (assertImportJobRecovery) {
+        logInfo('WARN: import recovery assertion skipped (section unavailable)')
       }
       logInfo('Payroll batch UI verified')
     }

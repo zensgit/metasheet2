@@ -1287,3 +1287,38 @@ Files changed:
 - `plugins/plugin-attendance/index.cjs`
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
 - `apps/web/src/views/AttendanceView.vue`
+
+## Post-Go Validation (2026-02-20): Parallel A/B/C Hardening (`1+2+3` local)
+
+This record validates the parallel hardening increment:
+
+- A line: strict gate scripts/workflow now support optional `REQUIRE_IMPORT_JOB_RECOVERY` / `require_import_job_recovery`.
+- B line: perf summary + trend report now include async job telemetry (`progressPercent`, `throughputRowsPerSec`).
+- C line: full-flow Playwright script includes optional recovery assertion (`IMPORT_JOB_TIMEOUT -> Reload import job -> Resume polling`).
+
+Validation evidence:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS | `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/backend-attendance-integration.log` |
+| `pnpm --filter @metasheet/web build` | PASS | `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/web-build.log` |
+| `node scripts/ops/attendance-validate-gate-summary-schema.mjs <tmpdir> 1 schemas/attendance/strict-gate-summary.schema.json` | PASS | `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/gate-summary-schema.log` |
+| `node --check scripts/verify-attendance-full-flow.mjs` + perf scripts | PASS | `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/script-syntax.log` |
+| `node scripts/ops/attendance-import-perf-trend-report.mjs` (fixture validation) | PASS | `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/perf-trend-report.log`, `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/trend-report-output/20260220-165716/attendance-import-perf-longrun-trend.md` |
+
+Execution note:
+
+- Remote Playwright execution for `ASSERT_IMPORT_JOB_RECOVERY=true` still requires a valid `<ADMIN_JWT>` from the target environment. The production `dev-token` endpoint is disabled (`Cannot POST /api/auth/dev-token`), so this local increment records compile/schema/script validation and defers remote runtime validation to the next strict-gates run with fresh credentials.
+
+Files changed:
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+- `apps/web/src/views/AttendanceView.vue`
+- `schemas/attendance/strict-gate-summary.schema.json`
+- `scripts/ops/attendance-import-perf.mjs`
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+- `scripts/ops/attendance-run-gates.sh`
+- `scripts/ops/attendance-run-strict-gates-twice.sh`
+- `scripts/verify-attendance-full-flow.mjs`
+- `docs/attendance-production-ga-daily-gates-20260209.md`
+- `docs/attendance-parallel-delivery-plan-20260219.md`

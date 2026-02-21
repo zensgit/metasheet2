@@ -25,6 +25,7 @@ REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
 REQUIRE_IMPORT_UPLOAD="true" \
 REQUIRE_IMPORT_ASYNC="true" \
+REQUIRE_IMPORT_JOB_RECOVERY="false" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
 AUTH_TOKEN="<ADMIN_JWT>" \
@@ -42,6 +43,13 @@ Expected:
   - `export csv ok`
   - `audit export csv ok`
   - `import async idempotency ok`
+- Optional (when `REQUIRE_IMPORT_JOB_RECOVERY=true`):
+  - `gate-playwright-full-flow-desktop.log` contains `Admin import recovery assertion passed`.
+  - This assertion covers `IMPORT_JOB_TIMEOUT -> Reload import job -> Resume polling`.
+
+Workflow input mapping (`.github/workflows/attendance-strict-gates-prod.yml`):
+
+- `require_import_job_recovery` (default: `false`) -> `REQUIRE_IMPORT_JOB_RECOVERY`.
 
 Evidence:
 

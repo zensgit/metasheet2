@@ -18,6 +18,7 @@ REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD:-false}"
 REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC:-false}"
 REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-false}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
+REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 
 function die() {
   echo "[attendance-run-gates] ERROR: $*" >&2
@@ -85,6 +86,7 @@ gate_pw_mobile="FAIL"
 info "API_BASE=${API_BASE}"
 info "WEB_URL=${WEB_URL}"
 info "OUTPUT_ROOT=${OUTPUT_ROOT}"
+info "REQUIRE_IMPORT_JOB_RECOVERY=${REQUIRE_IMPORT_JOB_RECOVERY}"
 
 function maybe_run_preflight() {
   # Keep "auto" mode ergonomic on dev machines (skip when env file is absent),
@@ -171,6 +173,7 @@ function run_playwright_full_flow_desktop() {
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
+    ASSERT_IMPORT_JOB_RECOVERY="$REQUIRE_IMPORT_JOB_RECOVERY" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-desktop" \
     HEADLESS="$HEADLESS" \
     node "${ROOT_DIR}/scripts/verify-attendance-full-flow.mjs" \
@@ -344,6 +347,7 @@ cat >"$summary_json" <<EOF
   "apiBase": "${API_BASE}",
   "webUrl": "${WEB_URL}",
   "expectProductMode": "${EXPECT_PRODUCT_MODE}",
+  "requireImportJobRecovery": ${REQUIRE_IMPORT_JOB_RECOVERY},
   "exitCode": ${exit_code},
   "gates": {
     "preflight": "${gate_preflight}",

@@ -195,6 +195,13 @@ function coerceNonNegativeNumber(value) {
   return Math.floor(numeric)
 }
 
+function coerceNonNegativeFloat(value, digits = 2) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return null
+  const factor = 10 ** Math.max(0, Math.floor(digits))
+  return Math.round(numeric * factor) / factor
+}
+
 function makeCsv({ startDate, userId, groupName }) {
   const lines = new Array(rows + 1)
   lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
@@ -368,6 +375,8 @@ async function run() {
       processedRows: null,
       failedRows: null,
       elapsedMs: null,
+      progressPercent: null,
+      throughputRowsPerSec: null,
       perfMetrics: {
         previewMs: tPreview1 - tPreview0,
         commitMs: null,
@@ -376,6 +385,8 @@ async function run() {
         processedRows: null,
         failedRows: null,
         elapsedMs: null,
+        progressPercent: null,
+        throughputRowsPerSec: null,
       },
       uploadCsv,
       previewMs: tPreview1 - tPreview0,
@@ -416,6 +427,8 @@ async function run() {
   let processedRows = null
   let failedRows = null
   let jobElapsedMs = null
+  let progressPercent = null
+  let throughputRowsPerSec = null
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = job?.id
@@ -426,6 +439,15 @@ async function run() {
     processedRows = coerceNonNegativeNumber(finalJob?.processedRows)
     failedRows = coerceNonNegativeNumber(finalJob?.failedRows)
     jobElapsedMs = coerceNonNegativeNumber(finalJob?.elapsedMs)
+    progressPercent = coerceNonNegativeFloat(finalJob?.progressPercent)
+    throughputRowsPerSec = coerceNonNegativeFloat(finalJob?.throughputRowsPerSec)
+    if (progressPercent === null) {
+      const progress = coerceNonNegativeNumber(finalJob?.progress)
+      const total = coerceNonNegativeNumber(finalJob?.total)
+      if (progress !== null && total && total > 0) {
+        progressPercent = coerceNonNegativeFloat((progress / total) * 100)
+      }
+    }
     if (!batchId) die('commit-async job did not return batchId')
   } else {
     batchId = commit.body?.data?.batchId
@@ -433,6 +455,8 @@ async function run() {
     processedRows = coerceNonNegativeNumber(commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported)
     failedRows = coerceNonNegativeNumber(commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount)
     jobElapsedMs = coerceNonNegativeNumber(commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs)
+    progressPercent = coerceNonNegativeFloat(commit.body?.data?.progressPercent)
+    throughputRowsPerSec = coerceNonNegativeFloat(commit.body?.data?.throughputRowsPerSec)
     if (!batchId) die('commit did not return batchId')
   }
   const tCommit1 = nowMs()
@@ -486,6 +510,8 @@ async function run() {
     processedRows,
     failedRows,
     elapsedMs,
+    progressPercent,
+    throughputRowsPerSec,
     jobElapsedMs,
     perfMetrics: {
       previewMs: tPreview1 - tPreview0,
@@ -495,6 +521,8 @@ async function run() {
       processedRows,
       failedRows,
       elapsedMs,
+      progressPercent,
+      throughputRowsPerSec,
     },
     uploadCsv,
     jobId,
@@ -536,6 +564,9 @@ async function run() {
   log(`commit ok: batchId=${batchId} ms=${summary.commitMs}`)
   if (exportMs !== null) log(`export ok: type=${exportType} ms=${exportMs}`)
   if (rolledBack) log(`rollback ok: ms=${rollbackMs}`)
+  if (progressPercent !== null || throughputRowsPerSec !== null) {
+    log(`job telemetry: progressPercent=${progressPercent ?? '--'} throughputRowsPerSec=${throughputRowsPerSec ?? '--'}`)
+  }
   log(`Wrote: ${path.join(outDir, 'perf-summary.json')}`)
   if (summary.regressions.length > 0) {
     throw new Error(`performance threshold regression: ${summary.regressions.join('; ')}`)

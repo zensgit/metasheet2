@@ -102,6 +102,12 @@ function formatMs(value) {
   return String(Math.round(value))
 }
 
+function formatFloat(value, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '--'
+  const numeric = Number(value)
+  return numeric.toFixed(digits)
+}
+
 function fmtPct(value) {
   if (!Number.isFinite(value)) return '--'
   return `${(value * 100).toFixed(1)}%`
@@ -126,6 +132,11 @@ function recordFromSummary(summary, sourcePath, sourceType) {
     commitMs: toNumber(summary?.commitMs),
     exportMs: toNumber(summary?.exportMs),
     rollbackMs: toNumber(summary?.rollbackMs),
+    processedRows: toNumber(summary?.processedRows),
+    failedRows: toNumber(summary?.failedRows),
+    elapsedMs: toNumber(summary?.elapsedMs),
+    progressPercent: toNumber(summary?.progressPercent),
+    throughputRowsPerSec: toNumber(summary?.throughputRowsPerSec),
     regressions: Array.isArray(summary?.regressions) ? summary.regressions.map((v) => String(v)) : [],
     sourceType,
     sourcePath,
@@ -179,11 +190,11 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Mode | Upload | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Mode | Upload | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
+  lines.push('|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
     const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')

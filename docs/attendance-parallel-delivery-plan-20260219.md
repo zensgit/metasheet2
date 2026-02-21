@@ -113,6 +113,83 @@
 2. C 线：补 Playwright 用例覆盖“async job timeout -> reload job -> resume polling”恢复链路。
 3. A 线：将上述新恢复链路纳入 strict/full-flow 验收脚本并写入 daily handbook。
 
+## Latest Progress (2026-02-20): A/B/C 并线完成（Telemetry 落盘 + Recovery 验收透传）
+
+### A 线（门禁）
+
+- `scripts/ops/attendance-run-gates.sh`
+  - 新增 `REQUIRE_IMPORT_JOB_RECOVERY`（默认 `false`）并透传到 desktop full-flow：
+    - `ASSERT_IMPORT_JOB_RECOVERY="$REQUIRE_IMPORT_JOB_RECOVERY"`
+  - `gate-summary.json` 新增 `requireImportJobRecovery` 字段（布尔）。
+- `scripts/ops/attendance-run-strict-gates-twice.sh`
+  - 新增同名透传变量，便于 strict twice 启用恢复链路验收。
+- `.github/workflows/attendance-strict-gates-prod.yml`
+  - 新增 workflow_dispatch input：`require_import_job_recovery`（默认 `false`）。
+
+### B 线（性能与趋势）
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - `perf-summary.json` 新增并落盘：
+    - `progressPercent`
+    - `throughputRowsPerSec`
+  - `perfMetrics` 同步新增上述字段。
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - trend 报表 `Scenario Summary` 新增列：
+    - `Latest Progress %`
+    - `Latest Throughput`
+
+### C 线（前端恢复链路 + Playwright）
+
+- `apps/web/src/views/AttendanceView.vue`
+  - 新增仅测试启用的 debug 配置读取：`localStorage.metasheet_attendance_debug.import.*`
+  - 支持测试覆盖：
+    - `forceUploadCsv`
+    - `forceAsyncImport`
+    - `forceTimeoutOnce`
+    - `pollIntervalMs`
+    - `pollTimeoutMs`
+  - `IMPORT_JOB_TIMEOUT` 提示文案明确引导：先 `Reload import job`，再 `Resume polling`。
+- `scripts/verify-attendance-full-flow.mjs`
+  - 新增 `ASSERT_IMPORT_JOB_RECOVERY=true` 时的桌面端恢复断言：
+    - 触发 async preview 超时
+    - 点击状态动作 `Reload import job`
+    - 点击 async 卡片 `Resume polling`
+    - 断言任务进入完成态
+
+### Schema 更新
+
+- `schemas/attendance/strict-gate-summary.schema.json`
+  - 追加可选字段：`requireImportJobRecovery:boolean`（兼容 `additionalProperties:false` 约束）。
+
+### 本地验证（PASS）
+
+- Backend integration:
+  - `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts`
+  - 结果：PASS（14/14）
+- Web build:
+  - `pnpm --filter @metasheet/web build`
+  - 结果：PASS
+- Strict gate summary schema:
+  - `node scripts/ops/attendance-validate-gate-summary-schema.mjs <tmpdir> 1 schemas/attendance/strict-gate-summary.schema.json`
+  - 结果：PASS
+- Script syntax:
+  - `node --check scripts/verify-attendance-full-flow.mjs`
+  - `node --check scripts/ops/attendance-import-perf.mjs`
+  - `node --check scripts/ops/attendance-import-perf-trend-report.mjs`
+  - 结果：PASS
+- Trend report telemetry rendering:
+  - `CURRENT_ROOT=<fixture_current> HISTORY_ROOT=<fixture_history> OUTPUT_DIR=<fixture_out> node scripts/ops/attendance-import-perf-trend-report.mjs`
+  - 结果：PASS（Markdown 含 `Latest Progress %` / `Latest Throughput` 列）
+
+证据目录：
+
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/backend-attendance-integration.log`
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/web-build.log`
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/gate-summary-schema.log`
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/script-syntax.log`
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/perf-trend-report.log`
+- `output/playwright/attendance-next-phase/20260220-165421-parallel-abc/trend-report-output/20260220-165716/attendance-import-perf-longrun-trend.md`
+
 ## D8-D10 封板标准（Go/No-Go）
 
 - Strict Gates twice 连续 PASS（2 轮）。
