@@ -14,7 +14,7 @@ const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-produc
 const allowLegacyImport = process.env.ALLOW_LEGACY_IMPORT === '1'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
-const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 60000))
 
 function logInfo(message) {
   console.log(`[attendance-production-flow] ${message}`)
