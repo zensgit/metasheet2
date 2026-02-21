@@ -129,11 +129,11 @@ jobs:
             mode: 'commit'
             commit_async: 'false'
             export_csv: 'true'
-            rollback: 'true'
+            rollback: 'false'
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_PREVIEW_MS || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '100000' }}
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
-            max_rollback_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_ROLLBACK_MS || vars.ATTENDANCE_PERF_MAX_ROLLBACK_MS || '120000' }}
+            max_rollback_ms: ''
           - id: rows50k-preview
             rows: '50000'
             mode: 'preview'

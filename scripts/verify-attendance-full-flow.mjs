@@ -22,6 +22,9 @@ const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
+const authMeRetries = Math.max(1, Number(process.env.AUTH_ME_RETRIES || 5))
+const authMeRetryDelayMs = Math.max(100, Number(process.env.AUTH_ME_RETRY_DELAY_MS || 800))
+const authMeTimeoutMs = Math.max(1000, Number(process.env.AUTH_ME_TIMEOUT_MS || 10000))
 
 function logInfo(message) {
   console.log(`[attendance-full-flow] ${message}`)
@@ -35,6 +38,10 @@ function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
   if (value === 'platform') return 'platform'
   return ''
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function deriveApiBaseFromWebUrl(url) {
@@ -144,24 +151,58 @@ async function fetchAuthMeFeatures(apiBase) {
   }
 
   const url = `${normalizeUrl(apiBase)}/auth/me`
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-  })
-  const raw = await res.text()
-  let body = null
-  try {
-    body = raw ? JSON.parse(raw) : null
-  } catch {
-    body = null
+  let lastError = null
+
+  for (let attempt = 1; attempt <= authMeRetries; attempt += 1) {
+    try {
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(authMeTimeoutMs)
+        : undefined
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        signal,
+      })
+      const raw = await res.text()
+      let body = null
+      try {
+        body = raw ? JSON.parse(raw) : null
+      } catch {
+        body = null
+      }
+      if (!res.ok) {
+        if (res.status === 401) {
+          await refreshAuthToken(apiBase)
+        }
+        const retriable = res.status === 401 || res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 504)
+        const error = new Error(`GET /auth/me failed: HTTP ${res.status} ${raw.slice(0, 160)}`)
+        error.retriable = retriable
+        lastError = error
+        if (!retriable || attempt >= authMeRetries) {
+          throw error
+        }
+        const delayMs = Math.min(authMeRetryDelayMs * (2 ** (attempt - 1)), 5000)
+        logInfo(`WARN: /auth/me attempt ${attempt}/${authMeRetries} failed (HTTP ${res.status}); retrying in ${delayMs}ms`)
+        await sleep(delayMs)
+        continue
+      }
+      const payload = body?.data ?? body ?? {}
+      return payload?.features && typeof payload.features === 'object' ? payload.features : null
+    } catch (error) {
+      lastError = error
+      const retriable = typeof error?.retriable === 'boolean' ? error.retriable : true
+      if (!retriable || attempt >= authMeRetries) {
+        break
+      }
+      const delayMs = Math.min(authMeRetryDelayMs * (2 ** (attempt - 1)), 5000)
+      const message = (error && error.message) || String(error)
+      logInfo(`WARN: /auth/me attempt ${attempt}/${authMeRetries} error (${message}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
   }
-  if (!res.ok) {
-    throw new Error(`GET /auth/me failed: HTTP ${res.status} ${raw.slice(0, 160)}`)
-  }
-  const payload = body?.data ?? body ?? {}
-  return payload?.features && typeof payload.features === 'object' ? payload.features : null
+
+  throw lastError || new Error('GET /auth/me failed')
 }
 
 async function endpointExists(apiBase, pathname) {
