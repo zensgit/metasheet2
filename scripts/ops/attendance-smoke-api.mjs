@@ -10,6 +10,9 @@ const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
+const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
+const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -44,11 +47,11 @@ function decodeJwtPayload(jwt) {
 async function refreshAuthToken() {
   const url = `${apiBase}/auth/refresh-token`
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
-    })
+    }, { label: 'POST /auth/refresh-token', allowRefresh: false })
     const raw = await res.text()
     let body = null
     try {
@@ -84,14 +87,14 @@ async function refreshAuthToken() {
 
 async function apiFetch(path, init = {}) {
   const url = `${apiBase}${path}`
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-  })
+  }, { label: `${init.method || 'GET'} ${path}` })
   const raw = await res.text()
   let body = null
   try {
@@ -104,13 +107,13 @@ async function apiFetch(path, init = {}) {
 
 async function apiFetchRaw(path, init = {}) {
   const url = `${apiBase}${path}`
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${token}`,
     },
-  })
+  }, { label: `${init.method || 'GET'} ${path}` })
   const raw = await res.text()
   let body = null
   try {
@@ -175,6 +178,46 @@ function isoMinutesAgo(minutes) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRetriableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504)
+}
+
+async function fetchWithRetry(url, init = {}, options = {}) {
+  const label = options.label || url
+  const allowRefresh = options.allowRefresh !== false
+
+  for (let attempt = 1; attempt <= apiRetryAttempts; attempt += 1) {
+    try {
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(apiTimeoutMs)
+        : undefined
+      const res = await fetch(url, { ...init, signal })
+      if (res.status === 401 && allowRefresh && attempt < apiRetryAttempts) {
+        const refreshed = await refreshAuthToken()
+        if (refreshed) {
+          const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+          log(`WARN: ${label} got 401; refreshed token and retrying in ${delayMs}ms`)
+          await sleep(delayMs)
+          continue
+        }
+      }
+      if (isRetriableStatus(res.status) && attempt < apiRetryAttempts) {
+        const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+        log(`WARN: ${label} returned HTTP ${res.status}; retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+        await sleep(delayMs)
+        continue
+      }
+      return res
+    } catch (error) {
+      if (attempt >= apiRetryAttempts) throw error
+      const delayMs = Math.min(apiRetryDelayMs * attempt, 5000)
+      log(`WARN: ${label} network error (${(error && error.message) || String(error)}); retry ${attempt}/${apiRetryAttempts} in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
+  }
+  throw new Error(`${label}: exhausted retries`)
 }
 
 async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = {}) {
@@ -285,10 +328,10 @@ async function run() {
 
     // Audit log export should stream CSV (even if it only contains headers).
     const auditExportUrl = `${apiBase}/attendance-admin/audit-logs/export.csv?limit=50`
-    const auditExportRes = await fetch(auditExportUrl, {
+    const auditExportRes = await fetchWithRetry(auditExportUrl, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
-    })
+    }, { label: 'GET /attendance-admin/audit-logs/export.csv' })
     const auditExportText = await auditExportRes.text()
     if (auditExportRes.status === 404) {
       if (requireAttendanceAdminApi) die('attendance-admin audit log export missing (404)')
@@ -520,10 +563,10 @@ async function run() {
 
   // 6.2) export endpoint should return CSV (items or anomalies).
   const exportUrl = `${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`
-  const exportRes = await fetch(exportUrl, {
+  const exportRes = await fetchWithRetry(exportUrl, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
-  })
+  }, { label: 'GET /attendance/import/batches/:id/export.csv' })
   const exportText = await exportRes.text()
   if (exportRes.status === 404) {
     if (requireImportExport) die('export endpoint missing (404)')

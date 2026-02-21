@@ -5,6 +5,8 @@ API_BASE="${API_BASE:-}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 USER_ID="${USER_ID:-}"
 ROLE="${ROLE:-}"
+CURL_RETRY_ATTEMPTS="${CURL_RETRY_ATTEMPTS:-5}"
+CURL_RETRY_DELAY_SEC="${CURL_RETRY_DELAY_SEC:-1}"
 
 function die() {
   echo "[attendance-provision-user] ERROR: $*" >&2
@@ -22,6 +24,11 @@ function refresh_token_if_needed() {
   # IMPORTANT: never print tokens in logs.
   local result code body next
   result="$(curl -sS -w '\n%{http_code}' \
+    --retry "${CURL_RETRY_ATTEMPTS}" \
+    --retry-delay "${CURL_RETRY_DELAY_SEC}" \
+    --retry-all-errors \
+    --connect-timeout 10 \
+    --max-time 30 \
     -X POST "${API_BASE}/auth/refresh-token" \
     -H "Content-Type: application/json" \
     --data "{\"token\":\"${AUTH_TOKEN}\"}" || true)"
@@ -89,6 +96,11 @@ info "Granting permissions: role=${ROLE} userId=${USER_ID} count=${#permissions[
 for perm in "${permissions[@]}"; do
   info "Granting ${perm}"
   curl -fsS \
+    --retry "${CURL_RETRY_ATTEMPTS}" \
+    --retry-delay "${CURL_RETRY_DELAY_SEC}" \
+    --retry-all-errors \
+    --connect-timeout 10 \
+    --max-time 30 \
     -X POST "${API_BASE}/permissions/grant" \
     -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -H "Content-Type: application/json" \
