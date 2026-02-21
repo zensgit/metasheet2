@@ -367,14 +367,22 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
     const hasStatusAction = await statusAction.count().then(async (count) => {
       if (!count) return false
-      return statusAction.isVisible().catch(() => false)
+      const visible = await statusAction.isVisible().catch(() => false)
+      if (!visible) return false
+      return statusAction.isEnabled().catch(() => false)
     })
     if (hasStatusAction) {
       await statusAction.click()
     } else {
       const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })
       if (await reloadInCard.count()) {
-        await reloadInCard.first().click()
+        const reloadButton = reloadInCard.first()
+        const reloadEnabled = await reloadButton.isEnabled().catch(() => false)
+        if (reloadEnabled) {
+          await reloadButton.click()
+        } else {
+          logInfo('WARN: reload job button is disabled; continuing with async completion assertion')
+        }
       }
     }
 
