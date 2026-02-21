@@ -1980,3 +1980,30 @@ Runbook note:
 
 - `branch=feature-branch` 的 dashboard 通常会出现 `NO_COMPLETED_RUN`（remote-only gates按 `main` 调度）。这类 run 只用于脚本回归，不用于生产门禁判定。
 - 生产门禁请固定使用：`branch=main`。
+
+## Latest Notes (2026-02-21): Final Stabilization Snapshot
+
+Execution summary:
+
+1. Hardened strict/perf scripts against transient `502` / `ECONNREFUSED` / `fetch failed`.
+2. Stabilized import mutation retries by re-preparing `commitToken` on each preview/commit retry.
+3. Tuned baseline rollback threshold fallback to `30000ms`.
+4. Re-ran strict + perf baseline + perf longrun, then validated daily dashboard on `main`.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict gates (main) | [#22257658383](https://github.com/zensgit/metasheet2/actions/runs/22257658383) | PASS | `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-1/gate-summary.json`, `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-2/gate-summary.json` |
+| Perf baseline 100k (main, `commit_async=false`) | [#22257793629](https://github.com/zensgit/metasheet2/actions/runs/22257793629) | PASS | `output/playwright/ga/22257793629/attendance-import-perf-22257793629-1/attendance-perf-mlwd8aeo-7mygl2/perf-summary.json` |
+| Perf longrun (main) | [#22257658595](https://github.com/zensgit/metasheet2/actions/runs/22257658595) | PASS | `output/playwright/ga/22257658595/attendance-import-perf-longrun-rows10k-commit-22257658595-1/current-flat/rows10000-commit.json` |
+| Daily dashboard (main, final) | [#22257840707](https://github.com/zensgit/metasheet2/actions/runs/22257840707) | PASS | `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.json` |
+
+Observed dashboard status (`#22257840707`):
+
+- `overallStatus=pass`
+- `Strict Gates=PASS`
+- `Perf Baseline=PASS`
+- `Perf Long Run=PASS`
+- `Remote Preflight=PASS`
+- `Storage Health=PASS`
