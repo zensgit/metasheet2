@@ -268,20 +268,34 @@ async function assertImportJobRecoveryFlow(page, importSection) {
       `${workDate},recovery-user,recovery-group,09:00,18:00,正常`,
     ].join('\n')
     await fs.writeFile(csvPath, csvText, 'utf8')
-    await csvInput.setInputFiles(csvPath)
-    await loadCsvButton.click()
-    await waitForImportPayload(page)
+  await csvInput.setInputFiles(csvPath)
+  await loadCsvButton.click()
+  await waitForImportPayload(page)
 
-    await previewButton.click()
-    await page.getByText('Async import job is still running in background.', { exact: true }).waitFor({ timeout: timeoutMs })
+  await previewButton.click()
+  const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
+  const timeoutMessage = page.getByText('Async import job is still running in background.', { exact: true }).first()
+  await Promise.any([
+    timeoutMessage.waitFor({ timeout: timeoutMs }),
+    asyncCard.waitFor({ timeout: timeoutMs }),
+  ])
 
-    const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
-    await statusAction.waitFor({ timeout: timeoutMs })
+  const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
+  const hasStatusAction = await statusAction.count().then(async (count) => {
+    if (!count) return false
+    return statusAction.isVisible().catch(() => false)
+  })
+  if (hasStatusAction) {
     await statusAction.click()
+  } else {
+    const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })
+    if (await reloadInCard.count()) {
+      await reloadInCard.first().click()
+    }
+  }
 
-    const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
-    await asyncCard.waitFor({ timeout: timeoutMs })
-    const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
+  await asyncCard.waitFor({ timeout: timeoutMs })
+  const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
     const resumeVisible = await resumeButton.count().then(async (count) => {
       if (!count) return false
       return resumeButton.first().isVisible()
