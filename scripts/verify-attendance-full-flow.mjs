@@ -309,7 +309,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   try {
     let preparedByApiUpload = false
     try {
-      const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 130000))
+      const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 200))
       const nextPayload = {
         ...basePayload,
         orgId: resolvedOrgId,
