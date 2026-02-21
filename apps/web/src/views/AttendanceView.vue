@@ -3822,6 +3822,54 @@ interface AttendanceApiError extends Error {
   status?: number
 }
 
+interface AttendanceImportDebugOptions {
+  forceUploadCsv: boolean
+  forceAsyncImport: boolean
+  forceTimeoutOnce: boolean
+  pollIntervalMs: number | null
+  pollTimeoutMs: number | null
+}
+
+function parseDebugBoolean(value: unknown): boolean {
+  if (value === true || value === 'true' || value === 1 || value === '1') return true
+  return false
+}
+
+function parseDebugPositiveInt(value: unknown): number | null {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.trunc(parsed)
+}
+
+function readImportDebugOptions(): AttendanceImportDebugOptions {
+  const defaults: AttendanceImportDebugOptions = {
+    forceUploadCsv: false,
+    forceAsyncImport: false,
+    forceTimeoutOnce: false,
+    pollIntervalMs: null,
+    pollTimeoutMs: null,
+  }
+  if (typeof window === 'undefined') return defaults
+
+  const raw = window.localStorage.getItem('metasheet_attendance_debug')
+  if (!raw) return defaults
+  try {
+    const parsed = JSON.parse(raw) as Record<string, any>
+    const importNode = parsed?.import && typeof parsed.import === 'object'
+      ? (parsed.import as Record<string, any>)
+      : parsed
+    return {
+      forceUploadCsv: parseDebugBoolean(importNode.forceUploadCsv ?? parsed.forceUploadCsv),
+      forceAsyncImport: parseDebugBoolean(importNode.forceAsyncImport ?? parsed.forceAsyncImport),
+      forceTimeoutOnce: parseDebugBoolean(importNode.forceTimeoutOnce ?? parsed.forceTimeoutOnce),
+      pollIntervalMs: parseDebugPositiveInt(importNode.pollIntervalMs ?? parsed.pollIntervalMs),
+      pollTimeoutMs: parseDebugPositiveInt(importNode.pollTimeoutMs ?? parsed.pollTimeoutMs),
+    }
+  } catch {
+    return defaults
+  }
+}
+
 const loading = ref(false)
 const punching = ref(false)
 const requestSubmitting = ref(false)
@@ -4571,10 +4619,17 @@ const IMPORT_PREVIEW_CHUNK_THRESHOLD = 10_000
 const IMPORT_PREVIEW_CHUNK_SIZE = 5000
 const IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
-const IMPORT_ASYNC_POLL_INTERVAL_MS = 2000
-const IMPORT_ASYNC_POLL_TIMEOUT_MS = 30 * 60 * 1000
+const IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS = 2000
+const IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000
+const importDebugOptions = readImportDebugOptions()
+const importAsyncPollIntervalMs = importDebugOptions.pollIntervalMs ?? IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS
+const importAsyncPollTimeoutMs = importDebugOptions.pollTimeoutMs ?? IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS
+let importDebugTimeoutPending = importDebugOptions.forceTimeoutOnce
 
 function estimateImportRowCount(payload: Record<string, any>): number | null {
+  if (importDebugOptions.forceAsyncImport) {
+    return IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD
+  }
   if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim().length > 0) {
     const id = payload.csvFileId.trim()
     if (importCsvFileId.value && id === importCsvFileId.value && importCsvFileRowCountHint.value) {
@@ -4940,7 +4995,7 @@ async function applyImportCsvFile() {
     }
     if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
 
-    const shouldUpload = file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
+    const shouldUpload = importDebugOptions.forceUploadCsv || file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
     if (shouldUpload) {
       const uploaded = await uploadImportCsvFile(file)
       importCsvFileId.value = uploaded.fileId
@@ -5321,6 +5376,10 @@ async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
   const startedAt = Date.now()
   try {
     while (seq === importJobPollSeq) {
+      if (importDebugTimeoutPending) {
+        importDebugTimeoutPending = false
+        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', 'Import job timed out')
+      }
       const job = await fetchImportJob(jobId)
       importAsyncJob.value = job
       if (job.status === 'completed') return job
@@ -5330,10 +5389,10 @@ async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
       if (job.status === 'canceled') {
         throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job canceled')
       }
-      if (Date.now() - startedAt > IMPORT_ASYNC_POLL_TIMEOUT_MS) {
+      if (Date.now() - startedAt > importAsyncPollTimeoutMs) {
         throw createImportJobStateError('IMPORT_JOB_TIMEOUT', 'Import job timed out')
       }
-      await sleep(IMPORT_ASYNC_POLL_INTERVAL_MS)
+      await sleep(importAsyncPollIntervalMs)
     }
     throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job polling canceled')
   } finally {
@@ -5893,7 +5952,7 @@ function classifyStatusError(
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (code === 'IMPORT_JOB_TIMEOUT') {
     message = 'Async import job is still running in background.'
-    meta.hint = 'Use "Reload import job" to continue tracking progress without submitting again.'
+    meta.hint = 'Use "Reload import job", then "Resume polling" in the async job card to continue tracking.'
     meta.action = 'reload-import-job'
   } else if (code === 'IMPORT_JOB_FAILED') {
     message = rawMessage

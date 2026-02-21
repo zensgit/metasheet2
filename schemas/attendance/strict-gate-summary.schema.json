@@ -33,6 +33,9 @@
       "type": "string",
       "minLength": 1
     },
+    "requireImportJobRecovery": {
+      "type": "boolean"
+    },
     "exitCode": {
       "type": "number"
     },
