@@ -33,7 +33,7 @@ on:
       commit_async:
         description: 'Use /commit-async path (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
       export_csv:
         description: 'Verify export csv latency (true/false)'
         required: false
@@ -140,7 +140,7 @@ jobs:
       ROWS: ${{ inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '100000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
-      COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'false' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
