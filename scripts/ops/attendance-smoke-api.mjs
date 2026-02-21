@@ -12,7 +12,7 @@ const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
-const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'

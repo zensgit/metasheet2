@@ -35,7 +35,7 @@ const rollbackRetryAttempts = Math.max(1, Number(process.env.ROLLBACK_RETRY_ATTE
 const rollbackRetryDelayMs = Math.max(100, Number(process.env.ROLLBACK_RETRY_DELAY_MS || 1500))
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
-const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 15000))
+const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 180000))
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
