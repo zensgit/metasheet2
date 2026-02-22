@@ -822,8 +822,13 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(commitPayload),
     })
     expect(commitRes.status).toBe(200)
-    const batchId = (commitRes.body as { data?: { batchId?: string } } | undefined)?.data?.batchId
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    const batchId = commitData?.batchId
     expect(batchId).toBeTruthy()
+    expect(['standard', 'bulk']).toContain(String(commitData?.engine))
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     // Retry should return the same batchId and set idempotent=true even without a new commitToken.
     // Omit commitToken on retry to ensure idempotency works as designed.
@@ -838,9 +843,12 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(retryPayload),
     })
     expect(retryRes.status).toBe(200)
-    const retryData = (retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    const retryData = (retryRes.body as { data?: any } | undefined)?.data
     expect(retryData?.batchId).toBe(batchId)
     expect(retryData?.idempotent).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(retryData?.engine))
+    expect(Number(retryData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(retryData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
   })
 
   it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
