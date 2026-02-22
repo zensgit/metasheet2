@@ -5898,8 +5898,9 @@ module.exports = {
 	          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
 	          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
 	          summary: {
-	            processedRows: Number(commitResult.rowCount ?? 0),
-	            failedRows: Math.max(0, Number(commitResult.skippedCount ?? 0)),
+	            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
+	            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
+	            elapsedMs: Number(commitResult.elapsedMs ?? 0),
 	          },
 	        }
 	        await db.query(
@@ -5924,15 +5925,20 @@ module.exports = {
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
 	    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
 	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+	      const commitStartedAtMs = Date.now()
 	      if (cleanIdempotency) {
 	        const existing = await loadIdempotentImportBatch(db, orgId, cleanIdempotency)
 	        if (existing) {
+	          const existingRowCount = existing.imported + existing.skipped
 	          return {
 	            batchId: existing.batchId,
 	            imported: existing.imported,
-	            rowCount: existing.imported + existing.skipped,
+	            rowCount: existingRowCount,
+	            processedRows: existing.imported,
+	            failedRows: existing.skipped,
+	            elapsedMs: 0,
 	            skippedCount: existing.skipped,
-	            engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
+	            engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
 	            meta: existing.meta,
 	            idempotent: true,
 	          }
@@ -6666,18 +6672,22 @@ module.exports = {
 		        await deleteImportUpload({ orgId, fileId: csvFileId })
 		      }
 
-		      if (idempotentInTransaction) {
-		        return {
-		          batchId: idempotentInTransaction.batchId,
-		          imported: idempotentInTransaction.imported,
-		          rowCount: idempotentInTransaction.imported + idempotentInTransaction.skipped,
-		          skippedCount: idempotentInTransaction.skipped,
-		          engine: resolveImportEngineFromMeta(
-		            idempotentInTransaction.meta,
-		            idempotentInTransaction.imported + idempotentInTransaction.skipped
-		          ),
-		          items: [],
-		          skipped: [],
+	      if (idempotentInTransaction) {
+	        const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
+	        return {
+	          batchId: idempotentInTransaction.batchId,
+	          imported: idempotentInTransaction.imported,
+	          rowCount: idempotentRowCount,
+	          processedRows: idempotentInTransaction.imported,
+	          failedRows: idempotentInTransaction.skipped,
+	          elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
+	          skippedCount: idempotentInTransaction.skipped,
+	          engine: resolveImportEngineFromMeta(
+	            idempotentInTransaction.meta,
+	            idempotentRowCount
+	          ),
+	          items: [],
+	          skipped: [],
 		          csvWarnings: [],
 	          groupWarnings: [],
 	          meta: idempotentInTransaction.meta,
@@ -6685,13 +6695,16 @@ module.exports = {
 	        }
 	      }
 
-		      return {
-		        batchId: resolvedBatchId,
-		        imported: importedCount,
-		        rowCount: rows.length,
-		        skippedCount: skipped.length,
-		        engine: importEngine,
-		        items: returnItems ? results : [],
+	      return {
+	        batchId: resolvedBatchId,
+	        imported: importedCount,
+	        rowCount: rows.length,
+	        processedRows: importedCount,
+	        failedRows: skipped.length,
+	        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
+	        skippedCount: skipped.length,
+	        engine: importEngine,
+	        items: returnItems ? results : [],
 		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
 		        skipped,
 	        csvWarnings: [...csvWarnings, ...groupWarnings],
@@ -10393,12 +10406,16 @@ module.exports = {
 	        if (idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
+	            const existingRowCount = existing.imported + existing.skipped
 	            res.json({
 	              ok: true,
 	              data: {
 	                batchId: existing.batchId,
 	                imported: existing.imported,
-	                engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
+	                processedRows: existing.imported,
+	                failedRows: existing.skipped,
+	                elapsedMs: 0,
+	                engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
 	                items: [],
 	                skipped: [],
 	                csvWarnings: [],
@@ -10416,8 +10433,8 @@ module.exports = {
 	          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
 	          return
         }
-        if (commitToken) {
-          let tokenOk = false
+	        if (commitToken) {
+	          let tokenOk = false
           try {
             tokenOk = await consumeImportCommitToken(commitToken, { db, orgId, userId: requesterId })
           } catch (error) {
@@ -10433,12 +10450,13 @@ module.exports = {
             res.status(403).json({ ok: false, error: { code: 'COMMIT_TOKEN_INVALID', message: 'commitToken invalid or expired' } })
             return
           }
-          if (!tokenOk && !requireImportCommitToken) {
-            logger.warn('Attendance import commit token invalid; continuing without enforcement.')
-          }
-        }
+	          if (!tokenOk && !requireImportCommitToken) {
+	            logger.warn('Attendance import commit token invalid; continuing without enforcement.')
+	          }
+	        }
+	        const commitStartedAtMs = Date.now()
 
-        try {
+	        try {
           let ruleSetConfig = null
           if (parsed.data.ruleSetId) {
             const rows = await db.query(
@@ -11184,14 +11202,18 @@ module.exports = {
 	          }
 
 	          if (idempotentInTransaction) {
+	            const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
 	            res.json({
 	              ok: true,
 	              data: {
 	                batchId: idempotentInTransaction.batchId,
 	                imported: idempotentInTransaction.imported,
+	                processedRows: idempotentInTransaction.imported,
+	                failedRows: idempotentInTransaction.skipped,
+	                elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
 	                engine: resolveImportEngineFromMeta(
 	                  idempotentInTransaction.meta,
-	                  idempotentInTransaction.imported + idempotentInTransaction.skipped
+	                  idempotentRowCount
 	                ),
 	                items: [],
 	                skipped: [],
@@ -11209,9 +11231,12 @@ module.exports = {
 	            data: {
 	              batchId,
 	              imported: importedCount,
+	              processedRows: importedCount,
+	              failedRows: skipped.length,
+	              elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
 	              engine: importEngine,
 	              items: returnItems ? results : [],
-              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
+	              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
               skipped,
               csvWarnings: [...csvWarnings, ...groupWarnings],
               groupWarnings,
@@ -11231,19 +11256,23 @@ module.exports = {
 	          const isIdempotencyUnique = Boolean(idempotencyKey)
 	            && String(error?.code ?? '') === '23505'
 	            && maybeConstraint.includes('uq_attendance_import_batches_idempotency_key')
-	          if (isIdempotencyUnique && await hasImportBatchIdempotencyColumn(db)) {
-	            try {
-	              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
-		              if (existing) {
-		                res.json({
-		                  ok: true,
-		                  data: {
-		                    batchId: existing.batchId,
-		                    imported: existing.imported,
-		                    engine: resolveImportEngineFromMeta(existing.meta, existing.imported + existing.skipped),
-		                    items: [],
-		                    skipped: [],
-		                    csvWarnings: [],
+		          if (isIdempotencyUnique && await hasImportBatchIdempotencyColumn(db)) {
+		            try {
+		              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
+			              if (existing) {
+			                const existingRowCount = existing.imported + existing.skipped
+			                res.json({
+			                  ok: true,
+			                  data: {
+			                    batchId: existing.batchId,
+			                    imported: existing.imported,
+			                    processedRows: existing.imported,
+			                    failedRows: existing.skipped,
+			                    elapsedMs: 0,
+			                    engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
+			                    items: [],
+			                    skipped: [],
+			                    csvWarnings: [],
 	                    groupWarnings: [],
 	                    meta: existing.meta,
 	                    idempotent: true,
@@ -11663,6 +11692,7 @@ module.exports = {
 	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
 	            return
 	          }
+	          const importEngine = resolveImportEngineByRowCount(rows.length)
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
