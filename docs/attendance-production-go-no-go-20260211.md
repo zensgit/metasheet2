@@ -1383,3 +1383,30 @@ Go/No-Go snapshot:
 - Dashboard (production branch view): PASS.
 
 Decision: `GO` (no open P0/P1 attendance tracking issues; all required gates green with reproducible evidence paths).
+
+## Post-Go Validation (2026-02-22): PR #224 Merge + Review Policy Enforcement + Gate Re-Run
+
+This record validates:
+
+- PR [#224](https://github.com/zensgit/metasheet2/pull/224) merged to `main` (`fb1f5f2e`).
+- Branch policy is enforced at the requested level:
+  - `require_pr_reviews=true`
+  - `min_approving_review_count=1`
+  - `require_code_owner_reviews=false`
+- Drill/recovery and full gate chain (strict/perf/dashboard) passed with reproducible artifacts.
+
+Evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (`drill_fail=true`) | [#22267999575](https://github.com/zensgit/metasheet2/actions/runs/22267999575) | FAIL (expected) | `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/step-summary.md`, `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/policy.log`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) opened |
+| Branch Policy Drift recovery (`drill_fail=false`) | [#22268010766](https://github.com/zensgit/metasheet2/actions/runs/22268010766) | PASS | `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/step-summary.md`, `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/policy.json`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) closed |
+| Branch Protection parity check | [#22268146870](https://github.com/zensgit/metasheet2/actions/runs/22268146870) | PASS | `output/playwright/ga/22268146870/attendance-branch-protection-prod-22268146870-1/step-summary.md` (`Require PR reviews=true`, `Min approving reviews=1`) |
+| Strict Gates (Prod, twice) | [#22268021574](https://github.com/zensgit/metasheet2/actions/runs/22268021574) | PASS | `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-1/gate-api-smoke.log`, `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-2/gate-api-smoke.log` |
+| Perf Baseline (`upload_csv=true`) | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
+| Perf Long Run (`upload_csv=true`) | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows500k-preview-22268111924-1/current-flat/rows500000-preview.json` |
+| Daily Dashboard (main final) | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.protection.requirePrReviews=true`) |
+
+Production decision:
+
+- `GO` (no open attendance P0/P1/P2 tracking issue; strict/perf/dashboard all PASS after policy upgrade).

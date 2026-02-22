@@ -80,3 +80,17 @@ Key log checks:
 
 - This report intentionally contains no live token/secret values.
 - Use placeholders in commands (for example `<ADMIN_JWT>`).
+
+## Update (2026-02-22): Post-Merge Gate Refresh
+
+After PR [#224](https://github.com/zensgit/metasheet2/pull/224) merged, gates were re-run on `main` with review policy enforcement enabled.
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill | [#22267999575](https://github.com/zensgit/metasheet2/actions/runs/22267999575) | FAIL (expected) | `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/step-summary.md` |
+| Branch Policy Drift recovery | [#22268010766](https://github.com/zensgit/metasheet2/actions/runs/22268010766) | PASS | `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/policy.json` |
+| Branch Protection parity | [#22268146870](https://github.com/zensgit/metasheet2/actions/runs/22268146870) | PASS | `output/playwright/ga/22268146870/attendance-branch-protection-prod-22268146870-1/step-summary.md` |
+| Strict Gates | [#22268021574](https://github.com/zensgit/metasheet2/actions/runs/22268021574) | PASS | `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-1/gate-summary.json` |
+| Perf Baseline | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
+| Perf Long Run | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json` |
+| Daily Dashboard | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` |

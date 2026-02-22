@@ -2007,3 +2007,37 @@ Observed dashboard status (`#22257840707`):
 - `Perf Long Run=PASS`
 - `Remote Preflight=PASS`
 - `Storage Health=PASS`
+
+## Latest Notes (2026-02-22): PR Review Policy Raised To `true` + Full Gate Re-Verification
+
+Execution summary:
+
+1. Merged PR [#224](https://github.com/zensgit/metasheet2/pull/224) (`fb1f5f2e`) with:
+   - branch policy workflow defaults set to `require_pr_reviews=true`
+   - import API telemetry contract surfaced in commit/job responses
+   - frontend import async panel telemetry rendering
+2. Executed branch policy drill/recovery with a dedicated drill issue title and verified open/close behavior.
+3. Re-ran strict/perf/dashboard workflows on `main` and archived artifacts under `output/playwright/ga/<runId>/...`.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift drill (`drill_fail=true`) | [#22267999575](https://github.com/zensgit/metasheet2/actions/runs/22267999575) | FAIL (expected) | `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/step-summary.md`, `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/policy.log`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) (`OPEN` at drill time) |
+| Branch Policy Drift recovery (`drill_fail=false`) | [#22268010766](https://github.com/zensgit/metasheet2/actions/runs/22268010766) | PASS | `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/step-summary.md`, `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/policy.json`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) (`CLOSED`) |
+| Branch Protection workflow parity check | [#22268146870](https://github.com/zensgit/metasheet2/actions/runs/22268146870) | PASS | `output/playwright/ga/22268146870/attendance-branch-protection-prod-22268146870-1/step-summary.md` (`Require PR reviews=true`, `Min approving reviews=1`) |
+| Strict Gates (Prod, twice) | [#22268021574](https://github.com/zensgit/metasheet2/actions/runs/22268021574) | PASS | `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-1/gate-api-smoke.log`, `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-2/gate-api-smoke.log` |
+| Perf Baseline (`upload_csv=true`) | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
+| Perf Long Run (`upload_csv=true`) | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows500k-preview-22268111924-1/current-flat/rows500000-preview.json` |
+| Daily Dashboard (main, final) | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` |
+
+Observed dashboard status (`#22268136099`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+- `gateFlat.strict.runId=22268021574`
+- `gateFlat.perf.runId=22268076603`
+- `gateFlat.longrun.runId=22268111924`
