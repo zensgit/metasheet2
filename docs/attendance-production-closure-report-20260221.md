@@ -120,6 +120,13 @@ Code updates:
     - `standard` -> standard chunk env/fallback
     - `bulk` -> bulk chunk env/fallback
 
+- `scripts/ops/attendance-import-perf.mjs`
+  - `perf-summary.json` now records `chunkConfig.itemsChunkSize` and `chunkConfig.recordsChunkSize`.
+  - Perf run fetches batch detail metadata (`/attendance/import/batches/:id`) to align summary with actual committed batch config.
+
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Trend summary now includes `Chunk` column (`items/records`) for latest scenario sample.
+
 - `apps/web/src/views/AttendanceView.vue`
   - Added import error taxonomy for CSV upload path:
     - `EXPIRED`, `INVALID_CSV_FILE_ID`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE` (HTTP `413`)
@@ -133,6 +140,7 @@ Local verification:
 | Item | Command | Result |
 |---|---|---|
 | Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Perf scripts syntax | `node --check scripts/ops/attendance-import-perf.mjs && node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS |
 | Attendance integration suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) |
 | Web build | `pnpm --filter @metasheet/web build` | PASS |
 

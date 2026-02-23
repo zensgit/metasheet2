@@ -592,6 +592,8 @@ async function run() {
   let jobElapsedMs = null
   let progressPercent = null
   let throughputRowsPerSec = null
+  let chunkItemsSize = null
+  let chunkRecordsSize = null
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = job?.id
@@ -604,6 +606,8 @@ async function run() {
     jobElapsedMs = coerceNonNegativeNumber(finalJob?.elapsedMs)
     progressPercent = coerceNonNegativeFloat(finalJob?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(finalJob?.throughputRowsPerSec)
+    chunkItemsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.itemsChunkSize)
+    chunkRecordsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.recordsChunkSize)
     if (progressPercent === null) {
       const progress = coerceNonNegativeNumber(finalJob?.progress)
       const total = coerceNonNegativeNumber(finalJob?.total)
@@ -620,7 +624,26 @@ async function run() {
     jobElapsedMs = coerceNonNegativeNumber(commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs)
     progressPercent = coerceNonNegativeFloat(commit.body?.data?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(commit.body?.data?.throughputRowsPerSec)
+    chunkItemsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.itemsChunkSize)
+    chunkRecordsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.recordsChunkSize)
     if (!batchId) die('commit did not return batchId')
+  }
+  // Resolve chunk metadata from batch detail endpoint (covers async jobs and older responses).
+  try {
+    const batchDetail = await apiFetch(`/attendance/import/batches/${encodeURIComponent(batchId)}`, { method: 'GET' })
+    if (batchDetail.res.ok && batchDetail.body?.ok) {
+      if (typeof batchDetail.body?.data?.meta?.engine === 'string' && batchDetail.body.data.meta.engine) {
+        engine = batchDetail.body.data.meta.engine
+      }
+      if (chunkItemsSize === null) {
+        chunkItemsSize = coerceNonNegativeNumber(batchDetail.body?.data?.meta?.chunkConfig?.itemsChunkSize)
+      }
+      if (chunkRecordsSize === null) {
+        chunkRecordsSize = coerceNonNegativeNumber(batchDetail.body?.data?.meta?.chunkConfig?.recordsChunkSize)
+      }
+    }
+  } catch (error) {
+    log(`WARN: batch metadata fetch failed: ${(error && error.message) || String(error)}`)
   }
   const tCommit1 = nowMs()
   const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
@@ -675,6 +698,10 @@ async function run() {
     elapsedMs,
     progressPercent,
     throughputRowsPerSec,
+    chunkConfig: {
+      itemsChunkSize: chunkItemsSize,
+      recordsChunkSize: chunkRecordsSize,
+    },
     jobElapsedMs,
     perfMetrics: {
       previewMs: tPreview1 - tPreview0,
@@ -686,6 +713,10 @@ async function run() {
       elapsedMs,
       progressPercent,
       throughputRowsPerSec,
+      chunkConfig: {
+        itemsChunkSize: chunkItemsSize,
+        recordsChunkSize: chunkRecordsSize,
+      },
     },
     uploadCsv,
     jobId,

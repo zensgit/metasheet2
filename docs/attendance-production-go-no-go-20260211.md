@@ -1419,12 +1419,14 @@ This increment hardens B-line import execution semantics:
 - Batch metadata persists `chunkConfig` so runtime strategy is auditable from import batches.
 - Admin Center import error handling now classifies CSV upload failures (`EXPIRED`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE`) and exposes a one-click `Re-apply CSV` recovery action.
 - Admin Center `Import batches` table now surfaces `Engine` and `Chunk` (`items/records`) from `batch.meta.chunkConfig` for operator troubleshooting.
+- Perf tooling now records and reports chunk settings (`items/records`) in `perf-summary.json` and longrun trend markdown.
 
 Local evidence:
 
 | Item | Command | Status | Evidence |
 |---|---|---|---|
 | Plugin syntax check | `node --check plugins/plugin-attendance/index.cjs` | PASS | local command output |
+| Perf scripts syntax | `node --check scripts/ops/attendance-import-perf.mjs && node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | local command output |
 | Attendance integration tests | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
 | Web build | `pnpm --filter @metasheet/web build` | PASS | local command output |
 
