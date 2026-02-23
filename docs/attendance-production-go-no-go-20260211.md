@@ -1614,6 +1614,9 @@ Changes:
   - Recovery assertion now accepts both status actions:
     - `Resume import job` (new UX)
     - `Reload import job` (backward-compatible fallback)
+  - Recovery assertion also validates async telemetry lines in the card:
+    - `Processed: <n> · Failed: <n>`
+    - `Elapsed: <ms> ms`
 
 Local verification:
 
