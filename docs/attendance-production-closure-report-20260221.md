@@ -101,6 +101,7 @@ Scope:
 
 - Ensure import `engine` classification (`standard|bulk`) drives real execution knobs, not only response labels.
 - Persist chunk strategy in batch metadata for post-incident auditability.
+- Improve import failure recovery UX in Admin Center with CSV upload-specific guidance/actions.
 
 Code updates:
 
@@ -119,12 +120,18 @@ Code updates:
     - `standard` -> standard chunk env/fallback
     - `bulk` -> bulk chunk env/fallback
 
+- `apps/web/src/views/AttendanceView.vue`
+  - Added import error taxonomy for CSV upload path:
+    - `EXPIRED`, `INVALID_CSV_FILE_ID`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE` (HTTP `413`)
+  - Added status action `Re-apply CSV` (`reload-import-csv`) to recover preview/import failures without page reload.
+
 Local verification:
 
 | Item | Command | Result |
 |---|---|---|
 | Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
 | Attendance integration suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) |
+| Web build | `pnpm --filter @metasheet/web build` | PASS |
 
 Notes:
 

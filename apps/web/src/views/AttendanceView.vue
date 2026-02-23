@@ -3277,6 +3277,7 @@ type AttendanceStatusAction =
   | 'refresh-overview'
   | 'reload-admin'
   | 'reload-import-job'
+  | 'reload-import-csv'
   | 'retry-save-settings'
   | 'retry-save-rule'
   | 'retry-preview-import'
@@ -4094,6 +4095,7 @@ const statusActionLabel = computed(() => {
   if (action === 'refresh-overview') return 'Retry refresh'
   if (action === 'reload-admin') return 'Reload admin'
   if (action === 'reload-import-job') return 'Reload import job'
+  if (action === 'reload-import-csv') return 'Re-apply CSV'
   if (action === 'retry-save-settings') return 'Retry save settings'
   if (action === 'retry-save-rule') return 'Retry save rule'
   if (action === 'retry-preview-import') return 'Retry preview'
@@ -4109,6 +4111,7 @@ const statusActionBusy = computed(() => {
   if (action === 'refresh-overview') return loading.value
   if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
   if (action === 'reload-import-job') return importAsyncPolling.value
+  if (action === 'reload-import-csv') return importLoading.value
   if (action === 'retry-save-settings') return settingsLoading.value
   if (action === 'retry-save-rule') return ruleLoading.value
   if (action === 'retry-preview-import') return importLoading.value
@@ -5929,7 +5932,11 @@ function inferErrorCodeFromMessage(message: string): string {
   if (!normalized) return ''
   if (normalized.includes('COMMIT_TOKEN_INVALID')) return 'COMMIT_TOKEN_INVALID'
   if (normalized.includes('COMMIT_TOKEN_REQUIRED')) return 'COMMIT_TOKEN_REQUIRED'
+  if (normalized.includes('PAYLOAD_TOO_LARGE')) return 'PAYLOAD_TOO_LARGE'
+  if (normalized.includes('CSV_TOO_LARGE')) return 'CSV_TOO_LARGE'
   if (normalized.includes('RATE_LIMIT')) return 'RATE_LIMITED'
+  if (normalized.includes('IMPORT UPLOAD EXPIRED')) return 'EXPIRED'
+  if (normalized.includes('CSVFILEID') && normalized.includes('UUID')) return 'INVALID_CSV_FILE_ID'
   if (normalized.includes('PUNCH_TOO_SOON')) return 'PUNCH_TOO_SOON'
   if (normalized.includes('FORBIDDEN') || normalized.includes('PERMISSION')) return 'FORBIDDEN'
   if (normalized.includes('UNAUTHORIZED') || normalized.includes('TOKEN_EXPIRED')) return 'UNAUTHORIZED'
@@ -5981,6 +5988,33 @@ function classifyStatusError(
     message = 'Import token expired before request completed.'
     meta.hint = 'Click retry to refresh commit token and submit again.'
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
+  } else if (
+    context === 'import-preview'
+    && (code === 'EXPIRED' || code === 'INVALID_CSV_FILE_ID')
+  ) {
+    message = code === 'EXPIRED'
+      ? 'Uploaded CSV file has expired on the server.'
+      : rawMessage
+    meta.hint = 'Click "Re-apply CSV" to upload again, then retry preview.'
+    meta.action = 'reload-import-csv'
+  } else if (
+    context === 'import-run'
+    && (code === 'EXPIRED' || code === 'INVALID_CSV_FILE_ID')
+  ) {
+    message = code === 'EXPIRED'
+      ? 'Uploaded CSV file has expired on the server.'
+      : rawMessage
+    meta.hint = 'Click "Re-apply CSV" to upload again, then retry import.'
+    meta.action = 'reload-import-csv'
+  } else if (
+    (context === 'import-preview' || context === 'import-run')
+    && (code === 'CSV_TOO_LARGE' || code === 'PAYLOAD_TOO_LARGE' || status === 413)
+  ) {
+    message = code === 'CSV_TOO_LARGE'
+      ? rawMessage
+      : 'CSV upload exceeds server size limit.'
+    meta.hint = 'Use a smaller file or split the CSV by date/user range, then retry.'
+    meta.action = 'reload-import-csv'
   } else if (code === 'IMPORT_JOB_TIMEOUT') {
     message = 'Async import job is still running in background.'
     meta.hint = 'Use "Reload import job", then "Resume polling" in the async job card to continue tracking.'
@@ -6040,6 +6074,10 @@ async function runStatusAction() {
   }
   if (action === 'reload-import-job') {
     await refreshImportAsyncJob()
+    return
+  }
+  if (action === 'reload-import-csv') {
+    await applyImportCsvFile()
     return
   }
   if (action === 'retry-save-settings') {

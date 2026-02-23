@@ -1417,6 +1417,7 @@ This increment hardens B-line import execution semantics:
 
 - `engine=standard|bulk` now maps to concrete chunk controls in both sync and async commit paths.
 - Batch metadata persists `chunkConfig` so runtime strategy is auditable from import batches.
+- Admin Center import error handling now classifies CSV upload failures (`EXPIRED`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE`) and exposes a one-click `Re-apply CSV` recovery action.
 
 Local evidence:
 
@@ -1424,6 +1425,7 @@ Local evidence:
 |---|---|---|---|
 | Plugin syntax check | `node --check plugins/plugin-attendance/index.cjs` | PASS | local command output |
 | Attendance integration tests | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+| Web build | `pnpm --filter @metasheet/web build` | PASS | local command output |
 
 Notes:
 
