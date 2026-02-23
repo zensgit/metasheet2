@@ -1492,3 +1492,41 @@ Observed dashboard highlights (`#22307851285`):
 - `gateFlat.protection.runId=22307832865`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Post-Go Development Verification (2026-02-23): Longrun `rows100k-commit` Coverage
+
+Goal:
+
+- Expand perf longrun gate coverage from preview-heavy matrix to include a committed bulk-path scenario (`rows100k-commit`) with upload channel enabled.
+
+Code changes:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - Added scenario: `rows100k-commit` (`rows=100000`, `mode=commit`, `export_csv=true`)
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Updated report description/notes to reflect commit coverage (`10k` + `100k`) and preview coverage (`50k/100k/500k`).
+
+Verification evidence:
+
+| Check | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Longrun drill on feature branch | [#22308569094](https://github.com/zensgit/metasheet2/actions/runs/22308569094) | PASS | `output/playwright/ga/22308569094/attendance-import-perf-longrun-drill-22308569094-1/drill.txt` |
+| Longrun full run on feature branch (new scenario executed) | [#22308598232](https://github.com/zensgit/metasheet2/actions/runs/22308598232) | PASS | `output/playwright/ga/22308598232/attendance-import-perf-longrun-rows100k-commit-22308598232-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308598232/attendance-import-perf-longrun-trend-22308598232-1/20260223-134338/attendance-import-perf-longrun-trend.json` |
+| Longrun full rerun after threshold decouple | [#22308829077](https://github.com/zensgit/metasheet2/actions/runs/22308829077) | PASS | `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json` |
+| Trend report fixture validation | `CURRENT_ROOT=... HISTORY_ROOT=... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/attendance-next-phase/20260223-longrun-commit-coverage/trend-report/20260223-133942/attendance-import-perf-longrun-trend.json` |
+
+Observed `rows100k-commit` sample:
+
+- `uploadCsv=true`
+- `engine=bulk`
+- `previewMs=9040`
+- `commitMs=98404`
+- `exportMs=3388`
+- `chunkConfig=1200/1000`
+
+Threshold policy note:
+
+- `rows100k-commit` threshold now uses dedicated longrun defaults and no longer falls back to baseline `ATTENDANCE_PERF_MAX_*` values:
+  - preview: `180000`
+  - commit: `300000`
+  - export: `45000`

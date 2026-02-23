@@ -134,6 +134,16 @@ jobs:
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
             max_rollback_ms: ''
+          - id: rows100k-commit
+            rows: '100000'
+            mode: 'commit'
+            commit_async: 'false'
+            export_csv: 'true'
+            rollback: 'false'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_PREVIEW_MS || '180000' }}
+            max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_COMMIT_MS || '300000' }}
+            max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_EXPORT_MS || '45000' }}
+            max_rollback_ms: ''
           - id: rows50k-preview
             rows: '50000'
             mode: 'preview'

@@ -526,10 +526,16 @@ Defaults:
 
 - `upload_csv=true` (recommended; ensures the longrun trend covers the `/attendance/import/upload` channel).
 - Scenario matrix includes:
-  - `rows10k-commit` (commit + export + rollback)
+  - `rows10k-commit` (commit + export)
+  - `rows100k-commit` (commit + export; bulk-path guard)
   - `rows50k-preview`
   - `rows100k-preview`
   - `rows500k-preview` (extreme-scale guard)
+- Optional threshold overrides for the new commit scenario:
+  - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_PREVIEW_MS`
+  - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_COMMIT_MS`
+  - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_EXPORT_MS`
+  - These use dedicated longrun defaults (`180000/300000/45000`) and are intentionally not inherited from baseline `ATTENDANCE_PERF_MAX_*` vars.
 
 Manual trigger:
 
@@ -2068,3 +2074,34 @@ Observed dashboard status (`#22307851285`):
 - `gateFlat.protection.runId=22307832865`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-23): Longrun Matrix Expansion (`rows100k-commit`)
+
+Execution summary:
+
+1. Expanded `.github/workflows/attendance-import-perf-longrun.yml` matrix to add `rows100k-commit`.
+2. Kept upload channel coverage (`upload_csv=true`) and trend aggregation unchanged.
+3. Re-ran longrun workflow on branch `codex/attendance-longrun-commit-coverage` to verify new scenario executes and reports correctly.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Longrun drill (branch) | [#22308569094](https://github.com/zensgit/metasheet2/actions/runs/22308569094) | PASS | `output/playwright/ga/22308569094/attendance-import-perf-longrun-drill-22308569094-1/drill.txt` |
+| Longrun full run (branch, includes `rows100k-commit`) | [#22308598232](https://github.com/zensgit/metasheet2/actions/runs/22308598232) | PASS | `output/playwright/ga/22308598232/attendance-import-perf-longrun-rows100k-commit-22308598232-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308598232/attendance-import-perf-longrun-trend-22308598232-1/20260223-134338/attendance-import-perf-longrun-trend.json` |
+
+Key observations (`#22308598232`):
+
+- New scenario `rows100k-commit` completed successfully (`commitMs=98404`, `uploadCsv=true`, `engine=bulk`).
+- Trend report status is `pass` and now includes `rows100k-commit` in scenario summary.
+
+Threshold tuning follow-up (`#22308829077`):
+
+- To avoid accidental tightening from baseline envs, `rows100k-commit` now uses dedicated defaults only:
+  - `max_preview_ms=180000`
+  - `max_commit_ms=300000`
+  - `max_export_ms=45000`
+- Verification run: [#22308829077](https://github.com/zensgit/metasheet2/actions/runs/22308829077) `PASS`
+  - Evidence:
+    - `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`
+    - `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json`
