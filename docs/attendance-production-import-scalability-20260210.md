@@ -333,8 +333,10 @@ To reduce SQL statement size and placeholder count during large commits, bulk wr
 
 Runtime switches (optional):
 
-- `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values` (default `unnest`)
+- `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values|staging` (default `unnest`)
 - `ATTENDANCE_IMPORT_ITEMS_INSERT_MODE=unnest|values` (default `unnest`)
+- `ATTENDANCE_IMPORT_COPY_ENABLED=true|false` (default `true`)
+- `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS` (default `50000`)
 
 Verification:
 

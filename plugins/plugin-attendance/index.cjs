@@ -873,13 +873,28 @@ function resolveEnumEnv(name, fallback, allowed) {
 const ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_RECORD_UPSERT_MODE',
   'unnest',
-  ['values', 'unnest']
+  ['values', 'unnest', 'staging']
 )
 
 const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
   'unnest',
   ['values', 'unnest']
+)
+
+const ATTENDANCE_IMPORT_COPY_ENABLED = resolveEnumEnv(
+  'ATTENDANCE_IMPORT_COPY_ENABLED',
+  'true',
+  ['true', 'false']
+) === 'true'
+
+const ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = resolvePositiveIntEnv(
+  'ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS',
+  ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD,
+  {
+    min: 1000,
+    max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
+  }
 )
 
 const ATTENDANCE_IMPORT_BULK_ENGINE_MODE = resolveEnumEnv(
@@ -4368,9 +4383,184 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
   return map
 }
 
-async function batchUpsertAttendanceRecords(client, rows) {
-  if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') {
+async function ensureAttendanceImportRecordsStageTable(client) {
+  if (client && client.__attendanceImportStageReady === true) return
+  await client.query(
+    `CREATE TEMP TABLE IF NOT EXISTS attendance_import_records_stage (
+       user_id text NOT NULL,
+       org_id text NOT NULL,
+       work_date date NOT NULL,
+       timezone text,
+       first_in_at timestamptz,
+       last_out_at timestamptz,
+       work_minutes int,
+       late_minutes int,
+       early_leave_minutes int,
+       status text,
+       is_workday boolean,
+       meta_json jsonb,
+       source_batch_id uuid
+     ) ON COMMIT DROP`
+  )
+  if (client) client.__attendanceImportStageReady = true
+}
+
+async function batchUpsertAttendanceRecordsStaging(client, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return new Map()
+  await ensureAttendanceImportRecordsStageTable(client)
+
+  const userIds = []
+  const orgIds = []
+  const workDates = []
+  const timezones = []
+  const firstInAts = []
+  const lastOutAts = []
+  const workMinutes = []
+  const lateMinutes = []
+  const earlyLeaveMinutes = []
+  const statuses = []
+  const isWorkdays = []
+  const metaJsons = []
+  const sourceBatchIds = []
+
+  for (const row of rows) {
+    userIds.push(row.userId ?? null)
+    orgIds.push(row.orgId ?? null)
+    workDates.push(row.workDate ?? null)
+    timezones.push(row.timezone ?? null)
+    firstInAts.push(row.firstInAt ?? null)
+    lastOutAts.push(row.lastOutAt ?? null)
+    workMinutes.push(row.workMinutes ?? 0)
+    lateMinutes.push(row.lateMinutes ?? 0)
+    earlyLeaveMinutes.push(row.earlyLeaveMinutes ?? 0)
+    statuses.push(row.status ?? null)
+    isWorkdays.push(row.isWorkday ?? true)
+    metaJsons.push(row.metaJson ?? '{}')
+    sourceBatchIds.push(row.sourceBatchId ?? null)
+  }
+
+  await client.query('TRUNCATE attendance_import_records_stage')
+  await client.query(
+    `INSERT INTO attendance_import_records_stage
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
+     SELECT
+       t.user_id,
+       t.org_id,
+       t.work_date,
+       t.timezone,
+       t.first_in_at,
+       t.last_out_at,
+       t.work_minutes,
+       t.late_minutes,
+       t.early_leave_minutes,
+       t.status,
+       t.is_workday,
+       t.meta_json::jsonb,
+       t.source_batch_id
+     FROM unnest(
+       $1::text[],
+       $2::text[],
+       $3::date[],
+       $4::text[],
+       $5::timestamptz[],
+       $6::timestamptz[],
+       $7::int[],
+       $8::int[],
+       $9::int[],
+       $10::text[],
+       $11::boolean[],
+       $12::text[],
+       $13::uuid[]
+     ) AS t(
+       user_id,
+       org_id,
+       work_date,
+       timezone,
+       first_in_at,
+       last_out_at,
+       work_minutes,
+       late_minutes,
+       early_leave_minutes,
+       status,
+       is_workday,
+       meta_json,
+       source_batch_id
+     )`,
+    [
+      userIds,
+      orgIds,
+      workDates,
+      timezones,
+      firstInAts,
+      lastOutAts,
+      workMinutes,
+      lateMinutes,
+      earlyLeaveMinutes,
+      statuses,
+      isWorkdays,
+      metaJsons,
+      sourceBatchIds,
+    ]
+  )
+
+  const inserted = await client.query(
+    `INSERT INTO attendance_records
+      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
+     SELECT
+       s.user_id,
+       s.org_id,
+       s.work_date,
+       s.timezone,
+       s.first_in_at,
+       s.last_out_at,
+       s.work_minutes,
+       s.late_minutes,
+       s.early_leave_minutes,
+       s.status,
+       s.is_workday,
+       s.meta_json,
+       s.source_batch_id,
+       now()
+     FROM attendance_import_records_stage s
+     ON CONFLICT (user_id, work_date, org_id)
+     DO UPDATE SET
+       org_id = EXCLUDED.org_id,
+       timezone = EXCLUDED.timezone,
+       first_in_at = EXCLUDED.first_in_at,
+       last_out_at = EXCLUDED.last_out_at,
+       work_minutes = EXCLUDED.work_minutes,
+       late_minutes = EXCLUDED.late_minutes,
+       early_leave_minutes = EXCLUDED.early_leave_minutes,
+       status = EXCLUDED.status,
+       is_workday = EXCLUDED.is_workday,
+       meta = EXCLUDED.meta,
+       source_batch_id = EXCLUDED.source_batch_id,
+       updated_at = now()
+     RETURNING id, user_id, work_date`
+  )
+  await client.query('TRUNCATE attendance_import_records_stage')
+
+  const map = new Map()
+  for (const row of inserted) {
+    if (!row?.user_id || !row?.work_date) continue
+    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
+    map.set(`${row.user_id}:${workDateKey}`, row)
+  }
+  return map
+}
+
+async function batchUpsertAttendanceRecords(client, rows, options = {}) {
+  const strategy = typeof options?.strategy === 'string'
+    ? options.strategy.trim().toLowerCase()
+    : null
+  if (strategy === 'values' || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') {
     return batchUpsertAttendanceRecordsValues(client, rows)
+  }
+  if (strategy === 'staging') {
+    return batchUpsertAttendanceRecordsStaging(client, rows)
+  }
+  if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging') {
+    return batchUpsertAttendanceRecordsStaging(client, rows)
   }
   return batchUpsertAttendanceRecordsUnnest(client, rows)
 }
@@ -5471,13 +5661,38 @@ module.exports = {
 	    const resolveImportEngineByRowCount = (rowCount) => {
 	      const numeric = Number(rowCount ?? 0)
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD
-	      const supportsBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
-	        && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	      const supportsRecordBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
+	        || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging'
+	      const supportsBulkPath = supportsRecordBulkPath && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
 	      if (!supportsBulkPath) return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'off') return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'force') return 'bulk'
 	      if (thresholdReached) return 'bulk'
 	      return 'standard'
+	    }
+
+	    const resolveImportRecordUpsertStrategy = ({ rowCount, engine }) => {
+	      if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') return 'values'
+	      if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging') return 'staging'
+	      const numeric = Number(rowCount ?? 0)
+	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
+	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
+	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	        return 'staging'
+	      }
+	      return 'unnest'
+	    }
+
+	    const resolveImportRecordUpsertStrategyFromMeta = (meta, rowCountHint, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const explicit = typeof payload?.recordUpsertStrategy === 'string'
+	        ? payload.recordUpsertStrategy.trim().toLowerCase()
+	        : ''
+	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
+	      return resolveImportRecordUpsertStrategy({
+	        rowCount: rowCountHint,
+	        engine: engineHint,
+	      })
 	    }
 
 	    const resolveImportChunkConfig = (engine) => {
@@ -5557,6 +5772,7 @@ module.exports = {
 	      })()
 	      const engine = resolveImportEngineFromMeta(payload, total)
 	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
+	      const recordUpsertStrategy = resolveImportRecordUpsertStrategyFromMeta(payload, total, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5567,6 +5783,7 @@ module.exports = {
 	        status,
 	        engine,
 	        chunkConfig,
+	        recordUpsertStrategy,
 	        progress,
 	        total,
 	        progressPercent,
@@ -5948,6 +6165,14 @@ module.exports = {
 		          __jobType: 'commit',
 		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
 		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		          recordUpsertStrategy:
+		            commitResult.recordUpsertStrategy
+		            ?? commitResult?.meta?.recordUpsertStrategy
+		            ?? resolveImportRecordUpsertStrategyFromMeta(
+		              payload,
+		              commitResult.rowCount ?? commitResult.imported ?? 0,
+		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		            ),
 		          summary: {
 		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
 		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
@@ -5984,6 +6209,7 @@ module.exports = {
 	        const existing = await loadIdempotentImportBatch(db, orgId, cleanIdempotency)
 	        if (existing) {
 	          const existingRowCount = existing.imported + existing.skipped
+	          const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
 	          return {
 	            batchId: existing.batchId,
 	            imported: existing.imported,
@@ -5992,7 +6218,12 @@ module.exports = {
 	            failedRows: existing.skipped,
 	            elapsedMs: 0,
 	            skippedCount: existing.skipped,
-	            engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
+	            engine: existingEngine,
+	            recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	              existing.meta,
+	              existingRowCount,
+	              existingEngine
+	            ),
 	            meta: existing.meta,
 	            idempotent: true,
 	          }
@@ -6030,6 +6261,10 @@ module.exports = {
 	      }
 	      const importEngine = resolveImportEngineByRowCount(rows.length)
 	      const importChunkConfig = resolveImportChunkConfig(importEngine)
+	      const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+	        rowCount: rows.length,
+	        engine: importEngine,
+	      })
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
@@ -6102,6 +6337,7 @@ module.exports = {
 		          idempotencyKey: cleanIdempotency || undefined,
 		          engine: importEngine,
 		          chunkConfig: importChunkConfig,
+		          recordUpsertStrategy: importRecordUpsertStrategy,
 		          mappingProfileId: payload.mappingProfileId ?? null,
 		          groupSync: groupSync
 		            ? {
@@ -6298,7 +6534,9 @@ module.exports = {
 	            })
 	          }
 
-	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows)
+	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
+	            strategy: importRecordUpsertStrategy,
+	          })
 
 	          for (const item of chunk) {
 	            const record = upserted.get(`${item.userId}:${item.workDate}`)
@@ -6730,6 +6968,10 @@ module.exports = {
 
 	      if (idempotentInTransaction) {
 	        const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
+	        const idempotentEngine = resolveImportEngineFromMeta(
+	          idempotentInTransaction.meta,
+	          idempotentRowCount
+	        )
 	        return {
 	          batchId: idempotentInTransaction.batchId,
 	          imported: idempotentInTransaction.imported,
@@ -6738,9 +6980,11 @@ module.exports = {
 	          failedRows: idempotentInTransaction.skipped,
 	          elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
 	          skippedCount: idempotentInTransaction.skipped,
-	          engine: resolveImportEngineFromMeta(
+	          engine: idempotentEngine,
+	          recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
 	            idempotentInTransaction.meta,
-	            idempotentRowCount
+	            idempotentRowCount,
+	            idempotentEngine
 	          ),
 	          items: [],
 	          skipped: [],
@@ -6760,6 +7004,7 @@ module.exports = {
 	        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
 	        skippedCount: skipped.length,
 	        engine: importEngine,
+	        recordUpsertStrategy: importRecordUpsertStrategy,
 	        items: returnItems ? results : [],
 		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
 		        skipped,
@@ -10463,6 +10708,7 @@ module.exports = {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
 	            const existingRowCount = existing.imported + existing.skipped
+	            const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
 	            res.json({
 	              ok: true,
 	              data: {
@@ -10471,7 +10717,12 @@ module.exports = {
 	                processedRows: existing.imported,
 	                failedRows: existing.skipped,
 	                elapsedMs: 0,
-	                engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
+	                engine: existingEngine,
+	                recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                  existing.meta,
+	                  existingRowCount,
+	                  existingEngine
+	                ),
 	                items: [],
 	                skipped: [],
 	                csvWarnings: [],
@@ -10545,6 +10796,10 @@ module.exports = {
 	          }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
 	          const importChunkConfig = resolveImportChunkConfig(importEngine)
+	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+	            rowCount: rows.length,
+	            engine: importEngine,
+	          })
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -10623,6 +10878,7 @@ module.exports = {
 	              idempotencyKey: idempotencyKey || undefined,
 	              engine: importEngine,
 	              chunkConfig: importChunkConfig,
+	              recordUpsertStrategy: importRecordUpsertStrategy,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -10818,7 +11074,9 @@ module.exports = {
 				                })
 				              }
 
-				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows)
+				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
+				                strategy: importRecordUpsertStrategy,
+				              })
 
 				              for (const item of chunk) {
 				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
@@ -11261,6 +11519,10 @@ module.exports = {
 
 	          if (idempotentInTransaction) {
 	            const idempotentRowCount = idempotentInTransaction.imported + idempotentInTransaction.skipped
+	            const idempotentEngine = resolveImportEngineFromMeta(
+	              idempotentInTransaction.meta,
+	              idempotentRowCount
+	            )
 	            res.json({
 	              ok: true,
 	              data: {
@@ -11269,9 +11531,11 @@ module.exports = {
 	                processedRows: idempotentInTransaction.imported,
 	                failedRows: idempotentInTransaction.skipped,
 	                elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	                engine: resolveImportEngineFromMeta(
+	                engine: idempotentEngine,
+	                recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
 	                  idempotentInTransaction.meta,
-	                  idempotentRowCount
+	                  idempotentRowCount,
+	                  idempotentEngine
 	                ),
 	                items: [],
 	                skipped: [],
@@ -11293,6 +11557,7 @@ module.exports = {
 	              failedRows: skipped.length,
 	              elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
 	              engine: importEngine,
+	              recordUpsertStrategy: importRecordUpsertStrategy,
 	              items: returnItems ? results : [],
 	              itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
               skipped,
@@ -11319,6 +11584,7 @@ module.exports = {
 		              const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 			              if (existing) {
 			                const existingRowCount = existing.imported + existing.skipped
+			                const existingEngine = resolveImportEngineFromMeta(existing.meta, existingRowCount)
 			                res.json({
 			                  ok: true,
 			                  data: {
@@ -11327,7 +11593,12 @@ module.exports = {
 			                    processedRows: existing.imported,
 			                    failedRows: existing.skipped,
 			                    elapsedMs: 0,
-			                    engine: resolveImportEngineFromMeta(existing.meta, existingRowCount),
+			                    engine: existingEngine,
+			                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+			                      existing.meta,
+			                      existingRowCount,
+			                      existingEngine
+			                    ),
 			                    items: [],
 			                    skipped: [],
 			                    csvWarnings: [],

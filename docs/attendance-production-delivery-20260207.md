@@ -178,8 +178,14 @@ P1 (1-2 weeks, production hardening):
       - `ATTENDANCE_IMPORT_PREFETCH_MAX_WORK_DATES` (default `366`)
       - `ATTENDANCE_IMPORT_PREFETCH_MAX_SPAN_DAYS` (default `366`)
     - Import loops release processed row field payloads early to reduce heap pressure during large commits.
+  - Staging fast path auto-switch (implemented 2026-02-23):
+    - Record upsert path auto-switches to staging mode for large bulk imports:
+      - `ATTENDANCE_IMPORT_COPY_ENABLED` (default `true`)
+      - `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS` (default `50000`)
+    - Commit/job telemetry now includes `recordUpsertStrategy` (`values|unnest|staging`).
+    - Perf summaries and trend reports include `recordUpsertStrategy` so longrun artifacts can confirm which write strategy was used.
   - Remaining:
-    - COPY-based fast path / staging-table pipeline for extreme payloads (500k+ rows).
+    - Native streaming `COPY FROM STDIN` pipeline for extreme payloads (500k+ rows, optional optimization).
     - Perf baseline refresh for 100k+ commit imports under the new tuning knobs.
 - Security (implemented 2026-02-09):
   - Rate limits for import/export/admin writes (production-only by default).
@@ -435,7 +441,7 @@ Latest head re-validation on `main` (post-`91c21cab`):
     - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-1/`
     - `output/playwright/ga/21941278046/attendance-strict-gates-prod-21941278046-1/20260212-094127-2/`
 - Bulk write defaults (runtime switches optional):
-  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values` (default `unnest`)
+  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=unnest|values|staging` (default `unnest`)
   - `ATTENDANCE_IMPORT_ITEMS_INSERT_MODE=unnest|values` (default `unnest`)
 - Perf baseline (10k, async+export+rollback, thresholds enabled): `PASS`
   - Run: [Attendance Import Perf Baseline #21941424853](https://github.com/zensgit/metasheet2/actions/runs/21941424853) (`SUCCESS`)

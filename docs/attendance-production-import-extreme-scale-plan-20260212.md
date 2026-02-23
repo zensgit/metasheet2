@@ -123,7 +123,7 @@ Proposal:
 Rollout:
 
 - Feature gate via env:
-  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=values|unnest`
+  - `ATTENDANCE_IMPORT_RECORD_UPSERT_MODE=values|unnest|staging`
   - default `unnest` (shipped; set `values` to revert)
 
 Validation:
@@ -177,14 +177,21 @@ Notes:
 Rollout:
 
 - Keep this path behind a threshold + explicit enable switch:
-  - `ATTENDANCE_IMPORT_COPY_ENABLED=true|false`
-  - `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS=200000` (example)
+  - `ATTENDANCE_IMPORT_COPY_ENABLED=true|false` (default `true`)
+  - `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS=50000` (default)
 - Fallback to the non-COPY path when COPY cannot be used.
 
 Validation:
 
 - Add a dedicated perf workflow for `200k+` (manual trigger only).
 - Keep strict gates unchanged (still run daily).
+
+Status (2026-02-23):
+
+- Shipped **staging-table auto-switch** (no new dependency) for large imports:
+  - selects `recordUpsertStrategy=staging` for bulk imports at/above threshold.
+  - exposes strategy in commit/job telemetry and perf summaries.
+- Native streaming `COPY FROM STDIN` remains optional future optimization for `500k+` heavy traffic.
 
 ## Risks / Open Questions
 

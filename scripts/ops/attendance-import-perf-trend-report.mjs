@@ -133,6 +133,7 @@ function recordFromSummary(summary, sourcePath, sourceType) {
     rows,
     mode,
     uploadCsv: Boolean(summary?.uploadCsv),
+    recordUpsertStrategy: String(summary?.recordUpsertStrategy || summary?.perfMetrics?.recordUpsertStrategy || ''),
     startedAt,
     previewMs: toNumber(summary?.previewMs),
     commitMs: toNumber(summary?.commitMs),
@@ -198,12 +199,13 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Mode | Upload | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Mode | Upload | Upsert | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
+  lines.push('|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
     const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
+    const upsert = row?.latest?.recordUpsertStrategy ? String(row.latest.recordUpsertStrategy).toUpperCase() : '--'
     const chunk = formatChunk(row?.latest?.chunkItemsSize, row?.latest?.chunkRecordsSize)
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${upsert} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')
