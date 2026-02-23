@@ -19,6 +19,7 @@ const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-f
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
+const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
@@ -453,6 +454,12 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       page.getByText(/Preview job completed \(/).first().waitFor({ timeout: timeoutMs }),
       page.getByText(/Imported \d+(\/\d+)? rows \(async job\)\./).first().waitFor({ timeout: timeoutMs }),
     ])
+
+    if (assertImportJobTelemetry) {
+      await asyncCard.getByText(/Processed:\s*\d+\s*·\s*Failed:\s*\d+/i).first().waitFor({ timeout: timeoutMs })
+      await asyncCard.getByText(/Elapsed:\s*\d+\s*ms/i).first().waitFor({ timeout: timeoutMs })
+    }
+
     logInfo('Admin import recovery assertion passed')
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true })

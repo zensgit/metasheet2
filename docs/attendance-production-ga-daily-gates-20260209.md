@@ -2228,6 +2228,10 @@ Updates:
    - `Resume import job` (new one-click timeout recovery)
    - `Reload import job` (compatibility fallback)
 2. This keeps CI/remote UI verification compatible while frontend recovery UX evolves.
+3. Recovery assertion now also checks async telemetry fields in the job card:
+   - `Processed: <n> · Failed: <n>`
+   - `Elapsed: <ms> ms`
+   - can be disabled only with `ASSERT_IMPORT_JOB_TELEMETRY=false`.
 
 ## Latest Notes (2026-02-23): Post-PR #233 Branch Policy and Dashboard Re-Verify
 
