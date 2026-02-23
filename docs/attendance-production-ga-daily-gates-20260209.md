@@ -2195,3 +2195,36 @@ Observed dashboard status (`#22310807657`):
 - `gateFlat.protection.runId=22310774604`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-23): Post-PR #232 Gate Re-Verify
+
+Execution summary:
+
+1. Merged PR [#232](https://github.com/zensgit/metasheet2/pull/232) (docs evidence sync).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and validated protection gate source run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22310999119](https://github.com/zensgit/metasheet2/actions/runs/22310999119) | PASS | `output/playwright/ga/22310999119/attendance-branch-policy-drift-prod-22310999119-1/policy.json`, `output/playwright/ga/22310999119/attendance-branch-policy-drift-prod-22310999119-1/policy.log`, `output/playwright/ga/22310999119/attendance-branch-policy-drift-prod-22310999119-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22311046163](https://github.com/zensgit/metasheet2/actions/runs/22311046163) | PASS | `output/playwright/ga/22311046163/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22311046163/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22311046163/gate-meta/protection/meta.json` |
+
+Observed dashboard status (`#22311046163`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22310999119`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-23): Full-Flow Recovery Assertion Update
+
+Updates:
+
+1. `scripts/verify-attendance-full-flow.mjs` recovery assertion now accepts both status actions:
+   - `Resume import job` (new one-click timeout recovery)
+   - `Reload import job` (compatibility fallback)
+2. This keeps CI/remote UI verification compatible while frontend recovery UX evolves.

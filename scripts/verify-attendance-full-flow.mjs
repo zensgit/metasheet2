@@ -405,14 +405,23 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       asyncCard.waitFor({ timeout: timeoutMs }),
     ])
 
-    const statusAction = page.locator('.attendance__status-block').getByRole('button', { name: 'Reload import job', exact: true }).first()
-    const hasStatusAction = await statusAction.count().then(async (count) => {
-      if (!count) return false
-      const visible = await statusAction.isVisible().catch(() => false)
-      if (!visible) return false
-      return statusAction.isEnabled().catch(() => false)
-    })
-    if (hasStatusAction) {
+    const statusBlock = page.locator('.attendance__status-block').first()
+    const resumeStatusAction = statusBlock.getByRole('button', { name: 'Resume import job', exact: true }).first()
+    const reloadStatusAction = statusBlock.getByRole('button', { name: 'Reload import job', exact: true }).first()
+    const statusAction = await (async () => {
+      if (await resumeStatusAction.count()) return resumeStatusAction
+      if (await reloadStatusAction.count()) return reloadStatusAction
+      return null
+    })()
+    const hasStatusAction = statusAction
+      ? await statusAction.count().then(async (count) => {
+          if (!count) return false
+          const visible = await statusAction.isVisible().catch(() => false)
+          if (!visible) return false
+          return statusAction.isEnabled().catch(() => false)
+        })
+      : false
+    if (hasStatusAction && statusAction) {
       await statusAction.click()
     } else {
       const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })

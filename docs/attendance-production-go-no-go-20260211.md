@@ -1595,6 +1595,38 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Development Verification (2026-02-23): Async Import Recovery UX Hardening
+
+Goal:
+
+- Improve admin-side recovery guidance for async import timeout/failed/canceled states and keep Playwright recovery assertion aligned.
+
+Changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - Added status action `resume-import-job` for one-click recovery after `IMPORT_JOB_TIMEOUT`.
+  - Improved import error classification for:
+    - `INVALID_CSV_FILE_ID` (friendly message + `Re-apply CSV`)
+    - `IMPORT_JOB_NOT_FOUND` (new retry guidance)
+    - `IMPORT_JOB_FAILED` nested causes (`EXPIRED`, `COMMIT_TOKEN_*`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE`) with actionable retry hints.
+  - Updated `IMPORT_JOB_CANCELED` guidance to direct retry flow.
+- `scripts/verify-attendance-full-flow.mjs`
+  - Recovery assertion now accepts both status actions:
+    - `Resume import job` (new UX)
+    - `Reload import job` (backward-compatible fallback)
+
+Local verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Playwright script syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
+| Web build | `pnpm --filter @metasheet/web build` | PASS |
+| Web unit tests | `pnpm --filter @metasheet/web exec vitest run --watch=false` | PASS (`26 passed`) |
+
+Decision:
+
+- `GO` unchanged (UX hardening only, backward-compatible behavior preserved).
+
 ## Post-Go Development Verification (2026-02-23): Import Staging Fast Path Auto-Switch (50k+)
 
 Goal:
