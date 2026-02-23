@@ -114,6 +114,7 @@ Code updates:
     - async commit processor (`processAsyncImportCommitJob`)
     - sync commit endpoint (`POST /api/attendance/import/commit`)
   - `batchMeta` now persists `chunkConfig` with the resolved chunk sizes.
+  - Import job API (`GET /api/attendance/import/jobs/:id`) now returns `chunkConfig` for async polling visibility.
 
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
   - Import commit integration test now validates `meta.chunkConfig` and matches it to the returned `engine`:

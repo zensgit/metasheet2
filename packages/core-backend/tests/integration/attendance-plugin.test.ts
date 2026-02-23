@@ -85,6 +85,18 @@ const expectedBulkRecordsChunkSize = resolvePositiveIntEnvForTest(
   5000
 )
 
+function expectChunkConfigMatchesEngine(engine: unknown, chunkConfig: any) {
+  expect(typeof chunkConfig?.itemsChunkSize).toBe('number')
+  expect(typeof chunkConfig?.recordsChunkSize).toBe('number')
+  if (String(engine) === 'bulk') {
+    expect(chunkConfig?.itemsChunkSize).toBe(expectedBulkItemsChunkSize)
+    expect(chunkConfig?.recordsChunkSize).toBe(expectedBulkRecordsChunkSize)
+  } else {
+    expect(chunkConfig?.itemsChunkSize).toBe(expectedStandardItemsChunkSize)
+    expect(chunkConfig?.recordsChunkSize).toBe(expectedStandardRecordsChunkSize)
+  }
+}
+
 describe('Attendance Plugin Integration', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
@@ -1164,6 +1176,7 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof job?.elapsedMs).toBe('number')
     expect(typeof job?.progressPercent).toBe('number')
     expect(typeof job?.throughputRowsPerSec).toBe('number')
+    expectChunkConfigMatchesEngine(job?.engine, job?.chunkConfig)
 
     // Retry should return the same job without requiring a new commitToken.
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
@@ -1213,6 +1226,7 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof completedJob?.elapsedMs).toBe('number')
     expect(typeof completedJob?.progressPercent).toBe('number')
     expect(typeof completedJob?.throughputRowsPerSec).toBe('number')
+    expectChunkConfigMatchesEngine(completedJob?.engine, completedJob?.chunkConfig)
 
     const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
       method: 'POST',
@@ -1649,15 +1663,7 @@ describe('Attendance Plugin Integration', () => {
     expect(commitData?.imported).toBe(1)
     expect(['standard', 'bulk']).toContain(String(commitData?.engine))
     const chunkConfig = commitData?.meta?.chunkConfig
-    expect(typeof chunkConfig?.itemsChunkSize).toBe('number')
-    expect(typeof chunkConfig?.recordsChunkSize).toBe('number')
-    if (commitData?.engine === 'bulk') {
-      expect(chunkConfig?.itemsChunkSize).toBe(expectedBulkItemsChunkSize)
-      expect(chunkConfig?.recordsChunkSize).toBe(expectedBulkRecordsChunkSize)
-    } else {
-      expect(chunkConfig?.itemsChunkSize).toBe(expectedStandardItemsChunkSize)
-      expect(chunkConfig?.recordsChunkSize).toBe(expectedStandardRecordsChunkSize)
-    }
+    expectChunkConfigMatchesEngine(commitData?.engine, chunkConfig)
     expect(Array.isArray(commitData?.items)).toBe(true)
     expect(commitData?.items.length).toBe(0)
     expect(typeof commitData?.batchId).toBe('string')

@@ -5501,6 +5501,19 @@ module.exports = {
 	      return resolveImportEngineByRowCount(Number.isFinite(hint) ? hint : 0)
 	    }
 
+	    const resolveImportChunkConfigFromMeta = (meta, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const itemsRaw = Number(payload?.summary?.chunkConfig?.itemsChunkSize ?? payload?.chunkConfig?.itemsChunkSize)
+	      const recordsRaw = Number(payload?.summary?.chunkConfig?.recordsChunkSize ?? payload?.chunkConfig?.recordsChunkSize)
+	      if (Number.isFinite(itemsRaw) && Number.isFinite(recordsRaw) && itemsRaw > 0 && recordsRaw > 0) {
+	        return {
+	          itemsChunkSize: Math.floor(itemsRaw),
+	          recordsChunkSize: Math.floor(recordsRaw),
+	        }
+	      }
+	      return resolveImportChunkConfig(engineHint)
+	    }
+
 	    const computeImportJobElapsedMs = (startedAt, finishedAt, status) => {
 	      const startMs = startedAt ? Date.parse(String(startedAt)) : Number.NaN
 	      if (!Number.isFinite(startMs)) return 0
@@ -5542,6 +5555,8 @@ module.exports = {
 	        const rows = Math.max(0, processedRows)
 	        return Number((rows / (elapsedMs / 1000)).toFixed(2))
 	      })()
+	      const engine = resolveImportEngineFromMeta(payload, total)
+	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5550,7 +5565,8 @@ module.exports = {
 	        idempotencyKey,
 	        kind,
 	        status,
-	        engine: resolveImportEngineFromMeta(payload, total),
+	        engine,
+	        chunkConfig,
 	        progress,
 	        total,
 	        progressPercent,
@@ -5928,16 +5944,19 @@ module.exports = {
 	        })
 
 	        // Drop large payload after completion while preserving compact progress metadata.
-	        const summaryPayload = {
-	          __jobType: 'commit',
-	          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
-	          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
-	          summary: {
-	            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
-	            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
-	            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-	          },
-	        }
+		        const summaryPayload = {
+		          __jobType: 'commit',
+		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
+		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		          summary: {
+		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
+		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
+		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		            ),
+		          },
+		        }
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	          [rowId, orgId, JSON.stringify(summaryPayload)]
