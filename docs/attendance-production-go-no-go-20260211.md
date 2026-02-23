@@ -1435,3 +1435,30 @@ Notes:
 
 - Integration assertions now verify `commit.data.meta.chunkConfig` matches the returned `engine` and env-resolved chunk defaults.
 - No breaking API change; this is a backward-compatible observability + execution-path hardening.
+
+## Post-Go Verification (2026-02-23): CI Flake Hardening (`sharding-e2e`)
+
+Goal:
+
+- Remove recurring non-product flakiness in `Plugin System Tests` caused by a fixed rate-limit upper bound assertion.
+
+Change summary:
+
+- Updated `packages/core-backend/src/tests/sharding-e2e.test.ts`:
+  - switched from fixed `processedCount <= 210` to elapsed-time-aware upper bound:
+    - `dynamicUpperBound = min(235, ceil(200 + elapsedMs * 100/s + 15))`
+  - preserved lower bound assertion (`processedCount >= 150`)
+  - kept `rateLimitedCount` assertion non-blocking (`>= 0`) because `messageBus.publish` does not deterministically surface limiter exceptions to the publisher callsite.
+
+Evidence:
+
+| Check | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Plugin System Tests rerun (PR #227) | [#22307437402](https://github.com/zensgit/metasheet2/actions/runs/22307437402) | PASS | `test (18.x)=pass`, `test (20.x)=pass`, `coverage=pass` |
+| Targeted sharding e2e suite | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS (`17 passed`) | local command output |
+| Attendance integration regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+| Web regression build | `pnpm --filter @metasheet/web build` | PASS | local command output |
+
+Decision:
+
+- `GO` for this increment; CI stability risk reduced without relaxing attendance product gates.
