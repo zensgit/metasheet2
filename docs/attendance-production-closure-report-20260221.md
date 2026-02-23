@@ -124,6 +124,9 @@ Code updates:
   - Added import error taxonomy for CSV upload path:
     - `EXPIRED`, `INVALID_CSV_FILE_ID`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE` (HTTP `413`)
   - Added status action `Re-apply CSV` (`reload-import-csv`) to recover preview/import failures without page reload.
+  - Added import batch table visibility:
+    - `Engine` column (`standard|bulk`)
+    - `Chunk` column (`itemsChunkSize/recordsChunkSize`) from `batch.meta.chunkConfig`
 
 Local verification:
 

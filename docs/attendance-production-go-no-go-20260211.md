@@ -1418,6 +1418,7 @@ This increment hardens B-line import execution semantics:
 - `engine=standard|bulk` now maps to concrete chunk controls in both sync and async commit paths.
 - Batch metadata persists `chunkConfig` so runtime strategy is auditable from import batches.
 - Admin Center import error handling now classifies CSV upload failures (`EXPIRED`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE`) and exposes a one-click `Re-apply CSV` recovery action.
+- Admin Center `Import batches` table now surfaces `Engine` and `Chunk` (`items/records`) from `batch.meta.chunkConfig` for operator troubleshooting.
 
 Local evidence:
 

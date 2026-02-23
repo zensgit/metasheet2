@@ -2002,6 +2002,8 @@
                       <th>Batch</th>
                       <th>Status</th>
                       <th>Rows</th>
+                      <th>Engine</th>
+                      <th>Chunk</th>
                       <th>Source</th>
                       <th>Rule set</th>
                       <th>Created</th>
@@ -2013,6 +2015,8 @@
                       <td>{{ batch.id.slice(0, 8) }}</td>
                       <td>{{ batch.status }}</td>
                       <td>{{ batch.rowCount }}</td>
+                      <td>{{ resolveImportBatchEngine(batch) }}</td>
+                      <td>{{ resolveImportBatchChunkLabel(batch) }}</td>
                       <td>{{ batch.source || '--' }}</td>
                       <td>{{ resolveRuleSetName(batch.ruleSetId) }}</td>
                       <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
@@ -5620,6 +5624,22 @@ async function runImport() {
   } finally {
     importLoading.value = false
   }
+}
+
+function resolveImportBatchEngine(batch: AttendanceImportBatch): string {
+  const engine = typeof batch?.meta?.engine === 'string' ? batch.meta.engine.trim().toLowerCase() : ''
+  if (engine === 'bulk' || engine === 'standard') return engine
+  return '--'
+}
+
+function resolveImportBatchChunkLabel(batch: AttendanceImportBatch): string {
+  const chunk = batch?.meta?.chunkConfig && typeof batch.meta.chunkConfig === 'object'
+    ? batch.meta.chunkConfig as Record<string, unknown>
+    : null
+  const items = Number(chunk?.itemsChunkSize)
+  const records = Number(chunk?.recordsChunkSize)
+  if (!Number.isFinite(items) || !Number.isFinite(records)) return '--'
+  return `${Math.max(0, Math.floor(items))}/${Math.max(0, Math.floor(records))}`
 }
 
 async function loadImportBatches() {
