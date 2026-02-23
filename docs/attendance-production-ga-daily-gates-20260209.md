@@ -2129,3 +2129,27 @@ Observed dashboard status (`#22309250542`):
 - `gateFlat.protection.runId=22309204427`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-23): Final Re-Verify After PR #229 Merge
+
+Execution summary:
+
+1. Re-verified branch protection baseline on `main` (`require_pr_reviews=true`, `min_approving_review_count=1`).
+2. Triggered a fresh non-drill branch policy run after merge.
+3. Triggered a fresh dashboard run and confirmed it consumed the latest non-drill protection evidence.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22309503350](https://github.com/zensgit/metasheet2/actions/runs/22309503350) | PASS | `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/policy.json`, `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22309519851](https://github.com/zensgit/metasheet2/actions/runs/22309519851) | PASS | `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.md` |
+
+Observed dashboard status (`#22309519851`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22309503350`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
