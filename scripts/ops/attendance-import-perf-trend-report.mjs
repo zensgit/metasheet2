@@ -5,7 +5,8 @@
  * - CURRENT_ROOT (required)
  * - HISTORY_ROOT (optional)
  *
- * Produces Markdown + JSON report for 10k/50k/100k/500k regression runs.
+ * Produces Markdown + JSON report for 10k/100k commit and 50k/100k/500k preview
+ * regression runs.
  */
 
 import fs from 'fs/promises'
@@ -220,7 +221,7 @@ function renderMarkdown(payload) {
   lines.push('')
   lines.push('## Notes')
   lines.push('')
-  lines.push('- 10k scenario is expected to run `commit` + `rollback` + optional `export` checks.')
+  lines.push('- 10k and 100k scenarios are expected to run `commit` + optional `export` checks.')
   lines.push('- 50k/100k/500k scenarios are expected to run `preview` checks for scale trend.')
   lines.push('- Use this report with strict gates and daily dashboard for Go/No-Go review.')
 
