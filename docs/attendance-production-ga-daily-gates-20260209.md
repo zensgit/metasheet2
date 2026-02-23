@@ -2105,3 +2105,27 @@ Threshold tuning follow-up (`#22308829077`):
   - Evidence:
     - `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`
     - `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json`
+
+## Latest Notes (2026-02-23): Post-merge Branch Policy Recheck (Main)
+
+Execution summary:
+
+1. Re-ran `Attendance Branch Policy Drift (Prod)` on `main` after the latest merge cycle.
+2. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after the new policy run.
+3. Confirmed dashboard `gateFlat.protection` now points at the latest non-drill branch-policy run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22309204427](https://github.com/zensgit/metasheet2/actions/runs/22309204427) | PASS | `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.json`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22309250542](https://github.com/zensgit/metasheet2/actions/runs/22309250542) | PASS | `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.md` |
+
+Observed dashboard status (`#22309250542`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22309204427`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`

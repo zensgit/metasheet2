@@ -1530,3 +1530,35 @@ Threshold policy note:
   - preview: `180000`
   - commit: `300000`
   - export: `45000`
+
+## Post-Go Verification (2026-02-23): Branch Policy + Dashboard Re-Verify (Post-Merge)
+
+Goal:
+
+- Reconfirm A-line guardrails remain green on `main` after the latest merge operations.
+
+Execution:
+
+- Triggered `Attendance Branch Policy Drift (Prod)` on `main` (non-drill).
+- Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after branch-policy completion.
+- Downloaded artifacts into `output/playwright/ga/<runId>/...` and validated `gateFlat.protection` source binding.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22309204427](https://github.com/zensgit/metasheet2/actions/runs/22309204427) | PASS | `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.json`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.log`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | [#22309250542](https://github.com/zensgit/metasheet2/actions/runs/22309250542) | PASS | `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/gate-meta/protection/meta.json` |
+
+Observed dashboard highlights (`#22309250542`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22309204427`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+
+Decision:
+
+- `GO` remains unchanged.
