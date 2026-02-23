@@ -1462,3 +1462,33 @@ Evidence:
 Decision:
 
 - `GO` for this increment; CI stability risk reduced without relaxing attendance product gates.
+
+## Post-Go Verification (2026-02-23): Branch Policy + Dashboard Recheck
+
+Goal:
+
+- Reconfirm A-line gate chain remains stable after latest PR activity and CI reruns.
+
+Execution:
+
+- Triggered `attendance-branch-policy-drift-prod.yml` on `main` with:
+  - `require_pr_reviews=true`
+  - `min_approving_review_count=1`
+  - `require_code_owner_reviews=false`
+- Triggered `attendance-daily-gate-dashboard.yml` (`lookback_hours=48`) and downloaded artifacts.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main baseline) | [#22307832865](https://github.com/zensgit/metasheet2/actions/runs/22307832865) | PASS | `output/playwright/ga/22307832865/policy.json`, `output/playwright/ga/22307832865/policy.log`, `output/playwright/ga/22307832865/step-summary.md` |
+| Daily Gate Dashboard (main) | [#22307851285](https://github.com/zensgit/metasheet2/actions/runs/22307851285) | PASS | `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.md` |
+
+Observed dashboard highlights (`#22307851285`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22307832865`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
