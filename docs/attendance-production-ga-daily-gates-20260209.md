@@ -535,6 +535,7 @@ Defaults:
   - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_PREVIEW_MS`
   - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_COMMIT_MS`
   - `ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_EXPORT_MS`
+  - These use dedicated longrun defaults (`180000/300000/45000`) and are intentionally not inherited from baseline `ATTENDANCE_PERF_MAX_*` vars.
 
 Manual trigger:
 
