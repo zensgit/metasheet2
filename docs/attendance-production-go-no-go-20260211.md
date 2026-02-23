@@ -1594,3 +1594,39 @@ Observed dashboard highlights (`#22309519851`):
 Decision:
 
 - `GO` unchanged.
+
+## Post-Go Development Verification (2026-02-23): Import Staging Fast Path Auto-Switch (50k+)
+
+Goal:
+
+- Close the remaining P0 gap for large-import persistence by adding staging auto-switch and telemetry visibility.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - Added import record upsert strategy resolver:
+    - `values|unnest|staging`
+    - auto-selects `staging` when bulk engine is active and row count reaches `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS`.
+  - Added env controls:
+    - `ATTENDANCE_IMPORT_COPY_ENABLED` (default `true`)
+    - `ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS` (default `50000`)
+  - Added staging write path via temp table (`attendance_import_records_stage`) and set-based upsert.
+  - Commit + async job payloads now expose `recordUpsertStrategy`.
+- `scripts/ops/attendance-import-perf.mjs`
+  - Perf summary now records `recordUpsertStrategy`.
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Trend markdown adds `Upsert` column to show strategy (`VALUES|UNNEST|STAGING`).
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - Added integration case to assert staging auto-switch when threshold is reached.
+
+Local verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Perf scripts syntax | `node --check scripts/ops/attendance-import-perf.mjs && node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS |
+| Attendance integration suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`15 passed`) |
+
+Decision:
+
+- `GO` unchanged (feature added under backward-compatible env controls; no open P0/P1 created by this increment).

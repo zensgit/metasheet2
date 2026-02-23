@@ -594,6 +594,7 @@ async function run() {
   let throughputRowsPerSec = null
   let chunkItemsSize = null
   let chunkRecordsSize = null
+  let recordUpsertStrategy = null
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = job?.id
@@ -608,6 +609,9 @@ async function run() {
     throughputRowsPerSec = coerceNonNegativeFloat(finalJob?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.itemsChunkSize)
     chunkRecordsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.recordsChunkSize)
+    if (typeof finalJob?.recordUpsertStrategy === 'string' && finalJob.recordUpsertStrategy) {
+      recordUpsertStrategy = finalJob.recordUpsertStrategy
+    }
     if (progressPercent === null) {
       const progress = coerceNonNegativeNumber(finalJob?.progress)
       const total = coerceNonNegativeNumber(finalJob?.total)
@@ -626,6 +630,11 @@ async function run() {
     throughputRowsPerSec = coerceNonNegativeFloat(commit.body?.data?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.itemsChunkSize)
     chunkRecordsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.recordsChunkSize)
+    if (typeof commit.body?.data?.recordUpsertStrategy === 'string' && commit.body.data.recordUpsertStrategy) {
+      recordUpsertStrategy = commit.body.data.recordUpsertStrategy
+    } else if (typeof commit.body?.data?.meta?.recordUpsertStrategy === 'string' && commit.body.data.meta.recordUpsertStrategy) {
+      recordUpsertStrategy = commit.body.data.meta.recordUpsertStrategy
+    }
     if (!batchId) die('commit did not return batchId')
   }
   // Resolve chunk metadata from batch detail endpoint (covers async jobs and older responses).
@@ -640,6 +649,9 @@ async function run() {
       }
       if (chunkRecordsSize === null) {
         chunkRecordsSize = coerceNonNegativeNumber(batchDetail.body?.data?.meta?.chunkConfig?.recordsChunkSize)
+      }
+      if (!recordUpsertStrategy && typeof batchDetail.body?.data?.meta?.recordUpsertStrategy === 'string') {
+        recordUpsertStrategy = batchDetail.body.data.meta.recordUpsertStrategy
       }
     }
   } catch (error) {
@@ -698,6 +710,7 @@ async function run() {
     elapsedMs,
     progressPercent,
     throughputRowsPerSec,
+    recordUpsertStrategy,
     chunkConfig: {
       itemsChunkSize: chunkItemsSize,
       recordsChunkSize: chunkRecordsSize,
@@ -713,6 +726,7 @@ async function run() {
       elapsedMs,
       progressPercent,
       throughputRowsPerSec,
+      recordUpsertStrategy,
       chunkConfig: {
         itemsChunkSize: chunkItemsSize,
         recordsChunkSize: chunkRecordsSize,

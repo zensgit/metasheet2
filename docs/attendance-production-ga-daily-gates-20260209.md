@@ -2153,3 +2153,21 @@ Observed dashboard status (`#22309519851`):
 - `gateFlat.protection.runId=22309503350`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-23): Perf Artifacts Add Upsert Strategy Signal
+
+Updates:
+
+1. `scripts/ops/attendance-import-perf.mjs` now writes `recordUpsertStrategy` into `perf-summary.json`.
+2. `scripts/ops/attendance-import-perf-trend-report.mjs` now shows an `Upsert` column (`VALUES|UNNEST|STAGING`) in Scenario Summary.
+3. Attendance import commit/job telemetry now exposes `recordUpsertStrategy`, enabling GA artifacts to prove which write strategy was used.
+
+Local verification:
+
+- `node --check scripts/ops/attendance-import-perf.mjs`
+- `node --check scripts/ops/attendance-import-perf-trend-report.mjs`
+
+Expected artifact checks after next perf/longrun runs:
+
+- `output/playwright/ga/<RUN_ID>/**/perf-summary.json` includes `recordUpsertStrategy`.
+- `output/playwright/ga/<RUN_ID>/**/attendance-import-perf-longrun-trend.md` includes `Upsert` column values per scenario.

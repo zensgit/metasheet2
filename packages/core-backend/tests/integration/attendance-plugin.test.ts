@@ -118,6 +118,16 @@ describe('Attendance Plugin Integration', () => {
     process.env.SKIP_PLUGINS = 'false'
     // Keep CSV guardrail deterministic and testable across environments.
     process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '1000'
+    // Keep bulk/staging auto-switch testable in integration scope.
+    if (!process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD) {
+      process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = '100'
+    }
+    if (!process.env.ATTENDANCE_IMPORT_COPY_ENABLED) {
+      process.env.ATTENDANCE_IMPORT_COPY_ENABLED = 'true'
+    }
+    if (!process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS) {
+      process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = '100'
+    }
     // Isolate import upload channel state (csvFileId) under a temp directory for integration tests.
     const repoRoot = path.join(__dirname, '../../../../')
     importUploadDir = path.join(repoRoot, 'tmp', `attendance-import-upload-${Date.now().toString(36)}`)
@@ -1016,6 +1026,80 @@ describe('Attendance Plugin Integration', () => {
 
     expect(firstInAtIso.startsWith(`${workDate}T09:00:00`)).toBe(true)
     expect(lastOutAtIso.startsWith(`${workDate}T18:00:00`)).toBe(true)
+  })
+
+  it('auto-switches to staging upsert strategy for bulk imports when copy threshold is reached', async () => {
+    if (!baseUrl) return
+
+    const userId = `attendance-staging-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const seedDate = new Date(Date.UTC(2026, 0, 1))
+    const rows = Array.from({ length: 120 }, (_, index) => {
+      const date = new Date(seedDate)
+      date.setUTCDate(seedDate.getUTCDate() + index)
+      const workDate = date.toISOString().slice(0, 10)
+      return {
+        workDate,
+        fields: {
+          firstInAt: `${workDate}T09:00:00Z`,
+          lastOutAt: `${workDate}T18:00:00Z`,
+          status: 'normal',
+        },
+      }
+    })
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        timezone: 'UTC',
+        rows,
+        mode: 'override',
+        returnItems: false,
+        commitToken,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    expect(commitData?.batchId).toBeTruthy()
+    expect(commitData?.engine).toBe('bulk')
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(120)
+    expect(commitData?.recordUpsertStrategy).toBe('staging')
+    expect(commitData?.meta?.recordUpsertStrategy).toBe('staging')
+
+    const batchDetailRes = await requestJson(
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(String(commitData.batchId))}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(batchDetailRes.status).toBe(200)
+    const batchMeta = (batchDetailRes.body as { data?: { meta?: any } } | undefined)?.data?.meta
+    expect(batchMeta?.recordUpsertStrategy).toBe('staging')
   })
 
   it('deduplicates concurrent import commits with the same idempotencyKey', async () => {
