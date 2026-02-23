@@ -2171,3 +2171,27 @@ Expected artifact checks after next perf/longrun runs:
 
 - `output/playwright/ga/<RUN_ID>/**/perf-summary.json` includes `recordUpsertStrategy`.
 - `output/playwright/ga/<RUN_ID>/**/attendance-import-perf-longrun-trend.md` includes `Upsert` column values per scenario.
+
+## Latest Notes (2026-02-23): Post-PR #231 Branch Policy and Dashboard Re-Verify
+
+Execution summary:
+
+1. Merged PR [#231](https://github.com/zensgit/metasheet2/pull/231).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and validated it references the latest policy run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22310774604](https://github.com/zensgit/metasheet2/actions/runs/22310774604) | PASS | `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.json`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.log`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22310807657](https://github.com/zensgit/metasheet2/actions/runs/22310807657) | PASS | `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22310807657/gate-meta/protection/meta.json` |
+
+Observed dashboard status (`#22310807657`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22310774604`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
