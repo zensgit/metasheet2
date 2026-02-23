@@ -51,6 +51,40 @@ function randomUuidV4(): string {
   })
 }
 
+function resolvePositiveIntEnvForTest(name: string, fallback: number, min: number, max?: number): number {
+  const raw = process.env[name]
+  if (raw == null || raw === '') return fallback
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  const upper = Number.isFinite(max) ? Number(max) : Number.POSITIVE_INFINITY
+  return Math.min(upper, Math.max(min, parsed))
+}
+
+const expectedStandardItemsChunkSize = resolvePositiveIntEnvForTest(
+  'ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE',
+  300,
+  50,
+  1000
+)
+const expectedStandardRecordsChunkSize = resolvePositiveIntEnvForTest(
+  'ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE',
+  200,
+  50,
+  1000
+)
+const expectedBulkItemsChunkSize = resolvePositiveIntEnvForTest(
+  'ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE',
+  1200,
+  200,
+  5000
+)
+const expectedBulkRecordsChunkSize = resolvePositiveIntEnvForTest(
+  'ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE',
+  1000,
+  200,
+  5000
+)
+
 describe('Attendance Plugin Integration', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
@@ -1613,7 +1647,17 @@ describe('Attendance Plugin Integration', () => {
     expect(commitRes.status).toBe(200)
     const commitData = (commitRes.body as { data?: any } | undefined)?.data
     expect(commitData?.imported).toBe(1)
-    expect(commitData?.engine).toBe('standard')
+    expect(['standard', 'bulk']).toContain(String(commitData?.engine))
+    const chunkConfig = commitData?.meta?.chunkConfig
+    expect(typeof chunkConfig?.itemsChunkSize).toBe('number')
+    expect(typeof chunkConfig?.recordsChunkSize).toBe('number')
+    if (commitData?.engine === 'bulk') {
+      expect(chunkConfig?.itemsChunkSize).toBe(expectedBulkItemsChunkSize)
+      expect(chunkConfig?.recordsChunkSize).toBe(expectedBulkRecordsChunkSize)
+    } else {
+      expect(chunkConfig?.itemsChunkSize).toBe(expectedStandardItemsChunkSize)
+      expect(chunkConfig?.recordsChunkSize).toBe(expectedStandardRecordsChunkSize)
+    }
     expect(Array.isArray(commitData?.items)).toBe(true)
     expect(commitData?.items.length).toBe(0)
     expect(typeof commitData?.batchId).toBe('string')

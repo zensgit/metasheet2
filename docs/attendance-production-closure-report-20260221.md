@@ -94,3 +94,39 @@ After PR [#224](https://github.com/zensgit/metasheet2/pull/224) merged, gates we
 | Perf Baseline | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
 | Perf Long Run | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json` |
 | Daily Dashboard | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` |
+
+## Update (2026-02-23): Bulk Path Chunking Hardening (B-line)
+
+Scope:
+
+- Ensure import `engine` classification (`standard|bulk`) drives real execution knobs, not only response labels.
+- Persist chunk strategy in batch metadata for post-incident auditability.
+
+Code updates:
+
+- `plugins/plugin-attendance/index.cjs`
+  - Added env knobs:
+    - `ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE` (default `1200`)
+    - `ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE` (default `1000`)
+    - `ATTENDANCE_IMPORT_BULK_ENGINE_MODE` (`auto|force|off`, default `auto`)
+  - Added `resolveImportChunkConfig(engine)` and wired it into:
+    - async commit processor (`processAsyncImportCommitJob`)
+    - sync commit endpoint (`POST /api/attendance/import/commit`)
+  - `batchMeta` now persists `chunkConfig` with the resolved chunk sizes.
+
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - Import commit integration test now validates `meta.chunkConfig` and matches it to the returned `engine`:
+    - `standard` -> standard chunk env/fallback
+    - `bulk` -> bulk chunk env/fallback
+
+Local verification:
+
+| Item | Command | Result |
+|---|---|---|
+| Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Attendance integration suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) |
+
+Notes:
+
+- This update is backward-compatible for API consumers; no existing response fields were removed.
+- Remaining next step for B-line is true staging/COPY execution for 100k+ imports (separate milestone).

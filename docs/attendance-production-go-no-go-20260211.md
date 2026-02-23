@@ -1410,3 +1410,22 @@ Evidence:
 Production decision:
 
 - `GO` (no open attendance P0/P1/P2 tracking issue; strict/perf/dashboard all PASS after policy upgrade).
+
+## Post-Go Development Verification (2026-02-23): Import Engine ChunkConfig Wiring
+
+This increment hardens B-line import execution semantics:
+
+- `engine=standard|bulk` now maps to concrete chunk controls in both sync and async commit paths.
+- Batch metadata persists `chunkConfig` so runtime strategy is auditable from import batches.
+
+Local evidence:
+
+| Item | Command | Status | Evidence |
+|---|---|---|---|
+| Plugin syntax check | `node --check plugins/plugin-attendance/index.cjs` | PASS | local command output |
+| Attendance integration tests | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+
+Notes:
+
+- Integration assertions now verify `commit.data.meta.chunkConfig` matches the returned `engine` and env-resolved chunk defaults.
+- No breaking API change; this is a backward-compatible observability + execution-path hardening.
