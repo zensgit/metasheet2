@@ -2094,3 +2094,14 @@ Key observations (`#22308598232`):
 
 - New scenario `rows100k-commit` completed successfully (`commitMs=98404`, `uploadCsv=true`, `engine=bulk`).
 - Trend report status is `pass` and now includes `rows100k-commit` in scenario summary.
+
+Threshold tuning follow-up (`#22308829077`):
+
+- To avoid accidental tightening from baseline envs, `rows100k-commit` now uses dedicated defaults only:
+  - `max_preview_ms=180000`
+  - `max_commit_ms=300000`
+  - `max_export_ms=45000`
+- Verification run: [#22308829077](https://github.com/zensgit/metasheet2/actions/runs/22308829077) `PASS`
+  - Evidence:
+    - `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`
+    - `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json`
