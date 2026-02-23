@@ -2041,3 +2041,30 @@ Observed dashboard status (`#22268136099`):
 - `gateFlat.strict.runId=22268021574`
 - `gateFlat.perf.runId=22268076603`
 - `gateFlat.longrun.runId=22268111924`
+
+## Latest Notes (2026-02-23): Branch Policy Redrive + Daily Dashboard Recheck
+
+Execution summary:
+
+1. Re-ran branch policy drift workflow on `main` with production baseline:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+2. Re-ran daily dashboard (`lookback_hours=48`) and archived new artifacts.
+3. Verified dashboard `gateFlat.protection` points to the latest successful branch-policy run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main baseline) | [#22307832865](https://github.com/zensgit/metasheet2/actions/runs/22307832865) | PASS | `output/playwright/ga/22307832865/policy.json`, `output/playwright/ga/22307832865/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`) | [#22307851285](https://github.com/zensgit/metasheet2/actions/runs/22307851285) | PASS | `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.md` |
+
+Observed dashboard status (`#22307851285`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22307832865`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`

@@ -839,6 +839,16 @@ const ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_I
   max: 1000,
 })
 
+const ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE', 1200, {
+  min: 200,
+  max: 5000,
+})
+
+const ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE', 1000, {
+  min: 200,
+  max: 5000,
+})
+
 const ATTENDANCE_IMPORT_PREFETCH_MAX_USERS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_PREFETCH_MAX_USERS', 5000, {
   min: 100,
   max: 100000,
@@ -870,6 +880,12 @@ const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
   'unnest',
   ['values', 'unnest']
+)
+
+const ATTENDANCE_IMPORT_BULK_ENGINE_MODE = resolveEnumEnv(
+  'ATTENDANCE_IMPORT_BULK_ENGINE_MODE',
+  'auto',
+  ['auto', 'force', 'off']
 )
 
 function iterateCsvRows(csvText, delimiter = ',', onRow) {
@@ -5454,8 +5470,27 @@ module.exports = {
 
 	    const resolveImportEngineByRowCount = (rowCount) => {
 	      const numeric = Number(rowCount ?? 0)
-	      if (Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD) return 'bulk'
+	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD
+	      const supportsBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
+	        && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	      if (!supportsBulkPath) return 'standard'
+	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'off') return 'standard'
+	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'force') return 'bulk'
+	      if (thresholdReached) return 'bulk'
 	      return 'standard'
+	    }
+
+	    const resolveImportChunkConfig = (engine) => {
+	      if (engine === 'bulk') {
+	        return {
+	          itemsChunkSize: ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE,
+	          recordsChunkSize: ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE,
+	        }
+	      }
+	      return {
+	        itemsChunkSize: ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE,
+	        recordsChunkSize: ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE,
+	      }
 	    }
 
 	    const resolveImportEngineFromMeta = (meta, rowCountHint) => {
@@ -5464,6 +5499,19 @@ module.exports = {
 	      if (explicit === 'bulk' || explicit === 'standard') return explicit
 	      const hint = Number(rowCountHint ?? payload?.summary?.processedRows ?? payload?.rowCount ?? payload?.total ?? 0)
 	      return resolveImportEngineByRowCount(Number.isFinite(hint) ? hint : 0)
+	    }
+
+	    const resolveImportChunkConfigFromMeta = (meta, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const itemsRaw = Number(payload?.summary?.chunkConfig?.itemsChunkSize ?? payload?.chunkConfig?.itemsChunkSize)
+	      const recordsRaw = Number(payload?.summary?.chunkConfig?.recordsChunkSize ?? payload?.chunkConfig?.recordsChunkSize)
+	      if (Number.isFinite(itemsRaw) && Number.isFinite(recordsRaw) && itemsRaw > 0 && recordsRaw > 0) {
+	        return {
+	          itemsChunkSize: Math.floor(itemsRaw),
+	          recordsChunkSize: Math.floor(recordsRaw),
+	        }
+	      }
+	      return resolveImportChunkConfig(engineHint)
 	    }
 
 	    const computeImportJobElapsedMs = (startedAt, finishedAt, status) => {
@@ -5507,6 +5555,8 @@ module.exports = {
 	        const rows = Math.max(0, processedRows)
 	        return Number((rows / (elapsedMs / 1000)).toFixed(2))
 	      })()
+	      const engine = resolveImportEngineFromMeta(payload, total)
+	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5515,7 +5565,8 @@ module.exports = {
 	        idempotencyKey,
 	        kind,
 	        status,
-	        engine: resolveImportEngineFromMeta(payload, total),
+	        engine,
+	        chunkConfig,
 	        progress,
 	        total,
 	        progressPercent,
@@ -5893,16 +5944,19 @@ module.exports = {
 	        })
 
 	        // Drop large payload after completion while preserving compact progress metadata.
-	        const summaryPayload = {
-	          __jobType: 'commit',
-	          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
-	          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
-	          summary: {
-	            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
-	            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
-	            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-	          },
-	        }
+		        const summaryPayload = {
+		          __jobType: 'commit',
+		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
+		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		          summary: {
+		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
+		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
+		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		            ),
+		          },
+		        }
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	          [rowId, orgId, JSON.stringify(summaryPayload)]
@@ -5971,10 +6025,11 @@ module.exports = {
 		        fallbackUserId: payload.userId ?? requesterId,
 		      })
 
-		      if (rows.length === 0) {
-		        throw new Error('No rows to import')
-		      }
-		      const importEngine = resolveImportEngineByRowCount(rows.length)
+	      if (rows.length === 0) {
+	        throw new Error('No rows to import')
+	      }
+	      const importEngine = resolveImportEngineByRowCount(rows.length)
+	      const importChunkConfig = resolveImportChunkConfig(importEngine)
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
@@ -6046,6 +6101,7 @@ module.exports = {
 		          ...(payload.batchMeta ?? {}),
 		          idempotencyKey: cleanIdempotency || undefined,
 		          engine: importEngine,
+		          chunkConfig: importChunkConfig,
 		          mappingProfileId: payload.mappingProfileId ?? null,
 		          groupSync: groupSync
 		            ? {
@@ -6110,10 +6166,10 @@ module.exports = {
 		            id: randomUUID(),
 	            userId: userId ?? null,
 	            workDate: workDate ?? null,
-	            recordId: recordId ?? null,
-	            previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
-	          })
-	          if (importItemsBuffer.length >= ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE) {
+	          recordId: recordId ?? null,
+	          previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
+	      })
+	          if (importItemsBuffer.length >= importChunkConfig.itemsChunkSize) {
 	            await flushImportItems()
 	          }
 	        }
@@ -6274,7 +6330,7 @@ module.exports = {
 	        }
 	        const enqueueRecordUpsert = async (item) => {
 	          recordUpsertsBuffer.push(item)
-	          if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
+	          if (recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
 	            await flushRecordUpserts()
 	          }
 	        }
@@ -10488,6 +10544,7 @@ module.exports = {
 	            return
 	          }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
+	          const importChunkConfig = resolveImportChunkConfig(importEngine)
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -10565,6 +10622,7 @@ module.exports = {
 	              ...(parsed.data.batchMeta ?? {}),
 	              idempotencyKey: idempotencyKey || undefined,
 	              engine: importEngine,
+	              chunkConfig: importChunkConfig,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -10630,7 +10688,7 @@ module.exports = {
 			                recordId: recordId ?? null,
 			                previewSnapshot: JSON.stringify(previewSnapshot ?? {}),
 			              })
-			              if (importItemsBuffer.length >= ATTENDANCE_IMPORT_ITEMS_CHUNK_SIZE) {
+			              if (importItemsBuffer.length >= importChunkConfig.itemsChunkSize) {
 			                await flushImportItems()
 			              }
 			            }
@@ -10789,7 +10847,7 @@ module.exports = {
 				            }
 				            const enqueueRecordUpsert = async (item) => {
 				              recordUpsertsBuffer.push(item)
-				              if (recordUpsertsBuffer.length >= ATTENDANCE_IMPORT_RECORDS_CHUNK_SIZE) {
+				              if (recordUpsertsBuffer.length >= importChunkConfig.recordsChunkSize) {
 			                await flushRecordUpserts()
 			              }
 			            }

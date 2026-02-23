@@ -1410,3 +1410,85 @@ Evidence:
 Production decision:
 
 - `GO` (no open attendance P0/P1/P2 tracking issue; strict/perf/dashboard all PASS after policy upgrade).
+
+## Post-Go Development Verification (2026-02-23): Import Engine ChunkConfig Wiring
+
+This increment hardens B-line import execution semantics:
+
+- `engine=standard|bulk` now maps to concrete chunk controls in both sync and async commit paths.
+- Batch metadata persists `chunkConfig` so runtime strategy is auditable from import batches.
+- Async import job polling now includes `chunkConfig` (`GET /api/attendance/import/jobs/:id`) for runtime visibility.
+- Admin Center import error handling now classifies CSV upload failures (`EXPIRED`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE`) and exposes a one-click `Re-apply CSV` recovery action.
+- Admin Center `Import batches` table now surfaces `Engine` and `Chunk` (`items/records`) from `batch.meta.chunkConfig` for operator troubleshooting.
+- Perf tooling now records and reports chunk settings (`items/records`) in `perf-summary.json` and longrun trend markdown.
+
+Local evidence:
+
+| Item | Command | Status | Evidence |
+|---|---|---|---|
+| Plugin syntax check | `node --check plugins/plugin-attendance/index.cjs` | PASS | local command output |
+| Perf scripts syntax | `node --check scripts/ops/attendance-import-perf.mjs && node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | local command output |
+| Attendance integration tests | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+| Web build | `pnpm --filter @metasheet/web build` | PASS | local command output |
+
+Notes:
+
+- Integration assertions now verify `commit.data.meta.chunkConfig` matches the returned `engine` and env-resolved chunk defaults.
+- No breaking API change; this is a backward-compatible observability + execution-path hardening.
+
+## Post-Go Verification (2026-02-23): CI Flake Hardening (`sharding-e2e`)
+
+Goal:
+
+- Remove recurring non-product flakiness in `Plugin System Tests` caused by a fixed rate-limit upper bound assertion.
+
+Change summary:
+
+- Updated `packages/core-backend/src/tests/sharding-e2e.test.ts`:
+  - switched from fixed `processedCount <= 210` to elapsed-time-aware upper bound:
+    - `dynamicUpperBound = min(235, ceil(200 + elapsedMs * 100/s + 15))`
+  - preserved lower bound assertion (`processedCount >= 150`)
+  - kept `rateLimitedCount` assertion non-blocking (`>= 0`) because `messageBus.publish` does not deterministically surface limiter exceptions to the publisher callsite.
+
+Evidence:
+
+| Check | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Plugin System Tests rerun (PR #227) | [#22307437402](https://github.com/zensgit/metasheet2/actions/runs/22307437402) | PASS | `test (18.x)=pass`, `test (20.x)=pass`, `coverage=pass` |
+| Targeted sharding e2e suite | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS (`17 passed`) | local command output |
+| Attendance integration regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+| Web regression build | `pnpm --filter @metasheet/web build` | PASS | local command output |
+
+Decision:
+
+- `GO` for this increment; CI stability risk reduced without relaxing attendance product gates.
+
+## Post-Go Verification (2026-02-23): Branch Policy + Dashboard Recheck
+
+Goal:
+
+- Reconfirm A-line gate chain remains stable after latest PR activity and CI reruns.
+
+Execution:
+
+- Triggered `attendance-branch-policy-drift-prod.yml` on `main` with:
+  - `require_pr_reviews=true`
+  - `min_approving_review_count=1`
+  - `require_code_owner_reviews=false`
+- Triggered `attendance-daily-gate-dashboard.yml` (`lookback_hours=48`) and downloaded artifacts.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main baseline) | [#22307832865](https://github.com/zensgit/metasheet2/actions/runs/22307832865) | PASS | `output/playwright/ga/22307832865/policy.json`, `output/playwright/ga/22307832865/policy.log`, `output/playwright/ga/22307832865/step-summary.md` |
+| Daily Gate Dashboard (main) | [#22307851285](https://github.com/zensgit/metasheet2/actions/runs/22307851285) | PASS | `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.md` |
+
+Observed dashboard highlights (`#22307851285`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22307832865`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`

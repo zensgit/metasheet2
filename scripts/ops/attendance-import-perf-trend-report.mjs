@@ -108,6 +108,11 @@ function formatFloat(value, digits = 2) {
   return numeric.toFixed(digits)
 }
 
+function formatChunk(items, records) {
+  if (!Number.isFinite(items) || !Number.isFinite(records)) return '--'
+  return `${Math.floor(items)}/${Math.floor(records)}`
+}
+
 function fmtPct(value) {
   if (!Number.isFinite(value)) return '--'
   return `${(value * 100).toFixed(1)}%`
@@ -137,6 +142,8 @@ function recordFromSummary(summary, sourcePath, sourceType) {
     elapsedMs: toNumber(summary?.elapsedMs),
     progressPercent: toNumber(summary?.progressPercent),
     throughputRowsPerSec: toNumber(summary?.throughputRowsPerSec),
+    chunkItemsSize: toNumber(summary?.chunkConfig?.itemsChunkSize ?? summary?.perfMetrics?.chunkConfig?.itemsChunkSize),
+    chunkRecordsSize: toNumber(summary?.chunkConfig?.recordsChunkSize ?? summary?.perfMetrics?.chunkConfig?.recordsChunkSize),
     regressions: Array.isArray(summary?.regressions) ? summary.regressions.map((v) => String(v)) : [],
     sourceType,
     sourcePath,
@@ -190,11 +197,12 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Mode | Upload | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Mode | Upload | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
+  lines.push('|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
     const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    const chunk = formatChunk(row?.latest?.chunkItemsSize, row?.latest?.chunkRecordsSize)
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')

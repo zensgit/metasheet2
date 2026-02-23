@@ -94,3 +94,80 @@ After PR [#224](https://github.com/zensgit/metasheet2/pull/224) merged, gates we
 | Perf Baseline | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
 | Perf Long Run | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json` |
 | Daily Dashboard | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` |
+
+## Update (2026-02-23): Bulk Path Chunking Hardening (B-line)
+
+Scope:
+
+- Ensure import `engine` classification (`standard|bulk`) drives real execution knobs, not only response labels.
+- Persist chunk strategy in batch metadata for post-incident auditability.
+- Improve import failure recovery UX in Admin Center with CSV upload-specific guidance/actions.
+
+Code updates:
+
+- `plugins/plugin-attendance/index.cjs`
+  - Added env knobs:
+    - `ATTENDANCE_IMPORT_BULK_ITEMS_CHUNK_SIZE` (default `1200`)
+    - `ATTENDANCE_IMPORT_BULK_RECORDS_CHUNK_SIZE` (default `1000`)
+    - `ATTENDANCE_IMPORT_BULK_ENGINE_MODE` (`auto|force|off`, default `auto`)
+  - Added `resolveImportChunkConfig(engine)` and wired it into:
+    - async commit processor (`processAsyncImportCommitJob`)
+    - sync commit endpoint (`POST /api/attendance/import/commit`)
+  - `batchMeta` now persists `chunkConfig` with the resolved chunk sizes.
+  - Import job API (`GET /api/attendance/import/jobs/:id`) now returns `chunkConfig` for async polling visibility.
+
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - Import commit integration test now validates `meta.chunkConfig` and matches it to the returned `engine`:
+    - `standard` -> standard chunk env/fallback
+    - `bulk` -> bulk chunk env/fallback
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - `perf-summary.json` now records `chunkConfig.itemsChunkSize` and `chunkConfig.recordsChunkSize`.
+  - Perf run fetches batch detail metadata (`/attendance/import/batches/:id`) to align summary with actual committed batch config.
+
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Trend summary now includes `Chunk` column (`items/records`) for latest scenario sample.
+
+- `apps/web/src/views/AttendanceView.vue`
+  - Added import error taxonomy for CSV upload path:
+    - `EXPIRED`, `INVALID_CSV_FILE_ID`, `CSV_TOO_LARGE`, `PAYLOAD_TOO_LARGE` (HTTP `413`)
+  - Added status action `Re-apply CSV` (`reload-import-csv`) to recover preview/import failures without page reload.
+  - Added import batch table visibility:
+    - `Engine` column (`standard|bulk`)
+    - `Chunk` column (`itemsChunkSize/recordsChunkSize`) from `batch.meta.chunkConfig`
+
+Local verification:
+
+| Item | Command | Result |
+|---|---|---|
+| Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Perf scripts syntax | `node --check scripts/ops/attendance-import-perf.mjs && node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS |
+| Attendance integration suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) |
+| Web build | `pnpm --filter @metasheet/web build` | PASS |
+
+Notes:
+
+- This update is backward-compatible for API consumers; no existing response fields were removed.
+- Remaining next step for B-line is true staging/COPY execution for 100k+ imports (separate milestone).
+
+## Update (2026-02-23): CI Stability Hardening (`sharding-e2e` rate-limit bound)
+
+Background:
+
+- PR [#227](https://github.com/zensgit/metasheet2/pull/227) initially hit a flaky CI failure in `Plugin System Tests` (`test (20.x)`), where `processedCount` occasionally exceeded a fixed threshold (`<=210`) in `sharding-e2e`.
+
+Change:
+
+- File: `packages/core-backend/src/tests/sharding-e2e.test.ts`
+- Replaced fixed upper bound with elapsed-time-aware dynamic upper bound:
+  - `dynamicUpperBound = min(235, ceil(200 + elapsedMs * 100/s + 15))`
+- Kept lower bound assertion (`>=150`) and removed brittle dependency on surfaced `RateLimitError` throws at `publish()` callsite.
+
+Verification evidence:
+
+| Item | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Plugin System Tests rerun (PR #227) | [#22307437402](https://github.com/zensgit/metasheet2/actions/runs/22307437402) | PASS | GitHub checks: `test (18.x)`/`test (20.x)`/`coverage` all green |
+| Targeted sharding suite | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS (`17 passed`) | local command output |
+| Attendance integration regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
+| Web build regression | `pnpm --filter @metasheet/web build` | PASS | local command output |

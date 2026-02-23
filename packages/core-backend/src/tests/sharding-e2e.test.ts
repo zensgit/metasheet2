@@ -260,6 +260,7 @@ describe('Multi-Tenant Sharding E2E (Sprint 6 Day 5)', () => {
       messageBus.subscribe('high.volume', combinedHandler)
 
       // Send many messages for same tenant (should hit rate limit)
+      const dispatchStartedAt = Date.now()
       const messagePromises: Promise<unknown>[] = []
 
       for (let i = 0; i < 250; i++) {
@@ -276,12 +277,14 @@ describe('Multi-Tenant Sharding E2E (Sprint 6 Day 5)', () => {
 
       await Promise.all(messagePromises)
       await new Promise(resolve => setTimeout(resolve, 50))
+      const elapsedMs = Math.max(1, Date.now() - dispatchStartedAt)
 
-      // Should have processed around bucket capacity (200)
-      // Allow small tolerance for timing variations in async processing
-      expect(processedCount).toBeLessThanOrEqual(210)
+      // Expected upper bound:
+      // bucket capacity + refill during dispatch window + small scheduling tolerance.
+      const dynamicUpperBound = Math.min(235, Math.ceil(200 + (elapsedMs / 1000) * 100 + 15))
+      expect(processedCount).toBeLessThanOrEqual(dynamicUpperBound)
       expect(processedCount).toBeGreaterThanOrEqual(150)
-      // Some should have been rate limited (250 - processed)
+      // messageBus.publish may not surface rate-limit errors to this callsite.
       expect(rateLimitedCount).toBeGreaterThanOrEqual(0)
     })
   })
