@@ -2371,3 +2371,25 @@ Observed dashboard status (`#22337693734`):
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
 - `gateFlat.perf.recordUpsertStrategy=staging`
+
+## Latest Notes (2026-02-24): Final Strict Gates Twice + Post-Policy Dashboard Bind
+
+Execution summary:
+
+1. Triggered `Attendance Strict Gates (Prod)` on `main`.
+2. Verified both strict iterations passed with upload-channel API smoke and Playwright desktop/mobile coverage.
+3. Re-ran `Attendance Branch Policy Drift (Prod)` and then `Attendance Daily Gate Dashboard` (`lookback_hours=48`) to bind latest policy evidence.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (twice, non-drill) | [#22337802322](https://github.com/zensgit/metasheet2/actions/runs/22337802322) | PASS | `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-api-smoke.log`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-api-smoke.log` |
+| Branch Policy Drift (main, non-drill) | [#22337759756](https://github.com/zensgit/metasheet2/actions/runs/22337759756) | PASS | `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.json`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.log`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337780063](https://github.com/zensgit/metasheet2/actions/runs/22337780063) | PASS | `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/gate-meta/protection/meta.json` |
+
+Observed status:
+
+- Strict API smoke logs contain `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS` in both iterations.
+- Dashboard `#22337780063` keeps `overallStatus=pass` and binds `gateFlat.protection.runId=22337759756`.
+- Branch protection contract remains: `requirePrReviews=true`, `minApprovingReviews=1`.
