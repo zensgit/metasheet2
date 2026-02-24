@@ -2345,3 +2345,29 @@ Observed dashboard status (`#22337567788`):
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
 - `gateFlat.perf.recordUpsertStrategy=staging`
+
+## Latest Notes (2026-02-24): Post-PR #240 Final Policy Restore and Dashboard Re-Run
+
+Execution summary:
+
+1. Merged PR [#240](https://github.com/zensgit/metasheet2/pull/240) (docs evidence sync).
+2. Re-applied branch protection review baseline (`require_pr_reviews=true`, `min_approving_review_count=1`).
+3. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after policy completion.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22337671524](https://github.com/zensgit/metasheet2/actions/runs/22337671524) | PASS | `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.json`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.log`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337693734](https://github.com/zensgit/metasheet2/actions/runs/22337693734) | PASS | `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/gate-meta/protection/meta.json` |
+
+Observed dashboard status (`#22337693734`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22337671524`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+- `gateFlat.perf.recordUpsertStrategy=staging`
