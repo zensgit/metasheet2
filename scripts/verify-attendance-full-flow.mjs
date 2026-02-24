@@ -20,7 +20,7 @@ const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
-const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT !== 'false'
+const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT === 'true'
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
