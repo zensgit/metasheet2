@@ -88,6 +88,7 @@ function try_graphql_fallback() {
   set +e
   gh api graphql \
     -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks isAdminEnforced requiredStatusCheckContexts requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews } } } }' \
+    -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks isAdminEnforced requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews requiredStatusCheckContexts } } } }' \
     -f owner="$owner" \
     -f name="$repo_name" \
     >"$graphql_json" 2>"$graphql_err"
@@ -192,6 +193,7 @@ if (( rc != 0 )); then
 else
   strict_current="$(jq -r '.required_status_checks.strict // false' "$protection_json")"
   enforce_admins_current="$(jq -r '.enforce_admins.enabled // false' "$protection_json")"
+  pr_reviews_required_current="$(jq -r 'if (.required_pull_request_reviews == null) then false else true end' "$protection_json")"
   pr_reviews_required_current="$(jq -r 'if (.required_pull_request_reviews == null) then false else true end' "$protection_json")"
   approving_review_count_current="$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' "$protection_json")"
   code_owner_reviews_current="$(jq -r '.required_pull_request_reviews.require_code_owner_reviews // false' "$protection_json")"
@@ -316,20 +318,31 @@ if [[ "$require_enforce_admins" == "true" && "$enforce_admins_current" != "true"
   die "ENFORCE_ADMINS_DISABLED" "enforce_admins.enabled=false but REQUIRE_ENFORCE_ADMINS=true"
 fi
 
+if [[ "$require_pr_reviews" == "true" && "$pr_reviews_required_current" != "true" ]]; then
+  die "PR_REVIEWS_NOT_ENABLED" "required_pull_request_reviews=null but REQUIRE_PR_REVIEWS=true"
+fi
+
+if [[ "$require_pr_reviews" == "false" && "$pr_reviews_required_current" == "true" ]]; then
+  die "PR_REVIEWS_UNEXPECTED" "required_pull_request_reviews is enabled but REQUIRE_PR_REVIEWS=false"
+fi
+
+if [[ "$require_pr_reviews" == "true" ]]; then
+  if [[ ! "$approving_review_count_current" =~ ^[0-9]+$ ]]; then
+    die "APPROVING_REVIEW_COUNT_INVALID" "required_approving_review_count is not numeric: ${approving_review_count_current}"
+  fi
+  if (( approving_review_count_current < min_approving_review_count )); then
+    die "APPROVING_REVIEW_COUNT_TOO_LOW" "required_approving_review_count=${approving_review_count_current}, expected >= ${min_approving_review_count}"
+  fi
+  if [[ "$require_code_owner_reviews" == "true" && "$code_owner_reviews_current" != "true" ]]; then
+    die "CODE_OWNER_REVIEWS_DISABLED" "require_code_owner_reviews=false but REQUIRE_CODE_OWNER_REVIEWS=true"
+  fi
+  if [[ "$require_code_owner_reviews" == "false" && "$code_owner_reviews_current" == "true" ]]; then
+    die "CODE_OWNER_REVIEWS_UNEXPECTED" "require_code_owner_reviews=true but REQUIRE_CODE_OWNER_REVIEWS=false"
+  fi
+fi
+
 if (( ${#missing_checks[@]} > 0 )); then
   die "REQUIRED_CHECKS_MISSING" "missing required checks: $(IFS=,; echo "${missing_checks[*]}")"
-fi
-
-if [[ "$require_pr_reviews" == "true" && "$pr_reviews_required_current" != "true" ]]; then
-  die "PR_REVIEWS_NOT_ENABLED" "required_pull_request_reviews is not enabled but REQUIRE_PR_REVIEWS=true"
-fi
-
-if [[ "$require_pr_reviews" == "true" && "$approving_review_count_current" -lt "$min_approving_review_count" ]]; then
-  die "APPROVING_REVIEW_COUNT_TOO_LOW" "required_approving_review_count=${approving_review_count_current} but expected >= ${min_approving_review_count}"
-fi
-
-if [[ "$require_code_owner_reviews" == "true" && "$code_owner_reviews_current" != "true" ]]; then
-  die "CODE_OWNER_REVIEWS_NOT_ENABLED" "require_code_owner_reviews=false but REQUIRE_CODE_OWNER_REVIEWS=true"
 fi
 
 info "OK: required checks, strict/admin settings, and review settings are acceptable"
