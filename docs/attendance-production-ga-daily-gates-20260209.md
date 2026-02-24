@@ -2281,3 +2281,40 @@ Observed dashboard status (`#22334028181`):
 - `gateFlat.protection.runId=22333998882`
 - `gateFlat.protection.requirePrReviews=true`
 - `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-24): Post-PR #237 Branch Policy and Dashboard Re-Verify
+
+Execution summary:
+
+1. Restored branch protection baseline after merge operations.
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` after policy completion and validated latest protection run binding.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22334103172](https://github.com/zensgit/metasheet2/actions/runs/22334103172) | PASS | `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.json`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.log`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22334126100](https://github.com/zensgit/metasheet2/actions/runs/22334126100) | PASS | `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/gate-meta/protection/meta.json` |
+
+Observed dashboard status (`#22334126100`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22334103172`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+
+## Latest Notes (2026-02-24): Longrun Guard Validation (`rows100k-commit`)
+
+Execution summary:
+
+1. Triggered a non-drill longrun run after adding `EXPECT_RECORD_UPSERT_STRATEGY` guard.
+2. Verified `rows100k-commit` artifacts show `recordUpsertStrategy=staging` and no regressions.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (non-drill) | [#22334158061](https://github.com/zensgit/metasheet2/actions/runs/22334158061) | PASS | `output/playwright/ga/22334158061/attendance-import-perf-longrun-rows100k-commit-22334158061-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.md` |

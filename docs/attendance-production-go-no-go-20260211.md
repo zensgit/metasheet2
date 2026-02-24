@@ -1595,6 +1595,62 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Post-PR #237 Mainline Gate Re-Verify
+
+Goal:
+
+- Reconfirm policy/dashboard status after merging PR `#237` (docs evidence sync).
+
+Execution:
+
+1. Restored branch protection baseline (`require_pr_reviews=true`, `min_approving_review_count=1`).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after policy completion.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22334103172](https://github.com/zensgit/metasheet2/actions/runs/22334103172) | PASS | `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.json`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.log`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | [#22334126100](https://github.com/zensgit/metasheet2/actions/runs/22334126100) | PASS | `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/gate-meta/protection/meta.json` |
+
+Observed dashboard highlights (`#22334126100`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22334103172`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+
+Decision:
+
+- `GO` unchanged.
+
+## Post-Go Verification (2026-02-24): Longrun Guard Execution (staging expectation)
+
+Goal:
+
+- Verify the new longrun guard blocks 100k commit regressions where upsert strategy is not `staging`.
+
+Execution:
+
+1. Triggered non-drill `Attendance Import Perf Long Run` with `upload_csv=true`.
+2. Verified `rows100k-commit` artifact includes:
+   - `recordUpsertStrategy: "staging"`
+   - `expectations.recordUpsertStrategy: "staging"`
+   - `regressions: []`
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (non-drill) | [#22334158061](https://github.com/zensgit/metasheet2/actions/runs/22334158061) | PASS | `output/playwright/ga/22334158061/attendance-import-perf-longrun-rows100k-commit-22334158061-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.json` |
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Development Verification (2026-02-23): Longrun Upsert Strategy Guard
 
 Goal:
