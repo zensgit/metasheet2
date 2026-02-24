@@ -2318,3 +2318,30 @@ Verification run:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Perf Longrun (non-drill) | [#22334158061](https://github.com/zensgit/metasheet2/actions/runs/22334158061) | PASS | `output/playwright/ga/22334158061/attendance-import-perf-longrun-rows100k-commit-22334158061-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.md` |
+
+## Latest Notes (2026-02-24): Post-PR #239 Contract Matrix + Policy/Dashboard Re-Verify
+
+Execution summary:
+
+1. Merged PR [#239](https://github.com/zensgit/metasheet2/pull/239) to tighten dashboard contract parsing/validation for upsert strategy fields.
+2. Triggered `Attendance Gate Contract Matrix` on `main` and verified both strict/dashboard contracts pass with the new `dashboard.invalid.upsert.json` negative case.
+3. Re-applied branch protection baseline (`require_pr_reviews=true`, `min_approving_review_count=1`) and re-ran `Attendance Branch Policy Drift (Prod)`.
+4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) to confirm `gateFlat.protection` binds the latest non-drill policy run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Gate Contract Matrix (main) | [#22337517816](https://github.com/zensgit/metasheet2/actions/runs/22337517816) | PASS | `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.valid.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.invalid.upsert.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-strict-22337517816-1/strict/gate-summary.valid.json` |
+| Branch Policy Drift (main, non-drill) | [#22337554892](https://github.com/zensgit/metasheet2/actions/runs/22337554892) | PASS | `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.json`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.log`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337567788](https://github.com/zensgit/metasheet2/actions/runs/22337567788) | PASS | `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/gate-meta/protection/meta.json` |
+
+Observed dashboard status (`#22337567788`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22337554892`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+- `gateFlat.perf.recordUpsertStrategy=staging`
