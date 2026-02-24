@@ -6,6 +6,9 @@ BRANCH="${BRANCH:-main}"
 REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV:-contracts (strict),contracts (dashboard)}"
 REQUIRE_STRICT="${REQUIRE_STRICT:-true}"
 ENFORCE_ADMINS="${ENFORCE_ADMINS:-true}"
+REQUIRE_PR_REVIEWS="${REQUIRE_PR_REVIEWS:-true}"
+MIN_APPROVING_REVIEW_COUNT="${MIN_APPROVING_REVIEW_COUNT:-1}"
+REQUIRE_CODE_OWNER_REVIEWS="${REQUIRE_CODE_OWNER_REVIEWS:-false}"
 APPLY="${APPLY:-false}"
 
 function die() {
@@ -41,6 +44,12 @@ repo_name="${REPO##*/}"
 
 require_strict="$(bool_normalize "$REQUIRE_STRICT")"
 enforce_admins="$(bool_normalize "$ENFORCE_ADMINS")"
+require_pr_reviews="$(bool_normalize "$REQUIRE_PR_REVIEWS")"
+require_code_owner_reviews="$(bool_normalize "$REQUIRE_CODE_OWNER_REVIEWS")"
+if [[ ! "$MIN_APPROVING_REVIEW_COUNT" =~ ^[0-9]+$ ]]; then
+  die "MIN_APPROVING_REVIEW_COUNT must be a non-negative integer"
+fi
+min_approving_review_count="$MIN_APPROVING_REVIEW_COUNT"
 apply_changes="$(bool_normalize "$APPLY")"
 
 required_checks=()
@@ -55,23 +64,35 @@ if (( ${#required_checks[@]} == 0 )); then
 fi
 
 contexts_json="$(printf '%s\n' "${required_checks[@]}" | jq -R . | jq -s .)"
+pr_reviews_json='null'
+if [[ "$require_pr_reviews" == "true" ]]; then
+  pr_reviews_json="$(jq -n \
+    --argjson min_count "$min_approving_review_count" \
+    --argjson require_code_owner "$require_code_owner_reviews" \
+    '{
+      dismiss_stale_reviews: true,
+      require_code_owner_reviews: $require_code_owner,
+      required_approving_review_count: $min_count
+    }')"
+fi
 payload="$(jq -n \
   --argjson strict "$require_strict" \
   --argjson contexts "$contexts_json" \
   --argjson enforce_admins "$enforce_admins" \
+  --argjson required_pull_request_reviews "$pr_reviews_json" \
   '{
     required_status_checks: {
       strict: $strict,
       contexts: $contexts
     },
     enforce_admins: $enforce_admins,
-    required_pull_request_reviews: null,
+    required_pull_request_reviews: $required_pull_request_reviews,
     restrictions: null
   }')"
 
 info "repo=${REPO} branch=${BRANCH}"
 info "required_checks=$(IFS=,; echo "${required_checks[*]}")"
-info "require_strict=${require_strict} enforce_admins=${enforce_admins}"
+info "require_strict=${require_strict} enforce_admins=${enforce_admins} require_pr_reviews=${require_pr_reviews} min_approving_review_count=${min_approving_review_count} require_code_owner_reviews=${require_code_owner_reviews}"
 
 if [[ "$apply_changes" != "true" ]]; then
   info "APPLY=false (dry-run). No branch protection changes will be applied."
@@ -98,6 +119,9 @@ BRANCH="$BRANCH" \
 REQUIRED_CHECKS_CSV="$REQUIRED_CHECKS_CSV" \
 REQUIRE_STRICT="$REQUIRE_STRICT" \
 REQUIRE_ENFORCE_ADMINS="$ENFORCE_ADMINS" \
+REQUIRE_PR_REVIEWS="$REQUIRE_PR_REVIEWS" \
+MIN_APPROVING_REVIEW_COUNT="$MIN_APPROVING_REVIEW_COUNT" \
+REQUIRE_CODE_OWNER_REVIEWS="$REQUIRE_CODE_OWNER_REVIEWS" \
 ./scripts/ops/attendance-check-branch-protection.sh
 
 info "OK: branch protection applied and verified"
