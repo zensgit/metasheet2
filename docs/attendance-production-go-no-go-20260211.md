@@ -1595,6 +1595,50 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Post-PR #243 Admin Save Timeout Hardening
+
+Goal:
+
+- Verify that Admin Center save operations no longer risk indefinite `Saving...` state and that production strict-gate UI flow covers this assertion.
+
+Execution:
+
+1. Merged PR [#243](https://github.com/zensgit/metasheet2/pull/243) (`71345bd5d6cef107ba3f17d28d584531077ee9d9`).
+2. Restored branch protection review baseline:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+3. Re-ran:
+   - `Attendance Branch Policy Drift (Prod)`
+   - `Attendance Daily Gate Dashboard` (`lookback_hours=48`)
+   - `Attendance Strict Gates (Prod)` (twice)
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22339850697](https://github.com/zensgit/metasheet2/actions/runs/22339850697) | PASS | `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/policy.json`, `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`) | [#22339849959](https://github.com/zensgit/metasheet2/actions/runs/22339849959) | PASS | `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (twice, non-drill) | [#22339849230](https://github.com/zensgit/metasheet2/actions/runs/22339849230) | PASS | `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-playwright-full-flow-desktop.log` |
+
+Observed highlights:
+
+- `policy.json` confirms:
+  - `requirePrReviews=true`
+  - `approvingReviewCountCurrent=1`
+- Dashboard `#22339849959` confirms:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.protection.runId=22337759756`
+  - `gateFlat.perf.recordUpsertStrategy=staging`
+- Strict-gate desktop full-flow logs include:
+  - `Admin settings save cycle verified (Save settings button recovered from saving state)`
+  - `Full flow verification complete`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Final Strict Gates + Policy/Dashboard Stability Check
 
 Goal:

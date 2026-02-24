@@ -2393,3 +2393,27 @@ Observed status:
 - Strict API smoke logs contain `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS` in both iterations.
 - Dashboard `#22337780063` keeps `overallStatus=pass` and binds `gateFlat.protection.runId=22337759756`.
 - Branch protection contract remains: `requirePrReviews=true`, `minApprovingReviews=1`.
+
+## Latest Notes (2026-02-24): Post-PR #243 Admin Save Timeout Verification
+
+Execution summary:
+
+1. Merged PR [#243](https://github.com/zensgit/metasheet2/pull/243) (`fix(attendance-web): timeout admin save requests and verify recovery`).
+2. Re-ran branch policy and dashboard on `main`.
+3. Re-ran strict gates twice and verified new desktop full-flow assertion for Admin settings save recovery.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22339850697](https://github.com/zensgit/metasheet2/actions/runs/22339850697) | PASS | `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/policy.json`, `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`) | [#22339849959](https://github.com/zensgit/metasheet2/actions/runs/22339849959) | PASS | `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (twice, non-drill) | [#22339849230](https://github.com/zensgit/metasheet2/actions/runs/22339849230) | PASS | `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-playwright-full-flow-desktop.log` |
+
+Observed status:
+
+- Strict-gate desktop logs include:
+  - `Admin settings save cycle verified (Save settings button recovered from saving state)`
+  - `Full flow verification complete`
+- Branch policy remains compliant (`require_pr_reviews=true`, `min_approving_review_count=1`).
+- Daily dashboard remains green (`overallStatus=pass`, `p0Status=pass`).
