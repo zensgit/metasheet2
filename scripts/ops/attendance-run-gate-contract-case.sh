@@ -111,6 +111,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
+  dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -151,6 +152,8 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "rows": 100000,
       "mode": "commit",
       "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
       "previewMs": "1200",
       "regressionsCount": "0"
     },
@@ -163,6 +166,74 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "rows": 500000,
       "mode": "preview",
       "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
+  cat >"$dashboard_invalid_upsert" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 600001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 600002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 600003,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 2,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
       "previewMs": "33000",
       "regressionsCount": "0"
     }
@@ -365,6 +436,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_perf"
   expect_fail "dashboard longrun gateFlat contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
+  expect_fail "dashboard upsert contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
 
   info "OK: dashboard contract case passed"
   exit 0
