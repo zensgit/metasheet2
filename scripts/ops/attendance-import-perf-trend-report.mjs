@@ -188,6 +188,10 @@ function sortByStartedDesc(a, b) {
 
 function renderMarkdown(payload) {
   const lines = []
+  const has500kPreview = payload.scenarios.some((row) => {
+    const scenario = String(row?.scenario || '').toLowerCase()
+    return scenario.includes('500k') || Number(row?.rows) >= 500000
+  })
   lines.push('# Attendance Import Perf Long-Run Trend')
   lines.push('')
   lines.push(`Generated at (UTC): \`${payload.generatedAt}\``)
@@ -224,7 +228,10 @@ function renderMarkdown(payload) {
   lines.push('## Notes')
   lines.push('')
   lines.push('- 10k and 100k scenarios are expected to run `commit` + optional `export` checks.')
-  lines.push('- 50k/100k/500k scenarios are expected to run `preview` checks for scale trend.')
+  lines.push(`- 50k/100k${has500kPreview ? '/500k' : ''} scenarios are expected to run \`preview\` checks for scale trend.`)
+  if (!has500kPreview) {
+    lines.push('- 500k preview scenario is currently skipped (`include_rows500k_preview=false`).')
+  }
   lines.push('- Use this report with strict gates and daily dashboard for Go/No-Go review.')
 
   return `${lines.join('\n')}\n`
