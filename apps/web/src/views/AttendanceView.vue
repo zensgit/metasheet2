@@ -4631,6 +4631,7 @@ const IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS = 2000
 const IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000
+const ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS = 45 * 1000
 const importDebugOptions = readImportDebugOptions()
 const importAsyncPollIntervalMs = importDebugOptions.pollIntervalMs ?? IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS
 const importAsyncPollTimeoutMs = importDebugOptions.pollTimeoutMs ?? IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS
@@ -5959,6 +5960,7 @@ function inferErrorCodeFromMessage(message: string): string {
   if (normalized.includes('PAYLOAD_TOO_LARGE')) return 'PAYLOAD_TOO_LARGE'
   if (normalized.includes('CSV_TOO_LARGE')) return 'CSV_TOO_LARGE'
   if (normalized.includes('IMPORT_JOB_NOT_FOUND') || normalized.includes('JOB_NOT_FOUND')) return 'IMPORT_JOB_NOT_FOUND'
+  if (normalized.includes('REQUEST_TIMEOUT') || normalized.includes('TIMED OUT')) return 'REQUEST_TIMEOUT'
   if (normalized.includes('RATE_LIMIT')) return 'RATE_LIMITED'
   if (normalized.includes('IMPORT UPLOAD EXPIRED')) return 'EXPIRED'
   if (normalized.includes('CSVFILEID') && normalized.includes('UUID')) return 'INVALID_CSV_FILE_ID'
@@ -5982,6 +5984,51 @@ function createApiError(response: { status: number }, payload: any, fallbackMess
     error.code = normalizeErrorCode(errorNode.code)
   }
   return error
+}
+
+function createRequestTimeoutError(timeoutMs: number): AttendanceApiError {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1000))
+  const error = new Error(`Request timed out after ${seconds}s`) as AttendanceApiError
+  error.status = 408
+  error.code = 'REQUEST_TIMEOUT'
+  return error
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const name = String((error as any).name || '').toLowerCase()
+  return name === 'aborterror'
+}
+
+async function apiFetchWithTimeout(path: string, options: RequestInit = {}, timeoutMs = ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  const parentSignal = options.signal
+  let parentAbortHandler: (() => void) | null = null
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort()
+    } else {
+      parentAbortHandler = () => controller.abort()
+      parentSignal.addEventListener('abort', parentAbortHandler, { once: true })
+    }
+  }
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await apiFetch(path, {
+      ...options,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw createRequestTimeoutError(timeoutMs)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+    if (parentSignal && parentAbortHandler) {
+      parentSignal.removeEventListener('abort', parentAbortHandler)
+    }
+  }
 }
 
 function createForbiddenError(message = 'Admin permissions required'): AttendanceApiError {
@@ -6078,6 +6125,10 @@ function classifyStatusError(
   } else if (code === 'RATE_LIMITED' || status === 429) {
     message = 'Request was rate-limited by the server.'
     meta.hint = 'Wait a few seconds before retrying to avoid repeated throttling.'
+    meta.action = defaultAction
+  } else if (code === 'REQUEST_TIMEOUT' || status === 408) {
+    message = 'Request timed out before the server responded.'
+    meta.hint = 'Retry the action. If this repeats, check network/server health.'
     meta.action = defaultAction
   } else if (code === 'PUNCH_TOO_SOON') {
     message = rawMessage
@@ -7351,7 +7402,7 @@ function removeHolidayOverride(index: number) {
 async function loadSettings() {
   settingsLoading.value = true
   try {
-    const response = await apiFetch('/api/attendance/settings')
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -7466,10 +7517,10 @@ async function saveSettings() {
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
     }
 
-    const response = await apiFetch('/api/attendance/settings', {
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
       method: 'PUT',
       body: JSON.stringify(payload),
-    })
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
       throw createForbiddenError()
@@ -7576,7 +7627,7 @@ async function loadRule() {
   ruleLoading.value = true
   try {
     const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/rules/default?${query.toString()}`)
+    const response = await apiFetchWithTimeout(`/api/attendance/rules/default?${query.toString()}`, {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     const data = await response.json()
     if (!response.ok || !data.ok) {
       throw new Error(data?.error?.message || 'Failed to load rule')
@@ -7611,10 +7662,10 @@ async function saveRule() {
       workingDays: parseWorkingDaysInput(ruleForm.workingDays),
       orgId: normalizedOrgId(),
     }
-    const response = await apiFetch('/api/attendance/rules/default', {
+    const response = await apiFetchWithTimeout('/api/attendance/rules/default', {
       method: 'PUT',
       body: JSON.stringify(payload),
-    })
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
       throw createForbiddenError()
