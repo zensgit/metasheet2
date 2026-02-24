@@ -1595,6 +1595,42 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Post-PR #240 Final Policy Restore and Dashboard Bind
+
+Goal:
+
+- Confirm branch protection review requirements are fully restored after merging docs PR [#240](https://github.com/zensgit/metasheet2/pull/240) (`0871a20d04c38e9026149f9399deb71dd9bb4bc4`) and that dashboard consumes the latest non-drill policy run.
+
+Execution:
+
+1. Re-applied branch protection with:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after policy completion.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22337671524](https://github.com/zensgit/metasheet2/actions/runs/22337671524) | PASS | `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.json`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.log`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337693734](https://github.com/zensgit/metasheet2/actions/runs/22337693734) | PASS | `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/gate-meta/protection/meta.json` |
+
+Observed dashboard highlights (`#22337693734`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22337671524`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+- `gateFlat.perf.recordUpsertStrategy=staging`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Post-PR #239 Gate Contract Re-Verify
 
 Goal:
