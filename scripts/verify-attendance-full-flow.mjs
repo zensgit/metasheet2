@@ -311,11 +311,16 @@ async function waitForImportPayload(page, previousValue = null) {
   }, previousValue, { timeout: timeoutMs })
 }
 
-function buildRecoveryCsv(workDate, rowCount) {
+function buildRecoveryCsv(workDate, rowCount, userId) {
   const lines = new Array(rowCount + 1)
   lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+  const baseDate = new Date(`${workDate}T00:00:00Z`)
+  const resolvedUserId = String(userId || '').trim() || 'current-user'
   for (let i = 0; i < rowCount; i += 1) {
-    lines[i + 1] = `${workDate},recovery-user-${i},recovery-group,09:00,18:00,正常`
+    const d = new Date(baseDate)
+    d.setUTCDate(d.getUTCDate() - i)
+    const dateText = d.toISOString().slice(0, 10)
+    lines[i + 1] = `${dateText},${resolvedUserId},recovery-group,09:00,18:00,正常`
   }
   return lines.join('\n')
 }
@@ -354,6 +359,21 @@ async function uploadRecoveryCsvFile(apiBase, orgId, csvText) {
   }
 }
 
+async function resolveRecoveryUserId(apiBase) {
+  const response = await fetch(`${normalizeUrl(apiBase)}/auth/me`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data) return ''
+  const user = data?.data?.user ?? data?.user ?? {}
+  const value = user?.userId || user?.id || user?.user_id || ''
+  return String(value || '').trim()
+}
+
 async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   logInfo('Admin import recovery assertion started')
   const payloadInput = importSection.locator('#attendance-import-payload').first()
@@ -373,11 +393,12 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   const orgIdFromInput = await page.locator('#attendance-org-id').first().inputValue().catch(() => '')
   const basePayload = tryParseJsonObject(await payloadInput.inputValue())
   const resolvedOrgId = String(basePayload.orgId || orgIdFromInput || 'default').trim() || 'default'
+  const resolvedUserId = String(basePayload.userId || await resolveRecoveryUserId(apiBase) || '').trim() || 'current-user'
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
   try {
     let preparedByApiUpload = false
     try {
-      const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 200))
+      const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 200, resolvedUserId))
       const nextPayload = {
         ...basePayload,
         orgId: resolvedOrgId,
@@ -401,7 +422,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
 
       const initialPayload = await payloadInput.inputValue()
-      await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1), 'utf8')
+      await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1, resolvedUserId), 'utf8')
       await csvInput.setInputFiles(csvPath)
       await loadCsvButton.click()
       await waitForImportPayload(page, initialPayload)
@@ -409,7 +430,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       if (!payload.includes('"csvFileId"')) {
         logInfo('Recovery assertion fallback: forcing upload channel with large CSV payload')
         const previousPayload = payload
-        await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000), 'utf8')
+        await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 130000, resolvedUserId), 'utf8')
         await csvInput.setInputFiles(csvPath)
         await loadCsvButton.click()
         try {
