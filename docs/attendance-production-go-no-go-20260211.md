@@ -1595,6 +1595,56 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Post-PR #246 Mainline Gate Re-Run
+
+Goal:
+
+- Confirm `main` remains compliant after PR #246 merge and temporary merge override recovery:
+  - branch policy includes PR review fields
+  - dashboard binds latest policy run
+  - strict gates still pass with import telemetry requirement enabled
+
+Execution:
+
+1. Merged PR [#246](https://github.com/zensgit/metasheet2/pull/246).
+2. Restored branch protection baseline:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+3. Triggered:
+   - `Attendance Branch Policy Drift (Prod)` on `main`
+   - `Attendance Daily Gate Dashboard` (`lookback_hours=48`) on `main`
+   - `Attendance Strict Gates (Prod)` on `main` with `require_import_telemetry=true`
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22346290813](https://github.com/zensgit/metasheet2/actions/runs/22346290813) | PASS | `output/playwright/ga/22346290813/policy.json`, `output/playwright/ga/22346290813/policy.log`, `output/playwright/ga/22346290813/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`) | [#22346315048](https://github.com/zensgit/metasheet2/actions/runs/22346315048) | PASS | `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22346315048/gate-meta/protection/meta.json` |
+| Strict Gates (main, twice, non-drill) | [#22346357457](https://github.com/zensgit/metasheet2/actions/runs/22346357457) | PASS | `output/playwright/ga/22346357457/20260224-101623-1/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-2/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-1/gate-api-smoke.log`, `output/playwright/ga/22346357457/20260224-101623-2/gate-api-smoke.log` |
+
+Observed highlights:
+
+- `policy.json` now reports:
+  - `requirePrReviews=true`
+  - `prReviewsRequiredCurrent=true`
+  - `minApprovingReviewCount=1`
+  - `approvingReviewCountCurrent=1`
+- Daily dashboard reports:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.protection.runId=22346290813`
+- Strict API smoke logs (both iterations) include:
+  - `import commit telemetry ok`
+  - `import idempotency telemetry ok`
+  - `import async telemetry ok`
+  - `SMOKE PASS`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Branch Policy Script Review-Field Enforcement Repair
 
 Goal:
