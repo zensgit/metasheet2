@@ -1595,6 +1595,40 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
+
+Goal:
+
+- Verify the hardened desktop async import recovery polling logic under strict gate conditions, including explicit `require_import_job_recovery=true`.
+
+Execution:
+
+1. Updated `scripts/verify-attendance-full-flow.mjs` recovery polling to deadline-based retries with resume/reload fallback actions.
+2. Triggered strict gates on branch `codex/attendance-next-round-ops` with default parameters.
+3. Triggered strict gates with `require_import_job_recovery=true` to force recovery assertion execution in desktop full-flow.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (default recovery gate off) | [#22356838096](https://github.com/zensgit/metasheet2/actions/runs/22356838096) | PASS | `output/playwright/ga/22356838096/20260224-151021-1/gate-summary.json`, `output/playwright/ga/22356838096/20260224-151021-2/gate-summary.json` |
+| Strict Gates (`require_import_job_recovery=true`) | [#22357338954](https://github.com/zensgit/metasheet2/actions/runs/22357338954) | PASS | `output/playwright/ga/22357338954/20260224-152238-1/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-2/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22357338954/20260224-152238-2/gate-playwright-full-flow-desktop.log` |
+| Strict Gates rerun (same params, runner-level install stall) | [#22357011088](https://github.com/zensgit/metasheet2/actions/runs/22357011088) | CANCELED | GitHub run timeline; canceled before gate execution due runner stall in browser install step |
+
+Observed highlights:
+
+- Recovery gate was truly active in `#22357338954`:
+  - Both `gate-summary.json` files include `"requireImportJobRecovery": true`.
+  - Desktop logs include `Admin import recovery assertion passed` in both iterations.
+- Strict API smoke remained green with required strict markers:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Development Verification (2026-02-24): Optional 500k Longrun Toggle + Async Telemetry UX
 
 Goal:
