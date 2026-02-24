@@ -347,6 +347,14 @@ function parsePerfSummaryJson(text) {
     : (typeof value?.jobElapsedMs === 'number'
       ? value.jobElapsedMs
       : (typeof value?.perfMetrics?.elapsedMs === 'number' ? value.perfMetrics.elapsedMs : null))
+  const recordUpsertStrategy = typeof value?.recordUpsertStrategy === 'string'
+    ? value.recordUpsertStrategy.trim().toLowerCase()
+    : (typeof value?.perfMetrics?.recordUpsertStrategy === 'string'
+      ? value.perfMetrics.recordUpsertStrategy.trim().toLowerCase()
+      : null)
+  const expectedRecordUpsertStrategy = typeof value?.expectations?.recordUpsertStrategy === 'string'
+    ? value.expectations.recordUpsertStrategy.trim().toLowerCase()
+    : null
 
   return {
     reason: regressionsRaw.length > 0 ? 'REGRESSION' : null,
@@ -359,6 +367,8 @@ function parsePerfSummaryJson(text) {
     processedRows: processedRows === null ? null : String(processedRows),
     failedRows: failedRows === null ? null : String(failedRows),
     elapsedMs: elapsedMs === null ? null : String(elapsedMs),
+    recordUpsertStrategy: recordUpsertStrategy || null,
+    expectedRecordUpsertStrategy: expectedRecordUpsertStrategy || null,
     uploadCsv: uploadCsv === null ? null : uploadCsv ? 'true' : 'false',
     previewMs: previewMs === null ? null : String(previewMs),
     commitMs: commitMs === null ? null : String(commitMs),
@@ -1615,6 +1625,8 @@ async function run() {
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
         if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
         if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
+        if (meta.recordUpsertStrategy) summaryBits.push(`upsert=${meta.recordUpsertStrategy}`)
+        if (meta.expectedRecordUpsertStrategy) summaryBits.push(`upsert_expected=${meta.expectedRecordUpsertStrategy}`)
         if (meta.processedRows) summaryBits.push(`processed=${meta.processedRows}`)
         if (meta.failedRows) summaryBits.push(`failed=${meta.failedRows}`)
         if (meta.elapsedMs) summaryBits.push(`elapsed=${meta.elapsedMs}`)
@@ -1676,6 +1688,8 @@ async function run() {
         flat.summarySchemaVersion = meta.schemaVersion ?? null
         flat.engine = meta.engine ?? null
         flat.requestedEngine = meta.requestedEngine ?? null
+        flat.recordUpsertStrategy = meta.recordUpsertStrategy ?? null
+        flat.expectedRecordUpsertStrategy = meta.expectedRecordUpsertStrategy ?? null
         flat.processedRows = meta.processedRows ?? null
         flat.failedRows = meta.failedRows ?? null
         flat.elapsedMs = meta.elapsedMs ?? null

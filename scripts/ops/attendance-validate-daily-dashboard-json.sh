@@ -79,6 +79,8 @@ function validate_perf_like_gate() {
   local gate_rows
   local gate_mode
   local gate_upload_csv
+  local gate_upsert_strategy
+  local gate_expected_upsert_strategy
   local gate_regressions_count
   local gate_preview_ms
 
@@ -115,6 +117,8 @@ function validate_perf_like_gate() {
   gate_rows="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].rows // empty' "$report_json")"
   gate_mode="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].mode // empty' "$report_json")"
   gate_upload_csv="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].uploadCsv // empty' "$report_json")"
+  gate_upsert_strategy="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].recordUpsertStrategy // empty' "$report_json")"
+  gate_expected_upsert_strategy="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].expectedRecordUpsertStrategy // empty' "$report_json")"
   gate_regressions_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].regressionsCount // empty' "$report_json")"
   gate_preview_ms="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].previewMs // empty' "$report_json")"
 
@@ -144,6 +148,33 @@ function validate_perf_like_gate() {
       die "${gate_label} contract failed: gateFlat.${gate_key}.uploadCsv=${gate_upload_csv:-<empty>} (expected true|false when status=PASS)"
       ;;
   esac
+
+  if [[ -n "$gate_upsert_strategy" ]]; then
+    case "$gate_upsert_strategy" in
+      values|unnest|staging)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.recordUpsertStrategy=${gate_upsert_strategy} (expected values|unnest|staging when present)"
+        ;;
+    esac
+  fi
+
+  if [[ -n "$gate_expected_upsert_strategy" ]]; then
+    case "$gate_expected_upsert_strategy" in
+      values|unnest|staging)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.expectedRecordUpsertStrategy=${gate_expected_upsert_strategy} (expected values|unnest|staging when present)"
+        ;;
+    esac
+
+    if [[ -z "$gate_upsert_strategy" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.expectedRecordUpsertStrategy=${gate_expected_upsert_strategy} but recordUpsertStrategy is empty"
+    fi
+    if [[ "$gate_upsert_strategy" != "$gate_expected_upsert_strategy" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.recordUpsertStrategy=${gate_upsert_strategy} mismatches expectedRecordUpsertStrategy=${gate_expected_upsert_strategy}"
+    fi
+  fi
 
   if [[ -z "$gate_regressions_count" ]] || ! [[ "$gate_regressions_count" =~ ^[0-9]+$ ]]; then
     die "${gate_label} contract failed: gateFlat.${gate_key}.regressionsCount=${gate_regressions_count:-<empty>} (expected integer when status=PASS)"
