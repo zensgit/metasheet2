@@ -2478,3 +2478,37 @@ Observed policy snapshot (`policy.json`):
 - `prReviewsRequiredCurrent=true`
 - `approvingReviewCountCurrent=1`
 - `codeOwnerReviewsCurrent=false`
+
+## Latest Notes (2026-02-24): Post-PR #246 Mainline Re-Validation
+
+Execution summary:
+
+1. Merged PR [#246](https://github.com/zensgit/metasheet2/pull/246) (`fix(attendance-gates): restore branch policy review-field drift checks`).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) to confirm `gateFlat.protection` references the latest policy run.
+4. Re-ran `Attendance Strict Gates (Prod)` on `main` with `require_import_telemetry=true`.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22346290813](https://github.com/zensgit/metasheet2/actions/runs/22346290813) | PASS | `output/playwright/ga/22346290813/policy.json`, `output/playwright/ga/22346290813/policy.log`, `output/playwright/ga/22346290813/step-summary.md` |
+| Daily Dashboard (`lookback_hours=48`) | [#22346315048](https://github.com/zensgit/metasheet2/actions/runs/22346315048) | PASS | `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22346315048/gate-meta/protection/meta.json` |
+| Strict Gates (main, twice, non-drill) | [#22346357457](https://github.com/zensgit/metasheet2/actions/runs/22346357457) | PASS | `output/playwright/ga/22346357457/20260224-101623-1/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-2/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-1/gate-api-smoke.log`, `output/playwright/ga/22346357457/20260224-101623-2/gate-api-smoke.log` |
+
+Observed status:
+
+- `policy.json` confirms review enforcement:
+  - `requirePrReviews=true`
+  - `prReviewsRequiredCurrent=true`
+  - `minApprovingReviewCount=1`
+  - `approvingReviewCountCurrent=1`
+- Daily dashboard remains green and references the latest policy run:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.protection.runId=22346290813`
+- Strict API smoke logs (both iterations) include:
+  - `import commit telemetry ok`
+  - `import idempotency telemetry ok`
+  - `import async telemetry ok`
+  - `SMOKE PASS`
