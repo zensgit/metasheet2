@@ -22,6 +22,10 @@ on:
         description: 'Upload CSV via /attendance/import/upload (true/false)'
         required: false
         default: 'true'
+      include_rows500k_preview:
+        description: 'Run rows500k-preview scenario (true/false)'
+        required: false
+        default: 'true'
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -184,6 +188,7 @@ jobs:
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
+      INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -194,6 +199,7 @@ jobs:
           node-version: '20'
 
       - name: Run long-run scenario
+        if: matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true'
         env:
           SCENARIO: ${{ matrix.id }}
           ROWS: ${{ matrix.rows }}
@@ -213,7 +219,13 @@ jobs:
           mkdir -p "$OUTPUT_DIR"
           node ./scripts/ops/attendance-import-perf.mjs 2>&1 | tee "$OUTPUT_DIR/perf.log"
 
+      - name: Mark rows500k-preview as skipped
+        if: matrix.id == 'rows500k-preview' && env.INCLUDE_ROWS500K_PREVIEW != 'true'
+        run: |
+          echo "Skipping rows500k-preview because INCLUDE_ROWS500K_PREVIEW=${INCLUDE_ROWS500K_PREVIEW}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Capture scenario summary
+        if: matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true'
         run: |
           set -euo pipefail
           SCENARIO_DIR="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"
@@ -234,6 +246,7 @@ jobs:
           path: |
             output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/**
             output/playwright/attendance-import-perf-longrun/current-flat/rows${{ matrix.rows }}-${{ matrix.mode }}.json
+          if-no-files-found: ignore
 
   trend-report:
     needs: perf-scenarios

@@ -1940,15 +1940,7 @@
                     ({{ importAsyncJob.progressPercent }}%)
                   </span>
                 </div>
-                <div v-if="typeof importAsyncJob.processedRows === 'number' || typeof importAsyncJob.failedRows === 'number'">
-                  Processed: {{ importAsyncJob.processedRows ?? 0 }} · Failed: {{ importAsyncJob.failedRows ?? 0 }}
-                </div>
-                <div v-if="typeof importAsyncJob.elapsedMs === 'number' || typeof importAsyncJob.throughputRowsPerSec === 'number'">
-                  Elapsed: {{ importAsyncJob.elapsedMs ?? 0 }} ms
-                  <span v-if="typeof importAsyncJob.throughputRowsPerSec === 'number'">
-                    · Throughput: {{ importAsyncJob.throughputRowsPerSec }} rows/s
-                  </span>
-                </div>
+                <div v-if="importAsyncJobTelemetryText">{{ importAsyncJobTelemetryText }}</div>
                 <div v-if="importAsyncJob.kind !== 'preview' && importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
                 <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
                   Preview rows: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
@@ -3666,6 +3658,7 @@ interface AttendanceImportJob {
   status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string
   progress: number
   total: number
+  engine?: 'standard' | 'bulk' | string | null
   processedRows?: number
   failedRows?: number
   elapsedMs?: number
@@ -4023,6 +4016,44 @@ const importAsyncJob = ref<AttendanceImportJob | null>(null)
 const importAsyncPolling = ref(false)
 const reconcileResult = ref<AttendanceReconcileResult | null>(null)
 const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
+
+function toNonNegativeNumber(value: unknown): number | null {
+  const num = Number(value)
+  if (!Number.isFinite(num) || num < 0) return null
+  return num
+}
+
+const importAsyncJobTelemetryText = computed(() => {
+  const job = importAsyncJob.value
+  if (!job) return ''
+
+  const parts: string[] = []
+  const engine = String(job.engine || '').trim()
+  const total = toNonNegativeNumber(job.total)
+  const hasInlineProgress = total !== null && total > 0
+  const processed = toNonNegativeNumber(
+    job.processedRows ?? (hasInlineProgress ? null : job.progress),
+  )
+  const failed = toNonNegativeNumber(job.failedRows)
+  const elapsedMs = toNonNegativeNumber(job.elapsedMs)
+  const progressPercent = toNonNegativeNumber(job.progressPercent)
+  const throughputRowsPerSec = toNonNegativeNumber(job.throughputRowsPerSec)
+
+  if (engine) parts.push(`Engine: ${engine}`)
+  if (processed !== null) {
+    if (total !== null && total > 0) {
+      parts.push(`Processed: ${processed}/${total}`)
+    } else {
+      parts.push(`Processed: ${processed}`)
+    }
+  }
+  if (failed !== null) parts.push(`Failed: ${failed}`)
+  if (elapsedMs !== null) parts.push(`Elapsed: ${Math.round(elapsedMs)} ms`)
+  if (!hasInlineProgress && progressPercent !== null) parts.push(`Progress: ${Math.round(progressPercent)}%`)
+  if (throughputRowsPerSec !== null) parts.push(`Throughput: ${throughputRowsPerSec.toFixed(2)} rows/s`)
+
+  return parts.join(' · ')
+})
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)

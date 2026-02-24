@@ -2512,3 +2512,44 @@ Observed status:
   - `import idempotency telemetry ok`
   - `import async telemetry ok`
   - `SMOKE PASS`
+
+## Latest Notes (2026-02-24): Perf Longrun Optional 500k Toggle + Import Async Telemetry UX
+
+Execution summary:
+
+1. Added optional longrun input `include_rows500k_preview` in `.github/workflows/attendance-import-perf-longrun.yml` (default `true`) to allow faster non-drill reruns without removing 500k coverage from defaults.
+2. Updated `scripts/ops/attendance-import-perf-trend-report.mjs` notes:
+   - Automatically shows `50k/100k/500k` when 500k summary exists.
+   - Emits explicit skip note when 500k scenario is disabled.
+3. Polished `apps/web/src/views/AttendanceView.vue` async import job status card:
+   - Added consolidated telemetry line with `Engine/Processed/Failed/Elapsed/Throughput`.
+   - Avoided duplicate progress text when top-line progress is already shown.
+
+Verification:
+
+| Check | Command/Run | Status | Evidence |
+|---|---|---|---|
+| Trend report syntax | `node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | local |
+| Web compile/type check | `pnpm --filter @metasheet/web build` | PASS | local |
+| Trend script with 500k-enabled fixture | `CURRENT_ROOT=output/playwright/ga/22334158061 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check/20260224-112744/attendance-import-perf-longrun-trend.md` |
+| Trend script with no-500k fixture | `CURRENT_ROOT=output/playwright/ga/22020987167 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check-no500k/20260224-112810/attendance-import-perf-longrun-trend.md` |
+| Perf longrun (branch, non-drill, `include_rows500k_preview=false`) | [#22348884993](https://github.com/zensgit/metasheet2/actions/runs/22348884993) | PASS | `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows10k-commit-22348884993-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows100k-commit-22348884993-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-trend-22348884993-1/20260224-113137/attendance-import-perf-longrun-trend.md` |
+
+Observed run evidence (`#22348884993`):
+
+- `rows500k-preview` matrix leg skipped by policy toggle (`Mark rows500k-preview as skipped` step success).
+- Trend markdown includes:
+  - `500k preview scenario is currently skipped (include_rows500k_preview=false).`
+- `perf-summary.json` keeps upload and telemetry visibility:
+  - `uploadCsv=true`
+  - `engine=standard|bulk`
+
+Recommended command for faster non-drill reruns:
+
+```bash
+gh workflow run attendance-import-perf-longrun.yml \
+  --ref main \
+  -f upload_csv=true \
+  -f include_rows500k_preview=false \
+  -f fail_on_regression=false
+```

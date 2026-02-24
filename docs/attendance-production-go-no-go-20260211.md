@@ -1595,6 +1595,54 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Development Verification (2026-02-24): Optional 500k Longrun Toggle + Async Telemetry UX
+
+Goal:
+
+- Keep longrun defaults production-safe (`500k` still enabled by default) while enabling faster non-drill reruns via explicit toggle.
+- Improve Admin Center async import job readability without changing API behavior.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - Added `workflow_dispatch` input `include_rows500k_preview` (default `true`).
+  - Added env `INCLUDE_ROWS500K_PREVIEW` and step-level gating:
+    - Skip run/capture for `rows500k-preview` when disabled.
+    - Keep matrix leg explicit with summary marker (`Mark rows500k-preview as skipped`).
+  - Artifact upload now tolerates skipped 500k leg (`if-no-files-found: ignore`).
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Notes now reflect whether 500k data is present.
+  - Emits explicit skip note when 500k is disabled.
+- `apps/web/src/views/AttendanceView.vue`
+  - Added async job field `engine`.
+  - Replaced split telemetry lines with a compact computed summary line.
+  - Avoided duplicate progress output when top-line progress already exists.
+
+Verification:
+
+| Check | Command/Run | Status | Evidence |
+|---|---|---|---|
+| Trend report script syntax | `node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | local |
+| Frontend build/type check | `pnpm --filter @metasheet/web build` | PASS | local |
+| Trend report fixture (500k present) | `CURRENT_ROOT=output/playwright/ga/22334158061 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check/20260224-112744/attendance-import-perf-longrun-trend.md` |
+| Trend report fixture (500k absent) | `CURRENT_ROOT=output/playwright/ga/22020987167 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check-no500k/20260224-112810/attendance-import-perf-longrun-trend.md` |
+| Perf longrun (branch non-drill, `include_rows500k_preview=false`) | [#22348884993](https://github.com/zensgit/metasheet2/actions/runs/22348884993) | PASS | `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows10k-commit-22348884993-1/current/rows10k-commit/attendance-perf-mm0iw9ja-i5kabx/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows100k-commit-22348884993-1/current/rows100k-commit/attendance-perf-mm0iwbrg-xg1csh/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-trend-22348884993-1/20260224-113137/attendance-import-perf-longrun-trend.md` |
+
+Observed:
+
+- Workflow run `#22348884993` succeeded with `rows500k-preview` skipped by toggle.
+- Trend markdown includes skip annotation for disabled 500k path.
+- Commit perf summaries retain production observability fields:
+  - `uploadCsv=true`
+  - `engine`
+  - `processedRows`
+  - `failedRows`
+  - `elapsedMs`
+
+Decision:
+
+- `GO` unchanged. This is backward-compatible gating + UX observability hardening.
+
 ## Post-Go Verification (2026-02-24): Post-PR #246 Mainline Gate Re-Run
 
 Goal:
