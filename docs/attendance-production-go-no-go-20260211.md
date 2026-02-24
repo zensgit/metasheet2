@@ -1595,6 +1595,50 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Strict API Smoke Import Telemetry Gate
+
+Goal:
+
+- Enforce import telemetry fields in strict API smoke so production gates fail fast if import responses/jobs stop returning:
+  - `engine`
+  - `processedRows`
+  - `failedRows`
+  - `elapsedMs`
+
+Changes:
+
+- `scripts/ops/attendance-smoke-api.mjs`
+  - Added `REQUIRE_IMPORT_TELEMETRY=true|false`.
+  - Added telemetry assertions for:
+    - `POST /attendance/import/commit`
+    - `POST /attendance/import/commit` idempotency retry
+    - `GET /attendance/import/jobs/:id` for preview-async and commit-async
+- `scripts/ops/attendance-run-gates.sh`
+  - Added and forwarded `REQUIRE_IMPORT_TELEMETRY`.
+- `scripts/ops/attendance-run-strict-gates-twice.sh`
+  - Added strict default `REQUIRE_IMPORT_TELEMETRY=true`.
+- `.github/workflows/attendance-strict-gates-prod.yml`
+  - Added workflow input `require_import_telemetry` (default `true`).
+- `scripts/ops/attendance-detect-api-smoke-reason.sh`
+  - Added reason mapping: `IMPORT_TELEMETRY_MISSING`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (branch `codex/attendance-strict-telemetry-gate`, twice, non-drill) | [#22343985697](https://github.com/zensgit/metasheet2/actions/runs/22343985697) | PASS | `output/playwright/ga/22343985697/20260224-090846-1/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-2/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-1/gate-summary.json`, `output/playwright/ga/22343985697/20260224-090846-2/gate-summary.json` |
+
+Evidence highlights (both iterations):
+
+- `import commit telemetry ok`
+- `import idempotency telemetry ok`
+- `import async telemetry ok`
+- `SMOKE PASS`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Post-PR #243 Admin Save Timeout Hardening
 
 Goal:

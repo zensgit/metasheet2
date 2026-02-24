@@ -25,6 +25,7 @@ REQUIRE_IDEMPOTENCY="true" \
 REQUIRE_IMPORT_EXPORT="true" \
 REQUIRE_IMPORT_UPLOAD="true" \
 REQUIRE_IMPORT_ASYNC="true" \
+REQUIRE_IMPORT_TELEMETRY="true" \
 REQUIRE_IMPORT_JOB_RECOVERY="false" \
 RUN_PREFLIGHT="false" \
 API_BASE="http://142.171.239.56:8081/api" \
@@ -42,6 +43,9 @@ Expected:
   - `import upload ok`
   - `export csv ok`
   - `audit export csv ok`
+  - `import commit telemetry ok`
+  - `import idempotency telemetry ok`
+  - `import async telemetry ok`
   - `import async idempotency ok`
 - Optional (when `REQUIRE_IMPORT_JOB_RECOVERY=true`):
   - `gate-playwright-full-flow-desktop.log` contains `Admin import recovery assertion passed`.
@@ -2417,3 +2421,35 @@ Observed status:
   - `Full flow verification complete`
 - Branch policy remains compliant (`require_pr_reviews=true`, `min_approving_review_count=1`).
 - Daily dashboard remains green (`overallStatus=pass`, `p0Status=pass`).
+
+## Latest Notes (2026-02-24): Strict Gate Telemetry Enforcement (Branch Verification)
+
+Execution summary:
+
+1. Added strict API smoke telemetry requirement for import responses/jobs:
+   - `engine`
+   - `processedRows`
+   - `failedRows`
+   - `elapsedMs`
+2. Wired `REQUIRE_IMPORT_TELEMETRY` through:
+   - `scripts/ops/attendance-run-gates.sh`
+   - `scripts/ops/attendance-run-strict-gates-twice.sh`
+   - `.github/workflows/attendance-strict-gates-prod.yml` (`require_import_telemetry`, default `true`)
+3. Re-ran strict gates on branch `codex/attendance-strict-telemetry-gate`.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (branch, twice, non-drill) | [#22343985697](https://github.com/zensgit/metasheet2/actions/runs/22343985697) | PASS | `output/playwright/ga/22343985697/20260224-090846-1/gate-summary.json`, `output/playwright/ga/22343985697/20260224-090846-2/gate-summary.json`, `output/playwright/ga/22343985697/20260224-090846-1/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-2/gate-api-smoke.log` |
+
+Observed API smoke evidence (both strict iterations):
+
+- `import upload ok`
+- `preview async telemetry ok`
+- `import commit telemetry ok`
+- `import idempotency telemetry ok`
+- `export csv ok`
+- `import async telemetry ok`
+- `import async idempotency ok`
+- `SMOKE PASS`

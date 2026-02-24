@@ -8,11 +8,13 @@ const requireIdempotency = process.env.REQUIRE_IDEMPOTENCY === 'true'
 const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
 const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
+const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
+const importEngines = new Set(['standard', 'bulk'])
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -178,6 +180,39 @@ function isoMinutesAgo(minutes) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function coerceNonNegativeNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed
+  }
+  return null
+}
+
+function assertImportTelemetry(payload, label, options = {}) {
+  const minProcessedRows = Number.isFinite(options.minProcessedRows) ? Number(options.minProcessedRows) : null
+  const engine = typeof payload?.engine === 'string' ? payload.engine.trim().toLowerCase() : ''
+  if (!importEngines.has(engine)) {
+    throw new Error(`${label}: telemetry.engine missing or invalid`)
+  }
+  const processedRows = coerceNonNegativeNumber(payload?.processedRows ?? payload?.rowCount ?? payload?.imported)
+  if (processedRows === null) {
+    throw new Error(`${label}: telemetry.processedRows missing or invalid`)
+  }
+  if (minProcessedRows !== null && processedRows < minProcessedRows) {
+    throw new Error(`${label}: telemetry.processedRows below minimum (${processedRows} < ${minProcessedRows})`)
+  }
+  const failedRows = coerceNonNegativeNumber(payload?.failedRows ?? payload?.skippedCount ?? 0)
+  if (failedRows === null) {
+    throw new Error(`${label}: telemetry.failedRows missing or invalid`)
+  }
+  const elapsedMs = coerceNonNegativeNumber(payload?.elapsedMs ?? payload?.jobElapsedMs)
+  if (elapsedMs === null) {
+    throw new Error(`${label}: telemetry.elapsedMs missing or invalid`)
+  }
+  return { engine, processedRows, failedRows, elapsedMs }
 }
 
 function isRetriableStatus(status) {
@@ -468,6 +503,10 @@ async function run() {
     if (!Array.isArray(previewAsyncResult.items) || previewAsyncResult.items.length === 0) {
       die('async preview job returned empty preview items')
     }
+    if (requireImportTelemetry) {
+      const telemetry = assertImportTelemetry(previewAsyncDone, 'GET /attendance/import/jobs/:id (preview-async)', { minProcessedRows: 1 })
+      log(`preview async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+    }
 
     const previewAsyncRetryPayload = { ...previewAsyncPayload }
     delete previewAsyncRetryPayload.commitToken
@@ -541,6 +580,10 @@ async function run() {
   const batchId = commit.body?.data?.batchId
   if (!batchId) die('commit did not return batchId')
   log(`commit ok: batchId=${batchId}`)
+  if (requireImportTelemetry) {
+    const telemetry = assertImportTelemetry(commit.body?.data, 'POST /attendance/import/commit', { minProcessedRows: 1 })
+    log(`import commit telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+  }
 
   // 6.1) idempotency retry should return the same batch without requiring a fresh commit token.
   const retryPayload = { ...commitPayload }
@@ -558,6 +601,10 @@ async function run() {
     if (!retryBatchId) die('idempotency retry did not return batchId')
     if (retryBatchId !== batchId) die(`idempotency retry returned different batchId: ${retryBatchId}`)
     if (commitRetry.body?.data?.idempotent !== true) die('idempotency retry missing idempotent=true')
+    if (requireImportTelemetry) {
+      const telemetry = assertImportTelemetry(commitRetry.body?.data, 'POST /attendance/import/commit (idempotency retry)', { minProcessedRows: 1 })
+      log(`import idempotency telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+    }
     log('idempotency ok')
   }
 
@@ -624,6 +671,10 @@ async function run() {
     })
     if (String(jobDone.batchId || '') !== String(asyncBatchId)) {
       die(`async job batchId mismatch: expected=${asyncBatchId} got=${String(jobDone.batchId || '')}`)
+    }
+    if (requireImportTelemetry) {
+      const telemetry = assertImportTelemetry(jobDone, 'GET /attendance/import/jobs/:id (commit-async)', { minProcessedRows: 1 })
+      log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
     }
 
     const asyncItemsRes = await apiFetch(`/attendance/import/batches/${asyncBatchId}/items?pageSize=50`, { method: 'GET' })
