@@ -267,6 +267,31 @@ async function assertHasRecords(page) {
   }
 }
 
+async function assertAdminSettingsSaveCycle(page) {
+  const settingsSection = page.locator('div.attendance__admin-section').filter({
+    has: page.getByRole('heading', { name: 'Settings', exact: true }),
+  }).first()
+  await settingsSection.waitFor({ timeout: adminReadyTimeoutMs })
+  const saveButton = settingsSection.getByRole('button', { name: 'Save settings', exact: true })
+  await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
+  await saveButton.click()
+
+  await page.waitForFunction(() => {
+    const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
+    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Settings')
+    if (!section) return false
+    const button = Array.from(section.querySelectorAll('button')).find((node) => {
+      const label = (node.textContent || '').trim()
+      return label === 'Save settings' || label === 'Saving...'
+    })
+    if (!button) return false
+    const label = (button.textContent || '').trim()
+    return label === 'Save settings' && !button.hasAttribute('disabled')
+  }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
+
+  logInfo('Admin settings save cycle verified (Save settings button recovered from saving state)')
+}
+
 async function captureDebugScreenshot(page, fileName) {
   await fs.mkdir(outputDir, { recursive: true })
   const screenshotPath = path.join(outputDir, fileName)
@@ -597,6 +622,7 @@ async function run() {
       } else if (assertImportJobRecovery) {
         logInfo('WARN: import recovery assertion skipped (section unavailable)')
       }
+      await assertAdminSettingsSaveCycle(page)
       logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
