@@ -2161,6 +2161,7 @@ Updates:
 1. `scripts/ops/attendance-import-perf.mjs` now writes `recordUpsertStrategy` into `perf-summary.json`.
 2. `scripts/ops/attendance-import-perf-trend-report.mjs` now shows an `Upsert` column (`VALUES|UNNEST|STAGING`) in Scenario Summary.
 3. Attendance import commit/job telemetry now exposes `recordUpsertStrategy`, enabling GA artifacts to prove which write strategy was used.
+4. `attendance-import-perf-longrun.yml` now enforces `EXPECT_RECORD_UPSERT_STRATEGY=staging` for `rows100k-commit` to catch bulk-path regressions early.
 
 Local verification:
 

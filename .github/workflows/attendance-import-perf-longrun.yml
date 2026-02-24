@@ -130,6 +130,7 @@ jobs:
             commit_async: 'false'
             export_csv: 'true'
             rollback: 'false'
+            expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_PREVIEW_MS || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '100000' }}
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
@@ -140,6 +141,7 @@ jobs:
             commit_async: 'false'
             export_csv: 'true'
             rollback: 'false'
+            expected_upsert_strategy: 'staging'
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_PREVIEW_MS || '180000' }}
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_COMMIT_MS || '300000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_EXPORT_MS || '45000' }}
@@ -150,6 +152,7 @@ jobs:
             commit_async: 'true'
             export_csv: 'false'
             rollback: 'false'
+            expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_50K_MAX_PREVIEW_MS || '180000' }}
             max_commit_ms: ''
             max_export_ms: ''
@@ -160,6 +163,7 @@ jobs:
             commit_async: 'true'
             export_csv: 'false'
             rollback: 'false'
+            expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_MAX_PREVIEW_MS || '240000' }}
             max_commit_ms: ''
             max_export_ms: ''
@@ -170,6 +174,7 @@ jobs:
             commit_async: 'true'
             export_csv: 'false'
             rollback: 'false'
+            expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_500K_MAX_PREVIEW_MS || '480000' }}
             max_commit_ms: ''
             max_export_ms: ''
@@ -200,6 +205,7 @@ jobs:
           MAX_COMMIT_MS: ${{ matrix.max_commit_ms }}
           MAX_EXPORT_MS: ${{ matrix.max_export_ms }}
           MAX_ROLLBACK_MS: ${{ matrix.max_rollback_ms }}
+          EXPECT_RECORD_UPSERT_STRATEGY: ${{ matrix.expected_upsert_strategy }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail

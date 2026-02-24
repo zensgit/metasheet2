@@ -55,6 +55,18 @@ const bulkEngineThresholdRaw = Number(process.env.BULK_ENGINE_THRESHOLD || 50_00
 const bulkEngineThreshold = Number.isFinite(bulkEngineThresholdRaw)
   ? Math.max(1000, Math.floor(bulkEngineThresholdRaw))
   : 50_000
+const expectRecordUpsertStrategyRaw = String(process.env.EXPECT_RECORD_UPSERT_STRATEGY || '')
+  .trim()
+  .toLowerCase()
+const expectRecordUpsertStrategy = (() => {
+  if (!expectRecordUpsertStrategyRaw) return ''
+  if (expectRecordUpsertStrategyRaw === 'values'
+    || expectRecordUpsertStrategyRaw === 'unnest'
+    || expectRecordUpsertStrategyRaw === 'staging') {
+    return expectRecordUpsertStrategyRaw
+  }
+  die('EXPECT_RECORD_UPSERT_STRATEGY must be one of: values|unnest|staging')
+})()
 
 function die(message) {
   console.error(`[attendance-import-perf] ERROR: ${message}`)
@@ -311,6 +323,14 @@ function coerceNonNegativeFloat(value, digits = 2) {
   return Math.round(numeric * factor) / factor
 }
 
+function normalizeRecordUpsertStrategy(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'values' || normalized === 'unnest' || normalized === 'staging') {
+    return normalized
+  }
+  return ''
+}
+
 function makeCsv({ startDate, userId, groupName }) {
   const lines = new Array(rows + 1)
   lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
@@ -381,6 +401,9 @@ async function run() {
   await refreshAuthToken()
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
+  if (expectRecordUpsertStrategy) {
+    log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
+  }
 
   const startedAt = new Date().toISOString()
   const runId = makeId()
@@ -610,7 +633,7 @@ async function run() {
     chunkItemsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.itemsChunkSize)
     chunkRecordsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.recordsChunkSize)
     if (typeof finalJob?.recordUpsertStrategy === 'string' && finalJob.recordUpsertStrategy) {
-      recordUpsertStrategy = finalJob.recordUpsertStrategy
+      recordUpsertStrategy = normalizeRecordUpsertStrategy(finalJob.recordUpsertStrategy)
     }
     if (progressPercent === null) {
       const progress = coerceNonNegativeNumber(finalJob?.progress)
@@ -631,9 +654,9 @@ async function run() {
     chunkItemsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.itemsChunkSize)
     chunkRecordsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.recordsChunkSize)
     if (typeof commit.body?.data?.recordUpsertStrategy === 'string' && commit.body.data.recordUpsertStrategy) {
-      recordUpsertStrategy = commit.body.data.recordUpsertStrategy
+      recordUpsertStrategy = normalizeRecordUpsertStrategy(commit.body.data.recordUpsertStrategy)
     } else if (typeof commit.body?.data?.meta?.recordUpsertStrategy === 'string' && commit.body.data.meta.recordUpsertStrategy) {
-      recordUpsertStrategy = commit.body.data.meta.recordUpsertStrategy
+      recordUpsertStrategy = normalizeRecordUpsertStrategy(commit.body.data.meta.recordUpsertStrategy)
     }
     if (!batchId) die('commit did not return batchId')
   }
@@ -651,7 +674,7 @@ async function run() {
         chunkRecordsSize = coerceNonNegativeNumber(batchDetail.body?.data?.meta?.chunkConfig?.recordsChunkSize)
       }
       if (!recordUpsertStrategy && typeof batchDetail.body?.data?.meta?.recordUpsertStrategy === 'string') {
-        recordUpsertStrategy = batchDetail.body.data.meta.recordUpsertStrategy
+        recordUpsertStrategy = normalizeRecordUpsertStrategy(batchDetail.body.data.meta.recordUpsertStrategy)
       }
     }
   } catch (error) {
@@ -665,6 +688,8 @@ async function run() {
   if (failedRows === null) {
     failedRows = 0
   }
+  const normalizedRecordUpsertStrategy = normalizeRecordUpsertStrategy(recordUpsertStrategy)
+  recordUpsertStrategy = normalizedRecordUpsertStrategy || null
 
   // Optional: verify export still works and capture its latency.
   let exportMs = null
@@ -751,6 +776,9 @@ async function run() {
       maxExportMs,
       maxRollbackMs,
     },
+    expectations: {
+      recordUpsertStrategy: expectRecordUpsertStrategy || null,
+    },
     regressions: [],
   }
 
@@ -765,6 +793,18 @@ async function run() {
   }
   if (maxRollbackMs !== null && summary.rollbackMs !== null && summary.rollbackMs > maxRollbackMs) {
     summary.regressions.push(`rollbackMs=${summary.rollbackMs} exceeds maxRollbackMs=${maxRollbackMs}`)
+  }
+  if (expectRecordUpsertStrategy && summary.mode === 'commit') {
+    const actualStrategy = normalizeRecordUpsertStrategy(summary.recordUpsertStrategy)
+    if (!actualStrategy) {
+      summary.regressions.push(
+        `recordUpsertStrategy is missing (expected=${expectRecordUpsertStrategy})`
+      )
+    } else if (actualStrategy !== expectRecordUpsertStrategy) {
+      summary.regressions.push(
+        `recordUpsertStrategy=${actualStrategy} does not match expected=${expectRecordUpsertStrategy}`
+      )
+    }
   }
 
   await writeJson(path.join(outDir, 'perf-summary.json'), summary)
