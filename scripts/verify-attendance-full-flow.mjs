@@ -20,6 +20,7 @@ const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
+const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT !== 'false'
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
@@ -483,6 +484,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     if (assertImportJobTelemetry) {
       await asyncCard.getByText(/Processed:\s*\d+\s*·\s*Failed:\s*\d+/i).first().waitFor({ timeout: timeoutMs })
       await asyncCard.getByText(/Elapsed:\s*\d+\s*ms/i).first().waitFor({ timeout: timeoutMs })
+      await asyncCard.getByText(/Engine:\s*[a-z0-9_-]+/i).first().waitFor({ timeout: timeoutMs })
     }
 
     logInfo('Admin import recovery assertion passed')
@@ -602,6 +604,10 @@ async function run() {
       }
 
       const importSectionCount = await importSection.count()
+      if (assertImportScalabilityHint && importSectionCount > 0) {
+        await importSection.getByText(/Auto mode:\s*preview\s*>=\s*\d+\s*rows/i).first().waitFor({ timeout: timeoutMs })
+        logInfo('Import scalability hint verified')
+      }
       const shouldAssertRetry = assertAdminRetry && importSectionCount > 0
       if (shouldAssertRetry) {
         const payloadInput = importSection.locator('#attendance-import-payload').first()
