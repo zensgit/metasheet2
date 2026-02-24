@@ -1595,6 +1595,41 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Post-PR #239 Gate Contract Re-Verify
+
+Goal:
+
+- Confirm `main` remains green after merging PR [#239](https://github.com/zensgit/metasheet2/pull/239) (`29bae2eca09c74cf9085f0e88642b7f016287177`), which tightened dashboard contract parsing/validation for upsert strategy metadata.
+
+Execution:
+
+1. Merged PR [#239](https://github.com/zensgit/metasheet2/pull/239).
+2. Ran `Attendance Gate Contract Matrix` on `main` to validate the new `dashboard.invalid.upsert.json` negative case.
+3. Re-ran `Attendance Branch Policy Drift (Prod)` after restoring `require_pr_reviews=true` and `min_approving_review_count=1`.
+4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and confirmed it references the latest non-drill protection run.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Gate Contract Matrix (main) | [#22337517816](https://github.com/zensgit/metasheet2/actions/runs/22337517816) | PASS | `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.valid.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.invalid.upsert.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-strict-22337517816-1/strict/gate-summary.valid.json` |
+| Branch Policy Drift (main, non-drill) | [#22337554892](https://github.com/zensgit/metasheet2/actions/runs/22337554892) | PASS | `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.json`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.log`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337567788](https://github.com/zensgit/metasheet2/actions/runs/22337567788) | PASS | `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/gate-meta/protection/meta.json` |
+
+Observed dashboard highlights (`#22337567788`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22337554892`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+- `gateFlat.perf.recordUpsertStrategy=staging`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Post-PR #237 Mainline Gate Re-Verify
 
 Goal:
