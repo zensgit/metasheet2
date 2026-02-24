@@ -485,22 +485,84 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     }
 
     await asyncCard.waitFor({ timeout: timeoutMs })
-    const resumeButton = asyncCard.getByRole('button', { name: 'Resume polling', exact: true })
-    const resumeVisible = await resumeButton.count().then(async (count) => {
-      if (!count) return false
-      return resumeButton.first().isVisible()
-    })
-    if (resumeVisible) {
-      await resumeButton.first().click()
-    } else {
-      logInfo('WARN: resume polling button not visible after reload; continuing with completed-state assertion')
+    const completionStatus = asyncCard.getByText(/Status:\s*completed/i).first()
+    const completionPreview = page.getByText(/Preview job completed \(/).first()
+    const completionImport = page.getByText(/Imported \d+(\/\d+)? rows \(async job\)\./).first()
+    const failedStatus = asyncCard.getByText(/Status:\s*failed/i).first()
+    const canceledStatus = asyncCard.getByText(/Status:\s*canceled/i).first()
+    const pollDelayMs = Math.max(1200, Math.min(4000, importRecoveryIntervalMs * 20))
+    const recoveryDeadlineMs = Math.max(
+      timeoutMs + 30000,
+      Number.isFinite(importRecoveryTimeoutMs) ? Math.max(0, importRecoveryTimeoutMs) * 1000 + 15000 : 90000,
+    )
+    const recoveryDeadlineAt = Date.now() + recoveryDeadlineMs
+
+    async function clickWhenReady(locator) {
+      const visible = await locator.count().then(async (count) => {
+        if (!count) return false
+        return locator.isVisible().catch(() => false)
+      })
+      if (!visible) return false
+      const enabled = await locator.isEnabled().catch(() => false)
+      if (!enabled) return false
+      await locator.click()
+      return true
     }
 
-    await Promise.any([
-      asyncCard.getByText(/Status:\s*completed/i).first().waitFor({ timeout: timeoutMs }),
-      page.getByText(/Preview job completed \(/).first().waitFor({ timeout: timeoutMs }),
-      page.getByText(/Imported \d+(\/\d+)? rows \(async job\)\./).first().waitFor({ timeout: timeoutMs }),
-    ])
+    async function triggerRecoveryPollAction() {
+      const resumeCandidates = [
+        asyncCard.getByRole('button', { name: 'Resume polling', exact: true }).first(),
+        statusBlock.getByRole('button', { name: 'Resume import job', exact: true }).first(),
+      ]
+      for (const candidate of resumeCandidates) {
+        if (await clickWhenReady(candidate)) return 'resume'
+      }
+
+      const reloadCandidates = [
+        asyncCard.getByRole('button', { name: 'Reload job', exact: true }).first(),
+        statusBlock.getByRole('button', { name: 'Reload import job', exact: true }).first(),
+      ]
+      for (const candidate of reloadCandidates) {
+        if (await clickWhenReady(candidate)) return 'reload'
+      }
+
+      return 'none'
+    }
+
+    let completed = false
+    let attempt = 0
+    while (Date.now() < recoveryDeadlineAt) {
+      attempt += 1
+      const hasCompleted = await Promise.any([
+        completionStatus.isVisible().catch(() => false),
+        completionPreview.isVisible().catch(() => false),
+        completionImport.isVisible().catch(() => false),
+      ]).catch(() => false)
+      if (hasCompleted) {
+        completed = true
+        break
+      }
+
+      const hasFailed = await Promise.any([
+        failedStatus.isVisible().catch(() => false),
+        canceledStatus.isVisible().catch(() => false),
+      ]).catch(() => false)
+      if (hasFailed) {
+        throw new Error('Import recovery job reached failed/canceled state')
+      }
+
+      const action = await triggerRecoveryPollAction()
+      if (attempt % 5 === 0 || action === 'none') {
+        const remainingMs = Math.max(0, recoveryDeadlineAt - Date.now())
+        logInfo(`Recovery polling attempt=${attempt} action=${action} remaining_ms=${remainingMs}`)
+      }
+      await page.waitForTimeout(pollDelayMs)
+    }
+
+    if (!completed) {
+      const waitedMs = recoveryDeadlineMs
+      throw new Error(`Import recovery did not complete within ${waitedMs}ms`)
+    }
 
     if (assertImportJobTelemetry) {
       const processedLine = asyncCard.getByText(/Processed:\s*\d+\s*·\s*Failed:\s*\d+/i).first()
