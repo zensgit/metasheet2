@@ -1595,6 +1595,42 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-24): Branch Policy Script Review-Field Enforcement Repair
+
+Goal:
+
+- Close a branch-policy drift blind spot by ensuring scripts enforce/validate PR review requirements, not only strict/admin/check contexts.
+
+Changes:
+
+- `scripts/ops/attendance-ensure-branch-protection.sh`
+  - Ensures `required_pull_request_reviews` is explicitly configured when `REQUIRE_PR_REVIEWS=true`.
+- `scripts/ops/attendance-check-branch-protection.sh`
+  - Validates:
+    - `requirePrReviews`
+    - `minApprovingReviewCount`
+    - `requireCodeOwnerReviews`
+  - Emits these fields into `policy.json` for dashboard/ops evidence.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (branch `codex/attendance-branch-policy-review-fix`) | [#22346158689](https://github.com/zensgit/metasheet2/actions/runs/22346158689) | PASS | `output/playwright/ga/22346158689/policy.json`, `output/playwright/ga/22346158689/policy.log`, `output/playwright/ga/22346158689/step-summary.md` |
+
+Observed policy fields (`policy.json`):
+
+- `requirePrReviews=true`
+- `prReviewsRequiredCurrent=true`
+- `minApprovingReviewCount=1`
+- `approvingReviewCountCurrent=1`
+- `requireCodeOwnerReviews=false`
+- `codeOwnerReviewsCurrent=false`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict API Smoke Import Telemetry Gate
 
 Goal:

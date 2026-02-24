@@ -2453,3 +2453,28 @@ Observed API smoke evidence (both strict iterations):
 - `import async telemetry ok`
 - `import async idempotency ok`
 - `SMOKE PASS`
+
+## Latest Notes (2026-02-24): Branch Policy Scripts Re-aligned to PR Review Enforcement
+
+Execution summary:
+
+1. After merging PR [#245](https://github.com/zensgit/metasheet2/pull/245), identified a drift gap where branch-policy scripts could miss PR review requirements.
+2. Fixed branch-policy scripts to enforce and validate:
+   - `require_pr_reviews`
+   - `min_approving_review_count`
+   - `require_code_owner_reviews`
+3. Re-ran branch-policy drift workflow to confirm policy JSON carries and validates review fields.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (branch validation) | [#22346158689](https://github.com/zensgit/metasheet2/actions/runs/22346158689) | PASS | `output/playwright/ga/22346158689/policy.json`, `output/playwright/ga/22346158689/policy.log`, `output/playwright/ga/22346158689/step-summary.md` |
+
+Observed policy snapshot (`policy.json`):
+
+- `requirePrReviews=true`
+- `minApprovingReviewCount=1`
+- `prReviewsRequiredCurrent=true`
+- `approvingReviewCountCurrent=1`
+- `codeOwnerReviewsCurrent=false`
