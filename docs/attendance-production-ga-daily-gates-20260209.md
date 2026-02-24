@@ -2553,3 +2553,39 @@ gh workflow run attendance-import-perf-longrun.yml \
   -f include_rows500k_preview=false \
   -f fail_on_regression=false
 ```
+
+## Latest Notes (2026-02-24): Post-PR #248 Mainline Re-Validation
+
+Execution summary:
+
+1. Merged PR [#248](https://github.com/zensgit/metasheet2/pull/248) (merge commit `836eab8909db08179da82c76da5d57f7b2620631`).
+2. Temporarily relaxed review requirement only for merge operation, then restored and verified:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+3. Triggered and passed three mainline workflows:
+   - Branch Policy Drift
+   - Daily Gate Dashboard
+   - Perf Long Run (`include_rows500k_preview=false`)
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22349165386](https://github.com/zensgit/metasheet2/actions/runs/22349165386) | PASS | `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.json`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.log`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/step-summary.md` |
+| Daily Gate Dashboard (main, `lookback_hours=48`) | [#22349165388](https://github.com/zensgit/metasheet2/actions/runs/22349165388) | PASS | `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/gate-meta/protection/meta.json` |
+| Perf Long Run (main, non-drill, `include_rows500k_preview=false`) | [#22349165365](https://github.com/zensgit/metasheet2/actions/runs/22349165365) | PASS | `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows10k-commit-22349165365-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows100k-commit-22349165365-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-trend-22349165365-1/20260224-114015/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Branch policy evidence (`#22349165386`) confirms restored review baseline:
+  - `requirePrReviews=true`
+  - `prReviewsRequiredCurrent=true`
+  - `minApprovingReviewCount=1`
+  - `approvingReviewCountCurrent=1`
+- Daily dashboard (`#22349165388`) remains green:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+- Longrun (`#22349165365`) confirms optional 500k behavior on main:
+  - trend markdown contains `500k preview scenario is currently skipped (include_rows500k_preview=false)`
+  - commit summaries still expose `uploadCsv=true` and `engine/processedRows/failedRows/elapsedMs`

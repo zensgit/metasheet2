@@ -1643,6 +1643,46 @@ Decision:
 
 - `GO` unchanged. This is backward-compatible gating + UX observability hardening.
 
+## Post-Go Verification (2026-02-24): Post-PR #248 Mainline Re-Validation
+
+Goal:
+
+- Confirm merged PR #248 behaves correctly on `main` and branch protection review policy is restored after merge window override.
+
+Execution:
+
+1. Merged PR [#248](https://github.com/zensgit/metasheet2/pull/248) (merge commit `836eab8909db08179da82c76da5d57f7b2620631`).
+2. Re-applied branch protection baseline:
+   - `require_pr_reviews=true`
+   - `min_approving_review_count=1`
+   - `require_code_owner_reviews=false`
+3. Ran three mainline verifications:
+   - `Attendance Branch Policy Drift (Prod)`
+   - `Attendance Daily Gate Dashboard` (`lookback_hours=48`)
+   - `Attendance Import Perf Long Run` (`include_rows500k_preview=false`, non-drill)
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22349165386](https://github.com/zensgit/metasheet2/actions/runs/22349165386) | PASS | `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.json`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.log`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/step-summary.md` |
+| Daily Gate Dashboard (main) | [#22349165388](https://github.com/zensgit/metasheet2/actions/runs/22349165388) | PASS | `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/gate-meta/protection/meta.json` |
+| Perf Longrun (main, non-drill, `include_rows500k_preview=false`) | [#22349165365](https://github.com/zensgit/metasheet2/actions/runs/22349165365) | PASS | `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows10k-commit-22349165365-1/current/rows10k-commit/attendance-perf-mm0j7mga-2w4bgf/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows100k-commit-22349165365-1/current/rows100k-commit/attendance-perf-mm0j7m66-x339ka/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-trend-22349165365-1/20260224-114015/attendance-import-perf-longrun-trend.md` |
+
+Observed:
+
+- Branch policy output confirms review policy restored:
+  - `requirePrReviews=true`
+  - `prReviewsRequiredCurrent=true`
+  - `minApprovingReviewCount=1`
+  - `approvingReviewCountCurrent=1`
+- Daily dashboard remains `overallStatus=pass`.
+- Main longrun run keeps upload/telemetry visibility and correctly marks 500k as skipped when toggle is off.
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Post-PR #246 Mainline Gate Re-Run
 
 Goal:
