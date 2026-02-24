@@ -117,6 +117,12 @@ if grep -qE 'export CSV missing expected headers' "$log_path"; then
   exit 0
 fi
 
+# Import telemetry gate failures.
+if grep -qE 'telemetry\.(engine|processedRows|failedRows|elapsedMs)' "$log_path"; then
+  echo "IMPORT_TELEMETRY_MISSING"
+  exit 0
+fi
+
 if grep -qE 'plugin-attendance is not active' "$log_path"; then
   echo "PLUGIN_INACTIVE"
   exit 0
