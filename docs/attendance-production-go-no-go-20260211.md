@@ -1595,6 +1595,33 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Development Verification (2026-02-23): Longrun Upsert Strategy Guard
+
+Goal:
+
+- Prevent false-green longrun runs where 100k commit silently falls back from staging path.
+
+Changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - Added optional env assertion `EXPECT_RECORD_UPSERT_STRATEGY=values|unnest|staging`.
+  - Summary now includes `expectations.recordUpsertStrategy`.
+  - Fails with regression entry when expected strategy does not match actual telemetry.
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - Added matrix field `expected_upsert_strategy`.
+  - `rows100k-commit` now sets `expected_upsert_strategy: staging`.
+
+Local verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Perf script syntax | `node --check scripts/ops/attendance-import-perf.mjs` | PASS |
+| Longrun workflow syntax | `node --check scripts/ops/attendance-import-perf-trend-report.mjs` | PASS |
+
+Decision:
+
+- `GO` unchanged (guardrail tightening only; no API behavior change).
+
 ## Post-Go Development Verification (2026-02-23): Async Import Recovery UX Hardening
 
 Goal:
