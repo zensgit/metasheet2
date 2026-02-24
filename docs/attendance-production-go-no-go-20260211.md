@@ -1622,6 +1622,38 @@ Decision:
 
 - `GO` unchanged (guardrail tightening only; no API behavior change).
 
+## Post-Go Verification (2026-02-24): Post-PR #236 Merge and Gate Re-Verify
+
+Goal:
+
+- Confirm mainline gate health remains green after merging PR `#236` (longrun upsert guard).
+
+Execution:
+
+1. Merged PR [#236](https://github.com/zensgit/metasheet2/pull/236) (merge commit `753ce0bb4506232603f31e85aea29935b1b0a902`).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after policy completion to bind latest protection run.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22333998882](https://github.com/zensgit/metasheet2/actions/runs/22333998882) | PASS | `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.json`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.log`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | [#22334028181](https://github.com/zensgit/metasheet2/actions/runs/22334028181) | PASS | `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/gate-meta/protection/meta.json` |
+
+Observed dashboard highlights (`#22334028181`):
+
+- `overallStatus=pass`
+- `p0Status=pass`
+- `gateFlat.protection.status=PASS`
+- `gateFlat.protection.runId=22333998882`
+- `gateFlat.protection.requirePrReviews=true`
+- `gateFlat.protection.minApprovingReviews=1`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Development Verification (2026-02-23): Async Import Recovery UX Hardening
 
 Goal:
