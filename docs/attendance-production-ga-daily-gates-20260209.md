@@ -2708,6 +2708,37 @@ Observed highlights:
 - Trend remains green:
   - `Overall: PASS`
 
+## Latest Notes (2026-02-25): Legacy Branch Drift Issue Auto-Close Recovery (PR #254)
+
+Execution summary:
+
+1. Merged PR [#254](https://github.com/zensgit/metasheet2/pull/254) to make branch policy issue tracking compatible with both titles:
+   - `[Attendance P1] Branch policy drift alert` (current)
+   - `[Attendance P1] Branch protection drift alert` (legacy)
+2. Triggered `Attendance Branch Policy Drift (Prod)` on `main` and confirmed PASS.
+3. Verified historical legacy issue [#190](https://github.com/zensgit/metasheet2/issues/190) auto-closed on recovery.
+4. Triggered `Attendance Daily Gate Dashboard` on `main` and confirmed no open tracking issues.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, post-PR #254) | [#22383209034](https://github.com/zensgit/metasheet2/actions/runs/22383209034) | PASS | `output/playwright/ga/22383209034/policy.json`, `output/playwright/ga/22383209034/policy.log`, `output/playwright/ga/22383209034/step-summary.md` |
+| Daily Gate Dashboard (main, post issue-close recovery) | [#22383228278](https://github.com/zensgit/metasheet2/actions/runs/22383228278) | PASS | `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383228278/gate-meta/protection/meta.json` |
+
+Observed highlights:
+
+- `policy.json` confirms branch policy baseline is intact:
+  - `requirePrReviews=true`
+  - `minApprovingReviewCount=1`
+  - `prReviewsRequiredCurrent=true`
+  - `approvingReviewCountCurrent=1`
+- `openTrackingIssues` is now empty in dashboard JSON:
+  - `"openTrackingIssues": []`
+- Dashboard remains green:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+
 ## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
 
 Execution summary:
