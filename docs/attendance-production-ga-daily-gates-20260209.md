@@ -2951,3 +2951,32 @@ Observed highlights:
 Operational note:
 
 - `scripts/ops/attendance-run-workflow-dispatch.sh` now supports `REF=<git-ref>` (maps to `gh workflow run --ref`) so branch-level workflow verification can be run deterministically before merge.
+
+## Latest Notes (2026-02-25): `rows500k-commit` Timeout Hardening (PR #266/#267)
+
+Execution summary:
+
+1. Triggered `Attendance Import Perf Long Run` on `main` with `upload_csv=true`, `include_rows500k_commit=true`, `include_rows500k_preview=false`; run [#22394440411](https://github.com/zensgit/metasheet2/actions/runs/22394440411) failed on `rows500k-commit` with `canceling statement due to statement timeout`.
+2. Merged PR [#266](https://github.com/zensgit/metasheet2/pull/266) to add heavy-query timeout wiring in DB query config and attendance import heavy SQL paths.
+3. Re-ran the same longrun profile and confirmed timeout-layer progression (client read-timeout path removed; DB statement-timeout path remained).
+4. Merged PR [#267](https://github.com/zensgit/metasheet2/pull/267) to enforce `query_timeout` + `statement_timeout` and `SET LOCAL statement_timeout` in heavy import transactions.
+5. Re-ran longrun on `main`; run [#22394865768](https://github.com/zensgit/metasheet2/actions/runs/22394865768) passed, including `rows500k-commit`.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Build + deploy (post-PR #266) | [#22394293493](https://github.com/zensgit/metasheet2/actions/runs/22394293493) | PASS | GitHub Actions deploy logs |
+| Perf Long Run (main, post-PR #266, transitional) | [#22394440411](https://github.com/zensgit/metasheet2/actions/runs/22394440411) | FAIL | `output/playwright/ga/22394440411/attendance-import-perf-longrun-rows500k-commit-22394440411-1/current/rows500k-commit/perf.log` |
+| Build + deploy (post-PR #267) | [#22394759732](https://github.com/zensgit/metasheet2/actions/runs/22394759732) | PASS | GitHub Actions deploy logs |
+| Perf Long Run (main, post-PR #267, `rows500k-commit` enabled) | [#22394865768](https://github.com/zensgit/metasheet2/actions/runs/22394865768) | PASS | `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/perf.log`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/attendance-perf-mm1ycxgl-l8z7x1/perf-summary.json`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-trend-22394865768-1/20260225-113750/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- `rows500k-commit` summary reports `uploadCsv=true`, `mode=commit`, `commitMs=428928`, `elapsedMs=427000`.
+- Scenario log confirms success path:
+  - `preview ok: rows=500000`
+  - `commit ok: batchId=...`
+  - `job telemetry: progressPercent=100 throughputRowsPerSec=1170.96`
+- Default P1 tracker is closed after recovery:
+  - [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` -> `CLOSED`.
