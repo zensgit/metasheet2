@@ -2708,6 +2708,38 @@ Observed highlights:
 - Trend remains green:
   - `Overall: PASS`
 
+## Latest Notes (2026-02-25): Strict Desktop Recovery Timeout Hardening
+
+Execution summary:
+
+1. Triggered strict gates on `main` (`#22383641081`) with `require_import_job_recovery=true`; gate failed only on desktop recovery action click timeout.
+2. Root cause identified in `scripts/verify-attendance-full-flow.mjs`: `Resume polling` button could become disabled/detached between `isEnabled()` check and `click()`, causing a 30s Playwright timeout.
+3. Patched `clickWhenReady()` to use bounded retries with short click timeout and re-check loops.
+4. Re-ran strict gates on branch `codex/attendance-import-job-metrics` (`#22383745777`) and confirmed both strict iterations PASS.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, pre-fix, `require_import_job_recovery=true`) | [#22383641081](https://github.com/zensgit/metasheet2/actions/runs/22383641081) | FAIL | `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-summary.json`, `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (branch, post-fix, `require_import_job_recovery=true`) | [#22383745777](https://github.com/zensgit/metasheet2/actions/runs/22383745777) | PASS | `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-playwright-full-flow-desktop.log` |
+
+Observed highlights:
+
+- Pre-fix failure signature:
+  - `playwrightDesktop=FAIL`
+  - `gateReasons.playwrightDesktop=TIMEOUT`
+  - desktop log includes `locator.click: Timeout 30000ms exceeded` on `Resume polling`.
+- Post-fix branch validation:
+  - both strict iterations show `playwrightDesktop=PASS`
+  - desktop logs include:
+    - `Admin import recovery assertion started`
+    - `Admin import recovery assertion passed`
+  - API smoke in both iterations still includes:
+    - `import upload ok`
+    - `idempotency ok`
+    - `export csv ok`
+
 ## Latest Notes (2026-02-25): Post-PR #255 Mainline Gate Re-Validation
 
 Execution summary:

@@ -1728,6 +1728,42 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): Strict Desktop Recovery Timeout Hardening
+
+Goal:
+
+- Eliminate strict gate false negatives caused by flaky desktop recovery button interactions under `require_import_job_recovery=true`.
+
+Execution:
+
+1. Triggered strict gates on `main` (`#22383641081`); observed desktop-only timeout while clicking `Resume polling`.
+2. Patched `scripts/verify-attendance-full-flow.mjs`:
+   - `clickWhenReady()` now retries with short click timeout and re-validates visibility/enabled state between attempts.
+3. Triggered strict gates on branch `codex/attendance-import-job-metrics` (`#22383745777`) with the same strict settings.
+4. Verified both strict iterations PASS and recovery assertion logs are present.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, pre-fix) | [#22383641081](https://github.com/zensgit/metasheet2/actions/runs/22383641081) | FAIL | `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-summary.json`, `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (branch, post-fix) | [#22383745777](https://github.com/zensgit/metasheet2/actions/runs/22383745777) | PASS | `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-playwright-full-flow-desktop.log` |
+
+Observed highlights:
+
+- Pre-fix failure reason:
+  - `playwrightDesktop=FAIL`
+  - `gateReasons.playwrightDesktop=TIMEOUT`
+  - desktop log timeout on `Resume polling` click.
+- Post-fix validation:
+  - both iterations PASS with `requireImportJobRecovery=true`
+  - desktop logs contain `Admin import recovery assertion passed`
+  - API smoke still validates `import upload ok`, `idempotency ok`, `export csv ok`.
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-25): PR #255 Mainline Gate Re-Validation
 
 Goal:

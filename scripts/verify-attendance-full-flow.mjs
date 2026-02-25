@@ -497,16 +497,32 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     )
     const recoveryDeadlineAt = Date.now() + recoveryDeadlineMs
 
-    async function clickWhenReady(locator) {
-      const visible = await locator.count().then(async (count) => {
-        if (!count) return false
-        return locator.isVisible().catch(() => false)
-      })
-      if (!visible) return false
-      const enabled = await locator.isEnabled().catch(() => false)
-      if (!enabled) return false
-      await locator.click()
-      return true
+    async function clickWhenReady(locator, { attempts = 3, waitMs = 250 } = {}) {
+      const maxAttempts = Math.max(1, Number(attempts) || 1)
+      for (let i = 0; i < maxAttempts; i += 1) {
+        const exists = await locator.count().then((count) => count > 0).catch(() => false)
+        if (!exists) return false
+
+        const visible = await locator.isVisible().catch(() => false)
+        if (!visible) {
+          await page.waitForTimeout(waitMs)
+          continue
+        }
+
+        const enabled = await locator.isEnabled().catch(() => false)
+        if (!enabled) {
+          await page.waitForTimeout(waitMs)
+          continue
+        }
+
+        try {
+          await locator.click({ timeout: 1500 })
+          return true
+        } catch {
+          await page.waitForTimeout(waitMs)
+        }
+      }
+      return false
     }
 
     async function triggerRecoveryPollAction() {
