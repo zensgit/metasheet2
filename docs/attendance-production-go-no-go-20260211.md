@@ -1694,6 +1694,40 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): Large-Commit Retry Hardening
+
+Goal:
+
+- Reduce transient `INTERNAL_ERROR` sensitivity in import perf gating by strengthening mutation retry behavior for large commit scenarios.
+
+Execution:
+
+1. Updated `scripts/ops/attendance-import-perf.mjs`:
+   - exponential retry backoff with jitter (`computeRetryDelayMs`)
+   - large-commit retry budget (`COMMIT_RETRIES_LARGE`, default `5`)
+2. Ran longrun on branch `codex/attendance-post-251-main-validation`:
+   - `upload_csv=true`
+   - `include_rows500k_preview=false`
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (branch, retry-hardened) | [#22382867831](https://github.com/zensgit/metasheet2/actions/runs/22382867831) | PASS | `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/attendance-perf-mm1kaxmo-3wtmjn/perf-summary.json`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-trend-22382867831-1/20260225-045842/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- `rows100k-commit` remained PASS with:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- perf log confirms hardened profile:
+  - `retry_profile preview=3 commit=3 commit_large=5`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
 
 Goal:
