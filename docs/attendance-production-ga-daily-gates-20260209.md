@@ -2620,6 +2620,37 @@ Observed highlights:
   - `p0Status=pass`
   - `gateFlat.strict.runId=22377460693`
 
+## Latest Notes (2026-02-25): Perf Baseline/Longrun Follow-Up and Longrun Stabilization
+
+Execution summary:
+
+1. Triggered `Attendance Import Perf Baseline` on `main` (`rows=100000`, `upload_csv=true`) after strict/dashboard re-validation.
+2. Triggered `Attendance Import Perf Long Run` on `main` (`upload_csv=true`, `include_rows500k_preview=false`) and observed a transient `rows100k-commit` 500 failure.
+3. Applied workflow stabilization in `.github/workflows/attendance-import-perf-longrun.yml`:
+   - `strategy.max-parallel: 2` for `perf-scenarios`.
+4. Re-ran longrun on `codex/attendance-next-round-ops` with the same inputs and verified all scenarios + trend report PASS.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Baseline (main, `rows=100000`, `upload_csv=true`) | [#22379746084](https://github.com/zensgit/metasheet2/actions/runs/22379746084) | PASS | `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/attendance-perf-mm1ff61s-0s7zkg/perf-summary.json`, `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/perf.log` |
+| Perf Long Run (main, pre-fix, `upload_csv=true`, `include_rows500k_preview=false`) | [#22379746105](https://github.com/zensgit/metasheet2/actions/runs/22379746105) | FAIL | `output/playwright/ga/22379746105/attendance-import-perf-longrun-rows100k-commit-22379746105-1/current/rows100k-commit/perf.log` |
+| Perf Long Run (branch, post-fix, `upload_csv=true`, `include_rows500k_preview=false`) | [#22379841144](https://github.com/zensgit/metasheet2/actions/runs/22379841144) | PASS | `output/playwright/ga/22379841144/attendance-import-perf-longrun-rows100k-commit-22379841144-1/current/rows100k-commit/attendance-perf-mm1fkklt-wwkr0l/perf-summary.json`, `output/playwright/ga/22379841144/attendance-import-perf-longrun-trend-22379841144-1/20260225-024555/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Baseline (`#22379746084`) remained green at 100k:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Main longrun pre-fix failure (`#22379746105`) was transient commit-side `INTERNAL_ERROR` on `rows100k-commit`:
+  - `POST /attendance/import/commit: HTTP 500 {"code":"INTERNAL_ERROR","message":"Failed to import attendance"}`
+- Branch longrun post-fix (`#22379841144`) recovered stability:
+  - `rows100k-commit` PASS with `recordUpsertStrategy=staging`
+  - trend report includes `Upload` and `Upsert` columns and marks `rows100k-commit` as `PASS`
+  - skip note present: `500k preview scenario is currently skipped (include_rows500k_preview=false)`
+
 ## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
 
 Execution summary:
