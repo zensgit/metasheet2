@@ -1595,6 +1595,72 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): PR #250 Merge Re-Validation on Main
+
+Goal:
+
+- Re-validate `main` gates after merging PR `#250` (`fix(attendance-gates): harden async import recovery polling in full-flow`).
+
+Execution:
+
+1. Triggered strict gates on `main` with `require_import_job_recovery=true`.
+2. Triggered daily dashboard (`lookback_hours=48`) on `main` after strict completed.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, `require_import_job_recovery=true`) | [#22377460693](https://github.com/zensgit/metasheet2/actions/runs/22377460693) | PASS | `output/playwright/ga/22377460693/20260225-011038-1/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-2/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22377460693/20260225-011038-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, `lookback_hours=48`) | [#22377585632](https://github.com/zensgit/metasheet2/actions/runs/22377585632) | PASS | `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22377585632/gate-meta/protection/meta.json`, `output/playwright/ga/22377585632/gate-meta/strict/meta.json` |
+
+Observed highlights:
+
+- Strict gate ran with recovery assertion enabled:
+  - `requireImportJobRecovery=true` in both strict iterations.
+  - `Admin import recovery assertion passed` in both desktop full-flow logs.
+- Strict smoke remained fully green (`import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`).
+- Dashboard remained healthy (`overallStatus=pass`, `p0Status=pass`) and references strict run `22377460693`.
+
+Decision:
+
+- `GO` unchanged.
+
+## Post-Go Verification (2026-02-25): Perf Longrun Stability Hardening
+
+Goal:
+
+- Address transient `rows100k-commit` longrun failures under high matrix concurrency and validate stable longrun execution on upload path.
+
+Execution:
+
+1. Triggered baseline and longrun on `main`:
+   - Baseline (`100k`, upload path) PASS.
+   - Longrun failed on `rows100k-commit` due transient `HTTP 500 INTERNAL_ERROR`.
+2. Applied longrun workflow stabilization:
+   - `.github/workflows/attendance-import-perf-longrun.yml`
+   - `strategy.max-parallel: 2` on `perf-scenarios` to reduce backend contention.
+3. Re-ran longrun on branch `codex/attendance-next-round-ops` with `upload_csv=true` and `include_rows500k_preview=false`; all scenarios and trend report PASS.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Baseline (main, `rows=100000`, `upload_csv=true`) | [#22379746084](https://github.com/zensgit/metasheet2/actions/runs/22379746084) | PASS | `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/attendance-perf-mm1ff61s-0s7zkg/perf-summary.json`, `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/perf.log` |
+| Perf Longrun (main, pre-fix) | [#22379746105](https://github.com/zensgit/metasheet2/actions/runs/22379746105) | FAIL | `output/playwright/ga/22379746105/attendance-import-perf-longrun-rows100k-commit-22379746105-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, post-fix) | [#22379841144](https://github.com/zensgit/metasheet2/actions/runs/22379841144) | PASS | `output/playwright/ga/22379841144/attendance-import-perf-longrun-rows100k-commit-22379841144-1/current/rows100k-commit/attendance-perf-mm1fkklt-wwkr0l/perf-summary.json`, `output/playwright/ga/22379841144/attendance-import-perf-longrun-trend-22379841144-1/20260225-024555/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Post-fix `rows100k-commit` summary:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Trend report shows `Upload=YES` and `Upsert=STAGING` for `rows100k-commit`.
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
 
 Goal:
