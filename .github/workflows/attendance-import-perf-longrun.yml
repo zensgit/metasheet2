@@ -126,6 +126,7 @@ jobs:
     timeout-minutes: 50
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - id: rows10k-commit
