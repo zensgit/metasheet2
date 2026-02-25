@@ -4061,11 +4061,21 @@ function buildImportHeavyQueryConfig(sql, params) {
     text: sql,
     values: params,
     query_timeout: Math.floor(timeoutMs),
+    statement_timeout: Math.floor(timeoutMs),
   }
 }
 
 async function queryImportHeavy(client, sql, params = []) {
   return client.query(buildImportHeavyQueryConfig(sql, params))
+}
+
+async function applyImportHeavyTransactionTimeout(client) {
+  const timeoutMs = Number(ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS)
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return
+  const normalized = Math.floor(timeoutMs)
+  if (client && client.__attendanceImportStatementTimeoutMs === normalized) return
+  await client.query(`SET LOCAL statement_timeout = ${normalized}`)
+  if (client) client.__attendanceImportStatementTimeoutMs = normalized
 }
 
 async function upsertAttendanceRecord(options) {
@@ -6343,6 +6353,7 @@ module.exports = {
 	      let idempotentInTransaction = null
 
 	      await db.transaction(async (trx) => {
+	        await applyImportHeavyTransactionTimeout(trx)
 	        if (cleanIdempotency) {
 	          await acquireImportIdempotencyLock(trx, orgId, cleanIdempotency)
 	          const existing = await loadIdempotentImportBatch(trx, orgId, cleanIdempotency)
@@ -10885,6 +10896,7 @@ module.exports = {
 	          let idempotentInTransaction = null
 
           await db.transaction(async (trx) => {
+	            await applyImportHeavyTransactionTimeout(trx)
             if (idempotencyKey) {
               await acquireImportIdempotencyLock(trx, orgId, idempotencyKey)
               const existing = await loadIdempotentImportBatch(trx, orgId, idempotencyKey)
@@ -12102,6 +12114,7 @@ module.exports = {
           let groupCreated = 0
           let groupMembersAdded = 0
           await db.transaction(async (trx) => {
+            await applyImportHeavyTransactionTimeout(trx)
             let groupIdMap = null
             if (groupSync) {
               groupIdMap = await loadAttendanceGroupIdMap(trx, orgId)
