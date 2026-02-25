@@ -402,18 +402,51 @@ async function uploadRecoveryCsvFile(apiBase, orgId, csvText) {
 }
 
 async function resolveRecoveryUserId(apiBase) {
-  const response = await fetch(`${normalizeUrl(apiBase)}/auth/me`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok || !data) return ''
-  const user = data?.data?.user ?? data?.user ?? {}
-  const value = user?.userId || user?.id || user?.user_id || ''
-  return String(value || '').trim()
+  const url = `${normalizeUrl(apiBase)}/auth/me`
+  for (let attempt = 1; attempt <= authMeRetries; attempt += 1) {
+    try {
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(authMeTimeoutMs)
+        : undefined
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal,
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        if (response.status === 401) {
+          await refreshAuthToken(apiBase)
+        }
+        const retriable = response.status === 401
+          || response.status === 408
+          || response.status === 429
+          || (response.status >= 500 && response.status <= 504)
+        if (!retriable || attempt >= authMeRetries) {
+          return ''
+        }
+        const delayMs = Math.min(authMeRetryDelayMs * (2 ** (attempt - 1)), 5000)
+        logInfo(`WARN: resolveRecoveryUserId attempt ${attempt}/${authMeRetries} failed (HTTP ${response.status}); retrying in ${delayMs}ms`)
+        await sleep(delayMs)
+        continue
+      }
+      const user = data?.data?.user ?? data?.user ?? {}
+      const value = user?.userId || user?.id || user?.user_id || ''
+      return String(value || '').trim()
+    } catch (error) {
+      if (attempt >= authMeRetries) {
+        return ''
+      }
+      const delayMs = Math.min(authMeRetryDelayMs * (2 ** (attempt - 1)), 5000)
+      const message = (error && error.message) || String(error)
+      logInfo(`WARN: resolveRecoveryUserId attempt ${attempt}/${authMeRetries} error (${message}); retrying in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
+  }
+  return ''
 }
 
 async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
