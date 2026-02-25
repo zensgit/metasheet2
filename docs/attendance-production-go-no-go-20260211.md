@@ -1663,6 +1663,42 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): PR #261 Merge + Full-Flow Assertion Hardened
+
+Goal:
+
+- Confirm `main` remains green after merging PR [#261](https://github.com/zensgit/metasheet2/pull/261), which hardens Playwright full-flow by asserting the records table structure:
+  - `.attendance__table-wrapper table.attendance__table--records`
+
+Execution:
+
+1. Merged PR [#261](https://github.com/zensgit/metasheet2/pull/261) (merge commit `553176679587542aa817e47a6d5a6a8d3c375159`).
+2. Re-ran strict gates (`require_import_job_recovery=true`) on `main`.
+3. Re-ran daily dashboard (`lookback_hours=48`) after strict completion.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, strict twice + recovery assertion + latest full-flow script) | [#22389307883](https://github.com/zensgit/metasheet2/actions/runs/22389307883) | PASS | `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-2/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-api-smoke.log`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post-strict rerun) | [#22389475748](https://github.com/zensgit/metasheet2/actions/runs/22389475748) | PASS | `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Strict gates (both iterations):
+  - `apiSmoke/provisioning/playwrightProd/playwrightDesktop/playwrightMobile = PASS`
+  - `gate-api-smoke.log` includes `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`
+  - desktop full-flow log includes `Admin import recovery assertion passed` and `Full flow verification complete`
+- Daily dashboard:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22389307883`
+  - `openTrackingIssues=[]`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-25): PR #250 Merge Re-Validation on Main
 
 Goal:
