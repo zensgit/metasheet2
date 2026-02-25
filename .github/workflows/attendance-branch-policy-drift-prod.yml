@@ -204,7 +204,12 @@ jobs:
 
             const owner = context.repo.owner
             const repo = context.repo.repo
-            const title = titleOverride || '[Attendance P1] Branch policy drift alert'
+            const defaultTitle = '[Attendance P1] Branch policy drift alert'
+            const legacyTitle = '[Attendance P1] Branch protection drift alert'
+            const title = titleOverride || defaultTitle
+            const matchingTitles = titleOverride
+              ? [title]
+              : [defaultTitle, legacyTitle]
             const failed = String(process.env.CHECK_RESULT || '').trim() === 'failure'
             const reason = String(process.env.CHECK_REASON || 'UNKNOWN').trim() || 'UNKNOWN'
             const rc = String(process.env.CHECK_RC || '1').trim() || '1'
@@ -224,7 +229,7 @@ jobs:
               '```',
             ].join('\n')
 
-            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const q = `repo:${owner}/${repo} type:issue in:title \"[Attendance P1] Branch\"`
             const search = await github.rest.search.issuesAndPullRequests({
               q,
               sort: 'updated',
@@ -232,7 +237,8 @@ jobs:
               per_page: 20,
             })
             const items = Array.isArray(search.data.items) ? search.data.items : []
-            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+            const normalizedTitles = new Set(matchingTitles)
+            const match = items.find((item) => item && !item.pull_request && normalizedTitles.has(item.title)) || null
 
             if (!failed) {
               if (!match || match.state !== 'open') {
