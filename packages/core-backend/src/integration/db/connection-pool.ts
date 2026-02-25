@@ -13,6 +13,7 @@ interface QueryConfig {
   text: string
   values?: unknown[]
   query_timeout?: number
+  statement_timeout?: number
 }
 
 type TransactionQuery = <T extends QueryResultRow = QueryResultRow>(
@@ -114,6 +115,7 @@ class ConnectionPool {
     }
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       queryConfig.query_timeout = Math.floor(timeoutMs)
+      queryConfig.statement_timeout = Math.floor(timeoutMs)
     }
     return queryConfig
   }
