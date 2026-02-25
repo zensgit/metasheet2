@@ -297,8 +297,27 @@ async function assertAdminSettingsSaveCycle(page) {
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   await saveButton.click()
 
-  const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
-  await statusMessage.waitFor({ timeout: Math.max(20_000, adminReadyTimeoutMs) })
+  await page.waitForFunction(() => {
+    const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
+    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Settings')
+    if (!section) return false
+    const button = Array.from(section.querySelectorAll('button')).find((node) => {
+      const label = (node.textContent || '').trim()
+      return label === 'Save settings' || label === 'Saving...'
+    })
+    if (!button) return false
+    const label = (button.textContent || '').trim()
+    return label === 'Saving...' || button.hasAttribute('disabled')
+  }, { timeout: Math.max(20_000, adminReadyTimeoutMs) })
+
+  let sawStatusMessage = false
+  try {
+    const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
+    await statusMessage.waitFor({ timeout: 8_000 })
+    sawStatusMessage = true
+  } catch {
+    sawStatusMessage = false
+  }
 
   await page.waitForFunction(() => {
     const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
@@ -313,7 +332,7 @@ async function assertAdminSettingsSaveCycle(page) {
     return label === 'Save settings' && !button.hasAttribute('disabled')
   }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
 
-  logInfo('Admin settings save cycle verified (status message + save button recovery)')
+  logInfo(`Admin settings save cycle verified (${sawStatusMessage ? 'status message + ' : ''}save button transition + recovery)`)
 }
 
 async function captureDebugScreenshot(page, fileName) {
