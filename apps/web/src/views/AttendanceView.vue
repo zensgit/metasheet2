@@ -1878,6 +1878,9 @@
                   {{ importLoading ? 'Importing...' : 'Import' }}
                 </button>
               </div>
+              <small class="attendance__field-hint">
+                {{ importScalabilityHint }}
+              </small>
               <div
                 v-if="importPreviewTask"
                 class="attendance__status"
@@ -4124,6 +4127,12 @@ const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
+const canResumeImportJobFromStatus = computed(() => {
+  const action = statusMeta.value?.action
+  if (action !== 'retry-run-import') return false
+  const status = String(importAsyncJob.value?.status || '').trim().toLowerCase()
+  return status === 'queued' || status === 'running'
+})
 
 const statusActionLabel = computed(() => {
   const action = statusMeta.value?.action
@@ -4136,6 +4145,7 @@ const statusActionLabel = computed(() => {
   if (action === 'retry-save-settings') return 'Retry save settings'
   if (action === 'retry-save-rule') return 'Retry save rule'
   if (action === 'retry-preview-import') return 'Retry preview'
+  if (action === 'retry-run-import' && canResumeImportJobFromStatus.value) return 'Resume import job'
   if (action === 'retry-run-import') return 'Retry import'
   if (action === 'retry-submit-request') return 'Retry submit request'
   if (action === 'reload-requests') return 'Reload requests'
@@ -4153,7 +4163,9 @@ const statusActionBusy = computed(() => {
   if (action === 'retry-save-settings') return settingsLoading.value
   if (action === 'retry-save-rule') return ruleLoading.value
   if (action === 'retry-preview-import') return importLoading.value
-  if (action === 'retry-run-import') return importLoading.value
+  if (action === 'retry-run-import') {
+    return canResumeImportJobFromStatus.value ? importAsyncPolling.value : importLoading.value
+  }
   if (action === 'retry-submit-request') return requestSubmitting.value
   if (action === 'reload-requests') return loading.value
   return false
@@ -4663,6 +4675,38 @@ const IMPORT_ASYNC_ROW_THRESHOLD = 50_000
 const IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS = 2000
 const IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000
 const ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS = 45 * 1000
+
+function parseEnvPositiveInt(raw: unknown, fallback: number, minimum = 1): number {
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return fallback
+  const normalized = Math.floor(parsed)
+  if (normalized < minimum) return fallback
+  return normalized
+}
+
+const importThresholds = {
+  largeRow: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_LARGE_ROW_THRESHOLD, IMPORT_LARGE_ROW_THRESHOLD, 100),
+  previewLimit: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_PREVIEW_LIMIT, IMPORT_PREVIEW_LIMIT, 10),
+  commitItemsLimit: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_COMMIT_ITEMS_LIMIT, IMPORT_COMMIT_ITEMS_LIMIT, 10),
+  previewChunkThreshold: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_PREVIEW_CHUNK_THRESHOLD, IMPORT_PREVIEW_CHUNK_THRESHOLD, 1000),
+  previewChunkSize: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_PREVIEW_CHUNK_SIZE, IMPORT_PREVIEW_CHUNK_SIZE, 100),
+  previewAsyncThreshold: parseEnvPositiveInt(import.meta.env.VITE_ATTENDANCE_IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD, IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD, 1000),
+  commitAsyncThreshold: parseEnvPositiveInt(
+    import.meta.env.VITE_ATTENDANCE_IMPORT_COMMIT_ASYNC_ROW_THRESHOLD
+      ?? import.meta.env.VITE_ATTENDANCE_IMPORT_ASYNC_ROW_THRESHOLD,
+    IMPORT_ASYNC_ROW_THRESHOLD,
+    1000,
+  ),
+}
+
+const importScalabilityHint = computed(() => {
+  const previewChunk = importThresholds.previewChunkThreshold.toLocaleString()
+  const previewChunkSize = importThresholds.previewChunkSize.toLocaleString()
+  const previewAsync = importThresholds.previewAsyncThreshold.toLocaleString()
+  const commitAsync = importThresholds.commitAsyncThreshold.toLocaleString()
+  return `Auto mode: preview >= ${previewChunk} rows may use chunked preview (${previewChunkSize}/chunk); preview >= ${previewAsync} rows queues async preview; import >= ${commitAsync} rows queues async import.`
+})
+
 const importDebugOptions = readImportDebugOptions()
 const importAsyncPollIntervalMs = importDebugOptions.pollIntervalMs ?? IMPORT_ASYNC_DEFAULT_POLL_INTERVAL_MS
 const importAsyncPollTimeoutMs = importDebugOptions.pollTimeoutMs ?? IMPORT_ASYNC_DEFAULT_POLL_TIMEOUT_MS
@@ -4670,7 +4714,7 @@ let importDebugTimeoutPending = importDebugOptions.forceTimeoutOnce
 
 function estimateImportRowCount(payload: Record<string, any>): number | null {
   if (importDebugOptions.forceAsyncImport) {
-    return IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD
+    return importThresholds.previewAsyncThreshold
   }
   if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim().length > 0) {
     const id = payload.csvFileId.trim()
@@ -4678,7 +4722,7 @@ function estimateImportRowCount(payload: Record<string, any>): number | null {
       return importCsvFileRowCountHint.value
     }
     // Force async import path when the payload references a server-side upload.
-    return IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD
+    return importThresholds.previewAsyncThreshold
   }
   if (Array.isArray(payload.rows)) return payload.rows.length
   if (typeof payload.csvText === 'string') {
@@ -4695,11 +4739,11 @@ function estimateImportRowCount(payload: Record<string, any>): number | null {
 
 function applyImportScalabilityHints(payload: Record<string, any>, options: { mode: 'preview' | 'commit' }) {
   const rowCountHint = estimateImportRowCount(payload)
-  if (!rowCountHint || rowCountHint <= IMPORT_LARGE_ROW_THRESHOLD) return
+  if (!rowCountHint || rowCountHint <= importThresholds.largeRow) return
 
   if (options.mode === 'preview') {
     if (payload.previewLimit === undefined || payload.previewLimit === null) {
-      payload.previewLimit = IMPORT_PREVIEW_LIMIT
+      payload.previewLimit = importThresholds.previewLimit
     }
     return
   }
@@ -4709,7 +4753,7 @@ function applyImportScalabilityHints(payload: Record<string, any>, options: { mo
     payload.returnItems = false
   }
   if (payload.itemsLimit === undefined || payload.itemsLimit === null) {
-    payload.itemsLimit = IMPORT_COMMIT_ITEMS_LIMIT
+    payload.itemsLimit = importThresholds.commitItemsLimit
   }
 }
 
@@ -4722,7 +4766,7 @@ interface ImportPreviewChunkPlan {
 
 function normalizePreviewSampleLimit(rawLimit: unknown): number {
   const value = Number(rawLimit)
-  if (!Number.isFinite(value)) return IMPORT_PREVIEW_LIMIT
+  if (!Number.isFinite(value)) return importThresholds.previewLimit
   return Math.min(Math.max(Math.trunc(value), 1), 1000)
 }
 
@@ -4765,41 +4809,44 @@ function splitCsvRecords(csvText: string): string[] {
 }
 
 function buildChunkedImportPreviewPlan(payload: Record<string, any>): ImportPreviewChunkPlan | null {
+  const chunkThreshold = importThresholds.previewChunkThreshold
+  const chunkSize = importThresholds.previewChunkSize
+  const sampleCap = importThresholds.previewLimit
   const sampleLimit = normalizePreviewSampleLimit(payload.previewLimit)
 
-  if (Array.isArray(payload.rows) && payload.rows.length >= IMPORT_PREVIEW_CHUNK_THRESHOLD) {
+  if (Array.isArray(payload.rows) && payload.rows.length >= chunkThreshold) {
     const totalRows = payload.rows.length
-    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+    const chunkCount = Math.ceil(totalRows / chunkSize)
     return {
       totalRows,
       chunkCount,
       sampleLimit,
       buildPayload: (chunkIndex, remainingSample) => {
-        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
-        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        const start = chunkIndex * chunkSize
+        const end = Math.min(totalRows, start + chunkSize)
         return {
           ...payload,
           rows: payload.rows.slice(start, end),
-          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+          previewLimit: Math.max(1, Math.min(remainingSample, sampleCap)),
         }
       },
     }
   }
 
-  if (Array.isArray(payload.entries) && payload.entries.length >= IMPORT_PREVIEW_CHUNK_THRESHOLD) {
+  if (Array.isArray(payload.entries) && payload.entries.length >= chunkThreshold) {
     const totalRows = payload.entries.length
-    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+    const chunkCount = Math.ceil(totalRows / chunkSize)
     return {
       totalRows,
       chunkCount,
       sampleLimit,
       buildPayload: (chunkIndex, remainingSample) => {
-        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
-        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        const start = chunkIndex * chunkSize
+        const end = Math.min(totalRows, start + chunkSize)
         return {
           ...payload,
           entries: payload.entries.slice(start, end),
-          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+          previewLimit: Math.max(1, Math.min(remainingSample, sampleCap)),
         }
       },
     }
@@ -4811,21 +4858,21 @@ function buildChunkedImportPreviewPlan(payload: Record<string, any>): ImportPrev
     const header = records[0]
     const dataRows = records.slice(1)
     const totalRows = dataRows.length
-    if (totalRows < IMPORT_PREVIEW_CHUNK_THRESHOLD) return null
-    const chunkCount = Math.ceil(totalRows / IMPORT_PREVIEW_CHUNK_SIZE)
+    if (totalRows < chunkThreshold) return null
+    const chunkCount = Math.ceil(totalRows / chunkSize)
 
     return {
       totalRows,
       chunkCount,
       sampleLimit,
       buildPayload: (chunkIndex, remainingSample) => {
-        const start = chunkIndex * IMPORT_PREVIEW_CHUNK_SIZE
-        const end = Math.min(totalRows, start + IMPORT_PREVIEW_CHUNK_SIZE)
+        const start = chunkIndex * chunkSize
+        const end = Math.min(totalRows, start + chunkSize)
         const csvText = [header, ...dataRows.slice(start, end)].join('\n')
         const nextPayload: Record<string, any> = {
           ...payload,
           csvText,
-          previewLimit: Math.max(1, Math.min(remainingSample, IMPORT_PREVIEW_LIMIT)),
+          previewLimit: Math.max(1, Math.min(remainingSample, sampleCap)),
         }
         delete nextPayload.rows
         delete nextPayload.entries
@@ -5204,7 +5251,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
     if (importPreviewTask.value && seq === importPreviewTaskSeq) {
       importPreviewTask.value = {
         ...importPreviewTask.value,
-        processedRows: Math.min(plan.totalRows, (chunkIndex + 1) * IMPORT_PREVIEW_CHUNK_SIZE),
+        processedRows: Math.min(plan.totalRows, (chunkIndex + 1) * importThresholds.previewChunkSize),
         completedChunks: chunkIndex + 1,
       }
     }
@@ -5342,7 +5389,7 @@ async function previewImport() {
   importLoading.value = true
   try {
     const rowCountHint = estimateImportRowCount(payload)
-    if (rowCountHint && rowCountHint >= IMPORT_PREVIEW_ASYNC_ROW_THRESHOLD) {
+    if (rowCountHint && rowCountHint >= importThresholds.previewAsyncThreshold) {
       const handledByAsync = await runPreviewImportAsync(payload, rowCountHint)
       if (handledByAsync) return
     }
@@ -5548,7 +5595,7 @@ async function runImport() {
     // Falls back to sync commit when the backend does not support async jobs.
     importAsyncJob.value = null
     const rowCountHint = estimateImportRowCount(payload)
-    if (rowCountHint && rowCountHint >= IMPORT_ASYNC_ROW_THRESHOLD) {
+    if (rowCountHint && rowCountHint >= importThresholds.commitAsyncThreshold) {
       let asyncResponse = await apiFetch('/api/attendance/import/commit-async', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -6228,6 +6275,11 @@ async function runStatusAction() {
     return
   }
   if (action === 'retry-run-import') {
+    if (canResumeImportJobFromStatus.value) {
+      await refreshImportAsyncJob({ silent: true })
+      await resumeImportAsyncJobPolling()
+      return
+    }
     await runImport()
     return
   }

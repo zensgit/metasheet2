@@ -2589,3 +2589,33 @@ Observed highlights:
 - Longrun (`#22349165365`) confirms optional 500k behavior on main:
   - trend markdown contains `500k preview scenario is currently skipped (include_rows500k_preview=false)`
   - commit summaries still expose `uploadCsv=true` and `engine/processedRows/failedRows/elapsedMs`
+
+## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
+
+Execution summary:
+
+1. Hardened `scripts/verify-attendance-full-flow.mjs` async import recovery polling to use a deadline-based loop with both resume/reload actions (`Resume polling`, `Resume import job`, `Reload job`, `Reload import job`).
+2. Ran strict gates on branch `codex/attendance-next-round-ops` with default inputs to validate no regression.
+3. Ran strict gates again with `require_import_job_recovery=true` to force the desktop recovery assertion path.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (branch, non-drill, default recovery=false) | [#22356838096](https://github.com/zensgit/metasheet2/actions/runs/22356838096) | PASS | `output/playwright/ga/22356838096/20260224-151021-1/gate-summary.json`, `output/playwright/ga/22356838096/20260224-151021-2/gate-summary.json`, `output/playwright/ga/22356838096/20260224-151021-1/gate-api-smoke.log`, `output/playwright/ga/22356838096/20260224-151021-2/gate-api-smoke.log` |
+| Strict Gates (branch, non-drill, `require_import_job_recovery=true`) | [#22357338954](https://github.com/zensgit/metasheet2/actions/runs/22357338954) | PASS | `output/playwright/ga/22357338954/20260224-152238-1/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-2/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22357338954/20260224-152238-2/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (branch, non-drill, rerun canceled due runner install stall) | [#22357011088](https://github.com/zensgit/metasheet2/actions/runs/22357011088) | CANCELED | GitHub run timeline (`Install Playwright browsers` runner stall; no product regression signal) |
+
+Observed highlights:
+
+- Recovery assertion was explicitly enabled in `#22357338954`:
+  - `gate-summary.json` contains `"requireImportJobRecovery": true` for both iterations.
+  - Desktop logs contain:
+    - `Admin import recovery assertion started`
+    - `Recovery polling attempt=...`
+    - `Admin import recovery assertion passed`
+- API smoke remained strict-green in both iterations:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `SMOKE PASS`
