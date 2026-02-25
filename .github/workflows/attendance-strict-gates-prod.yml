@@ -78,6 +78,10 @@ on:
         description: 'Require admin import timeout->reload->resume recovery assertion in desktop full-flow (true/false)'
         required: false
         default: 'false'
+      require_admin_settings_save:
+        description: 'Require admin settings save-cycle assertion in desktop full-flow (true/false)'
+        required: false
+        default: 'true'
   schedule:
     # Daily at 02:15 UTC.
     - cron: '15 2 * * *'
@@ -213,6 +217,7 @@ jobs:
       REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'true' }}
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       REQUIRE_IMPORT_JOB_RECOVERY: ${{ inputs.require_import_job_recovery || 'false' }}
+      REQUIRE_ADMIN_SETTINGS_SAVE: ${{ inputs.require_admin_settings_save || 'true' }}
       HEADLESS: 'true'
     steps:
       - name: Checkout

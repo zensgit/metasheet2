@@ -20,6 +20,7 @@ REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY:-false}"
 REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-false}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
 REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
+REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
 
 function die() {
   echo "[attendance-run-gates] ERROR: $*" >&2
@@ -89,6 +90,7 @@ info "WEB_URL=${WEB_URL}"
 info "OUTPUT_ROOT=${OUTPUT_ROOT}"
 info "REQUIRE_IMPORT_JOB_RECOVERY=${REQUIRE_IMPORT_JOB_RECOVERY}"
 info "REQUIRE_IMPORT_TELEMETRY=${REQUIRE_IMPORT_TELEMETRY}"
+info "REQUIRE_ADMIN_SETTINGS_SAVE=${REQUIRE_ADMIN_SETTINGS_SAVE}"
 
 function maybe_run_preflight() {
   # Keep "auto" mode ergonomic on dev machines (skip when env file is absent),
@@ -177,6 +179,7 @@ function run_playwright_full_flow_desktop() {
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
     ASSERT_IMPORT_JOB_RECOVERY="$REQUIRE_IMPORT_JOB_RECOVERY" \
+    ASSERT_ADMIN_SETTINGS_SAVE="$REQUIRE_ADMIN_SETTINGS_SAVE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-desktop" \
     HEADLESS="$HEADLESS" \
     node "${ROOT_DIR}/scripts/verify-attendance-full-flow.mjs" \

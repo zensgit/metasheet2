@@ -1527,6 +1527,7 @@ async function run() {
         artifactNamePrefixes: [
           `attendance-import-perf-longrun-rows100k-commit-${runId}-`,
           `attendance-import-perf-longrun-rows10k-commit-${runId}-`,
+          `attendance-import-perf-longrun-rows500k-commit-${runId}-`,
           `attendance-import-perf-longrun-rows500k-preview-${runId}-`,
           `attendance-import-perf-longrun-drill-${runId}-`,
         ],

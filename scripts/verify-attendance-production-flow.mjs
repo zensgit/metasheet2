@@ -537,7 +537,7 @@ async function run() {
   if (userId) {
     await page.locator('#attendance-user-id').fill(userId)
   }
-  await page.getByRole('button', { name: 'Refresh' }).click()
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
   const recordsCardAfter = getRecordsCard(page)
   await recordsCardAfter.getByRole('button', { name: 'Reload' }).click()
   await page.screenshot({ path: path.join(outputDir, '06-overview-after-import.png'), fullPage: true })
