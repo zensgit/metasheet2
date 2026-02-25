@@ -295,28 +295,48 @@ async function assertAdminSettingsSaveCycle(page) {
   await settingsSection.waitFor({ timeout: adminReadyTimeoutMs })
   const saveButton = settingsSection.getByRole('button', { name: 'Save settings', exact: true })
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
+  if (!(await saveButton.isEnabled())) {
+    throw new Error('Save settings button is not enabled before save-cycle assertion')
+  }
   await saveButton.click()
 
-  await page.waitForFunction(() => {
-    const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
-    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Settings')
-    if (!section) return false
-    const button = Array.from(section.querySelectorAll('button')).find((node) => {
-      const label = (node.textContent || '').trim()
-      return label === 'Save settings' || label === 'Saving...'
-    })
-    if (!button) return false
-    const label = (button.textContent || '').trim()
-    return label === 'Saving...' || button.hasAttribute('disabled')
-  }, { timeout: Math.max(20_000, adminReadyTimeoutMs) })
-
   let sawStatusMessage = false
-  try {
-    const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
-    await statusMessage.waitFor({ timeout: 8_000 })
-    sawStatusMessage = true
-  } catch {
-    sawStatusMessage = false
+  let sawBusyTransition = false
+
+  const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
+  const transientDeadline = Date.now() + Math.max(8_000, Math.min(adminReadyTimeoutMs, 30_000))
+  while (Date.now() < transientDeadline) {
+    sawStatusMessage ||= await statusMessage.isVisible().catch(() => false)
+    const transientState = await settingsSection.evaluate((section) => {
+      const button = Array.from(section.querySelectorAll('button')).find((node) => {
+        const label = (node.textContent || '').trim()
+        return label === 'Save settings' || label === 'Saving...'
+      })
+      if (!button) return { present: false, label: '', disabled: false }
+      return {
+        present: true,
+        label: (button.textContent || '').trim(),
+        disabled: button.hasAttribute('disabled'),
+      }
+    }).catch(() => ({ present: false, label: '', disabled: false }))
+
+    if (transientState.present && (transientState.label === 'Saving...' || transientState.disabled)) {
+      sawBusyTransition = true
+      break
+    }
+    if (sawStatusMessage) {
+      break
+    }
+    await page.waitForTimeout(250)
+  }
+
+  if (!sawStatusMessage) {
+    try {
+      await statusMessage.waitFor({ timeout: 8_000 })
+      sawStatusMessage = true
+    } catch {
+      sawStatusMessage = false
+    }
   }
 
   await page.waitForFunction(() => {
@@ -332,7 +352,12 @@ async function assertAdminSettingsSaveCycle(page) {
     return label === 'Save settings' && !button.hasAttribute('disabled')
   }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
 
-  logInfo(`Admin settings save cycle verified (${sawStatusMessage ? 'status message + ' : ''}save button transition + recovery)`)
+  const saveCycleDetails = [
+    sawStatusMessage ? 'status message' : null,
+    sawBusyTransition ? 'busy transition' : 'no busy transition observed',
+    'save button recovery',
+  ].filter(Boolean).join(' + ')
+  logInfo(`Admin settings save cycle verified (${saveCycleDetails})`)
 }
 
 async function captureDebugScreenshot(page, fileName) {
