@@ -1595,6 +1595,36 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): PR #250 Merge Re-Validation on Main
+
+Goal:
+
+- Re-validate `main` gates after merging PR `#250` (`fix(attendance-gates): harden async import recovery polling in full-flow`).
+
+Execution:
+
+1. Triggered strict gates on `main` with `require_import_job_recovery=true`.
+2. Triggered daily dashboard (`lookback_hours=48`) on `main` after strict completed.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, `require_import_job_recovery=true`) | [#22377460693](https://github.com/zensgit/metasheet2/actions/runs/22377460693) | PASS | `output/playwright/ga/22377460693/20260225-011038-1/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-2/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22377460693/20260225-011038-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, `lookback_hours=48`) | [#22377585632](https://github.com/zensgit/metasheet2/actions/runs/22377585632) | PASS | `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22377585632/gate-meta/protection/meta.json`, `output/playwright/ga/22377585632/gate-meta/strict/meta.json` |
+
+Observed highlights:
+
+- Strict gate ran with recovery assertion enabled:
+  - `requireImportJobRecovery=true` in both strict iterations.
+  - `Admin import recovery assertion passed` in both desktop full-flow logs.
+- Strict smoke remained fully green (`import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`).
+- Dashboard remained healthy (`overallStatus=pass`, `p0Status=pass`) and references strict run `22377460693`.
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
 
 Goal:

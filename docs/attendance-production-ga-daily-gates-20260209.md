@@ -2590,6 +2590,36 @@ Observed highlights:
   - trend markdown contains `500k preview scenario is currently skipped (include_rows500k_preview=false)`
   - commit summaries still expose `uploadCsv=true` and `engine/processedRows/failedRows/elapsedMs`
 
+## Latest Notes (2026-02-25): Post-PR #250 Mainline Re-Validation
+
+Execution summary:
+
+1. Merged PR [#250](https://github.com/zensgit/metasheet2/pull/250) (async import recovery polling hardening).
+2. Triggered `Attendance Strict Gates (Prod)` on `main` with `require_import_job_recovery=true`.
+3. Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) on `main` after strict completion.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, non-drill, `require_import_job_recovery=true`) | [#22377460693](https://github.com/zensgit/metasheet2/actions/runs/22377460693) | PASS | `output/playwright/ga/22377460693/20260225-011038-1/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-2/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22377460693/20260225-011038-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, `lookback_hours=48`) | [#22377585632](https://github.com/zensgit/metasheet2/actions/runs/22377585632) | PASS | `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22377585632/gate-meta/protection/meta.json`, `output/playwright/ga/22377585632/gate-meta/strict/meta.json` |
+
+Observed highlights:
+
+- Strict gate evidence confirms recovery assertion executed in both iterations:
+  - `gate-summary.json`: `"requireImportJobRecovery": true`
+  - desktop logs: `Admin import recovery assertion passed`
+- Strict API smoke markers present in both iterations:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `SMOKE PASS`
+- Dashboard remained green after strict refresh:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22377460693`
+
 ## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
 
 Execution summary:
