@@ -1,4 +1,4 @@
-import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
+import type { PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { Pool } from 'pg'
 import { Logger } from '../../core/logger'
 import { secretManager } from '../../security/SecretManager'
@@ -8,6 +8,18 @@ export interface QueryOptions {
   timeoutMs?: number
   readOnly?: boolean
 }
+
+interface QueryConfig {
+  text: string
+  values?: unknown[]
+  query_timeout?: number
+}
+
+type TransactionQuery = <T extends QueryResultRow = QueryResultRow>(
+  sql: string | QueryConfig,
+  params?: unknown[],
+  options?: QueryOptions
+) => Promise<QueryResult<T>>
 
 export interface ConnectionPoolOptions extends PoolConfig {
   slowQueryMs?: number
@@ -94,6 +106,18 @@ class ConnectionPool {
     }
   }
 
+  private buildQueryConfig(sql: string, params?: unknown[], options?: QueryOptions): QueryConfig {
+    const timeoutMs = Number(options?.timeoutMs ?? 0)
+    const queryConfig: QueryConfig = {
+      text: sql,
+      values: params,
+    }
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      queryConfig.query_timeout = Math.floor(timeoutMs)
+    }
+    return queryConfig
+  }
+
   async healthCheck(): Promise<void> {
     await this.pool.query('SELECT 1')
   }
@@ -101,11 +125,12 @@ class ConnectionPool {
   async query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     params?: unknown[],
-    _options?: QueryOptions
+    options?: QueryOptions
   ): Promise<QueryResult<T>> {
     const start = Date.now()
     try {
-      const res = await this.pool.query<T>(sql, params)
+      const queryConfig = this.buildQueryConfig(sql, params, options)
+      const res = await this.pool.query<T>(queryConfig)
       const ms = Date.now() - start
 
       // Track query metrics
@@ -125,11 +150,22 @@ class ConnectionPool {
     }
   }
 
-  async transaction<T>(handler: (client: { query: PoolClient['query'] }) => Promise<T>): Promise<T> {
+  async transaction<T>(handler: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const result = await handler({ query: client.query.bind(client) })
+      const query: TransactionQuery = async <R extends QueryResultRow = QueryResultRow>(
+        sqlOrConfig: string | QueryConfig,
+        params?: unknown[],
+        options?: QueryOptions
+      ): Promise<QueryResult<R>> => {
+        if (typeof sqlOrConfig === 'string') {
+          const queryConfig = this.buildQueryConfig(sqlOrConfig, params, options)
+          return client.query<R>(queryConfig)
+        }
+        return client.query<R>(sqlOrConfig)
+      }
+      const result = await handler({ query })
       await client.query('COMMIT')
       return result
     } catch (e) {

@@ -903,6 +903,15 @@ const ATTENDANCE_IMPORT_BULK_ENGINE_MODE = resolveEnumEnv(
   ['auto', 'force', 'off']
 )
 
+const ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS = resolvePositiveIntEnv(
+  'ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS',
+  180000,
+  {
+    min: 30000,
+    max: 900000,
+  }
+)
+
 function iterateCsvRows(csvText, delimiter = ',', onRow) {
   if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
   const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
@@ -4043,6 +4052,22 @@ async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
   return map
 }
 
+function buildImportHeavyQueryConfig(sql, params) {
+  const timeoutMs = Number(ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS)
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return { text: sql, values: params }
+  }
+  return {
+    text: sql,
+    values: params,
+    query_timeout: Math.floor(timeoutMs),
+  }
+}
+
+async function queryImportHeavy(client, sql, params = []) {
+  return client.query(buildImportHeavyQueryConfig(sql, params))
+}
+
 async function upsertAttendanceRecord(options) {
   const {
     userId,
@@ -4231,7 +4256,8 @@ async function batchUpsertAttendanceRecordsValues(client, rows) {
     )
   }
 
-  const inserted = await client.query(
+  const inserted = await queryImportHeavy(
+    client,
     `INSERT INTO attendance_records
       (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
      VALUES ${values}
@@ -4295,7 +4321,8 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
     sourceBatchIds.push(row.sourceBatchId ?? null)
   }
 
-  const inserted = await client.query(
+  const inserted = await queryImportHeavy(
+    client,
     `INSERT INTO attendance_records
       (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
      SELECT
@@ -4385,7 +4412,8 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
 
 async function ensureAttendanceImportRecordsStageTable(client) {
   if (client && client.__attendanceImportStageReady === true) return
-  await client.query(
+  await queryImportHeavy(
+    client,
     `CREATE TEMP TABLE IF NOT EXISTS attendance_import_records_stage (
        user_id text NOT NULL,
        org_id text NOT NULL,
@@ -4400,7 +4428,8 @@ async function ensureAttendanceImportRecordsStageTable(client) {
        is_workday boolean,
        meta_json jsonb,
        source_batch_id uuid
-     ) ON COMMIT DROP`
+     ) ON COMMIT DROP`,
+    []
   )
   if (client) client.__attendanceImportStageReady = true
 }
@@ -4439,8 +4468,9 @@ async function batchUpsertAttendanceRecordsStaging(client, rows) {
     sourceBatchIds.push(row.sourceBatchId ?? null)
   }
 
-  await client.query('TRUNCATE attendance_import_records_stage')
-  await client.query(
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
+  await queryImportHeavy(
+    client,
     `INSERT INTO attendance_import_records_stage
       (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
      SELECT
@@ -4503,7 +4533,8 @@ async function batchUpsertAttendanceRecordsStaging(client, rows) {
     ]
   )
 
-  const inserted = await client.query(
+  const inserted = await queryImportHeavy(
+    client,
     `INSERT INTO attendance_records
       (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, updated_at)
      SELECT
@@ -4536,9 +4567,10 @@ async function batchUpsertAttendanceRecordsStaging(client, rows) {
        meta = EXCLUDED.meta,
        source_batch_id = EXCLUDED.source_batch_id,
        updated_at = now()
-     RETURNING id, user_id, work_date`
+     RETURNING id, user_id, work_date`,
+    []
   )
-  await client.query('TRUNCATE attendance_import_records_stage')
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
 
   const map = new Map()
   for (const row of inserted) {
@@ -4579,7 +4611,8 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
     for (const item of items) {
       params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
     }
-    await client.query(
+    await queryImportHeavy(
+      client,
       `INSERT INTO attendance_import_items
        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
        VALUES ${values}`,
@@ -4602,7 +4635,8 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
     snapshots.push(item.previewSnapshot ?? '{}')
   }
 
-  await client.query(
+  await queryImportHeavy(
+    client,
     `INSERT INTO attendance_import_items
      (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
      SELECT
@@ -6485,7 +6519,8 @@ module.exports = {
 				              const chunkUserIds = chunk.map((item) => item.userId)
 				              const chunkWorkDates = chunk.map((item) => normalizeDateOnly(item.workDate) ?? item.workDate)
 
-				              const existingRows = await trx.query(
+				              const existingRows = await queryImportHeavy(
+				                trx,
 				                `SELECT ar.*
 				                 FROM attendance_records ar
 				                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
@@ -11024,15 +11059,16 @@ module.exports = {
 			              const chunkUserIds = chunk.map((item) => item.userId)
 			              const chunkWorkDates = chunk.map((item) => item.workDate)
 
-			              const existingRows = await trx.query(
-			                `SELECT ar.*
-			                 FROM attendance_records ar
-			                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
-			                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
-			                 WHERE ar.org_id = $1
-			                 FOR UPDATE`,
-				                [orgId, chunkUserIds, chunkWorkDates]
-				              )
+				              const existingRows = await queryImportHeavy(
+				                trx,
+				                `SELECT ar.*
+				                 FROM attendance_records ar
+				                 JOIN unnest($2::text[], $3::date[]) AS t(user_id, work_date)
+				                   ON ar.user_id = t.user_id AND ar.work_date = t.work_date
+				                 WHERE ar.org_id = $1
+				                 FOR UPDATE`,
+					                [orgId, chunkUserIds, chunkWorkDates]
+					              )
 				              const existingMap = new Map()
 				              for (const row of existingRows) {
 				                const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
