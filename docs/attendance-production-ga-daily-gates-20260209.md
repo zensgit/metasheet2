@@ -2013,6 +2013,43 @@ Observed:
   - `export csv ok`
 - Strict desktop full-flow logs include:
   - `Admin import recovery assertion passed`
+
+## Latest Notes (2026-02-25): Post-PR #261 Full-Flow Assertion Re-Verify
+
+Scope:
+
+- Re-verify strict + dashboard after merging PR [#261](https://github.com/zensgit/metasheet2/pull/261) (`test(attendance): assert records table wrapper in full-flow`).
+
+Validation runs:
+
+- Strict Gates (strict flags + import job recovery enabled):
+  - [Attendance Strict Gates (Prod) #22389307883](https://github.com/zensgit/metasheet2/actions/runs/22389307883) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-summary.json`
+    - `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-2/gate-summary.json`
+    - `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-api-smoke.log`
+    - `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-playwright-full-flow-desktop.log`
+- Daily Dashboard (after strict completed):
+  - [Attendance Daily Gate Dashboard #22389475748](https://github.com/zensgit/metasheet2/actions/runs/22389475748) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.md`
+
+Observed:
+
+- Strict API smoke logs include:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `SMOKE PASS`
+- Strict desktop full-flow logs include:
+  - `Admin import recovery assertion passed`
+  - `Full flow verification complete`
+- Dashboard highlights:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22389307883`
+  - `openTrackingIssues=[]`
 4. Re-ran daily dashboard on `main` after replacing a cancelled strict run with a successful strict run.
 
 Verification runs:
