@@ -1661,6 +1661,39 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): Mainline Confirmation After PR #251
+
+Goal:
+
+- Confirm the longrun stabilization change merged by PR `#251` is effective on `main` and reflected in the daily dashboard.
+
+Execution:
+
+1. Merged PR [#251](https://github.com/zensgit/metasheet2/pull/251).
+2. Triggered longrun on `main` with:
+   - `upload_csv=true`
+   - `include_rows500k_preview=false`
+3. Triggered daily dashboard (`lookback_hours=48`) to refresh gate linkage.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (main, post-fix) | [#22379991376](https://github.com/zensgit/metasheet2/actions/runs/22379991376) | PASS | `output/playwright/ga/22379991376/attendance-import-perf-longrun-rows100k-commit-22379991376-1/current/rows100k-commit/attendance-perf-mm1ft1ow-750vwt/perf-summary.json`, `output/playwright/ga/22379991376/attendance-import-perf-longrun-trend-22379991376-1/20260225-025251/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post-fix longrun source) | [#22380066284](https://github.com/zensgit/metasheet2/actions/runs/22380066284) | PASS | `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22380066284/gate-meta/longrun/meta.json` |
+
+Observed highlights:
+
+- `rows100k-commit` summary is stable on `main`:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Dashboard references `Perf Long Run` run `22379991376` and remains green.
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
 
 Goal:

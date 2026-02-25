@@ -2651,6 +2651,34 @@ Observed highlights:
   - trend report includes `Upload` and `Upsert` columns and marks `rows100k-commit` as `PASS`
   - skip note present: `500k preview scenario is currently skipped (include_rows500k_preview=false)`
 
+## Latest Notes (2026-02-25): Mainline Longrun Re-Validation After PR #251
+
+Execution summary:
+
+1. Merged PR [#251](https://github.com/zensgit/metasheet2/pull/251) (`max-parallel: 2` for longrun matrix).
+2. Re-ran `Attendance Import Perf Long Run` on `main` with:
+   - `upload_csv=true`
+   - `include_rows500k_preview=false`
+3. Re-ran `Attendance Daily Gate Dashboard` on `main` (`lookback_hours=48`) to confirm longrun gate source points to the fresh run.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (main, post-PR #251) | [#22379991376](https://github.com/zensgit/metasheet2/actions/runs/22379991376) | PASS | `output/playwright/ga/22379991376/attendance-import-perf-longrun-rows100k-commit-22379991376-1/current/rows100k-commit/attendance-perf-mm1ft1ow-750vwt/perf-summary.json`, `output/playwright/ga/22379991376/attendance-import-perf-longrun-trend-22379991376-1/20260225-025251/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post longrun refresh) | [#22380066284](https://github.com/zensgit/metasheet2/actions/runs/22380066284) | PASS | `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22380066284/gate-meta/longrun/meta.json` |
+
+Observed highlights:
+
+- `rows100k-commit` is green on `main` post-fix:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Longrun trend report status: `Overall: PASS`.
+- Daily dashboard references latest longrun run:
+  - `gateFlat.longrun.runId=22379991376`
+  - `overallStatus=pass`
+
 ## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
 
 Execution summary:
