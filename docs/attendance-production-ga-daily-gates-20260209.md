@@ -2679,6 +2679,35 @@ Observed highlights:
   - `gateFlat.longrun.runId=22379991376`
   - `overallStatus=pass`
 
+## Latest Notes (2026-02-25): Perf Mutation Retry Hardening (Large Commit)
+
+Execution summary:
+
+1. Hardened `scripts/ops/attendance-import-perf.mjs` mutation retry strategy:
+   - exponential backoff + jitter via `computeRetryDelayMs(...)`
+   - new env knobs:
+     - `MUTATION_RETRY_MAX_DELAY_MS` (default `8000`)
+     - `MUTATION_RETRY_JITTER_RATIO` (default `0.2`)
+     - `COMMIT_RETRIES_LARGE` (default `5`, auto-applied for `rows >= BULK_ENGINE_THRESHOLD`)
+2. Verified longrun on branch `codex/attendance-post-251-main-validation` with upload path enabled.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (branch, retry-hardened, `upload_csv=true`, `include_rows500k_preview=false`) | [#22382867831](https://github.com/zensgit/metasheet2/actions/runs/22382867831) | PASS | `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/attendance-perf-mm1kaxmo-3wtmjn/perf-summary.json`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-trend-22382867831-1/20260225-045842/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- `rows100k-commit` is stable and green:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Run log exposes active retry profile:
+  - `retry_profile preview=3 commit=3 commit_large=5`
+- Trend remains green:
+  - `Overall: PASS`
+
 ## Latest Notes (2026-02-24): Strict Gate Recovery Polling Hardening
 
 Execution summary:
