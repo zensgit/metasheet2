@@ -1595,6 +1595,32 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Development Verification (2026-02-25): Overview Records Mobile Table Recovery
+
+Goal:
+
+- Fix mobile usability regression where the `Records` table in `Attendance > Overview` could be squeezed/clipped on narrow viewports, making columns unreadable.
+
+Changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - Wrapped Overview `Records` table with `attendance__table-wrapper` for horizontal overflow handling.
+  - Added table class `attendance__table--records`.
+  - Added style rule:
+    - `.attendance__table--records { min-width: 860px; }`
+  - Result: desktop remains unchanged; mobile can horizontally scroll records without truncating content.
+
+Local verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Web build | `pnpm --filter @metasheet/web build` | PASS |
+| Web unit tests | `pnpm --filter @metasheet/web exec vitest run --watch=false` | PASS (`26 passed`) |
+
+Decision:
+
+- `GO` unchanged (UI-only resilience fix, backward-compatible).
+
 ## Post-Go Verification (2026-02-25): PR #250 Merge Re-Validation on Main
 
 Goal:

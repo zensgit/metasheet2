@@ -397,34 +397,36 @@
           </div>
         </div>
         <div v-if="records.length === 0" class="attendance__empty">No records.</div>
-        <table v-else class="attendance__table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>First in</th>
-              <th>Last out</th>
-              <th>Work (min)</th>
-              <th>Late</th>
-              <th>Early leave</th>
-              <th>Leave</th>
-              <th>Overtime</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="record in records" :key="record.id">
-              <td>{{ record.work_date }}</td>
-              <td>{{ formatDateTime(record.first_in_at) }}</td>
-              <td>{{ formatDateTime(record.last_out_at) }}</td>
-              <td>{{ record.work_minutes }}</td>
-              <td>{{ record.late_minutes }}</td>
-              <td>{{ record.early_leave_minutes }}</td>
-              <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
-              <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
-              <td>{{ formatStatus(record.status) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-else class="attendance__table-wrapper">
+          <table class="attendance__table attendance__table--records">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>First in</th>
+                <th>Last out</th>
+                <th>Work (min)</th>
+                <th>Late</th>
+                <th>Early leave</th>
+                <th>Leave</th>
+                <th>Overtime</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="record in records" :key="record.id">
+                <td>{{ record.work_date }}</td>
+                <td>{{ formatDateTime(record.first_in_at) }}</td>
+                <td>{{ formatDateTime(record.last_out_at) }}</td>
+                <td>{{ record.work_minutes }}</td>
+                <td>{{ record.late_minutes }}</td>
+                <td>{{ record.early_leave_minutes }}</td>
+                <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
+                <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
+                <td>{{ formatStatus(record.status) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <div class="attendance__pagination">
           <button class="attendance__btn" :disabled="recordsPage <= 1 || loading" @click="changeRecordsPage(-1)">
             Prev
@@ -9813,6 +9815,10 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   width: 100%;
   border-collapse: collapse;
   margin-top: 12px;
+}
+
+.attendance__table--records {
+  min-width: 860px;
 }
 
 .attendance__table-wrapper {
