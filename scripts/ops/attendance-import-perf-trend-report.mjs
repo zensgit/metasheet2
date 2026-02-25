@@ -6,7 +6,7 @@
  * - HISTORY_ROOT (optional)
  *
  * Produces Markdown + JSON report for 10k/100k commit and 50k/100k/500k preview
- * regression runs.
+ * regression runs, with optional 500k commit scenario.
  */
 
 import fs from 'fs/promises'
@@ -190,7 +190,13 @@ function renderMarkdown(payload) {
   const lines = []
   const has500kPreview = payload.scenarios.some((row) => {
     const scenario = String(row?.scenario || '').toLowerCase()
-    return scenario.includes('500k') || Number(row?.rows) >= 500000
+    const mode = String(row?.mode || '').toLowerCase()
+    return (scenario.includes('500k') || Number(row?.rows) >= 500000) && mode === 'preview'
+  })
+  const has500kCommit = payload.scenarios.some((row) => {
+    const scenario = String(row?.scenario || '').toLowerCase()
+    const mode = String(row?.mode || '').toLowerCase()
+    return (scenario.includes('500k') || Number(row?.rows) >= 500000) && mode === 'commit'
   })
   lines.push('# Attendance Import Perf Long-Run Trend')
   lines.push('')
@@ -227,10 +233,13 @@ function renderMarkdown(payload) {
   lines.push('')
   lines.push('## Notes')
   lines.push('')
-  lines.push('- 10k and 100k scenarios are expected to run `commit` + optional `export` checks.')
+  lines.push(`- 10k/100k${has500kCommit ? '/500k' : ''} scenarios are expected to run \`commit\` checks (+ optional export on smaller rows).`)
   lines.push(`- 50k/100k${has500kPreview ? '/500k' : ''} scenarios are expected to run \`preview\` checks for scale trend.`)
   if (!has500kPreview) {
     lines.push('- 500k preview scenario is currently skipped (`include_rows500k_preview=false`).')
+  }
+  if (!has500kCommit) {
+    lines.push('- 500k commit scenario is currently skipped (`include_rows500k_commit=false`).')
   }
   lines.push('- Use this report with strict gates and daily dashboard for Go/No-Go review.')
 

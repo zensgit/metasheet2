@@ -26,6 +26,10 @@ on:
         description: 'Run rows500k-preview scenario (true/false)'
         required: false
         default: 'true'
+      include_rows500k_commit:
+        description: 'Run rows500k-commit scenario (true/false)'
+        required: false
+        default: 'false'
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -184,12 +188,24 @@ jobs:
             max_commit_ms: ''
             max_export_ms: ''
             max_rollback_ms: ''
+          - id: rows500k-commit
+            rows: '500000'
+            mode: 'commit'
+            commit_async: 'true'
+            export_csv: 'false'
+            rollback: 'false'
+            expected_upsert_strategy: 'staging'
+            max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_500K_COMMIT_MAX_PREVIEW_MS || '600000' }}
+            max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_500K_COMMIT_MAX_COMMIT_MS || '900000' }}
+            max_export_ms: ''
+            max_rollback_ms: ''
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
+      INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -200,7 +216,9 @@ jobs:
           node-version: '20'
 
       - name: Run long-run scenario
-        if: matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true'
+        if: >
+          (matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true')
+          && (matrix.id != 'rows500k-commit' || env.INCLUDE_ROWS500K_COMMIT == 'true')
         env:
           SCENARIO: ${{ matrix.id }}
           ROWS: ${{ matrix.rows }}
@@ -225,8 +243,15 @@ jobs:
         run: |
           echo "Skipping rows500k-preview because INCLUDE_ROWS500K_PREVIEW=${INCLUDE_ROWS500K_PREVIEW}" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Mark rows500k-commit as skipped
+        if: matrix.id == 'rows500k-commit' && env.INCLUDE_ROWS500K_COMMIT != 'true'
+        run: |
+          echo "Skipping rows500k-commit because INCLUDE_ROWS500K_COMMIT=${INCLUDE_ROWS500K_COMMIT}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Capture scenario summary
-        if: matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true'
+        if: >
+          (matrix.id != 'rows500k-preview' || env.INCLUDE_ROWS500K_PREVIEW == 'true')
+          && (matrix.id != 'rows500k-commit' || env.INCLUDE_ROWS500K_COMMIT == 'true')
         run: |
           set -euo pipefail
           SCENARIO_DIR="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"

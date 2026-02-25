@@ -18,6 +18,7 @@ const allowEmptyRecords = process.env.ALLOW_EMPTY_RECORDS === 'true'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-flow'
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
+const assertAdminSettingsSave = process.env.ASSERT_ADMIN_SETTINGS_SAVE !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
 const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT === 'true'
@@ -296,6 +297,9 @@ async function assertAdminSettingsSaveCycle(page) {
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   await saveButton.click()
 
+  const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
+  await statusMessage.waitFor({ timeout: Math.max(20_000, adminReadyTimeoutMs) })
+
   await page.waitForFunction(() => {
     const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
     const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Settings')
@@ -309,7 +313,7 @@ async function assertAdminSettingsSaveCycle(page) {
     return label === 'Save settings' && !button.hasAttribute('disabled')
   }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
 
-  logInfo('Admin settings save cycle verified (Save settings button recovered from saving state)')
+  logInfo('Admin settings save cycle verified (status message + save button recovery)')
 }
 
 async function captureDebugScreenshot(page, fileName) {
@@ -762,7 +766,11 @@ async function run() {
       } else if (assertImportJobRecovery) {
         logInfo('WARN: import recovery assertion skipped (section unavailable)')
       }
-      await assertAdminSettingsSaveCycle(page)
+      if (assertAdminSettingsSave) {
+        await assertAdminSettingsSaveCycle(page)
+      } else {
+        logInfo('Admin settings save assertion skipped (ASSERT_ADMIN_SETTINGS_SAVE=false)')
+      }
       logInfo('Payroll batch UI verified')
     }
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
