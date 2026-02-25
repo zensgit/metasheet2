@@ -1728,6 +1728,40 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): PR #254 Legacy Drift-Issue Recovery
+
+Goal:
+
+- Ensure legacy branch drift issues close automatically after branch policy recovery and keep dashboard tracking clean.
+
+Execution:
+
+1. Merged PR [#254](https://github.com/zensgit/metasheet2/pull/254), which extends issue matching in branch-policy drift workflow to include legacy title variants.
+2. Triggered branch policy drift on `main` (PASS expected).
+3. Verified legacy issue [#190](https://github.com/zensgit/metasheet2/issues/190) auto-closed.
+4. Triggered dashboard refresh on `main` and verified no open tracking issues.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, post-PR #254) | [#22383209034](https://github.com/zensgit/metasheet2/actions/runs/22383209034) | PASS | `output/playwright/ga/22383209034/policy.json`, `output/playwright/ga/22383209034/policy.log`, `output/playwright/ga/22383209034/step-summary.md` |
+| Daily Gate Dashboard (main, post-recovery) | [#22383228278](https://github.com/zensgit/metasheet2/actions/runs/22383228278) | PASS | `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383228278/gate-meta/protection/meta.json` |
+
+Observed highlights:
+
+- Legacy issue closed on recovery:
+  - `#190` state is `CLOSED`
+  - `closedAt=2026-02-25T05:11:30Z`
+- Dashboard tracking is clean:
+  - `openTrackingIssues=[]`
+  - `overallStatus=pass`
+  - `p0Status=pass`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-24): Strict Gate Recovery Assertion Re-Enable
 
 Goal:
