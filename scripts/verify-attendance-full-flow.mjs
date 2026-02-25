@@ -268,6 +268,25 @@ async function assertHasRecords(page) {
   }
 }
 
+async function assertRecordsTableContainer(page) {
+  const recordsSection = page.locator('section.attendance__card').filter({
+    has: page.getByRole('heading', { name: 'Records' }),
+  })
+  const recordsTable = recordsSection.locator('table.attendance__table.attendance__table--records')
+  if (!(await recordsTable.count())) {
+    const empty = recordsSection.locator('text=No records.')
+    if (allowEmptyRecords && (await empty.count())) {
+      logInfo('Records table assertion skipped (ALLOW_EMPTY_RECORDS=true and no records)')
+      return
+    }
+    throw new Error('Expected records table with class attendance__table--records')
+  }
+  const wrappedTable = recordsSection.locator('.attendance__table-wrapper table.attendance__table--records')
+  if (!(await wrappedTable.count())) {
+    throw new Error('Expected records table to be wrapped by .attendance__table-wrapper')
+  }
+}
+
 async function assertAdminSettingsSaveCycle(page) {
   const settingsSection = page.locator('div.attendance__admin-section').filter({
     has: page.getByRole('heading', { name: 'Settings', exact: true }),
@@ -678,6 +697,7 @@ async function run() {
   }
   await refreshRecords(page)
   await assertHasRecords(page)
+  await assertRecordsTableContainer(page)
 
   const today = new Date().toISOString().slice(0, 10)
   const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
