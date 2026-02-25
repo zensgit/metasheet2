@@ -2594,3 +2594,44 @@ Observed dashboard highlights (`#22310807657`):
 Decision:
 
 - `GO` unchanged.
+
+## Post-Go Verification (2026-02-25): PR #263/#264 Merge + Strict/Dashboard Recovery
+
+Goal:
+
+- Land gate hardening changes (optional longrun 500k commit scenario + strict full-flow assertion hardening) and recover `main` strict/dashboard after transient connectivity failures.
+
+Code changes merged:
+
+- [#263](https://github.com/zensgit/metasheet2/pull/263)
+  - Optional longrun scenario `rows500k-commit` (`include_rows500k_commit`, default `false`).
+  - Strict-gate wiring `require_admin_settings_save` -> `REQUIRE_ADMIN_SETTINGS_SAVE`.
+  - `verify-attendance-production-flow.mjs`: exact `Refresh` selector to avoid `Retry refresh` collision.
+  - New helper script `scripts/ops/attendance-run-workflow-dispatch.sh` (`--ref` support).
+- [#264](https://github.com/zensgit/metasheet2/pull/264)
+  - `verify-attendance-full-flow.mjs`: retry/backoff for recovery-stage `/auth/me` lookup (`resolveRecoveryUserId`) to tolerate transient `ECONNREFUSED/5xx/429`.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (branch validation before merge) | [#22392236394](https://github.com/zensgit/metasheet2/actions/runs/22392236394) | PASS | `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-1/gate-summary.json`, `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-2/gate-summary.json` |
+| Strict Gates (main, pre-#264 transient failure) | [#22392542122](https://github.com/zensgit/metasheet2/actions/runs/22392542122) | FAIL | `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-summary.json`, `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (main, post-#264 recovery) | [#22392726626](https://github.com/zensgit/metasheet2/actions/runs/22392726626) | PASS | `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-api-smoke.log`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post strict recovery) | [#22392917876](https://github.com/zensgit/metasheet2/actions/runs/22392917876) | PASS | `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Recovery strict run `#22392726626` is fully green in both iterations:
+  - `apiSmoke=PASS`, `provisioning=PASS`, `playwrightProd=PASS`, `playwrightDesktop=PASS`, `playwrightMobile=PASS`.
+  - API smoke includes required strict markers: `import upload ok`, `idempotency ok`, `export csv ok`, `audit export csv ok`, `import async telemetry ok`.
+  - Desktop full-flow includes: `Admin import recovery assertion passed` and `Admin settings save cycle verified (save button transition + recovery)`.
+- Dashboard run `#22392917876` confirms production signal recovered:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `gateFlat.strict.runId=22392726626`
+
+Decision:
+
+- **GO maintained**.
