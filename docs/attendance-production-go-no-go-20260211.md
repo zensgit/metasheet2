@@ -1621,6 +1621,48 @@ Decision:
 
 - `GO` unchanged (UI-only resilience fix, backward-compatible).
 
+## Post-Go Verification (2026-02-25): PR #258 Merge + Main Gate Re-Verify
+
+Goal:
+
+- Confirm `main` remains production-green after merging PR `#258` (mobile records table readability fix).
+
+Execution:
+
+1. Merged PR [#258](https://github.com/zensgit/metasheet2/pull/258) (merge commit `9de1897164419bedfbae22fc3c49fc756e3a70e5`).
+2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
+3. Re-ran `Attendance Strict Gates (Prod)` with strict flags and import-job-recovery assertion enabled.
+4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after strict completion.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, non-drill) | [#22388823674](https://github.com/zensgit/metasheet2/actions/runs/22388823674) | PASS | `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.json`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.log`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/step-summary.md` |
+| Strict Gates (main, strict twice + recovery assertion) | [#22388862040](https://github.com/zensgit/metasheet2/actions/runs/22388862040) | PASS | `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-2/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-api-smoke.log`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post-strict rerun) | [#22389039654](https://github.com/zensgit/metasheet2/actions/runs/22389039654) | PASS | `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/gate-meta/protection/meta.json` |
+
+Observed highlights:
+
+- Branch policy:
+  - `requirePrReviews=true`
+  - `approvingReviewCountCurrent=1`
+  - `codeOwnerReviewsCurrent=false`
+- Strict gates:
+  - both iterations `gate-summary.json` show `apiSmoke/provisioning/playwrightProd/playwrightDesktop/playwrightMobile = PASS`
+  - `gate-api-smoke.log` contains `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`
+  - desktop full-flow logs contain `Admin import recovery assertion passed`
+- Daily dashboard:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22388862040`
+  - `gateFlat.protection.runId=22388823674`
+  - `openTrackingIssues=[]`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-25): PR #250 Merge Re-Validation on Main
 
 Goal:

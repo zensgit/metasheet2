@@ -1972,6 +1972,47 @@ Execution summary:
 1. Ran strict/perf baseline/perf longrun/branch-policy in parallel on `codex/attendance-next-actions`.
 2. Observed one longrun failure (`rows10k-commit` rollback transient `500`), fixed by adding rollback retries in `scripts/ops/attendance-import-perf.mjs`.
 3. Re-ran longrun and recovered to PASS; corresponding P1 issue auto-closed.
+
+## Latest Notes (2026-02-25): Post-PR #258 Mainline Re-Verify
+
+Scope:
+
+- Re-verify mainline gate health after merging PR [#258](https://github.com/zensgit/metasheet2/pull/258) (`fix(attendance-web): recover mobile records table readability`).
+
+Validation runs:
+
+- Branch Policy Drift:
+  - [Attendance Branch Policy Drift (Prod) #22388823674](https://github.com/zensgit/metasheet2/actions/runs/22388823674) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.json`
+    - `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.log`
+- Strict Gates (strict flags + import job recovery enabled):
+  - [Attendance Strict Gates (Prod) #22388862040](https://github.com/zensgit/metasheet2/actions/runs/22388862040) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-summary.json`
+    - `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-2/gate-summary.json`
+    - `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-api-smoke.log`
+    - `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-playwright-full-flow-desktop.log`
+- Daily Dashboard (after strict completed):
+  - [Attendance Daily Gate Dashboard #22389039654](https://github.com/zensgit/metasheet2/actions/runs/22389039654) (`SUCCESS`)
+  - Evidence:
+    - `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.json`
+    - `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.md`
+
+Observed:
+
+- Dashboard highlights:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22388862040`
+  - `gateFlat.protection.runId=22388823674`
+  - `openTrackingIssues=[]`
+- Strict API smoke logs include:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+- Strict desktop full-flow logs include:
+  - `Admin import recovery assertion passed`
 4. Re-ran daily dashboard on `main` after replacing a cancelled strict run with a successful strict run.
 
 Verification runs:
