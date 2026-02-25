@@ -34,6 +34,9 @@ const maxRollbackMs = parseOptionalPositiveInt('MAX_ROLLBACK_MS')
 const previewRetryAttempts = Math.max(1, Number(process.env.PREVIEW_RETRIES || 3))
 const commitRetryAttempts = Math.max(1, Number(process.env.COMMIT_RETRIES || 3))
 const mutationRetryDelayMs = Math.max(100, Number(process.env.MUTATION_RETRY_DELAY_MS || 1000))
+const mutationRetryMaxDelayMs = Math.max(mutationRetryDelayMs, Number(process.env.MUTATION_RETRY_MAX_DELAY_MS || 8000))
+const retryJitterRatio = Math.min(0.5, Math.max(0, Number(process.env.MUTATION_RETRY_JITTER_RATIO || 0.2)))
+const commitRetryAttemptsLarge = Math.max(commitRetryAttempts, Number(process.env.COMMIT_RETRIES_LARGE || 5))
 const rollbackRetryAttempts = Math.max(1, Number(process.env.ROLLBACK_RETRY_ATTEMPTS || 3))
 const rollbackRetryDelayMs = Math.max(100, Number(process.env.ROLLBACK_RETRY_DELAY_MS || 1500))
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
@@ -93,6 +96,22 @@ function nowMs() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function computeRetryDelayMs({
+  baseDelayMs,
+  attempt,
+  maxDelayMs,
+  jitterRatio = 0,
+}) {
+  const base = Math.max(1, Number(baseDelayMs) || 1)
+  const n = Math.max(1, Number(attempt) || 1)
+  const cap = Math.max(base, Number(maxDelayMs) || base)
+  const exponential = Math.min(cap, base * (2 ** Math.max(0, n - 1)))
+  if (jitterRatio <= 0) return Math.round(exponential)
+  const spread = exponential * Math.min(1, Math.max(0, jitterRatio))
+  const jittered = exponential - spread + (Math.random() * spread * 2)
+  return Math.max(1, Math.round(jittered))
 }
 
 function isRetriableStatus(status) {
@@ -279,8 +298,14 @@ async function rollbackImportBatch(batchId) {
     if (!transient || attempt >= rollbackRetryAttempts) {
       throw lastError
     }
-    log(`WARN: rollback transient failure (attempt=${attempt}/${rollbackRetryAttempts}); retrying in ${rollbackRetryDelayMs}ms`)
-    await new Promise((resolve) => setTimeout(resolve, rollbackRetryDelayMs))
+    const delayMs = computeRetryDelayMs({
+      baseDelayMs: rollbackRetryDelayMs,
+      attempt,
+      maxDelayMs: Math.max(rollbackRetryDelayMs, mutationRetryMaxDelayMs),
+      jitterRatio: retryJitterRatio,
+    })
+    log(`WARN: rollback transient failure (attempt=${attempt}/${rollbackRetryAttempts}); retrying in ${delayMs}ms`)
+    await sleep(delayMs)
   }
   throw lastError || new Error('rollback failed')
 }
@@ -401,6 +426,7 @@ async function run() {
   await refreshAuthToken()
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
+  log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
   }
@@ -506,7 +532,12 @@ async function run() {
       tPreview1 = nowMs()
     } catch (error) {
       if (attempt >= previewRetryAttempts) throw error
-      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      const delayMs = computeRetryDelayMs({
+        baseDelayMs: mutationRetryDelayMs,
+        attempt,
+        maxDelayMs: mutationRetryMaxDelayMs,
+        jitterRatio: retryJitterRatio,
+      })
       log(`WARN: preview attempt ${attempt}/${previewRetryAttempts} network error (${(error && error.message) || String(error)}); retrying in ${delayMs}ms`)
       await sleep(delayMs)
       continue
@@ -514,7 +545,12 @@ async function run() {
 
     if (!isResponseOk(preview) && isRetryableMutationFailure(preview) && attempt < previewRetryAttempts) {
       const code = String(preview.body?.error?.code || '')
-      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
+      const delayMs = computeRetryDelayMs({
+        baseDelayMs: mutationRetryDelayMs,
+        attempt,
+        maxDelayMs: mutationRetryMaxDelayMs,
+        jitterRatio: retryJitterRatio,
+      })
       log(`WARN: preview attempt ${attempt}/${previewRetryAttempts} failed (HTTP ${preview.res.status} code=${code || 'n/a'}); retrying in ${delayMs}ms`)
       await sleep(delayMs)
       continue
@@ -575,8 +611,11 @@ async function run() {
   // Commit (retry with fresh commitToken when transient/token errors happen).
   const tCommit0 = nowMs()
   const commitEndpoint = commitAsync ? '/attendance/import/commit-async' : '/attendance/import/commit'
+  const activeCommitRetryAttempts = rows >= bulkEngineThreshold
+    ? commitRetryAttemptsLarge
+    : commitRetryAttempts
   let commit = null
-  for (let attempt = 1; attempt <= commitRetryAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= activeCommitRetryAttempts; attempt += 1) {
     const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
     assertOk(prepCommit, `POST /attendance/import/prepare (commit attempt ${attempt})`)
     const commitTokenCommit = prepCommit.body?.data?.commitToken
@@ -588,17 +627,27 @@ async function run() {
         body: JSON.stringify({ ...basePayload, commitToken: commitTokenCommit }),
       })
     } catch (error) {
-      if (attempt >= commitRetryAttempts) throw error
-      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
-      log(`WARN: commit attempt ${attempt}/${commitRetryAttempts} network error (${(error && error.message) || String(error)}); retrying in ${delayMs}ms`)
+      if (attempt >= activeCommitRetryAttempts) throw error
+      const delayMs = computeRetryDelayMs({
+        baseDelayMs: mutationRetryDelayMs,
+        attempt,
+        maxDelayMs: mutationRetryMaxDelayMs,
+        jitterRatio: retryJitterRatio,
+      })
+      log(`WARN: commit attempt ${attempt}/${activeCommitRetryAttempts} network error (${(error && error.message) || String(error)}); retrying in ${delayMs}ms`)
       await sleep(delayMs)
       continue
     }
 
-    if (!isResponseOk(commit) && isRetryableMutationFailure(commit) && attempt < commitRetryAttempts) {
+    if (!isResponseOk(commit) && isRetryableMutationFailure(commit) && attempt < activeCommitRetryAttempts) {
       const code = String(commit.body?.error?.code || '')
-      const delayMs = Math.min(mutationRetryDelayMs * attempt, 5000)
-      log(`WARN: commit attempt ${attempt}/${commitRetryAttempts} failed (HTTP ${commit.res.status} code=${code || 'n/a'}); retrying in ${delayMs}ms`)
+      const delayMs = computeRetryDelayMs({
+        baseDelayMs: mutationRetryDelayMs,
+        attempt,
+        maxDelayMs: mutationRetryMaxDelayMs,
+        jitterRatio: retryJitterRatio,
+      })
+      log(`WARN: commit attempt ${attempt}/${activeCommitRetryAttempts} failed (HTTP ${commit.res.status} code=${code || 'n/a'}); retrying in ${delayMs}ms`)
       await sleep(delayMs)
       continue
     }
