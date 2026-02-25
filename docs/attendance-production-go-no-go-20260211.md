@@ -1728,6 +1728,42 @@ Decision:
 
 - `GO` unchanged.
 
+## Post-Go Verification (2026-02-25): PR #255 Mainline Gate Re-Validation
+
+Goal:
+
+- Confirm `main` remains policy-compliant and dashboard-clean immediately after PR #255 merge.
+
+Execution:
+
+1. Merged PR [#255](https://github.com/zensgit/metasheet2/pull/255).
+2. Triggered `Attendance Branch Policy Drift (Prod)` on `main` to re-verify branch policy enforcement.
+3. Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) on `main` to confirm tracking issue state and gate linking.
+
+Evidence:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main, post-PR #255) | [#22383360093](https://github.com/zensgit/metasheet2/actions/runs/22383360093) | PASS | `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.json`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.log`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-PR #255) | [#22383370628](https://github.com/zensgit/metasheet2/actions/runs/22383370628) | PASS | `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/gate-meta/protection/meta.json` |
+
+Observed highlights:
+
+- Branch policy remains locked:
+  - `requirePrReviews=true`
+  - `minApprovingReviewCount=1`
+  - `prReviewsRequiredCurrent=true`
+  - `approvingReviewCountCurrent=1`
+- Dashboard remains clean and references the latest protection gate:
+  - `openTrackingIssues=[]`
+  - `gateFlat.protection.runId=22383360093`
+  - `overallStatus=pass`
+  - `p0Status=pass`
+
+Decision:
+
+- `GO` unchanged.
+
 ## Post-Go Verification (2026-02-25): PR #254 Legacy Drift-Issue Recovery
 
 Goal:
