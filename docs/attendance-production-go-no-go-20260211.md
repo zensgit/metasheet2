@@ -2658,6 +2658,7 @@ Verification:
 |---|---|---|---|
 | Perf script syntax | local | PASS | `node --check scripts/ops/attendance-import-perf.mjs` |
 | Perf Longrun (branch `codex/attendance-perf-async-deadlock-retry`, non-drill, `upload_csv=true`) | [#22489161445](https://github.com/zensgit/metasheet2/actions/runs/22489161445) | PASS | `output/playwright/ga/22489161445/attendance-import-perf-longrun-rows100k-commit-22489161445-1/current/rows100k-commit/attendance-perf-mm4yl57r-jv4h0p/perf-summary.json`, `output/playwright/ga/22489161445/attendance-import-perf-longrun-trend-22489161445-1/20260227-140204/attendance-import-perf-longrun-trend.json` |
+| Perf Longrun (main, post-merge PR #271, non-drill, `upload_csv=true`) | [#22489422349](https://github.com/zensgit/metasheet2/actions/runs/22489422349) | PASS | `output/playwright/ga/22489422349/attendance-import-perf-longrun-rows100k-commit-22489422349-1/current/rows100k-commit/attendance-perf-mm4yut7w-hduc0l/perf-summary.json`, `output/playwright/ga/22489422349/attendance-import-perf-longrun-trend-22489422349-1/20260227-141131/attendance-import-perf-longrun-trend.json` |
 
 Observed highlights (`#22489161445`, rows100k-commit summary):
 
@@ -2666,6 +2667,11 @@ Observed highlights (`#22489161445`, rows100k-commit summary):
 - `recordUpsertStrategy=staging`
 - `commitIdempotencyKey=attendance-perf-mm4yl57r-jv4h0p`
 - `regressions=[]`
+- Mainline re-check (`#22489422349`) also shows:
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `commitIdempotencyKey=attendance-perf-mm4yut7w-hduc0l`
+  - `regressions=[]`
 
 Decision:
 
