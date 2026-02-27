@@ -2636,6 +2636,41 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Development Verification (2026-02-27): Async Deadlock Retry Hardening (Perf Script)
+
+Goal:
+
+- Reduce longrun flakiness from transient async import deadlocks by making `attendance-import-perf.mjs` retry async commit job failures with a new idempotency key on retryable DB conflict signatures.
+
+Code changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - Added `isRetryableAsyncCommitFailure()` for:
+    - `deadlock detected`
+    - `serialization failure` / `could not serialize access`
+    - `lock timeout`
+  - Added `buildCommitAttemptIdempotencyKey()` and rotated idempotency key only when async job failure is retryable.
+  - Added `commitIdempotencyKey` to `perf-summary.json`.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf script syntax | local | PASS | `node --check scripts/ops/attendance-import-perf.mjs` |
+| Perf Longrun (branch `codex/attendance-perf-async-deadlock-retry`, non-drill, `upload_csv=true`) | [#22489161445](https://github.com/zensgit/metasheet2/actions/runs/22489161445) | PASS | `output/playwright/ga/22489161445/attendance-import-perf-longrun-rows100k-commit-22489161445-1/current/rows100k-commit/attendance-perf-mm4yl57r-jv4h0p/perf-summary.json`, `output/playwright/ga/22489161445/attendance-import-perf-longrun-trend-22489161445-1/20260227-140204/attendance-import-perf-longrun-trend.json` |
+
+Observed highlights (`#22489161445`, rows100k-commit summary):
+
+- `uploadCsv=true`
+- `engine=bulk`
+- `recordUpsertStrategy=staging`
+- `commitIdempotencyKey=attendance-perf-mm4yl57r-jv4h0p`
+- `regressions=[]`
+
+Decision:
+
+- **GO maintained** (development hardening validated; production gates remain unchanged).
+
 ## Post-Go Verification (2026-02-27): Post-Merge Mainline Re-Validation (PR #268)
 
 Goal:
