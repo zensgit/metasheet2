@@ -2636,6 +2636,44 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-27): Post-Merge Mainline Re-Validation (PR #268)
+
+Goal:
+
+- Confirm `main` remains production-ready after merging PR [#268](https://github.com/zensgit/metasheet2/pull/268) (`admin settings save-cycle assertion hardening` + evidence docs update).
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, post-merge, recovery+admin-save enabled) | [#22486048486](https://github.com/zensgit/metasheet2/actions/runs/22486048486) | PASS | `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-1/gate-summary.json`, `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post strict refresh) | [#22486225516](https://github.com/zensgit/metasheet2/actions/runs/22486225516) | PASS | `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (main, post-merge, upload path) | [#22486265427](https://github.com/zensgit/metasheet2/actions/runs/22486265427) | PASS | `output/playwright/ga/22486265427/attendance-import-perf-22486265427-1/attendance-perf-mm4vdr0q-8gd1or/perf-summary.json` |
+
+Observed highlights:
+
+- Strict gate summaries (both iterations) report:
+  - `apiSmoke=PASS`
+  - `provisioning=PASS`
+  - `playwrightProd=PASS`
+  - `playwrightDesktop=PASS`
+  - `playwrightMobile=PASS`
+  - `exitCode=0`
+- Dashboard remains green and references refreshed strict signal:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `openTrackingIssues=[]`
+  - `gateFlat.strict.runId=22486048486`
+- Baseline summary confirms upload path performance within threshold:
+  - `rows=100000`
+  - `uploadCsv=true`
+  - `commitMs=95697`
+  - `regressions=[]`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-25): `rows500k-commit` Timeout Hardening (PR #266/#267)
 
 Goal:
