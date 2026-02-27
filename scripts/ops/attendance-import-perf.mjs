@@ -138,6 +138,20 @@ function isRetryableMutationFailure(resp) {
   return false
 }
 
+function isRetryableAsyncCommitFailure(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  if (!message.startsWith('async commit job failed:')) return false
+  return message.includes('deadlock detected')
+    || message.includes('serialization failure')
+    || message.includes('could not serialize access')
+    || message.includes('lock timeout')
+}
+
+function buildCommitAttemptIdempotencyKey(baseKey, attempt) {
+  if (attempt <= 1) return baseKey
+  return `${baseKey}-retry-${attempt}`
+}
+
 async function fetchWithRetry(url, init = {}, options = {}) {
   const label = options.label || url
   const allowRefresh = options.allowRefresh !== false
@@ -615,6 +629,9 @@ async function run() {
     ? commitRetryAttemptsLarge
     : commitRetryAttempts
   let commit = null
+  const baseCommitIdempotencyKey = runId
+  let commitIdempotencyKey = baseCommitIdempotencyKey
+  let finalAsyncJob = null
   for (let attempt = 1; attempt <= activeCommitRetryAttempts; attempt += 1) {
     const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
     assertOk(prepCommit, `POST /attendance/import/prepare (commit attempt ${attempt})`)
@@ -624,7 +641,11 @@ async function run() {
     try {
       commit = await apiFetch(commitEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ ...basePayload, commitToken: commitTokenCommit }),
+        body: JSON.stringify({
+          ...basePayload,
+          idempotencyKey: commitIdempotencyKey,
+          commitToken: commitTokenCommit,
+        }),
       })
     } catch (error) {
       if (attempt >= activeCommitRetryAttempts) throw error
@@ -651,10 +672,35 @@ async function run() {
       await sleep(delayMs)
       continue
     }
+    assertOk(commit, `POST ${commitEndpoint} (attempt ${attempt})`)
+
+    if (commitAsync) {
+      const attemptJob = commit.body?.data?.job
+      const attemptJobId = attemptJob?.id
+      if (!attemptJobId) die('commit-async did not return job.id')
+      try {
+        finalAsyncJob = await pollImportJob(attemptJobId)
+      } catch (error) {
+        if (isRetryableAsyncCommitFailure(error) && attempt < activeCommitRetryAttempts) {
+          const delayMs = computeRetryDelayMs({
+            baseDelayMs: mutationRetryDelayMs,
+            attempt,
+            maxDelayMs: mutationRetryMaxDelayMs,
+            jitterRatio: retryJitterRatio,
+          })
+          const nextAttempt = attempt + 1
+          commitIdempotencyKey = buildCommitAttemptIdempotencyKey(baseCommitIdempotencyKey, nextAttempt)
+          const message = (error && error.message) || String(error)
+          log(`WARN: commit-async job attempt ${attempt}/${activeCommitRetryAttempts} failed (${message}); retrying with idempotencyKey=${commitIdempotencyKey} in ${delayMs}ms`)
+          await sleep(delayMs)
+          continue
+        }
+        throw error
+      }
+    }
     break
   }
   if (!commit) die('commit response missing after retries')
-  assertOk(commit, `POST ${commitEndpoint}`)
 
   let batchId = null
   let jobId = null
@@ -671,7 +717,8 @@ async function run() {
     const job = commit.body?.data?.job
     jobId = job?.id
     if (!jobId) die('commit-async did not return job.id')
-    const finalJob = await pollImportJob(jobId)
+    const finalJob = finalAsyncJob
+    if (!finalJob) die('commit-async job result missing')
     batchId = finalJob?.batchId
     if (typeof finalJob?.engine === 'string' && finalJob.engine) engine = finalJob.engine
     processedRows = coerceNonNegativeNumber(finalJob?.processedRows)
@@ -807,6 +854,7 @@ async function run() {
       },
     },
     uploadCsv,
+    commitIdempotencyKey,
     jobId,
     previewMs: tPreview1 - tPreview0,
     commitMs: tCommit1 - tCommit0,
