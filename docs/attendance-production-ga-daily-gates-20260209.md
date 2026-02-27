@@ -2980,3 +2980,38 @@ Observed highlights:
   - `job telemetry: progressPercent=100 throughputRowsPerSec=1170.96`
 - Default P1 tracker is closed after recovery:
   - [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` -> `CLOSED`.
+
+## Latest Notes (2026-02-27): Post-Merge Mainline Gate Confirmation (PR #268)
+
+Execution summary:
+
+1. Merged PR [#268](https://github.com/zensgit/metasheet2/pull/268) onto `main`.
+2. Triggered `Attendance Strict Gates (Prod)` on `main` with:
+   - `require_import_job_recovery=true`
+   - `require_admin_settings_save=true`
+3. Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and verified it binds to the refreshed strict run.
+4. Triggered `Attendance Import Perf Baseline` on `main` (`rows=100000`, `upload_csv=true`) and verified no regression.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, post-merge) | [#22486048486](https://github.com/zensgit/metasheet2/actions/runs/22486048486) | PASS | `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-1/gate-summary.json`, `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post strict refresh) | [#22486225516](https://github.com/zensgit/metasheet2/actions/runs/22486225516) | PASS | `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (main, post-merge, upload path) | [#22486265427](https://github.com/zensgit/metasheet2/actions/runs/22486265427) | PASS | `output/playwright/ga/22486265427/attendance-import-perf-22486265427-1/attendance-perf-mm4vdr0q-8gd1or/perf-summary.json` |
+
+Observed highlights:
+
+- Strict Gates:
+  - both iterations `exitCode=0`
+  - `apiSmoke=PASS`, `provisioning=PASS`, `playwrightProd=PASS`, `playwrightDesktop=PASS`, `playwrightMobile=PASS`
+- Dashboard:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `openTrackingIssues=[]`
+  - `gateFlat.strict.runId=22486048486`
+- Perf Baseline:
+  - `rows=100000`
+  - `uploadCsv=true`
+  - `commitMs=95697`
+  - `regressions=[]`
