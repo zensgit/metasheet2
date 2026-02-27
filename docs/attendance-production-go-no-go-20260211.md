@@ -2635,3 +2635,43 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-02-25): `rows500k-commit` Timeout Hardening (PR #266/#267)
+
+Goal:
+
+- Recover `rows500k-commit` longrun stability on `main` under `upload_csv=true` after timeout regressions.
+
+Code changes merged:
+
+- [#266](https://github.com/zensgit/metasheet2/pull/266)
+  - Added heavy-query timeout override wiring (`timeoutMs`) from attendance import paths into DB query config.
+  - Added `ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS` (default `180000`) for heavy import SQL.
+- [#267](https://github.com/zensgit/metasheet2/pull/267)
+  - Applied both `query_timeout` and `statement_timeout` for heavy queries.
+  - Added `SET LOCAL statement_timeout` for heavy import transactions to keep timeout policy consistent inside txn scope.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Build + deploy (post-#266) | [#22394293493](https://github.com/zensgit/metasheet2/actions/runs/22394293493) | PASS | GitHub Actions deploy logs |
+| Perf Longrun (main, transitional after #266) | [#22394440411](https://github.com/zensgit/metasheet2/actions/runs/22394440411) | FAIL | `output/playwright/ga/22394440411/attendance-import-perf-longrun-rows500k-commit-22394440411-1/current/rows500k-commit/perf.log` |
+| Build + deploy (post-#267) | [#22394759732](https://github.com/zensgit/metasheet2/actions/runs/22394759732) | PASS | GitHub Actions deploy logs |
+| Perf Longrun (main, post-#267, `rows500k-commit` enabled) | [#22394865768](https://github.com/zensgit/metasheet2/actions/runs/22394865768) | PASS | `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/perf.log`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/attendance-perf-mm1ycxgl-l8z7x1/perf-summary.json`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-trend-22394865768-1/20260225-113750/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Transitional failure `#22394440411` moved from earlier read-timeout signature to DB `statement timeout`, confirming first-stage mitigation took effect.
+- Final recovery `#22394865768` passed all enabled non-drill scenarios, including `rows500k-commit`.
+- `rows500k-commit` summary in recovery run:
+  - `uploadCsv=true`
+  - `mode=commit`
+  - `commitMs=428928`
+  - `elapsedMs=427000`
+- P1 tracker status after recovery:
+  - [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` is `CLOSED`.
+
+Decision:
+
+- **GO maintained**.
