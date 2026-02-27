@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKFLOW="${WORKFLOW:-${1:-}}"
-if [[ $# -gt 0 ]]; then
+WORKFLOW="${WORKFLOW:-}"
+if [[ $# -gt 0 && "${1:-}" != *=* ]]; then
+  WORKFLOW="$1"
   shift || true
 fi
 
