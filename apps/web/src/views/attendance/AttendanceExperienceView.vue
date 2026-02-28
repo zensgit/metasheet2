@@ -1,6 +1,6 @@
 <template>
   <div class="attendance-shell">
-    <nav class="attendance-shell__tabs" aria-label="Attendance sections">
+    <nav class="attendance-shell__tabs" :aria-label="t.attendanceSections">
       <button
         v-for="tab in availableTabs"
         :key="tab.id"
@@ -14,10 +14,10 @@
     </nav>
 
     <section v-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
-      <h3>Desktop recommended</h3>
+      <h3>{{ t.desktopRecommended }}</h3>
       <p>{{ desktopOnlyMessage }}</p>
       <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
-        Back to Overview
+        {{ t.backToOverview }}
       </button>
     </section>
 
@@ -32,8 +32,8 @@
       :can-design="canAccessWorkflow"
     />
     <section v-else class="attendance-shell__desktop-hint">
-      <h3>Capability not available</h3>
-      <p>Current account does not have access to this section.</p>
+      <h3>{{ t.capabilityUnavailable }}</h3>
+      <p>{{ t.capabilityHint }}</p>
     </section>
   </div>
 </template>
@@ -41,6 +41,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
@@ -51,6 +52,7 @@ type AttendanceTab = 'overview' | 'admin' | 'workflow'
 const route = useRoute()
 const router = useRouter()
 const { hasFeature, loadProductFeatures } = useFeatureFlags()
+const { isZh } = useLocale()
 
 const activeTab = ref<AttendanceTab>('overview')
 const isMobile = ref(false)
@@ -58,18 +60,43 @@ const isMobile = ref(false)
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canAccessWorkflow = computed(() => hasFeature('workflow'))
 const desktopOnlyTabs: AttendanceTab[] = ['admin', 'workflow']
+const t = computed(() => isZh.value
+  ? {
+      attendanceSections: '考勤模块',
+      overview: '总览',
+      adminCenter: '管理中心',
+      workflowDesigner: '流程设计',
+      desktopRecommended: '建议使用桌面端',
+      backToOverview: '返回总览',
+      capabilityUnavailable: '当前能力不可用',
+      capabilityHint: '当前账号没有此模块的访问权限。',
+      workflowDesktopHint: '当前版本流程设计仅支持桌面端，请在桌面端编辑和发布流程。',
+      adminDesktopHint: '管理中心以桌面端为主，请在桌面端管理导入、规则与计薪配置。',
+    }
+  : {
+      attendanceSections: 'Attendance sections',
+      overview: 'Overview',
+      adminCenter: 'Admin Center',
+      workflowDesigner: 'Workflow Designer',
+      desktopRecommended: 'Desktop recommended',
+      backToOverview: 'Back to Overview',
+      capabilityUnavailable: 'Capability not available',
+      capabilityHint: 'Current account does not have access to this section.',
+      workflowDesktopHint: 'Workflow designer is desktop-only in this release. Use desktop for editing and publishing flows.',
+      adminDesktopHint: 'Admin center is desktop-first. Use desktop to manage import, rules, and payroll settings.',
+    })
 
 const availableTabs = computed<Array<{ id: AttendanceTab; label: string }>>(() => {
   const tabs: Array<{ id: AttendanceTab; label: string }> = [
-    { id: 'overview', label: 'Overview' },
+    { id: 'overview', label: t.value.overview },
   ]
 
   if (canAccessAdmin.value) {
-    tabs.push({ id: 'admin', label: 'Admin Center' })
+    tabs.push({ id: 'admin', label: t.value.adminCenter })
   }
 
   if (canAccessWorkflow.value) {
-    tabs.push({ id: 'workflow', label: 'Workflow Designer' })
+    tabs.push({ id: 'workflow', label: t.value.workflowDesigner })
   }
 
   return tabs
@@ -79,9 +106,9 @@ const desktopOnlyBlocked = computed(() => isMobile.value && desktopOnlyTabs.incl
 
 const desktopOnlyMessage = computed(() => {
   if (activeTab.value === 'workflow') {
-    return 'Workflow designer is desktop-only in this release. Use desktop for editing and publishing flows.'
+    return t.value.workflowDesktopHint
   }
-  return 'Admin center is desktop-first. Use desktop to manage import, rules, and payroll settings.'
+  return t.value.adminDesktopHint
 })
 
 function updateMobileState(): void {

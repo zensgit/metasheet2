@@ -1,61 +1,61 @@
 <template>
   <div class="attendance">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
-      <h3>Checking attendance module...</h3>
-      <p class="attendance__empty">Loading plugin status.</p>
+      <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
+      <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
     </div>
     <div v-else-if="pluginMissing" class="attendance__card attendance__card--empty">
-      <h3>Attendance module not enabled</h3>
-      <p class="attendance__empty" v-if="pluginFailed">Attendance plugin failed to load. Check server logs.</p>
+      <h3>{{ tr('Attendance module not enabled', '考勤模块未启用') }}</h3>
+      <p class="attendance__empty" v-if="pluginFailed">{{ tr('Attendance plugin failed to load. Check server logs.', '考勤插件加载失败，请检查服务端日志。') }}</p>
       <p class="attendance__empty" v-else-if="pluginErrorMessage">{{ pluginErrorMessage }}</p>
-      <p class="attendance__empty" v-else>Enable the attendance plugin to use this page.</p>
+      <p class="attendance__empty" v-else>{{ tr('Enable the attendance plugin to use this page.', '启用考勤插件后可使用此页面。') }}</p>
     </div>
     <template v-else>
       <header class="attendance__header" v-if="showOverview">
         <div>
-          <h2 class="attendance__title">Attendance</h2>
-          <p class="attendance__subtitle">Track punches, summaries, and adjustments.</p>
+          <h2 class="attendance__title">{{ tr('Attendance', '考勤') }}</h2>
+          <p class="attendance__subtitle">{{ tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。') }}</p>
         </div>
         <div class="attendance__actions">
           <button class="attendance__btn attendance__btn--primary" :disabled="punching" @click="punch('check_in')">
-            {{ punching ? 'Working...' : 'Check In' }}
+            {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
           </button>
           <button class="attendance__btn" :disabled="punching" @click="punch('check_out')">
-            {{ punching ? 'Working...' : 'Check Out' }}
+            {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
           </button>
         </div>
       </header>
 
       <section class="attendance__filters" v-if="showOverview">
         <label class="attendance__field" for="attendance-from-date">
-          <span>From</span>
+          <span>{{ tr('From', '开始') }}</span>
           <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
         </label>
         <label class="attendance__field" for="attendance-to-date">
-          <span>To</span>
+          <span>{{ tr('To', '结束') }}</span>
           <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
         </label>
         <label class="attendance__field" for="attendance-org-id">
-          <span>Org ID</span>
-          <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" placeholder="default" />
+          <span>{{ tr('Org ID', '组织 ID') }}</span>
+          <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
         </label>
         <label class="attendance__field" for="attendance-user-id">
-          <span>User ID (optional)</span>
+          <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
           <input
             id="attendance-user-id"
             name="targetUserId"
             v-model="targetUserId"
             type="text"
-            placeholder="Current user"
+            :placeholder="tr('Current user', '当前用户')"
           />
         </label>
-        <button class="attendance__btn" :disabled="loading" @click="refreshAll">Refresh</button>
+        <button class="attendance__btn" :disabled="loading" @click="refreshAll">{{ tr('Refresh', '刷新') }}</button>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
           </span>
           <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
-            Code: {{ statusCode }}
+            {{ tr('Code', '代码') }}: {{ statusCode }}
           </span>
           <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
             {{ statusHint }}
@@ -67,82 +67,82 @@
             :disabled="statusActionBusy"
             @click="runStatusAction"
           >
-            {{ statusActionBusy ? 'Working...' : statusActionLabel }}
+            {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
           </button>
         </div>
       </section>
 
       <section class="attendance__grid" v-if="showOverview">
         <div class="attendance__card">
-          <h3>Summary</h3>
+          <h3>{{ tr('Summary', '汇总') }}</h3>
           <div v-if="summary" class="attendance__summary">
             <div class="attendance__summary-item">
-              <span>Total days</span>
+              <span>{{ tr('Total days', '总天数') }}</span>
               <strong>{{ summary.total_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Total minutes</span>
+              <span>{{ tr('Total minutes', '总分钟数') }}</span>
               <strong>{{ summary.total_minutes }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Late minutes</span>
+              <span>{{ tr('Late minutes', '迟到分钟') }}</span>
               <strong>{{ summary.total_late_minutes ?? 0 }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Early leave minutes</span>
+              <span>{{ tr('Early leave minutes', '早退分钟') }}</span>
               <strong>{{ summary.total_early_leave_minutes ?? 0 }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Leave minutes</span>
+              <span>{{ tr('Leave minutes', '请假分钟') }}</span>
               <strong>{{ summary.leave_minutes ?? 0 }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Overtime minutes</span>
+              <span>{{ tr('Overtime minutes', '加班分钟') }}</span>
               <strong>{{ summary.overtime_minutes ?? 0 }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Normal</span>
+              <span>{{ tr('Normal', '正常') }}</span>
               <strong>{{ summary.normal_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Late</span>
+              <span>{{ tr('Late', '迟到') }}</span>
               <strong>{{ summary.late_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Early leave</span>
+              <span>{{ tr('Early leave', '早退') }}</span>
               <strong>{{ summary.early_leave_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Late + Early</span>
+              <span>{{ tr('Late + Early', '迟到+早退') }}</span>
               <strong>{{ summary.late_early_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Partial</span>
+              <span>{{ tr('Partial', '部分出勤') }}</span>
               <strong>{{ summary.partial_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Absent</span>
+              <span>{{ tr('Absent', '缺勤') }}</span>
               <strong>{{ summary.absent_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Adjusted</span>
+              <span>{{ tr('Adjusted', '已调整') }}</span>
               <strong>{{ summary.adjusted_days }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>Off</span>
+              <span>{{ tr('Off', '休息') }}</span>
               <strong>{{ summary.off_days }}</strong>
             </div>
           </div>
-          <div v-else class="attendance__empty">No summary yet.</div>
+          <div v-else class="attendance__empty">{{ tr('No summary yet.', '暂无汇总数据。') }}</div>
         </div>
 
         <div class="attendance__card attendance__card--calendar">
           <div class="attendance__calendar-header">
-            <h3>Calendar</h3>
+            <h3>{{ tr('Calendar', '日历') }}</h3>
             <div class="attendance__calendar-nav">
-              <button class="attendance__btn" @click="shiftMonth(-1)">Prev</button>
+              <button class="attendance__btn" @click="shiftMonth(-1)">{{ tr('Prev', '上月') }}</button>
               <span class="attendance__calendar-label">{{ calendarLabel }}</span>
-              <button class="attendance__btn" @click="shiftMonth(1)">Next</button>
+              <button class="attendance__btn" @click="shiftMonth(1)">{{ tr('Next', '下月') }}</button>
             </div>
           </div>
           <div class="attendance__calendar-weekdays">
@@ -168,10 +168,10 @@
         </div>
 
         <div class="attendance__card">
-          <h3>Adjustment Request</h3>
+          <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
           <div class="attendance__request-form">
             <label class="attendance__field" for="attendance-request-work-date">
-              <span>Work date</span>
+              <span>{{ tr('Work date', '工作日期') }}</span>
               <input
                 id="attendance-request-work-date"
                 name="requestWorkDate"
@@ -180,45 +180,45 @@
               />
             </label>
             <label class="attendance__field" for="attendance-request-type">
-              <span>Type</span>
+              <span>{{ tr('Type', '类型') }}</span>
               <select id="attendance-request-type" name="requestType" v-model="requestForm.requestType">
-                <option value="missed_check_in">Missed check-in</option>
-                <option value="missed_check_out">Missed check-out</option>
-                <option value="time_correction">Time correction</option>
-                <option value="leave">Leave</option>
-                <option value="overtime">Overtime</option>
+                <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
+                <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
+                <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
+                <option value="leave">{{ tr('Leave', '请假') }}</option>
+                <option value="overtime">{{ tr('Overtime', '加班') }}</option>
               </select>
             </label>
             <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-leave-type">
-              <span>Leave type</span>
+              <span>{{ tr('Leave type', '请假类型') }}</span>
               <select
                 id="attendance-request-leave-type"
                 name="requestLeaveType"
                 v-model="requestForm.leaveTypeId"
                 :disabled="leaveTypes.length === 0"
               >
-                <option value="" disabled>Select leave type</option>
+                <option value="" disabled>{{ tr('Select leave type', '选择请假类型') }}</option>
                 <option v-for="item in leaveTypes" :key="item.id" :value="item.id">
                   {{ item.name }}
                 </option>
               </select>
             </label>
             <label v-if="isOvertimeRequest" class="attendance__field" for="attendance-request-overtime-rule">
-              <span>Overtime rule</span>
+              <span>{{ tr('Overtime rule', '加班规则') }}</span>
               <select
                 id="attendance-request-overtime-rule"
                 name="requestOvertimeRule"
                 v-model="requestForm.overtimeRuleId"
                 :disabled="overtimeRules.length === 0"
               >
-                <option value="" disabled>Select rule</option>
+                <option value="" disabled>{{ tr('Select rule', '选择规则') }}</option>
                 <option v-for="rule in overtimeRules" :key="rule.id" :value="rule.id">
                   {{ rule.name }}
                 </option>
               </select>
             </label>
             <label class="attendance__field" for="attendance-request-in">
-              <span>{{ isLeaveOrOvertimeRequest ? 'Start' : 'Requested in' }}</span>
+              <span>{{ isLeaveOrOvertimeRequest ? tr('Start', '开始') : tr('Requested in', '申请打卡入') }}</span>
               <input
                 id="attendance-request-in"
                 name="requestedInAt"
@@ -227,7 +227,7 @@
               />
             </label>
             <label class="attendance__field" for="attendance-request-out">
-              <span>{{ isLeaveOrOvertimeRequest ? 'End' : 'Requested out' }}</span>
+              <span>{{ isLeaveOrOvertimeRequest ? tr('End', '结束') : tr('Requested out', '申请打卡出') }}</span>
               <input
                 id="attendance-request-out"
                 name="requestedOutAt"
@@ -236,7 +236,7 @@
               />
             </label>
             <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
-              <span>Duration (min)</span>
+              <span>{{ tr('Duration (min)', '时长（分钟）') }}</span>
               <input
                 id="attendance-request-minutes"
                 name="requestMinutes"
@@ -246,36 +246,36 @@
               />
             </label>
             <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-attachment">
-              <span>Attachment URL</span>
+              <span>{{ tr('Attachment URL', '附件链接') }}</span>
               <input
                 id="attendance-request-attachment"
                 name="requestAttachment"
                 v-model="requestForm.attachmentUrl"
                 type="text"
-                placeholder="Optional"
+                :placeholder="tr('Optional', '可选')"
               />
             </label>
             <label class="attendance__field attendance__field--full" for="attendance-request-reason">
-              <span>Reason</span>
+              <span>{{ tr('Reason', '原因') }}</span>
               <input
                 id="attendance-request-reason"
                 name="requestReason"
                 v-model="requestForm.reason"
                 type="text"
-                placeholder="Optional"
+                :placeholder="tr('Optional', '可选')"
               />
             </label>
             <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting" @click="submitRequest">
-              {{ requestSubmitting ? 'Submitting...' : 'Submit request' }}
+              {{ requestSubmitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
             </button>
           </div>
 
           <div class="attendance__requests">
             <div class="attendance__requests-header">
-              <span>Recent requests</span>
-              <button class="attendance__btn" :disabled="loading" @click="loadRequests">Reload</button>
+              <span>{{ tr('Recent requests', '最近申请') }}</span>
+              <button class="attendance__btn" :disabled="loading" @click="loadRequests">{{ tr('Reload', '重载') }}</button>
             </div>
-            <div v-if="requests.length === 0" class="attendance__empty">No requests.</div>
+            <div v-if="requests.length === 0" class="attendance__empty">{{ tr('No requests.', '暂无申请。') }}</div>
             <ul v-else class="attendance__request-list">
               <li v-for="item in requests" :key="item.id" class="attendance__request-item">
                 <div>
@@ -285,18 +285,18 @@
                   </span>
                 </div>
                 <div class="attendance__request-meta" v-if="item.metadata">
-                  <span v-if="item.metadata.leaveType">Leave: {{ item.metadata.leaveType.name }}</span>
-                  <span v-if="item.metadata.overtimeRule">Overtime: {{ item.metadata.overtimeRule.name }}</span>
-                  <span v-if="item.metadata.minutes">Minutes: {{ item.metadata.minutes }}</span>
+                  <span v-if="item.metadata.leaveType">{{ tr('Leave', '请假') }}: {{ item.metadata.leaveType.name }}</span>
+                  <span v-if="item.metadata.overtimeRule">{{ tr('Overtime', '加班') }}: {{ item.metadata.overtimeRule.name }}</span>
+                  <span v-if="item.metadata.minutes">{{ tr('Minutes', '分钟') }}: {{ item.metadata.minutes }}</span>
                 </div>
                 <div class="attendance__request-meta">
-                  <span>In: {{ formatDateTime(item.requested_in_at) }}</span>
-                  <span>Out: {{ formatDateTime(item.requested_out_at) }}</span>
+                  <span>{{ tr('In', '入') }}: {{ formatDateTime(item.requested_in_at) }}</span>
+                  <span>{{ tr('Out', '出') }}: {{ formatDateTime(item.requested_out_at) }}</span>
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
-                  <button class="attendance__btn" @click="cancelRequest(item.id)">Cancel</button>
-                  <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">Approve</button>
-                  <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">Reject</button>
+                  <button class="attendance__btn" @click="cancelRequest(item.id)">{{ tr('Cancel', '取消') }}</button>
+                  <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
+                  <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">{{ tr('Reject', '驳回') }}</button>
                 </div>
               </li>
             </ul>
@@ -305,22 +305,22 @@
 
         <div class="attendance__card">
           <div class="attendance__requests-header">
-            <h3>Anomalies</h3>
+            <h3>{{ tr('Anomalies', '异常') }}</h3>
             <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="loadAnomalies">
-              {{ anomaliesLoading ? 'Loading...' : 'Reload anomalies' }}
+              {{ anomaliesLoading ? tr('Loading...', '加载中...') : tr('Reload anomalies', '重载异常') }}
             </button>
           </div>
-          <div v-if="anomaliesLoading" class="attendance__empty">Loading anomalies...</div>
-          <div v-else-if="anomalies.length === 0" class="attendance__empty">No anomalies.</div>
+          <div v-if="anomaliesLoading" class="attendance__empty">{{ tr('Loading anomalies...', '正在加载异常...') }}</div>
+          <div v-else-if="anomalies.length === 0" class="attendance__empty">{{ tr('No anomalies.', '暂无异常。') }}</div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
               <thead>
                 <tr>
-                  <th>Date</th>
-                  <th>Status</th>
-                  <th>Warnings</th>
-                  <th>Request</th>
-                  <th>Action</th>
+                  <th>{{ tr('Date', '日期') }}</th>
+                  <th>{{ tr('Status', '状态') }}</th>
+                  <th>{{ tr('Warnings', '警告') }}</th>
+                  <th>{{ tr('Request', '申请') }}</th>
+                  <th>{{ tr('Action', '操作') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -346,7 +346,7 @@
                       :disabled="item.state === 'pending'"
                       @click="prefillRequestFromAnomaly(item)"
                     >
-                      {{ item.state === 'pending' ? 'Pending request' : 'Create request' }}
+                      {{ item.state === 'pending' ? tr('Pending request', '申请处理中') : tr('Create request', '创建申请') }}
                     </button>
                   </td>
                 </tr>
@@ -357,20 +357,20 @@
 
         <div class="attendance__card">
           <div class="attendance__requests-header">
-            <h3>Request Report</h3>
+            <h3>{{ tr('Request Report', '申请报表') }}</h3>
             <button class="attendance__btn" :disabled="reportLoading" @click="loadRequestReport">
-              {{ reportLoading ? 'Loading...' : 'Reload report' }}
+              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
             </button>
           </div>
-          <div v-if="requestReport.length === 0" class="attendance__empty">No report data.</div>
+          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Total</th>
-                  <th>Minutes</th>
+                  <th>{{ tr('Type', '类型') }}</th>
+                  <th>{{ tr('Status', '状态') }}</th>
+                  <th>{{ tr('Total', '总数') }}</th>
+                  <th>{{ tr('Minutes', '分钟') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -3269,6 +3269,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 
@@ -3311,6 +3312,9 @@ const props = withDefaults(
     mode: 'overview',
   }
 )
+
+const { locale, isZh } = useLocale()
+const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 
 interface AttendanceSummary {
   total_days: number
@@ -4182,9 +4186,13 @@ const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
 
-const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const weekDays = computed(() => (
+  isZh.value
+    ? ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+    : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+))
 const calendarLabel = computed(() => {
-  return new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+  return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
 })
 
 const recordMap = computed(() => {
@@ -4225,8 +4233,8 @@ const calendarDays = computed<CalendarDay[]>(() => {
       : key
     if (!record && holiday && holiday.isWorkingDay === false) {
       status = 'off'
-      statusLabel = 'Holiday'
-      tooltip = holiday.name ? `${key} · ${holiday.name}` : `${key} · Holiday`
+      statusLabel = tr('Holiday', '休息日')
+      tooltip = holiday.name ? `${key} · ${holiday.name}` : `${key} · ${tr('Holiday', '休息日')}`
     } else if (record && status === 'off' && holiday?.name) {
       tooltip = `${key} · ${holiday.name} · ${record.work_minutes} min`
     }
@@ -4433,20 +4441,31 @@ function formatDateTime(value: string | null): string {
   if (!value) return '--'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '--'
-  return date.toLocaleString()
+  return date.toLocaleString(locale.value)
 }
 
 function formatStatus(value: string): string {
-  const map: Record<string, string> = {
-    normal: 'Normal',
-    late: 'Late',
-    early_leave: 'Early leave',
-    late_early: 'Late + Early',
-    partial: 'Partial',
-    absent: 'Absent',
-    adjusted: 'Adjusted',
-    off: 'Off',
-  }
+  const map: Record<string, string> = isZh.value
+    ? {
+        normal: '正常',
+        late: '迟到',
+        early_leave: '早退',
+        late_early: '迟到+早退',
+        partial: '部分出勤',
+        absent: '缺勤',
+        adjusted: '已调整',
+        off: '休息',
+      }
+    : {
+        normal: 'Normal',
+        late: 'Late',
+        early_leave: 'Early leave',
+        late_early: 'Late + Early',
+        partial: 'Partial',
+        absent: 'Absent',
+        adjusted: 'Adjusted',
+        off: 'Off',
+      }
   return map[value] ?? value
 }
 
@@ -4472,13 +4491,21 @@ function formatPolicyList(item: AttendanceImportPreviewItem): string {
 }
 
 function formatRequestType(value: string): string {
-  const map: Record<string, string> = {
-    missed_check_in: 'Missed check-in',
-    missed_check_out: 'Missed check-out',
-    time_correction: 'Time correction',
-    leave: 'Leave request',
-    overtime: 'Overtime request',
-  }
+  const map: Record<string, string> = isZh.value
+    ? {
+        missed_check_in: '漏打上班卡',
+        missed_check_out: '漏打下班卡',
+        time_correction: '时间更正',
+        leave: '请假申请',
+        overtime: '加班申请',
+      }
+    : {
+        missed_check_in: 'Missed check-in',
+        missed_check_out: 'Missed check-out',
+        time_correction: 'Time correction',
+        leave: 'Leave request',
+        overtime: 'Overtime request',
+      }
   return map[value] ?? value
 }
 
@@ -4491,12 +4518,12 @@ function formatWarningsShort(warnings: string[]): string {
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
   if (item.state === 'pending') {
-    setStatus('A pending request already exists for this work date.', 'error')
+    setStatus(tr('A pending request already exists for this work date.', '该工作日已存在待处理申请。'), 'error')
     return
   }
   requestForm.workDate = item.workDate
   requestForm.requestType = item.suggestedRequestType ?? 'time_correction'
-  setStatus('Request form updated from anomaly.')
+  setStatus(tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'))
   await nextTick()
   document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
