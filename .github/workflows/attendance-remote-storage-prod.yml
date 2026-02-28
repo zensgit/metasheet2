@@ -99,16 +99,22 @@ jobs:
             "cd \"${DEPLOY_PATH}\""
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
+            "host_sync_attempts=3"
             'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
               '  echo "[host-sync] skipped (skip_host_sync=true)"'
               '  host_sync_rc=0'
             "else"
               "  set +e"
-              "  git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main"
-              '  host_sync_rc=$?'
+              '  for attempt in $(seq 1 "$host_sync_attempts"); do'
+              '    git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main'
+              '    host_sync_rc=$?'
+              '    echo "[host-sync] attempt=$attempt rc=$host_sync_rc"'
+              '    if [[ "$host_sync_rc" == "0" ]]; then break; fi'
+              '    if [[ "$attempt" -lt "$host_sync_attempts" ]]; then sleep $((attempt * 2)); fi'
+              '  done'
               "  set -e"
             "fi"
-            'echo "[host-sync] rc=$host_sync_rc"'
+            'echo "[host-sync] rc=$host_sync_rc attempts=$host_sync_attempts"'
             "echo \"=== HOST SYNC END ===\""
             "echo \"=== ATTENDANCE STORAGE START ===\""
             "storage_rc=0"
