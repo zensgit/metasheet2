@@ -3175,3 +3175,31 @@ Observed highlights:
   - `p0Status=pass`
   - `gateFlat.longrun.runId=22519504604`
   - `openTrackingIssues=[]`
+
+## Latest Notes (2026-02-28): Branch Validation for COPY Fast Path + Longrun Attribution
+
+Execution summary:
+
+1. Implemented import bulk-path optimization and resilience changes on branch `codex/attendance-parallel-123-20260228`:
+   - backend: COPY FROM STDIN fast path for attendance staging inserts with safe fallback to existing UNNEST path.
+   - web: stronger import gateway error classification (`502/503/504`) with recoverable retry actions.
+   - ops: longrun trend report now includes failure attribution buckets + remediation text and exports attribution metadata for issue body.
+2. Triggered `Attendance Import Perf Long Run` on branch with upload path enabled:
+   - `upload_csv=true`
+   - `include_rows500k_preview=false`
+   - `fail_on_regression=false`
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (branch `codex/attendance-parallel-123-20260228`, non-drill, upload path) | [#22520350142](https://github.com/zensgit/metasheet2/actions/runs/22520350142) | PASS | `output/playwright/ga/22520350142/attendance-import-perf-longrun-rows500k-commit-22520350142-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.json` |
+
+Observed highlights:
+
+- Longrun summaries confirm upload channel coverage remains active:
+  - `uploadCsv=true` appears in all current scenario summaries.
+- Trend markdown now includes:
+  - `Upload` column in Scenario Summary.
+  - `Failure Attribution` section (empty for this all-pass run).
+- Workflow trend-report + issue jobs both succeeded on the same run, proving attribution output path does not break existing P1 issue tracking.
