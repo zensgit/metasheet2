@@ -2636,6 +2636,44 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Development Verification (2026-02-28): Remote Host Sync Retry Hardening
+
+Goal:
+
+- Reduce transient `HOST_SYNC_FAILED` false negatives in remote operational gates by retrying deploy-host `git fetch/checkout/pull` before marking a gate failed.
+
+Code changes:
+
+- `.github/workflows/attendance-remote-preflight-prod.yml`
+- `.github/workflows/attendance-remote-metrics-prod.yml`
+- `.github/workflows/attendance-remote-storage-prod.yml`
+- `.github/workflows/attendance-remote-upload-cleanup-prod.yml`
+- `.github/workflows/attendance-remote-docker-gc-prod.yml`
+
+What changed:
+
+- Added `host_sync_attempts=3` for remote host sync.
+- Added retry loop with incremental backoff (`sleep 2s`, `4s`) between attempts.
+- Host sync logs now include per-attempt lines (`[host-sync] attempt=<n> rc=<code>`) plus final line with attempts count.
+- Kept existing skip/debug behavior unchanged (`skip_host_sync=true`).
+
+Branch verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Metrics (branch `codex/attendance-host-sync-retry-20260228`) | [#22514807034](https://github.com/zensgit/metasheet2/actions/runs/22514807034) | PASS | `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/step-summary.md`, `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/metrics.log` |
+| Remote Storage Health (branch `codex/attendance-host-sync-retry-20260228`) | [#22514818248](https://github.com/zensgit/metasheet2/actions/runs/22514818248) | PASS | `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/step-summary.md`, `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/storage.log` |
+
+Observed highlights:
+
+- Both step summaries show:
+  - `Host Sync` status: `PASS`
+  - gate `Overall`: `PASS`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): P1 Host-Sync Failure Recovery (Metrics/Storage)
 
 Goal:
