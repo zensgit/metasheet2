@@ -2636,6 +2636,32 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Strict Gates Refresh + Dashboard Binding
+
+Goal:
+
+- Re-run strict production gates on `main` after host-sync hardening merges and confirm dashboard binds to the refreshed strict run.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, non-drill refresh) | [#22515377178](https://github.com/zensgit/metasheet2/actions/runs/22515377178) | PASS | `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-1/gate-summary.json`, `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post strict refresh) | [#22515481530](https://github.com/zensgit/metasheet2/actions/runs/22515481530) | PASS | `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Strict run concluded `success` with full gate pass (`apiSmoke/provisioning/playwright`).
+- Dashboard summary confirms clean state:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `gateFlat.strict.runId=22515377178`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): Post-Merge Mainline Re-Check (PR #276)
 
 Goal:
