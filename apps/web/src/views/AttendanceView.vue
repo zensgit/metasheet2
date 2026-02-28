@@ -163,6 +163,8 @@
               <span class="attendance__calendar-date">{{ day.day }}</span>
               <span v-if="day.statusLabel" class="attendance__calendar-status">{{ day.statusLabel }}</span>
               <span v-else class="attendance__calendar-status attendance__calendar-status--empty">--</span>
+              <span v-if="day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
+              <span v-if="day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
             </div>
           </div>
         </div>
@@ -3823,6 +3825,8 @@ interface CalendarDay {
   status?: string
   statusLabel?: string
   tooltip: string
+  holidayName?: string
+  lunarLabel?: string
 }
 
 interface AttendanceApiError extends Error {
@@ -4228,15 +4232,19 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const holiday = holidayMap.value.get(key)
     let status = record?.status
     let statusLabel = status ? formatStatus(status) : undefined
+    const holidayName = typeof holiday?.name === 'string' && holiday.name.trim().length > 0
+      ? holiday.name.trim()
+      : undefined
+    const lunarLabel = formatLunarDayLabel(date)
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
     if (!record && holiday && holiday.isWorkingDay === false) {
       status = 'off'
       statusLabel = tr('Holiday', '休息日')
-      tooltip = holiday.name ? `${key} · ${holiday.name}` : `${key} · ${tr('Holiday', '休息日')}`
-    } else if (record && status === 'off' && holiday?.name) {
-      tooltip = `${key} · ${holiday.name} · ${record.work_minutes} min`
+      tooltip = holidayName ? `${key} · ${holidayName}` : `${key} · ${tr('Holiday', '休息日')}`
+    } else if (record && status === 'off' && holidayName) {
+      tooltip = `${key} · ${holidayName} · ${record.work_minutes} min`
     }
     return {
       key,
@@ -4246,6 +4254,8 @@ const calendarDays = computed<CalendarDay[]>(() => {
       status,
       statusLabel,
       tooltip,
+      holidayName,
+      lunarLabel,
     }
   })
 })
@@ -4507,6 +4517,20 @@ function formatRequestType(value: string): string {
         overtime: 'Overtime request',
       }
   return map[value] ?? value
+}
+
+function formatLunarDayLabel(date: Date): string | undefined {
+  if (!isZh.value || Number.isNaN(date.getTime())) return undefined
+  try {
+    const text = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
+      month: 'short',
+      day: 'numeric',
+    }).format(date)
+    const normalized = text.replace(/\s+/g, '')
+    return normalized || undefined
+  } catch {
+    return undefined
+  }
 }
 
 function formatWarningsShort(warnings: string[]): string {
@@ -9712,6 +9736,26 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 
 .attendance__calendar-status--empty {
   color: #999;
+}
+
+.attendance__calendar-lunar {
+  font-size: 10px;
+  color: #6b7280;
+  line-height: 1.2;
+}
+
+.attendance__calendar-holiday {
+  margin-top: auto;
+  font-size: 10px;
+  color: #b45309;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  padding: 2px 4px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .attendance__calendar-cell--muted {
