@@ -2636,6 +2636,32 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Latest Strict Refresh (Main) + Dashboard Rebind
+
+Goal:
+
+- Refresh strict gate signal on `main` and confirm dashboard rebinds to the newest strict run with no findings.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, non-drill latest refresh) | [#22515557190](https://github.com/zensgit/metasheet2/actions/runs/22515557190) | PASS | `output/playwright/ga/22515557190/20260228-064805-1/gate-summary.json`, `output/playwright/ga/22515557190/20260228-064805-2/gate-summary.json` |
+| Daily Gate Dashboard (main, latest strict binding) | [#22515657453](https://github.com/zensgit/metasheet2/actions/runs/22515657453) | PASS | `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Strict gate summaries (both iterations) report `exitCode=0`.
+- Dashboard confirms:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `gateFlat.strict.runId=22515557190`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): Strict Gates Refresh + Dashboard Binding
 
 Goal:
