@@ -276,9 +276,12 @@ jobs:
 
   trend-report:
     needs: perf-scenarios
-    if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
+    if: (github.event_name != 'workflow_dispatch' || inputs.drill != 'true') && always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      report_status: ${{ steps.trend.outputs.report_status || 'pass' }}
+      report_attribution: ${{ steps.trend.outputs.report_attribution || '' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TARGET_BRANCH: ${{ inputs.branch || 'main' }}
@@ -376,6 +379,7 @@ jobs:
       DRILL_RESULT: ${{ needs.drill.result }}
       PERF_RESULT: ${{ needs.perf-scenarios.result }}
       TREND_RESULT: ${{ needs.trend-report.result }}
+      TREND_ATTRIBUTION: ${{ needs.trend-report.outputs.report_attribution }}
     steps:
       - name: Open/update issue on failure (P1, no paging)
         uses: actions/github-script@v7
@@ -386,6 +390,7 @@ jobs:
             const drillResult = String(process.env.DRILL_RESULT || '').trim()
             const perfResult = String(process.env.PERF_RESULT || '').trim()
             const trendResult = String(process.env.TREND_RESULT || '').trim()
+            const trendAttribution = String(process.env.TREND_ATTRIBUTION || '').trim()
             const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
 
             const defaultTitle = '[Attendance P1] Perf longrun alert'
@@ -410,6 +415,7 @@ jobs:
               '',
               `Run: ${runUrl}`,
               statusLine,
+              trendAttribution ? `Attribution: ${trendAttribution}` : null,
               '',
               'Download:',
               '```bash',

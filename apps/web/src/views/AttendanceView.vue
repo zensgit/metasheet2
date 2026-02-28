@@ -6045,6 +6045,9 @@ function inferErrorCodeFromMessage(message: string): string {
   if (normalized.includes('IMPORT UPLOAD EXPIRED')) return 'EXPIRED'
   if (normalized.includes('CSVFILEID') && normalized.includes('UUID')) return 'INVALID_CSV_FILE_ID'
   if (normalized.includes('PUNCH_TOO_SOON')) return 'PUNCH_TOO_SOON'
+  if (normalized.includes('BAD_GATEWAY') || normalized.includes('HTTP 502')) return 'BAD_GATEWAY'
+  if (normalized.includes('GATEWAY_TIMEOUT') || normalized.includes('HTTP 504')) return 'GATEWAY_TIMEOUT'
+  if (normalized.includes('SERVICE UNAVAILABLE') || normalized.includes('HTTP 503')) return 'SERVICE_UNAVAILABLE'
   if (normalized.includes('FORBIDDEN') || normalized.includes('PERMISSION')) return 'FORBIDDEN'
   if (normalized.includes('UNAUTHORIZED') || normalized.includes('TOKEN_EXPIRED')) return 'UNAUTHORIZED'
   if (normalized.includes('SERVICE_UNAVAILABLE') || normalized.includes('DB_NOT_READY')) return 'SERVICE_UNAVAILABLE'
@@ -6202,6 +6205,17 @@ function classifyStatusError(
     message = 'Async import job is no longer available.'
     meta.hint = 'Submit a new import task and continue from the latest payload.'
     meta.action = 'retry-run-import'
+  } else if (
+    (context === 'import-run' || context === 'import-preview')
+    && (status === 502 || status === 503 || status === 504 || code === 'BAD_GATEWAY' || code === 'GATEWAY_TIMEOUT')
+  ) {
+    message = context === 'import-run'
+      ? 'Import request hit a temporary gateway error.'
+      : 'Import preview request hit a temporary gateway error.'
+    meta.hint = context === 'import-run'
+      ? 'Click retry. If an async job was already accepted, the flow will resume polling automatically.'
+      : 'Click retry preview in a moment. If this persists, check gateway/backend health.'
+    meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (code === 'RATE_LIMITED' || status === 429) {
     message = 'Request was rate-limited by the server.'
     meta.hint = 'Wait a few seconds before retrying to avoid repeated throttling.'
