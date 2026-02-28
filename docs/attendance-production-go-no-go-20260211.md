@@ -2707,6 +2707,42 @@ Decision:
 
 - **GO maintained** (false-negative class addressed; mainline merge + dashboard rebind is the next step).
 
+## Post-Go Verification (2026-02-28): Mainline Recovery After Poll-Timeout Hardening
+
+Goal:
+
+- Confirm `main` returns to green after merging poll-timeout hardening and that daily dashboard binds to the recovered longrun run.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (main, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | [#22519504604](https://github.com/zensgit/metasheet2/actions/runs/22519504604) | PASS | `output/playwright/ga/22519504604/attendance-import-perf-longrun-rows500k-commit-22519504604-1/current/rows500k-commit/attendance-perf-mm67u1m3-9ipq8w/perf-summary.json`, `output/playwright/ga/22519504604/attendance-import-perf-longrun-trend-22519504604-1/20260228-111543/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post longrun recovery) | [#22519690633](https://github.com/zensgit/metasheet2/actions/runs/22519690633) | PASS | `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Longrun `rows500k-commit` recovered on main:
+  - `rows=500000`
+  - `uploadCsv=true`
+  - `previewMs=15278`
+  - `commitMs=516830`
+  - `processedRows=500000`
+  - `failedRows=0`
+  - `throughputRowsPerSec=970.87`
+  - `recordUpsertStrategy=staging`
+  - `engine=bulk`
+  - `regressions=[]`
+- Dashboard `#22519690633` confirms gate health:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.longrun.runId=22519504604`
+  - `openTrackingIssues=[]`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): Mainline Perf Refresh + Dashboard Green
 
 Goal:

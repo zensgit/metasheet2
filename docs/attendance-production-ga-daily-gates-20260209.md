@@ -3139,3 +3139,39 @@ Observed highlights:
   - `recordUpsertStrategy=staging`
   - `engine=bulk`
   - `regressions=[]`
+
+## Latest Notes (2026-02-28): Mainline Longrun Recovery + Dashboard Rebind
+
+Execution summary:
+
+1. Triggered `Attendance Import Perf Long Run` on `main` after merging poll-timeout hardening:
+   - `upload_csv=true`
+   - `include_rows500k_preview=false`
+   - (did not override `include_rows500k_commit`, so default path exercised)
+2. Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) to rebind longrun source and validate overall health.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (main, post-fix, non-drill) | [#22519504604](https://github.com/zensgit/metasheet2/actions/runs/22519504604) | PASS | `output/playwright/ga/22519504604/attendance-import-perf-longrun-rows500k-commit-22519504604-1/current/rows500k-commit/attendance-perf-mm67u1m3-9ipq8w/perf-summary.json`, `output/playwright/ga/22519504604/attendance-import-perf-longrun-trend-22519504604-1/20260228-111543/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post longrun recovery) | [#22519690633](https://github.com/zensgit/metasheet2/actions/runs/22519690633) | PASS | `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- `rows500k-commit` on main:
+  - `rows=500000`
+  - `uploadCsv=true`
+  - `previewMs=15278`
+  - `commitMs=516830`
+  - `processedRows=500000`
+  - `failedRows=0`
+  - `throughputRowsPerSec=970.87`
+  - `recordUpsertStrategy=staging`
+  - `engine=bulk`
+  - `regressions=[]`
+- Dashboard run `#22519690633`:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.longrun.runId=22519504604`
+  - `openTrackingIssues=[]`
