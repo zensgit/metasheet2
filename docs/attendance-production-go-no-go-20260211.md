@@ -2636,6 +2636,43 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): P1 Host-Sync Failure Recovery (Metrics/Storage)
+
+Goal:
+
+- Close the temporary P1 degradation caused by remote host sync failures (`HOST_SYNC_FAILED`) and return Daily Dashboard to green.
+
+Incident snapshot:
+
+- Dashboard run [#22514479433](https://github.com/zensgit/metasheet2/actions/runs/22514479433): `FAIL` with `p0Status=pass`
+- Findings:
+  - Host Metrics failed: run [#22511923525](https://github.com/zensgit/metasheet2/actions/runs/22511923525) (`HOST_SYNC_FAILED`)
+  - Storage Health failed: run [#22511923381](https://github.com/zensgit/metasheet2/actions/runs/22511923381) (`HOST_SYNC_FAILED`)
+
+Recovery runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Metrics (main, recovery) | [#22514500377](https://github.com/zensgit/metasheet2/actions/runs/22514500377) | PASS | `output/playwright/ga/22514500377/step-summary.md`, `output/playwright/ga/22514500377/metrics.log` |
+| Remote Storage Health (main, recovery) | [#22514512568](https://github.com/zensgit/metasheet2/actions/runs/22514512568) | PASS | `output/playwright/ga/22514512568/step-summary.md`, `output/playwright/ga/22514512568/storage.log` |
+| Daily Gate Dashboard (post-recovery) | [#22514531102](https://github.com/zensgit/metasheet2/actions/runs/22514531102) | PASS | `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Recovery run summaries report host sync + gate outputs all `PASS`.
+- Tracking issues auto-closed after recovery:
+  - [#273](https://github.com/zensgit/metasheet2/issues/273) `[Attendance P1] Host metrics alert` -> `CLOSED`
+  - [#159](https://github.com/zensgit/metasheet2/issues/159) `[Attendance P1] Storage health alert` -> `CLOSED`
+- Final dashboard (`#22514531102`) reports:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `openTrackingIssues=[]`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): Production UI Live Check + Full-Flow (Desktop/Mobile)
 
 Goal:
