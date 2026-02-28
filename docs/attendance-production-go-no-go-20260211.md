@@ -2636,6 +2636,40 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Development Verification (2026-02-28): Longrun Default Coverage Includes `rows500k-commit`
+
+Goal:
+
+- Close a remaining gate-coverage gap by enabling `rows500k-commit` as the default longrun scenario, then validate the branch workflow executes this path with `upload_csv=true`.
+
+Code change:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - `workflow_dispatch.inputs.include_rows500k_commit` default: `false -> true`
+  - `INCLUDE_ROWS500K_COMMIT` env fallback: `false -> true`
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (branch `codex/attendance-longrun-default-500k-commit`, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | [#22516549887](https://github.com/zensgit/metasheet2/actions/runs/22516549887) | PASS | `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current/rows500k-commit/attendance-perf-mm60v6yg-52v83n/perf-summary.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-trend-22516549887-1/20260228-080055/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- `rows500k-commit` executed (not skipped) and passed:
+  - `rows=500000`
+  - `uploadCsv=true`
+  - `previewMs=15904`
+  - `commitMs=526397`
+  - `recordUpsertStrategy=staging`
+  - `engine=bulk`
+  - `regressions=[]`
+- Trend markdown includes `rows500k-commit` with `Upload=YES` and `Status=PASS`.
+
+Decision:
+
+- **GO maintained** (coverage strengthened; merge + mainline rerun pending in next step).
+
 ## Post-Go Verification (2026-02-28): Mainline Perf Refresh + Dashboard Green
 
 Goal:

@@ -3078,3 +3078,32 @@ Observed highlights:
   - `p0Status=pass`
   - `findings=[]`
   - `openTrackingIssues=[]`
+
+## Latest Notes (2026-02-28): Enable `rows500k-commit` by Default in Longrun
+
+Change:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - `include_rows500k_commit` default switched to `true`.
+  - `INCLUDE_ROWS500K_COMMIT` fallback switched to `true`.
+
+Verification run (branch):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (branch `codex/attendance-longrun-default-500k-commit`, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | [#22516549887](https://github.com/zensgit/metasheet2/actions/runs/22516549887) | PASS | `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current/rows500k-commit/attendance-perf-mm60v6yg-52v83n/perf-summary.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-trend-22516549887-1/20260228-080055/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- `rows500k-commit` path is executed and green by default-capable config:
+  - `rows=500000`
+  - `uploadCsv=true`
+  - `recordUpsertStrategy=staging`
+  - `engine=bulk`
+  - `regressions=[]`
+- Trend table includes `rows500k-commit` with `Upload=YES` and `Status=PASS`.
+
+Operational note:
+
+- For fast ad-hoc reruns, keep the escape hatch:
+  - `gh workflow run attendance-import-perf-longrun.yml -f include_rows500k_commit=false`
