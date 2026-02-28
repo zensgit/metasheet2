@@ -29,7 +29,7 @@ on:
       include_rows500k_commit:
         description: 'Run rows500k-commit scenario (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
       api_base:
         description: 'API base (must end with /api)'
         required: false
@@ -205,7 +205,7 @@ jobs:
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
-      INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
+      INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
