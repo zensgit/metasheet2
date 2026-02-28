@@ -2636,6 +2636,34 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Mainline Localization + Lunar/Holiday Calendar Labels
+
+Goal:
+
+- Confirm production readiness remains stable after merging:
+  - PR [#285](https://github.com/zensgit/metasheet2/pull/285) (`zh-CN` language toggle + core attendance UI localization),
+  - PR [#286](https://github.com/zensgit/metasheet2/pull/286) (attendance calendar lunar label + holiday name badge).
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, post localization/calendar merge) | [#22522123651](https://github.com/zensgit/metasheet2/actions/runs/22522123651) | PASS | `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-1/gate-summary.json`, `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post localization/calendar merge) | [#22522181481](https://github.com/zensgit/metasheet2/actions/runs/22522181481) | PASS | `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Production gate baseline remains green after UI localization/calendar UX enhancement:
+  - strict gate two-pass iteration succeeded;
+  - daily dashboard remained `overallStatus=pass`.
+- Functional scope clarified:
+  - Holiday support is already production-enabled through holiday sync/admin APIs.
+  - Lunar display is now surfaced in attendance calendar cells under zh locale.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Development Verification (2026-02-28): COPY Fast Path + Longrun Attribution (Branch)
 
 Goal:

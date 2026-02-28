@@ -3203,3 +3203,30 @@ Observed highlights:
   - `Upload` column in Scenario Summary.
   - `Failure Attribution` section (empty for this all-pass run).
 - Workflow trend-report + issue jobs both succeeded on the same run, proving attribution output path does not break existing P1 issue tracking.
+
+## Latest Notes (2026-02-28): zh-CN UI + Lunar/Holiday Calendar Labels (Main)
+
+Execution summary:
+
+1. Merged localization baseline on `main`:
+   - PR [#285](https://github.com/zensgit/metasheet2/pull/285): language toggle (`en` / `zh-CN`) + attendance core UI localization.
+2. Merged calendar enhancement on `main`:
+   - PR [#286](https://github.com/zensgit/metasheet2/pull/286): attendance calendar cell shows lunar day label (zh locale) + holiday name badge.
+3. Re-ran production gates on `main` to verify no regression:
+   - strict gates
+   - daily dashboard
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, post `#285/#286`) | [#22522123651](https://github.com/zensgit/metasheet2/actions/runs/22522123651) | PASS | `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-1/gate-summary.json`, `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post `#285/#286`) | [#22522181481](https://github.com/zensgit/metasheet2/actions/runs/22522181481) | PASS | `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Attendance UI now supports manual language switch in top nav (`English` / `中文`) and persists selection in `metasheet_locale`.
+- Calendar behavior on attendance page:
+  - holiday metadata still sourced from existing holiday sync pipeline (`holiday-cn` + manual holidays);
+  - zh locale shows lunar label in date cell (`zh-CN-u-ca-chinese`) and holiday name badge when available.
+- Post-merge gate status remains green (`strict=PASS`, `dashboard=PASS`).
