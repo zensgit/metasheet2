@@ -2636,6 +2636,47 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Production UI Live Check + Full-Flow (Desktop/Mobile)
+
+Goal:
+
+- Re-verify production live UI visibility and end-to-end full-flow script execution after post-merge hardening.
+
+Live UI captures (authenticated):
+
+- Overview (desktop): `output/playwright/attendance-prod-page-authenticated-20260228.png`
+- Admin Center (desktop): `output/playwright/attendance-prod-admin-center-authenticated-20260228.png`
+- Overview (mobile): `output/playwright/attendance-prod-mobile-authenticated-20260228.png`
+- Admin Center degraded view (mobile): `output/playwright/attendance-prod-mobile-admin-center-20260228.png`
+- Admin Center -> Back to Overview (mobile): `output/playwright/attendance-prod-mobile-overview-return-20260228.png`
+
+Scripted full-flow verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| `verify-attendance-full-flow` (desktop, production) | local (2026-02-28) | PASS | `output/playwright/attendance-full-flow-20260228-desktop/01-overview.png`, `output/playwright/attendance-full-flow-20260228-desktop/02-admin.png` |
+| `verify-attendance-full-flow` (mobile, production) | local (2026-02-28) | PASS | `output/playwright/attendance-full-flow-20260228-mobile/01-overview.png`, `output/playwright/attendance-full-flow-20260228-mobile/02-admin.png` |
+
+Observed highlights:
+
+- Desktop run key assertions passed:
+  - `Nav verified (attendance-focused)`
+  - `Admin import recovery assertion passed`
+  - `Admin settings save cycle verified`
+  - `Payroll batch UI verified`
+  - `Full flow verification complete`
+- Mobile run key assertions passed:
+  - `Nav verified (attendance-focused)`
+  - `Anomalies card verified`
+  - `Full flow verification complete`
+- Mobile Admin Center degradation is correctly enforced:
+  - `Desktop recommended` visible
+  - `Back to Overview` returns successfully to overview page
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Development Verification (2026-02-27): Async Deadlock Retry Hardening (Perf Script)
 
 Goal:
