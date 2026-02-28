@@ -2636,6 +2636,48 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Mainline Perf Refresh + Dashboard Green
+
+Goal:
+
+- Refresh post-go production evidence on `main` with current upload-path baseline + longrun trend, then confirm daily dashboard remains green.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Baseline (main, non-drill, `upload_csv=true`) | [#22516230477](https://github.com/zensgit/metasheet2/actions/runs/22516230477) | PASS | `output/playwright/ga/22516230477/attendance-import-perf-22516230477-1/attendance-perf-mm60365o-nepgma/perf-summary.json` |
+| Perf Longrun (main, non-drill, upload path) | [#22516278422](https://github.com/zensgit/metasheet2/actions/runs/22516278422) | PASS | `output/playwright/ga/22516278422/attendance-import-perf-longrun-rows100k-commit-22516278422-1/current/rows100k-commit/attendance-perf-mm6071fd-lrebf8/perf-summary.json`, `output/playwright/ga/22516278422/attendance-import-perf-longrun-trend-22516278422-1/20260228-073456/attendance-import-perf-longrun-trend.json` |
+| Daily Gate Dashboard (main, after perf refresh) | [#22516327881](https://github.com/zensgit/metasheet2/actions/runs/22516327881) | PASS | `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Baseline (`#22516230477`) confirms production upload path and bulk engine:
+  - `rows=100000`
+  - `uploadCsv=true`
+  - `previewMs=4998`
+  - `commitMs=109345`
+  - `exportMs=3503`
+  - `rollbackMs=1046`
+  - `engine=bulk`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Longrun (`#22516278422`) confirms stable trend set with upload path coverage:
+  - `status=pass`
+  - `scenarioCount=5`
+  - `rows100k-commit.uploadCsv=true`
+  - `rows100k-commit.commitMs=120495`
+  - `rows100k-commit.regressions=[]`
+- Dashboard (`#22516327881`) remains fully green after perf refresh:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `openTrackingIssues=[]`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-02-28): Latest Strict Refresh (Main) + Dashboard Rebind
 
 Goal:

@@ -3039,3 +3039,42 @@ Post-merge mainline re-check:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Perf Long Run (main, post-merge PR #271, non-drill, `upload_csv=true`) | [#22489422349](https://github.com/zensgit/metasheet2/actions/runs/22489422349) | PASS | `output/playwright/ga/22489422349/attendance-import-perf-longrun-rows100k-commit-22489422349-1/current/rows100k-commit/attendance-perf-mm4yut7w-hduc0l/perf-summary.json`, `output/playwright/ga/22489422349/attendance-import-perf-longrun-trend-22489422349-1/20260227-141131/attendance-import-perf-longrun-trend.json` |
+
+## Latest Notes (2026-02-28): Mainline Strict + Perf Refresh
+
+Execution summary:
+
+1. Triggered latest non-drill strict gates on `main`; run [#22515557190](https://github.com/zensgit/metasheet2/actions/runs/22515557190) passed both iterations.
+2. Triggered daily dashboard; run [#22515657453](https://github.com/zensgit/metasheet2/actions/runs/22515657453) passed and bound to strict run `22515557190`.
+3. Triggered perf baseline (`rows=100000`, `upload_csv=true`) on `main`; run [#22516230477](https://github.com/zensgit/metasheet2/actions/runs/22516230477) passed.
+4. Triggered perf longrun (non-drill, upload path) on `main`; run [#22516278422](https://github.com/zensgit/metasheet2/actions/runs/22516278422) passed with trend status `pass`.
+5. Triggered dashboard refresh after perf runs; run [#22516327881](https://github.com/zensgit/metasheet2/actions/runs/22516327881) passed.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, non-drill latest refresh) | [#22515557190](https://github.com/zensgit/metasheet2/actions/runs/22515557190) | PASS | `output/playwright/ga/22515557190/20260228-064805-1/gate-summary.json`, `output/playwright/ga/22515557190/20260228-064805-2/gate-summary.json` |
+| Daily Gate Dashboard (main, strict binding refresh) | [#22515657453](https://github.com/zensgit/metasheet2/actions/runs/22515657453) | PASS | `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (main, non-drill, upload path) | [#22516230477](https://github.com/zensgit/metasheet2/actions/runs/22516230477) | PASS | `output/playwright/ga/22516230477/attendance-import-perf-22516230477-1/attendance-perf-mm60365o-nepgma/perf-summary.json` |
+| Perf Long Run (main, non-drill, upload path) | [#22516278422](https://github.com/zensgit/metasheet2/actions/runs/22516278422) | PASS | `output/playwright/ga/22516278422/attendance-import-perf-longrun-rows100k-commit-22516278422-1/current/rows100k-commit/attendance-perf-mm6071fd-lrebf8/perf-summary.json`, `output/playwright/ga/22516278422/attendance-import-perf-longrun-trend-22516278422-1/20260228-073456/attendance-import-perf-longrun-trend.json` |
+| Daily Gate Dashboard (main, post perf refresh) | [#22516327881](https://github.com/zensgit/metasheet2/actions/runs/22516327881) | PASS | `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Strict run `#22515557190`: both iterations `exitCode=0`.
+- Baseline `#22516230477`:
+  - `uploadCsv=true`
+  - `engine=bulk`
+  - `recordUpsertStrategy=staging`
+  - `regressions=[]`
+- Longrun `#22516278422`:
+  - `status=pass`
+  - `scenarioCount=5`
+  - `rows100k-commit.uploadCsv=true`
+  - `rows100k-commit.regressions=[]`
+- Dashboard `#22516327881`:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+  - `openTrackingIssues=[]`
