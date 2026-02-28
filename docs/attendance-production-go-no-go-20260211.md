@@ -2636,6 +2636,34 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-02-28): Post-Merge Mainline Re-Check (PR #276)
+
+Goal:
+
+- Verify `main` remains green after merging PR [#276](https://github.com/zensgit/metasheet2/pull/276) (remote host-sync retry hardening).
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Metrics (main, post-merge) | [#22514864401](https://github.com/zensgit/metasheet2/actions/runs/22514864401) | PASS | `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/step-summary.md`, `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/metrics.log` |
+| Remote Storage Health (main, post-merge) | [#22514873466](https://github.com/zensgit/metasheet2/actions/runs/22514873466) | PASS | `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/step-summary.md`, `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/storage.log` |
+| Daily Gate Dashboard (main, post-merge) | [#22514880638](https://github.com/zensgit/metasheet2/actions/runs/22514880638) | PASS | `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- Dashboard summary:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `findings=[]`
+- Metrics/Storage step summaries both report:
+  - `Host Sync` status: `PASS`
+  - gate `Overall`: `PASS`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Development Verification (2026-02-28): Remote Host Sync Retry Hardening
 
 Goal:
