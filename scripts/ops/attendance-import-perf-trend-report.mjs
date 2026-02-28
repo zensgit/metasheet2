@@ -75,6 +75,138 @@ async function collectSummaryFiles(root) {
   return files
 }
 
+async function collectPerfLogFiles(root) {
+  const files = []
+  if (!(await pathExists(root))) return files
+
+  async function walk(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(fullPath)
+        continue
+      }
+      if (entry.isFile() && entry.name === 'perf.log') {
+        files.push(fullPath)
+      }
+    }
+  }
+
+  await walk(root)
+  return files
+}
+
+function inferScenarioFromPerfLogPath(filePath) {
+  const normalized = String(filePath || '').replace(/\\/g, '/')
+  const marker = '/current/'
+  const markerIndex = normalized.indexOf(marker)
+  if (markerIndex >= 0) {
+    const rest = normalized.slice(markerIndex + marker.length)
+    const scenario = rest.split('/')[0]
+    if (scenario) return scenario
+  }
+  const fallback = normalized.match(/rows\d+k?-(?:preview|commit)/i)
+  return fallback ? String(fallback[0]).toLowerCase() : path.basename(path.dirname(filePath))
+}
+
+function classifyPerfFailure(logText) {
+  const text = String(logText || '')
+  const upper = text.toUpperCase()
+  const failedLine = text
+    .split('\n')
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => line.startsWith('[attendance-import-perf] Failed:'))
+    || ''
+
+  if (upper.includes('ASYNC COMMIT JOB TIMED OUT')) {
+    return {
+      code: 'ASYNC_JOB_TIMEOUT',
+      message: failedLine || 'Async commit job timed out',
+      remediation: 'Increase large-job poll timeout and check gateway/backend availability during long-running import polling.',
+    }
+  }
+  if (upper.includes('HTTP 502')) {
+    return {
+      code: 'UPSTREAM_502',
+      message: failedLine || 'Gateway returned HTTP 502 while polling import jobs',
+      remediation: 'Stabilize upstream proxy/backend during import windows, then rerun longrun to validate recovery.',
+    }
+  }
+  if (upper.includes('HTTP 503')) {
+    return {
+      code: 'UPSTREAM_503',
+      message: failedLine || 'Gateway returned HTTP 503 while polling import jobs',
+      remediation: 'Check backend readiness and gateway upstream health, then rerun longrun.',
+    }
+  }
+  if (upper.includes('HTTP 504')) {
+    return {
+      code: 'UPSTREAM_504',
+      message: failedLine || 'Gateway returned HTTP 504 while polling import jobs',
+      remediation: 'Increase upstream timeout budget and verify backend capacity for 500k commit windows.',
+    }
+  }
+  if (upper.includes('STATEMENT TIMEOUT')) {
+    return {
+      code: 'DB_STATEMENT_TIMEOUT',
+      message: failedLine || 'Database statement timeout during import',
+      remediation: 'Tune import heavy-query timeout and verify DB resource headroom.',
+    }
+  }
+  if (upper.includes('DEADLOCK DETECTED')) {
+    return {
+      code: 'DB_DEADLOCK',
+      message: failedLine || 'Database deadlock detected during import',
+      remediation: 'Reduce concurrent heavy scenarios and keep async retry/idempotency policy enabled.',
+    }
+  }
+  if (upper.includes('COMMIT_TOKEN_INVALID') || upper.includes('COMMIT_TOKEN_REQUIRED')) {
+    return {
+      code: 'COMMIT_TOKEN',
+      message: failedLine || 'Commit token became invalid during retry',
+      remediation: 'Refresh commit token through prepare endpoint before each retry attempt.',
+    }
+  }
+  if (upper.includes('INVALID_CSV_FILE_ID') || upper.includes('EXPIRED')) {
+    return {
+      code: 'UPLOAD_REFERENCE_EXPIRED',
+      message: failedLine || 'Uploaded CSV reference expired/invalid',
+      remediation: 'Re-upload CSV file and retry preview/commit with a fresh csvFileId.',
+    }
+  }
+  return {
+    code: 'UNKNOWN_FAILURE',
+    message: failedLine || 'Perf scenario failed (see perf.log)',
+    remediation: 'Inspect perf.log and job artifacts, then rerun the scenario after remediation.',
+  }
+}
+
+async function parseFailureAttributions(root) {
+  const logFiles = await collectPerfLogFiles(root)
+  const attributions = []
+  for (const filePath of logFiles) {
+    let raw = ''
+    try {
+      raw = await fs.readFile(filePath, 'utf8')
+    } catch {
+      continue
+    }
+    if (!raw.includes('[attendance-import-perf] Failed:')) continue
+    const scenario = inferScenarioFromPerfLogPath(filePath)
+    const classification = classifyPerfFailure(raw)
+    attributions.push({
+      scenario,
+      code: classification.code,
+      message: classification.message,
+      remediation: classification.remediation,
+      sourcePath: filePath,
+    })
+  }
+  return attributions
+}
+
 function toNumber(value) {
   if (value === null || value === undefined) return null
   const n = Number(value)
@@ -242,7 +374,22 @@ function renderMarkdown(payload) {
     lines.push('- 500k commit scenario is currently skipped (`include_rows500k_commit=false`).')
   }
   lines.push('- Use this report with strict gates and daily dashboard for Go/No-Go review.')
-
+  lines.push('')
+  lines.push('## Failure Attribution')
+  lines.push('')
+  if (!Array.isArray(payload.failureAttribution) || payload.failureAttribution.length === 0) {
+    lines.push('- No scenario failure attribution detected in current artifacts.')
+  } else {
+    lines.push('| Scenario | Bucket | Message | Remediation |')
+    lines.push('|---|---|---|---|')
+    for (const item of payload.failureAttribution) {
+      const scenario = String(item?.scenario || '--')
+      const code = String(item?.code || '--')
+      const message = String(item?.message || '--').replace(/\|/g, '\\|')
+      const remediation = String(item?.remediation || '--').replace(/\|/g, '\\|')
+      lines.push(`| ${scenario} | ${code} | ${message} | ${remediation} |`)
+    }
+  }
   return `${lines.join('\n')}\n`
 }
 
@@ -259,10 +406,11 @@ async function writeGithubOutput(outputs) {
 async function run() {
   const currentRecordsRaw = await parseRecords(currentRoot, 'current')
   const historyRecordsRaw = await parseRecords(historyRoot, 'history')
+  const failureAttribution = await parseFailureAttributions(currentRoot)
   const currentRecords = dedupeRecords(currentRecordsRaw).sort(sortByStartedDesc)
   const historyRecords = dedupeRecords(historyRecordsRaw).sort(sortByStartedDesc)
 
-  if (currentRecords.length === 0) {
+  if (currentRecords.length === 0 && failureAttribution.length === 0) {
     die(`no perf summary found under CURRENT_ROOT: ${currentRoot}`)
   }
 
@@ -289,6 +437,17 @@ async function run() {
 
   const scenarioRows = []
   const warnings = []
+
+  for (const item of failureAttribution) {
+    warnings.push({
+      severity: 'P1',
+      scenario: item.scenario,
+      code: item.code,
+      message: `scenario failed: ${item.code} (${item.message})`,
+      remediation: item.remediation,
+      sourcePath: item.sourcePath,
+    })
+  }
 
   for (const scenario of scenarios) {
     const latest = currentLatestByScenario.get(scenario)
@@ -324,6 +483,7 @@ async function run() {
         warnings.push({
           severity: latest.regressions.length > 0 ? 'P1' : 'P2',
           scenario,
+          code: latest.regressions.length > 0 ? 'THRESHOLD_REGRESSION' : 'TREND_DRIFT',
           message,
         })
       }
@@ -358,6 +518,7 @@ async function run() {
     historyCount: historyRecords.length,
     scenarios: scenarioRows,
     warnings,
+    failureAttribution,
     input: {
       currentRoot,
       historyRoot,
@@ -375,6 +536,10 @@ async function run() {
     report_dir: outDir,
     report_markdown: markdownPath,
     report_json: jsonPath,
+    report_attribution: failureAttribution
+      .slice(0, 3)
+      .map((item) => `${item.scenario}:${item.code}`)
+      .join(' | '),
   }
   await writeGithubOutput(outputs)
 

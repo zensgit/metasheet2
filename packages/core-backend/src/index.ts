@@ -236,6 +236,10 @@ export class MetaSheetServer {
                 const result = await client.query(sql, params)
                 return result.rows
               },
+              rawQuery: async (queryConfig: unknown) => {
+                return client.query(queryConfig as any)
+              },
+              __rawClient: client,
               commit: async () => {
                 // Commit is handled by the pool manager
               },

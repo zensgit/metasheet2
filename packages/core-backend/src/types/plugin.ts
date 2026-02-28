@@ -392,6 +392,8 @@ export type DatabaseQueryResult = Record<string, unknown>[]
  */
 export interface DatabaseTransaction {
   query(sql: string, params?: unknown[]): Promise<DatabaseQueryResult>
+  rawQuery?(queryConfig: unknown): Promise<unknown>
+  __rawClient?: unknown
   commit(): Promise<void>
   rollback(): Promise<void>
 }

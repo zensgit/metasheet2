@@ -2,7 +2,7 @@ const { randomUUID } = require('crypto')
 const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
-const { Transform } = require('stream')
+const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
@@ -97,6 +97,30 @@ const workDateFormatterCache = new Map()
 const zonedMinutesFormatterCache = new Map()
 const zonedPartsFormatterCache = new Map()
 const timeToMinutesCache = new Map()
+let attendanceCopyFromFactory = null
+let attendanceCopyFromUnavailable = false
+
+function resolveAttendanceCopyFromFactory() {
+  if (attendanceCopyFromFactory) return attendanceCopyFromFactory
+  if (attendanceCopyFromUnavailable) return null
+  try {
+    const mod = require('pg-copy-streams')
+    const from = typeof mod?.from === 'function'
+      ? mod.from
+      : typeof mod === 'function'
+        ? mod
+        : null
+    if (typeof from !== 'function') {
+      attendanceCopyFromUnavailable = true
+      return null
+    }
+    attendanceCopyFromFactory = from
+    return attendanceCopyFromFactory
+  } catch (_error) {
+    attendanceCopyFromUnavailable = true
+    return null
+  }
+}
 
 function getCachedIntlDateTimeFormat(cache, timeZone, locale, options) {
   const tz = typeof timeZone === 'string' ? timeZone.trim() : ''
@@ -887,6 +911,12 @@ const ATTENDANCE_IMPORT_COPY_ENABLED = resolveEnumEnv(
   'true',
   ['true', 'false']
 ) === 'true'
+
+const ATTENDANCE_IMPORT_COPY_STREAM_MODE = resolveEnumEnv(
+  'ATTENDANCE_IMPORT_COPY_STREAM_MODE',
+  'auto',
+  ['auto', 'force', 'off']
+)
 
 const ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = resolvePositiveIntEnv(
   'ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS',
@@ -4420,6 +4450,74 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
   return map
 }
 
+function resolveAttendanceImportRawClient(client) {
+  if (!client || typeof client !== 'object') return null
+  const raw = client.__rawClient ?? client.rawClient ?? null
+  if (!raw || typeof raw.query !== 'function') return null
+  return raw
+}
+
+function shouldUseAttendanceImportCopyStdin({ client, totalRows }) {
+  if (!ATTENDANCE_IMPORT_COPY_ENABLED) return false
+  if (ATTENDANCE_IMPORT_COPY_STREAM_MODE === 'off') return false
+  if (!resolveAttendanceImportRawClient(client)) return false
+  if (!resolveAttendanceCopyFromFactory()) return false
+  if (ATTENDANCE_IMPORT_COPY_STREAM_MODE === 'force') return true
+  const size = Number.isFinite(Number(totalRows))
+    ? Math.max(0, Math.floor(Number(totalRows)))
+    : 0
+  return size >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
+}
+
+function encodeAttendanceImportCsvValue(value) {
+  if (value === null || value === undefined) return '\\N'
+  const text = String(value)
+  if (text === '\\N') return '"\\N"'
+  if (text.includes('"') || text.includes(',') || text.includes('\n') || text.includes('\r')) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function* iterAttendanceImportStageCsvLines(rows) {
+  for (const row of rows) {
+    const metaValue = typeof row?.metaJson === 'string'
+      ? row.metaJson
+      : JSON.stringify(row?.metaJson ?? {})
+    const values = [
+      row?.userId ?? null,
+      row?.orgId ?? null,
+      row?.workDate ?? null,
+      row?.timezone ?? null,
+      row?.firstInAt ?? null,
+      row?.lastOutAt ?? null,
+      row?.workMinutes ?? 0,
+      row?.lateMinutes ?? 0,
+      row?.earlyLeaveMinutes ?? 0,
+      row?.status ?? null,
+      row?.isWorkday ?? true,
+      metaValue,
+      row?.sourceBatchId ?? null,
+    ]
+    yield `${values.map((value) => encodeAttendanceImportCsvValue(value)).join(',')}\n`
+  }
+}
+
+async function copyAttendanceImportRowsToStage(client, rows) {
+  const rawClient = resolveAttendanceImportRawClient(client)
+  const copyFromFactory = resolveAttendanceCopyFromFactory()
+  if (!rawClient || !copyFromFactory) return false
+  const copyStream = rawClient.query(
+    copyFromFactory(
+      `COPY attendance_import_records_stage
+        (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
+       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+    )
+  )
+  await pipeline(Readable.from(iterAttendanceImportStageCsvLines(rows)), copyStream)
+  return true
+}
+
 async function ensureAttendanceImportRecordsStageTable(client) {
   if (client && client.__attendanceImportStageReady === true) return
   await queryImportHeavy(
@@ -4444,9 +4542,13 @@ async function ensureAttendanceImportRecordsStageTable(client) {
   if (client) client.__attendanceImportStageReady = true
 }
 
-async function batchUpsertAttendanceRecordsStaging(client, rows) {
+async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) return new Map()
   await ensureAttendanceImportRecordsStageTable(client)
+  const totalRows = Number.isFinite(Number(options?.totalRows))
+    ? Math.max(0, Math.floor(Number(options.totalRows)))
+    : rows.length
+  const allowCopyStdin = shouldUseAttendanceImportCopyStdin({ client, totalRows })
 
   const userIds = []
   const orgIds = []
@@ -4479,69 +4581,82 @@ async function batchUpsertAttendanceRecordsStaging(client, rows) {
   }
 
   await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
-  await queryImportHeavy(
-    client,
-    `INSERT INTO attendance_import_records_stage
-      (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
-     SELECT
-       t.user_id,
-       t.org_id,
-       t.work_date,
-       t.timezone,
-       t.first_in_at,
-       t.last_out_at,
-       t.work_minutes,
-       t.late_minutes,
-       t.early_leave_minutes,
-       t.status,
-       t.is_workday,
-       t.meta_json::jsonb,
-       t.source_batch_id
-     FROM unnest(
-       $1::text[],
-       $2::text[],
-       $3::date[],
-       $4::text[],
-       $5::timestamptz[],
-       $6::timestamptz[],
-       $7::int[],
-       $8::int[],
-       $9::int[],
-       $10::text[],
-       $11::boolean[],
-       $12::text[],
-       $13::uuid[]
-     ) AS t(
-       user_id,
-       org_id,
-       work_date,
-       timezone,
-       first_in_at,
-       last_out_at,
-       work_minutes,
-       late_minutes,
-       early_leave_minutes,
-       status,
-       is_workday,
-       meta_json,
-       source_batch_id
-     )`,
-    [
-      userIds,
-      orgIds,
-      workDates,
-      timezones,
-      firstInAts,
-      lastOutAts,
-      workMinutes,
-      lateMinutes,
-      earlyLeaveMinutes,
-      statuses,
-      isWorkdays,
-      metaJsons,
-      sourceBatchIds,
-    ]
-  )
+  let stagedByCopy = false
+  if (allowCopyStdin) {
+    try {
+      stagedByCopy = await copyAttendanceImportRowsToStage(client, rows)
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error)
+      console.warn(`[attendance-import] COPY FROM STDIN stage load failed, fallback to unnest: ${message}`)
+      await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
+      stagedByCopy = false
+    }
+  }
+  if (!stagedByCopy) {
+    await queryImportHeavy(
+      client,
+      `INSERT INTO attendance_import_records_stage
+        (user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta_json, source_batch_id)
+       SELECT
+         t.user_id,
+         t.org_id,
+         t.work_date,
+         t.timezone,
+         t.first_in_at,
+         t.last_out_at,
+         t.work_minutes,
+         t.late_minutes,
+         t.early_leave_minutes,
+         t.status,
+         t.is_workday,
+         t.meta_json::jsonb,
+         t.source_batch_id
+       FROM unnest(
+         $1::text[],
+         $2::text[],
+         $3::date[],
+         $4::text[],
+         $5::timestamptz[],
+         $6::timestamptz[],
+         $7::int[],
+         $8::int[],
+         $9::int[],
+         $10::text[],
+         $11::boolean[],
+         $12::text[],
+         $13::uuid[]
+       ) AS t(
+         user_id,
+         org_id,
+         work_date,
+         timezone,
+         first_in_at,
+         last_out_at,
+         work_minutes,
+         late_minutes,
+         early_leave_minutes,
+         status,
+         is_workday,
+         meta_json,
+         source_batch_id
+       )`,
+      [
+        userIds,
+        orgIds,
+        workDates,
+        timezones,
+        firstInAts,
+        lastOutAts,
+        workMinutes,
+        lateMinutes,
+        earlyLeaveMinutes,
+        statuses,
+        isWorkdays,
+        metaJsons,
+        sourceBatchIds,
+      ]
+    )
+  }
 
   const inserted = await queryImportHeavy(
     client,
@@ -4595,14 +4710,17 @@ async function batchUpsertAttendanceRecords(client, rows, options = {}) {
   const strategy = typeof options?.strategy === 'string'
     ? options.strategy.trim().toLowerCase()
     : null
+  const totalRows = Number.isFinite(Number(options?.totalRows))
+    ? Math.max(0, Math.floor(Number(options.totalRows)))
+    : rows.length
   if (strategy === 'values' || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'values') {
     return batchUpsertAttendanceRecordsValues(client, rows)
   }
   if (strategy === 'staging') {
-    return batchUpsertAttendanceRecordsStaging(client, rows)
+    return batchUpsertAttendanceRecordsStaging(client, rows, { totalRows })
   }
   if (ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging') {
-    return batchUpsertAttendanceRecordsStaging(client, rows)
+    return batchUpsertAttendanceRecordsStaging(client, rows, { totalRows })
   }
   return batchUpsertAttendanceRecordsUnnest(client, rows)
 }
@@ -6582,6 +6700,7 @@ module.exports = {
 
 	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 	            strategy: importRecordUpsertStrategy,
+            totalRows: rows.length,
 	          })
 
 	          for (const item of chunk) {
@@ -11124,6 +11243,7 @@ module.exports = {
 
 				              const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 				                strategy: importRecordUpsertStrategy,
+                    totalRows: rows.length,
 				              })
 
 				              for (const item of chunk) {

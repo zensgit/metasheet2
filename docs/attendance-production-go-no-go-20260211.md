@@ -2636,6 +2636,45 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Development Verification (2026-02-28): COPY Fast Path + Longrun Attribution (Branch)
+
+Goal:
+
+- Validate the next parallel development set on branch `codex/attendance-parallel-123-20260228`:
+  - backend COPY FROM STDIN fast path for attendance import staging (with fallback),
+  - frontend import gateway-error recovery UX hardening,
+  - longrun trend failure-attribution/remediation reporting + issue payload enrichment.
+
+Code changes:
+
+- `plugins/plugin-attendance/index.cjs`
+- `packages/core-backend/src/index.ts`
+- `packages/core-backend/src/types/plugin.ts`
+- `packages/core-backend/package.json`
+- `apps/web/src/views/AttendanceView.vue`
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+- `.github/workflows/attendance-import-perf-longrun.yml`
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Backend integration tests (`attendance-plugin.test.ts`) | local | PASS | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts --reporter=dot` |
+| Backend build | local | PASS | `pnpm --filter @metasheet/core-backend build` |
+| Web build | local | PASS | `pnpm --filter @metasheet/web build` |
+| Perf Long Run (branch `codex/attendance-parallel-123-20260228`, non-drill, `upload_csv=true`) | [#22520350142](https://github.com/zensgit/metasheet2/actions/runs/22520350142) | PASS | `output/playwright/ga/22520350142/attendance-import-perf-longrun-rows500k-commit-22520350142-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.json` |
+
+Observed highlights:
+
+- Branch longrun run completed green across scenario matrix and trend-report.
+- `uploadCsv=true` is present in trend JSON for current scenarios.
+- Trend markdown includes `Upload` column and `Failure Attribution` section.
+- `rows500k-commit` remained stable (`recordUpsertStrategy=staging`, `engine=bulk`) under upload path.
+
+Decision:
+
+- **GO maintained** for current production baseline; branch changes are validated and ready for PR review/merge.
+
 ## Post-Go Development Verification (2026-02-28): Longrun Default Coverage Includes `rows500k-commit`
 
 Goal:
