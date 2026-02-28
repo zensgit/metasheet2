@@ -3107,3 +3107,35 @@ Operational note:
 
 - For fast ad-hoc reruns, keep the escape hatch:
   - `gh workflow run attendance-import-perf-longrun.yml -f include_rows500k_commit=false`
+
+## Latest Notes (2026-02-28): 500k Commit Poll Timeout Hardening
+
+Problem:
+
+- After enabling `rows500k-commit` by default, one mainline run failed with `async commit job timed out` under transient `502` polling windows.
+
+Fix:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - Added poll controls:
+    - `IMPORT_JOB_POLL_INTERVAL_MS` (default `2000`)
+    - `IMPORT_JOB_POLL_TIMEOUT_MS` (default `30m`)
+    - `IMPORT_JOB_POLL_TIMEOUT_LARGE_MS` (default `45m`)
+  - Large jobs (`rows >= 500000`) now use `IMPORT_JOB_POLL_TIMEOUT_LARGE_MS`.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Long Run (main, pre-fix, non-drill) | [#22516773937](https://github.com/zensgit/metasheet2/actions/runs/22516773937) | FAIL | `output/playwright/ga/22516773937/attendance-import-perf-longrun-rows500k-commit-22516773937-1/current/rows500k-commit/perf.log` |
+| Perf Long Run (branch `codex/attendance-longrun-500k-poll-timeout`, post-fix, non-drill) | [#22517307128](https://github.com/zensgit/metasheet2/actions/runs/22517307128) | PASS | `output/playwright/ga/22517307128/attendance-import-perf-longrun-rows500k-commit-22517307128-1/current/rows500k-commit/attendance-perf-mm62nb2h-ss8bf3/perf-summary.json`, `output/playwright/ga/22517307128/attendance-import-perf-longrun-trend-22517307128-1/20260228-085054/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Pre-fix failure (`#22516773937`) shows repeated `GET /attendance/import/jobs/:id` transient `502` before timeout.
+- Post-fix branch run (`#22517307128`) completed with:
+  - `rows500k-commit.uploadCsv=true`
+  - `rows500k-commit.commitMs=548186`
+  - `recordUpsertStrategy=staging`
+  - `engine=bulk`
+  - `regressions=[]`
