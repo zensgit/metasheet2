@@ -2670,6 +2670,43 @@ Decision:
 
 - **GO maintained** (coverage strengthened; merge + mainline rerun pending in next step).
 
+## Post-Go Development Verification (2026-02-28): Longrun 500k Commit Poll-Timeout Hardening
+
+Goal:
+
+- Eliminate false negatives after enabling `rows500k-commit` by default, where async job polling could timeout at 30 minutes during transient `502` windows.
+
+Code change:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - Added:
+    - `IMPORT_JOB_POLL_INTERVAL_MS` (default `2000`)
+    - `IMPORT_JOB_POLL_TIMEOUT_MS` (default `30m`)
+    - `IMPORT_JOB_POLL_TIMEOUT_LARGE_MS` (default `45m`)
+  - For `rows >= 500000`, async commit polling now uses the large timeout.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (main, non-drill, post-#281; includes `rows500k-commit`) | [#22516773937](https://github.com/zensgit/metasheet2/actions/runs/22516773937) | FAIL (expected before fix) | `output/playwright/ga/22516773937/attendance-import-perf-longrun-rows500k-commit-22516773937-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch `codex/attendance-longrun-500k-poll-timeout`, non-drill, same profile) | [#22517307128](https://github.com/zensgit/metasheet2/actions/runs/22517307128) | PASS | `output/playwright/ga/22517307128/attendance-import-perf-longrun-rows500k-commit-22517307128-1/current/rows500k-commit/attendance-perf-mm62nb2h-ss8bf3/perf-summary.json`, `output/playwright/ga/22517307128/attendance-import-perf-longrun-trend-22517307128-1/20260228-085054/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- Pre-fix failure log (`#22516773937`) ends with `Failed: async commit job timed out` after repeated transient `502` polling errors.
+- Post-fix run (`#22517307128`) confirms recovery:
+  - `rows500k-commit.uploadCsv=true`
+  - `rows500k-commit.previewMs=17442`
+  - `rows500k-commit.commitMs=548186`
+  - `rows500k-commit.recordUpsertStrategy=staging`
+  - `rows500k-commit.engine=bulk`
+  - `rows500k-commit.regressions=[]`
+
+Decision:
+
+- **GO maintained** (false-negative class addressed; mainline merge + dashboard rebind is the next step).
+
 ## Post-Go Verification (2026-02-28): Mainline Perf Refresh + Dashboard Green
 
 Goal:

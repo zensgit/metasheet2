@@ -42,6 +42,15 @@ const rollbackRetryDelayMs = Math.max(100, Number(process.env.ROLLBACK_RETRY_DEL
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 180000))
+const importJobPollIntervalMs = Math.max(500, Number(process.env.IMPORT_JOB_POLL_INTERVAL_MS || 2000))
+const importJobPollTimeoutMs = Math.max(
+  60_000,
+  Number(process.env.IMPORT_JOB_POLL_TIMEOUT_MS || 30 * 60 * 1000),
+)
+const importJobPollTimeoutLargeMs = Math.max(
+  importJobPollTimeoutMs,
+  Number(process.env.IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || 45 * 60 * 1000),
+)
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -441,6 +450,9 @@ async function run() {
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
+  log(
+    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs}`,
+  )
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
   }
@@ -679,7 +691,13 @@ async function run() {
       const attemptJobId = attemptJob?.id
       if (!attemptJobId) die('commit-async did not return job.id')
       try {
-        finalAsyncJob = await pollImportJob(attemptJobId)
+        const pollTimeoutMs = rows >= 500_000
+          ? importJobPollTimeoutLargeMs
+          : importJobPollTimeoutMs
+        finalAsyncJob = await pollImportJob(attemptJobId, {
+          timeoutMs: pollTimeoutMs,
+          intervalMs: importJobPollIntervalMs,
+        })
       } catch (error) {
         if (isRetryableAsyncCommitFailure(error) && attempt < activeCommitRetryAttempts) {
           const delayMs = computeRetryDelayMs({
