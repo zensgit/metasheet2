@@ -431,11 +431,11 @@
         </div>
         <div class="attendance__pagination">
           <button class="attendance__btn" :disabled="recordsPage <= 1 || loading" @click="changeRecordsPage(-1)">
-            Prev
+            {{ tr('Prev', '上一页') }}
           </button>
-          <span>Page {{ recordsPage }} / {{ recordsTotalPages }}</span>
+          <span>{{ tr('Page', '页码') }} {{ recordsPage }} / {{ recordsTotalPages }}</span>
           <button class="attendance__btn" :disabled="recordsPage >= recordsTotalPages || loading" @click="changeRecordsPage(1)">
-            Next
+            {{ tr('Next', '下一页') }}
           </button>
         </div>
       </section>
@@ -443,9 +443,9 @@
       <section class="attendance__grid" v-if="showAdmin">
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
-            <h3>Admin Console</h3>
+            <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
             <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? 'Loading...' : 'Reload admin' }}
+              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
             </button>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -453,7 +453,7 @@
               {{ statusMessage }}
             </span>
             <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
-              Code: {{ statusCode }}
+              {{ tr('Code', '代码') }}: {{ statusCode }}
             </span>
             <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
               {{ statusHint }}
@@ -465,16 +465,16 @@
               :disabled="statusActionBusy"
               @click="runStatusAction"
             >
-              {{ statusActionBusy ? 'Working...' : statusActionLabel }}
+              {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
             </button>
           </div>
-          <div v-if="adminForbidden" class="attendance__empty">Admin permissions required to manage attendance settings.</div>
+          <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
           <div v-else>
             <div class="attendance__admin-section">
-              <h4>Settings</h4>
+              <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
-                  <span>Auto absence</span>
+                  <span>{{ tr('Auto absence', '自动缺勤') }}</span>
                   <input
                     id="attendance-auto-absence-enabled"
                     name="autoAbsenceEnabled"
@@ -483,7 +483,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-auto-absence-run-at">
-                  <span>Run at</span>
+                  <span>{{ tr('Run at', '执行时间') }}</span>
                   <input
                     id="attendance-auto-absence-run-at"
                     name="autoAbsenceRunAt"
@@ -492,7 +492,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-auto-absence-lookback">
-                  <span>Lookback days</span>
+                  <span>{{ tr('Lookback days', '回溯天数') }}</span>
                   <input
                     id="attendance-auto-absence-lookback"
                     name="autoAbsenceLookbackDays"
@@ -502,7 +502,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
-                  <span>Holiday first-day base hours</span>
+                  <span>{{ tr('Holiday first-day base hours', '节假日首日基准工时') }}</span>
                   <input
                     id="attendance-holiday-first-day-enabled"
                     name="holidayFirstDayEnabled"
@@ -511,7 +511,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-first-day-hours">
-                  <span>First-day base hours</span>
+                  <span>{{ tr('First-day base hours', '首日基准工时') }}</span>
                   <input
                     id="attendance-holiday-first-day-hours"
                     name="holidayFirstDayBaseHours"
@@ -522,7 +522,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-overtime-adds">
-                  <span>Overtime adds on holiday</span>
+                  <span>{{ tr('Overtime adds on holiday', '节假日计入加班') }}</span>
                   <input
                     id="attendance-holiday-overtime-adds"
                     name="holidayOvertimeAdds"
@@ -531,38 +531,38 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-overtime-source">
-                  <span>Overtime source</span>
+                  <span>{{ tr('Overtime source', '加班来源') }}</span>
                   <select
                     id="attendance-holiday-overtime-source"
                     name="holidayOvertimeSource"
                     v-model="settingsForm.holidayOvertimeSource"
                   >
-                    <option value="approval">Approval</option>
-                    <option value="clock">Clock</option>
-                    <option value="both">Both</option>
+                    <option value="approval">{{ tr('Approval', '审批') }}</option>
+                    <option value="clock">{{ tr('Clock', '打卡') }}</option>
+                    <option value="both">{{ tr('Both', '两者') }}</option>
                   </select>
                 </label>
                 <div class="attendance__field attendance__field--full">
                   <div class="attendance__admin-subsection">
                     <div class="attendance__admin-subsection-header">
-                      <h5>Holiday overrides</h5>
+                      <h5>{{ tr('Holiday overrides', '节假日覆盖规则') }}</h5>
                       <button class="attendance__btn" type="button" @click="addHolidayOverride">
-                        Add override
+                        {{ tr('Add override', '新增覆盖') }}
                       </button>
                     </div>
                     <div v-if="settingsForm.holidayOverrides.length === 0" class="attendance__empty">
-                      No overrides configured.
+                      {{ tr('No overrides configured.', '暂无覆盖规则。') }}
                     </div>
                     <div v-else class="attendance__table-wrapper">
                       <table class="attendance__table">
                         <thead>
                           <tr>
-                            <th>Holiday name</th>
-                            <th>Match</th>
-                            <th>First-day hours</th>
-                            <th>Enable</th>
-                            <th>Overtime adds</th>
-                            <th>Overtime source</th>
+                            <th>{{ tr('Holiday name', '节假日名称') }}</th>
+                            <th>{{ tr('Match', '匹配方式') }}</th>
+                            <th>{{ tr('First-day hours', '首日工时') }}</th>
+                            <th>{{ tr('Enable', '启用') }}</th>
+                            <th>{{ tr('Overtime adds', '计入加班') }}</th>
+                            <th>{{ tr('Overtime source', '加班来源') }}</th>
                             <th></th>
                           </tr>
                         </thead>
@@ -578,9 +578,9 @@
                               </td>
                               <td>
                                 <select v-model="override.match">
-                                  <option value="contains">Contains</option>
-                                  <option value="equals">Equals</option>
-                                  <option value="regex">Regex</option>
+                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
+                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
+                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
                                 </select>
                               </td>
                               <td>
@@ -599,14 +599,14 @@
                               </td>
                               <td>
                                 <select v-model="override.overtimeSource">
-                                  <option value="approval">Approval</option>
-                                  <option value="clock">Clock</option>
-                                  <option value="both">Both</option>
+                                  <option value="approval">{{ tr('Approval', '审批') }}</option>
+                                  <option value="clock">{{ tr('Clock', '打卡') }}</option>
+                                  <option value="both">{{ tr('Both', '两者') }}</option>
                                 </select>
                               </td>
                               <td>
                                 <button class="attendance__btn attendance__btn--danger" type="button" @click="removeHolidayOverride(index)">
-                                  Remove
+                                  {{ tr('Remove', '移除') }}
                                 </button>
                               </td>
                             </tr>
@@ -614,46 +614,46 @@
                               <td colspan="7">
                                 <div class="attendance__override-filters">
                                   <label class="attendance__override-field">
-                                    <span>Attendance groups</span>
+                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
                                     <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
                                     <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
-                                      Known groups: {{ attendanceGroupOptions.join(', ') }}
+                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
                                     </small>
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Roles</span>
+                                    <span>{{ tr('Roles', '角色') }}</span>
                                     <input v-model="override.roles" type="text" placeholder="司机,工段长" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Role tags</span>
+                                    <span>{{ tr('Role tags', '角色标签') }}</span>
                                     <input v-model="override.roleTags" type="text" placeholder="车间,仓储" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>User IDs</span>
+                                    <span>{{ tr('User IDs', '用户ID') }}</span>
                                     <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>User names</span>
+                                    <span>{{ tr('User names', '用户名') }}</span>
                                     <input v-model="override.userNames" type="text" placeholder="张三,李四" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Exclude user IDs</span>
+                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
                                     <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Exclude user names</span>
+                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
                                     <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Day index start</span>
+                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
                                     <input v-model.number="override.dayIndexStart" type="number" min="1" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Day index end</span>
+                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
                                     <input v-model.number="override.dayIndexEnd" type="number" min="1" />
                                   </label>
                                   <label class="attendance__override-field">
-                                    <span>Day index list</span>
+                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
                                     <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
                                   </label>
                                 </div>
@@ -666,7 +666,7 @@
                   </div>
                 </div>
                 <label class="attendance__field" for="attendance-min-punch-interval">
-                  <span>Min punch interval (min)</span>
+                  <span>{{ tr('Min punch interval (min)', '最小打卡间隔（分钟）') }}</span>
                   <input
                     id="attendance-min-punch-interval"
                     name="minPunchIntervalMinutes"
@@ -676,17 +676,17 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-ip-allowlist">
-                  <span>IP allowlist</span>
+                  <span>{{ tr('IP allowlist', 'IP 白名单') }}</span>
                   <textarea
                     id="attendance-ip-allowlist"
                     name="ipAllowlist"
                     v-model="settingsForm.ipAllowlist"
                     rows="3"
-                    placeholder="One per line or comma separated"
+                    :placeholder="tr('One per line or comma separated', '每行一个或逗号分隔')"
                   ></textarea>
                 </label>
                 <label class="attendance__field" for="attendance-geo-lat">
-                  <span>Geo fence lat</span>
+                  <span>{{ tr('Geo fence lat', '地理围栏纬度') }}</span>
                   <input
                     id="attendance-geo-lat"
                     name="geoFenceLat"
@@ -696,7 +696,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-geo-lng">
-                  <span>Geo fence lng</span>
+                  <span>{{ tr('Geo fence lng', '地理围栏经度') }}</span>
                   <input
                     id="attendance-geo-lng"
                     name="geoFenceLng"
@@ -706,7 +706,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-geo-radius">
-                  <span>Geo fence radius (m)</span>
+                  <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
                   <input
                     id="attendance-geo-radius"
                     name="geoFenceRadius"
@@ -717,7 +717,7 @@
                 </label>
               </div>
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
-                {{ settingsLoading ? 'Saving...' : 'Save settings' }}
+                {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
               </button>
             </div>
 
@@ -1117,30 +1117,30 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Holiday Sync</h4>
+                <h4>{{ tr('Holiday Sync', '节假日同步') }}</h4>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" :disabled="holidaySyncLoading" @click="syncHolidays">
-                    {{ holidaySyncLoading ? 'Syncing...' : 'Sync now' }}
+                    {{ holidaySyncLoading ? tr('Syncing...', '同步中...') : tr('Sync now', '立即同步') }}
                   </button>
                   <button
                     class="attendance__btn"
                     :disabled="holidaySyncLoading"
                     @click="syncHolidaysForYears([new Date().getFullYear()])"
                   >
-                    Sync current year
+                    {{ tr('Sync current year', '同步当年') }}
                   </button>
                   <button
                     class="attendance__btn"
                     :disabled="holidaySyncLoading"
                     @click="syncHolidaysForYears([new Date().getFullYear() + 1])"
                   >
-                    Sync next year
+                    {{ tr('Sync next year', '同步下一年') }}
                   </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-base-url">
-                  <span>Holiday source URL</span>
+                  <span>{{ tr('Holiday source URL', '节假日数据源地址') }}</span>
                   <input
                     id="attendance-holiday-sync-base-url"
                     name="holidaySyncBaseUrl"
@@ -1149,7 +1149,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-years">
-                  <span>Years (comma separated)</span>
+                  <span>{{ tr('Years (comma separated)', '年份（逗号分隔）') }}</span>
                   <input
                     id="attendance-holiday-sync-years"
                     name="holidaySyncYears"
@@ -1159,7 +1159,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-auto">
-                  <span>Auto sync (daily)</span>
+                  <span>{{ tr('Auto sync (daily)', '自动同步（每日）') }}</span>
                   <input
                     id="attendance-holiday-sync-auto"
                     name="holidaySyncAutoEnabled"
@@ -1168,7 +1168,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-run">
-                  <span>Auto sync time</span>
+                  <span>{{ tr('Auto sync time', '自动同步时间') }}</span>
                   <input
                     id="attendance-holiday-sync-auto-run"
                     name="holidaySyncAutoRunAt"
@@ -1177,17 +1177,17 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
-                  <span>Auto sync timezone</span>
+                  <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
                   <input
                     id="attendance-holiday-sync-auto-tz"
                     name="holidaySyncAutoTimezone"
                     v-model="settingsForm.holidaySyncAutoTimezone"
                     type="text"
-                    placeholder="Asia/Shanghai"
+                    :placeholder="tr('Asia/Shanghai', 'Asia/Shanghai')"
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
-                  <span>Append day index</span>
+                  <span>{{ tr('Append day index', '追加节假日序号') }}</span>
                   <input
                     id="attendance-holiday-sync-index"
                     name="holidaySyncAddDayIndex"
@@ -1196,7 +1196,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-holiday-sync-index-holidays">
-                  <span>Index holidays</span>
+                  <span>{{ tr('Index holidays', '需要编号的节假日') }}</span>
                   <input
                     id="attendance-holiday-sync-index-holidays"
                     name="holidaySyncDayIndexHolidays"
@@ -1206,7 +1206,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-index-max">
-                  <span>Max index days</span>
+                  <span>{{ tr('Max index days', '最大编号天数') }}</span>
                   <input
                     id="attendance-holiday-sync-index-max"
                     name="holidaySyncDayIndexMaxDays"
@@ -1216,7 +1216,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-index-format">
-                  <span>Index format</span>
+                  <span>{{ tr('Index format', '编号格式') }}</span>
                   <select
                     id="attendance-holiday-sync-index-format"
                     name="holidaySyncDayIndexFormat"
@@ -1228,7 +1228,7 @@
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-overwrite">
-                  <span>Overwrite existing</span>
+                  <span>{{ tr('Overwrite existing', '覆盖已有数据') }}</span>
                   <input
                     id="attendance-holiday-sync-overwrite"
                     name="holidaySyncOverwrite"
@@ -1238,11 +1238,11 @@
                 </label>
               </div>
               <div class="attendance__admin-meta">
-                <strong>Last sync</strong>
+                <strong>{{ tr('Last sync', '最近同步') }}</strong>
                 <span v-if="holidaySyncLastRun?.ranAt">
                   {{ new Date(holidaySyncLastRun.ranAt).toLocaleString() }}
-                  · {{ holidaySyncLastRun.success ? 'success' : 'failed' }}
-                  · {{ holidaySyncLastRun.totalApplied ?? 0 }} applied / {{ holidaySyncLastRun.totalFetched ?? 0 }} fetched
+                  · {{ holidaySyncLastRun.success ? tr('success', '成功') : tr('failed', '失败') }}
+                  · {{ holidaySyncLastRun.totalApplied ?? 0 }} {{ tr('applied', '已应用') }} / {{ holidaySyncLastRun.totalFetched ?? 0 }} {{ tr('fetched', '已获取') }}
                   <span v-if="holidaySyncLastRun.years && holidaySyncLastRun.years.length">
                     · {{ holidaySyncLastRun.years.join(',') }}
                   </span>
@@ -1256,18 +1256,18 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Default Rule</h4>
+                <h4>{{ tr('Default Rule', '默认规则') }}</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
-                  {{ ruleLoading ? 'Loading...' : 'Reload rule' }}
+                  {{ ruleLoading ? tr('Loading...', '加载中...') : tr('Reload rule', '重载规则') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rule-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-rule-name" name="ruleName" v-model="ruleForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-rule-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input
                     id="attendance-rule-timezone"
                     name="ruleTimezone"
@@ -1276,7 +1276,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-start">
-                  <span>Work start</span>
+                  <span>{{ tr('Work start', '上班时间') }}</span>
                   <input
                     id="attendance-rule-start"
                     name="ruleWorkStartTime"
@@ -1285,7 +1285,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-end">
-                  <span>Work end</span>
+                  <span>{{ tr('Work end', '下班时间') }}</span>
                   <input
                     id="attendance-rule-end"
                     name="ruleWorkEndTime"
@@ -1294,7 +1294,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-late-grace">
-                  <span>Late grace (min)</span>
+                  <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
                   <input
                     id="attendance-rule-late-grace"
                     name="ruleLateGraceMinutes"
@@ -1304,7 +1304,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-early-grace">
-                  <span>Early grace (min)</span>
+                  <span>{{ tr('Early grace (min)', '早退宽限（分钟）') }}</span>
                   <input
                     id="attendance-rule-early-grace"
                     name="ruleEarlyGraceMinutes"
@@ -1314,7 +1314,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rule-rounding">
-                  <span>Rounding (min)</span>
+                  <span>{{ tr('Rounding (min)', '取整（分钟）') }}</span>
                   <input
                     id="attendance-rule-rounding"
                     name="ruleRoundingMinutes"
