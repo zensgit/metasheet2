@@ -3341,3 +3341,8 @@ gh workflow run attendance-locale-zh-smoke-prod.yml \
 
 Artifact:
 - `attendance-locale-zh-smoke-prod-<runId>-<attempt>/attendance-zh-locale-calendar.png`
+
+Auth note:
+- Workflow first validates `ATTENDANCE_ADMIN_JWT`.
+- If JWT is invalid and `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` are configured, it auto-logins and continues.
+- If neither path yields a valid token, run fails with explicit rotation guidance.
