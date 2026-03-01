@@ -2662,6 +2662,17 @@ Assessment:
 - Active tracker: [#157](https://github.com/zensgit/metasheet2/issues/157) (`[Attendance P1] Perf longrun alert`).
 - Baseline tracker [#213](https://github.com/zensgit/metasheet2/issues/213) is currently CLOSED.
 
+### Follow-up (2026-03-01, post-`#295`)
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (post async/tuning update) | [#22537963463](https://github.com/zensgit/metasheet2/actions/runs/22537963463) | FAIL (P1) | `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows100k-commit-22537963463-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows500k-commit-22537963463-1/current/rows500k-commit/perf.log` |
+| Daily Dashboard | [#22539228593](https://github.com/zensgit/metasheet2/actions/runs/22539228593) | PASS | `output/playwright/ga/22539228593-r2/attendance-daily-gate-dashboard-22539228593-1/attendance-daily-gate-dashboard.json` |
+
+Conclusion remains:
+- **GO for P0 production chain** (strict + dashboard P0 healthy).
+- **No-Go for perf hardening closure** until `[Attendance P1] Perf longrun alert` is closed with stable large-import runs.
+
 ## Post-Go Verification (2026-02-28): Mainline Localization + Lunar/Holiday Calendar Labels
 
 Goal:
