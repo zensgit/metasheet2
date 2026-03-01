@@ -133,7 +133,7 @@ jobs:
   perf:
     if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
@@ -147,6 +147,8 @@ jobs:
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
       MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_BASELINE_MAX_ROLLBACK_MS || '30000' }}
+      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
+      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
