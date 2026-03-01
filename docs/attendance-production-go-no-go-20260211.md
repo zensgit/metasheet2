@@ -2673,6 +2673,16 @@ Conclusion remains:
 - **GO for P0 production chain** (strict + dashboard P0 healthy).
 - **No-Go for perf hardening closure** until `[Attendance P1] Perf longrun alert` is closed with stable large-import runs.
 
+### Follow-up (2026-03-01, post-`#297`)
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (`include_rows500k_*=false`) | [#22539314446](https://github.com/zensgit/metasheet2/actions/runs/22539314446) | FAIL (P1) | `output/playwright/ga/22539314446-r2/attendance-import-perf-longrun-rows100k-commit-22539314446-1/current/rows100k-commit/perf.log` |
+
+Result:
+- Poll interval tuning alone did not recover `rows100k-commit`; failure mode remains async-job timeout under transient upstream errors.
+- Gate posture unchanged: P0 remains healthy; P1 perf hardening remains open.
+
 ## Post-Go Verification (2026-02-28): Mainline Localization + Lunar/Holiday Calendar Labels
 
 Goal:

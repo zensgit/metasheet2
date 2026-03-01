@@ -3279,3 +3279,21 @@ Verification:
 
 Observed:
 - `gateFlat.longrun.reasonSummary` now reports `RUN_FAILED` cleanly (no misleading successful-scenario metrics appended on FAIL).
+
+### Update (2026-03-01, post-`#297` poll-interval tuning)
+
+Merged:
+- [#297](https://github.com/zensgit/metasheet2/pull/297)
+  - Longrun poll interval tuning for async commit scenarios:
+    - `rows100k-commit`: 5s
+    - `rows500k-commit`: 10s
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (`include_rows500k_*=false`) | [#22539314446](https://github.com/zensgit/metasheet2/actions/runs/22539314446) | FAIL (P1) | `output/playwright/ga/22539314446-r2/attendance-import-perf-longrun-rows100k-commit-22539314446-1/current/rows100k-commit/perf.log` |
+
+Observed:
+- 500k scenarios were skipped as configured; 100k async commit still timed out with intermittent `GET /attendance/import/jobs/:id` 5xx/connection errors.
+- This confirms current bottleneck is beyond client poll cadence tuning and requires backend/infra performance remediation.
