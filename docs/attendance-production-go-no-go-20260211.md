@@ -2659,7 +2659,8 @@ Assessment:
 
 - P0 gates remain green (`strict=PASS`, dashboard workflow now correctly keyed on `report_p0_status`).
 - P1 performance reliability remains open (upstream 502/timeouts on large import commit paths).
-- Active tracker: [#213](https://github.com/zensgit/metasheet2/issues/213) (`[Attendance P1] Perf baseline alert`).
+- Active tracker: [#157](https://github.com/zensgit/metasheet2/issues/157) (`[Attendance P1] Perf longrun alert`).
+- Baseline tracker [#213](https://github.com/zensgit/metasheet2/issues/213) is currently CLOSED.
 
 ## Post-Go Verification (2026-02-28): Mainline Localization + Lunar/Holiday Calendar Labels
 
