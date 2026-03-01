@@ -1,0 +1,89 @@
+name: Attendance Locale zh Smoke (Prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: 'Web URL (attendance page base)'
+        required: false
+        default: 'http://142.171.239.56:8081'
+      api_base:
+        description: 'API base'
+        required: false
+        default: 'http://142.171.239.56:8081/api'
+      org_id:
+        description: 'Org ID used for temporary holiday setup'
+        required: false
+        default: 'default'
+      verify_holiday:
+        description: 'Verify holiday badge with temp holiday create/delete (true/false)'
+        required: false
+        default: 'true'
+
+concurrency:
+  group: attendance-locale-zh-smoke-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WEB_URL: ${{ inputs.web_url || vars.ATTENDANCE_WEB_BASE_URL || 'http://142.171.239.56:8081' }}
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
+      VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      HEADLESS: 'true'
+      OUTPUT_DIR: output/playwright/attendance-locale-zh-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run zh locale smoke
+        run: pnpm verify:attendance-locale-zh
+
+      - name: Write step summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Attendance Locale zh Smoke (Prod)"
+            echo ""
+            echo "- WEB_URL: \`${WEB_URL}\`"
+            echo "- API_BASE: \`${API_BASE}\`"
+            echo "- ORG_ID: \`${ORG_ID}\`"
+            echo "- VERIFY_HOLIDAY: \`${VERIFY_HOLIDAY}\`"
+            echo ""
+            echo "Expected screenshot:"
+            echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-locale-zh-smoke-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/playwright/attendance-locale-zh-smoke/**

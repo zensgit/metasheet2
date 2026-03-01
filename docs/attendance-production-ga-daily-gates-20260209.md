@@ -3328,3 +3328,16 @@ Expected log markers:
 - `created holiday: ...`
 - `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on`
 - `deleted holiday: ...`
+
+GitHub workflow (uses `ATTENDANCE_ADMIN_JWT` secret):
+
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  -f web_url="http://142.171.239.56:8081" \
+  -f api_base="http://142.171.239.56:8081/api" \
+  -f org_id="default" \
+  -f verify_holiday=true
+```
+
+Artifact:
+- `attendance-locale-zh-smoke-prod-<runId>-<attempt>/attendance-zh-locale-calendar.png`
