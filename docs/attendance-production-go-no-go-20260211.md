@@ -2670,6 +2670,33 @@ Decision:
 
 - **GO maintained** (feature validation coverage strengthened; remote run requires fresh admin JWT at execution time).
 
+## Post-Go Verification (2026-03-01): zh Locale Production Screenshot Workflow Rollout
+
+Goal:
+
+- Enable reproducible production screenshot verification for zh attendance calendar (lunar + holiday badge) without ad-hoc local token sharing.
+
+Code changes merged:
+
+- [#300](https://github.com/zensgit/metasheet2/pull/300)
+  - Added `.github/workflows/attendance-locale-zh-smoke-prod.yml`.
+- [#301](https://github.com/zensgit/metasheet2/pull/301)
+  - Added token validation + login fallback (`ATTENDANCE_ADMIN_EMAIL`/`ATTENDANCE_ADMIN_PASSWORD`).
+- [#302](https://github.com/zensgit/metasheet2/pull/302)
+  - Guaranteed artifact output on auth failure (`auth-error.txt`).
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| zh Smoke workflow initial run | [#22540304225](https://github.com/zensgit/metasheet2/actions/runs/22540304225) | FAIL | Invalid JWT detected during holiday API check |
+| zh Smoke workflow with auth fallback | [#22540373968](https://github.com/zensgit/metasheet2/actions/runs/22540373968) | FAIL | Explicit auth remediation message |
+| zh Smoke workflow with auth-failure artifact | [#22540422680](https://github.com/zensgit/metasheet2/actions/runs/22540422680) | FAIL (expected until secret rotation) | `output/playwright/ga/22540422680/auth-error.txt` |
+
+Decision:
+
+- **GO maintained (P0 unaffected)**; zh screenshot gate is operational and auditable, currently blocked only by admin credential secret freshness.
+
 ## Post-Go Validation (2026-03-01): i18n/Calendar Delivery + Gate Semantics Alignment
 
 Merged changes:

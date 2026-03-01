@@ -3348,3 +3348,19 @@ Auth note:
 - Workflow first validates `ATTENDANCE_ADMIN_JWT`.
 - If JWT is invalid and `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` are configured, it auto-logins and continues.
 - If neither path yields a valid token, run fails with explicit rotation guidance.
+
+### Update (2026-03-01): Auth Failure Path Evidence Verified
+
+Runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | [#22540304225](https://github.com/zensgit/metasheet2/actions/runs/22540304225) | FAIL | `Resolve valid auth token` failed (`Invalid token`) |
+| Attendance Locale zh Smoke (Prod, auth fallback) | [#22540373968](https://github.com/zensgit/metasheet2/actions/runs/22540373968) | FAIL | Explicit remediation message in step log |
+| Attendance Locale zh Smoke (Prod, auth artifact hardening) | [#22540422680](https://github.com/zensgit/metasheet2/actions/runs/22540422680) | FAIL (expected until secret rotation) | `output/playwright/ga/22540422680/auth-error.txt` |
+
+Observed:
+- Workflow now always uploads evidence artifact even when auth bootstrap fails.
+- Current remaining blocker for screenshot capture is credential rotation:
+  - rotate `ATTENDANCE_ADMIN_JWT`, or
+  - set `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`.
