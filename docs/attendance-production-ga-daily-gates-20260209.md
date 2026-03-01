@@ -3261,3 +3261,21 @@ Current P1 perf signal (tracked, non-paging):
 - [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` is OPEN.
 - [#213](https://github.com/zensgit/metasheet2/issues/213) `[Attendance P1] Perf baseline alert` is CLOSED (latest update at 2026-03-01 05:32 UTC).
 - Longrun failing scenarios currently show repeated upstream `502 Bad Gateway` on import commit/job polling under large-load paths.
+
+### Update (2026-03-01, post-`#295`)
+
+Merged:
+- [#295](https://github.com/zensgit/metasheet2/pull/295)
+  - Longrun `rows100k-commit` switched to async commit path.
+  - Longrun matrix timeout budget increased.
+  - Daily dashboard perf failure summary now avoids mixing successful scenario metrics into `RUN_FAILED`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (post `#295`) | [#22537963463](https://github.com/zensgit/metasheet2/actions/runs/22537963463) | FAIL (P1) | `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows100k-commit-22537963463-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows500k-commit-22537963463-1/current/rows500k-commit/perf.log` |
+| Daily Dashboard (after longrun rerun) | [#22539228593](https://github.com/zensgit/metasheet2/actions/runs/22539228593) | PASS (P0) | `output/playwright/ga/22539228593-r2/attendance-daily-gate-dashboard-22539228593-1/attendance-daily-gate-dashboard.json` |
+
+Observed:
+- `gateFlat.longrun.reasonSummary` now reports `RUN_FAILED` cleanly (no misleading successful-scenario metrics appended on FAIL).
