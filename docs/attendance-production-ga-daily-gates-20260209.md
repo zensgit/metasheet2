@@ -3258,5 +3258,6 @@ Verification runs:
 
 Current P1 perf signal (tracked, non-paging):
 
-- [#213](https://github.com/zensgit/metasheet2/issues/213) `[Attendance P1] Perf baseline alert` is OPEN.
+- [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` is OPEN.
+- [#213](https://github.com/zensgit/metasheet2/issues/213) `[Attendance P1] Perf baseline alert` is CLOSED (latest update at 2026-03-01 05:32 UTC).
 - Longrun failing scenarios currently show repeated upstream `502 Bad Gateway` on import commit/job polling under large-load paths.
