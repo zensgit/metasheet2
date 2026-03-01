@@ -96,9 +96,9 @@ function validate_perf_like_gate() {
       ;;
   esac
 
-  gate_reason_code="$(jq -r --arg gate "$gate_key" 'if (.gateFlat[$gate] | type == "object" and has("reasonCode") and .gateFlat[$gate].reasonCode != null) then (.gateFlat[$gate].reasonCode | tostring) else "" end' "$report_json")"
-  gate_run_id="$(jq -r --arg gate "$gate_key" 'if (.gateFlat[$gate] | type == "object" and has("runId") and .gateFlat[$gate].runId != null) then (.gateFlat[$gate].runId | tostring) else "" end' "$report_json")"
-  gate_completed_run_id="$(jq -r --arg gate "$gate_key" 'if (.gates[$gate].completed | type == "object" and has("id") and .gates[$gate].completed.id != null) then (.gates[$gate].completed.id | tostring) else "" end' "$report_json")"
+  gate_reason_code="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("reasonCode") and .reasonCode != null then (.reasonCode | tostring) else "" end' "$report_json")"
+  gate_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("runId") and .runId != null then (.runId | tostring) else "" end' "$report_json")"
+  gate_completed_run_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].completed | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
 
   if [[ -n "$gate_run_id" && -n "$gate_completed_run_id" && "$gate_run_id" != "$gate_completed_run_id" ]]; then
     die "${gate_label} contract failed: gateFlat.${gate_key}.runId=${gate_run_id} mismatches gates.${gate_key}.completed.id=${gate_completed_run_id}"
