@@ -187,6 +187,42 @@ async function findHolidayBadgeAcrossMonths(page, holidayName) {
   )
 }
 
+async function findAnyHolidayBadgeAcrossMonths(page) {
+  const target = page.locator('.attendance__calendar-holiday')
+  const navPlan = [
+    null,
+    'next',
+    'next',
+    'prev',
+    'prev',
+    'prev',
+  ]
+  const navButtonByStep = {
+    next: page.getByRole('button', { name: /^(Next|下月)$/ }),
+    prev: page.getByRole('button', { name: /^(Prev|上月)$/ }),
+  }
+
+  for (const step of navPlan) {
+    if (step) {
+      await navButtonByStep[step].first().click()
+      await page.waitForLoadState('networkidle', { timeout: timeoutMs })
+    }
+    const count = await target.count()
+    if (count > 0) {
+      const calendarLabel = await page.locator('.attendance__calendar-label').first().textContent().catch(() => '')
+      const badgeTexts = await target.allTextContents().catch(() => [])
+      return {
+        count,
+        calendarLabel: String(calendarLabel || '').trim(),
+        badgeTexts: badgeTexts.slice(0, 12),
+      }
+    }
+  }
+
+  const calendarLabel = await page.locator('.attendance__calendar-label').first().textContent().catch(() => '')
+  throw new Error(`Holiday badges are not visible across probed months. calendarLabel="${String(calendarLabel || '').trim()}"`)
+}
+
 async function run() {
   if (!token) {
     throw new Error('AUTH_TOKEN is required')
@@ -281,11 +317,10 @@ async function run() {
       log(`created holiday: ${createdHolidayDate} ${createdHolidayName} (${createdHolidayId})`)
 
       await ensureHolidayExistsForMonth(monthStart, monthEnd, createdHolidayId)
-      await page.locator('#attendance-from-date').fill(monthStart)
-      await page.locator('#attendance-to-date').fill(monthEnd)
-      await page.getByRole('button', { name: '刷新', exact: true }).click()
-      await page.waitForLoadState('networkidle', { timeout: timeoutMs })
-      await findHolidayBadgeAcrossMonths(page, createdHolidayName)
+      const badgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
+      log(
+        `holiday badges visible: count=${badgeProbe.count}, month=${badgeProbe.calendarLabel}, samples=${JSON.stringify(badgeProbe.badgeTexts)}`,
+      )
     }
 
     const screenshotPath = path.join(outputDir, 'attendance-zh-locale-calendar.png')

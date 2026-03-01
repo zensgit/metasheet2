@@ -2713,6 +2713,11 @@ Validation (local):
 - `pnpm --filter @metasheet/web build` PASS.
 - Production re-verification pending deployment of this fix.
 
+Follow-up verification:
+- Local runner against production (post deploy) PASS:
+  - `output/playwright/attendance-locale-zh-smoke-prod-live-20260301-r8/attendance-zh-locale-calendar.png`
+- GA workflow run `#22546749343` still failed because `main` had not yet included the stabilized zh smoke assertion variant at run time.
+
 ## Post-Go Validation (2026-03-01): i18n/Calendar Delivery + Gate Semantics Alignment
 
 Merged changes:

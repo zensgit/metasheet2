@@ -3380,3 +3380,20 @@ Fix prepared on codebase:
 Status:
 - Code/build validated locally.
 - Production verification requires deploying the new web bundle, then rerunning `attendance-locale-zh-smoke-prod.yml`.
+
+### Update (2026-03-01): Live Verify PASS (Local Runner) + GA Script Delta Identified
+
+Live verify (local runner against production):
+- Command:
+  - `AUTH_TOKEN=<fresh_jwt> WEB_URL=http://142.171.239.56:8081 API_BASE=http://142.171.239.56:8081/api ORG_ID=default VERIFY_HOLIDAY=true node scripts/verify-attendance-locale-zh-smoke.mjs`
+- Result: PASS
+- Evidence:
+  - `output/playwright/attendance-locale-zh-smoke-prod-live-20260301-r8/attendance-zh-locale-calendar.png`
+
+GA run after JWT rotation:
+- Run: [#22546749343](https://github.com/zensgit/metasheet2/actions/runs/22546749343)
+- Result: FAIL
+- Cause:
+  - Workflow still executed pre-stabilization script from `main` (strict temp-holiday badge assertion).
+- Action:
+  - Merge stabilized smoke script (holiday API check + visible badge probe across months) and rerun this workflow.
