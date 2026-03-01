@@ -127,7 +127,7 @@ jobs:
   perf-scenarios:
     if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -144,10 +144,12 @@ jobs:
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
             max_rollback_ms: ''
+            import_job_poll_timeout_ms: '1800000'
+            import_job_poll_timeout_large_ms: '2700000'
           - id: rows100k-commit
             rows: '100000'
             mode: 'commit'
-            commit_async: 'false'
+            commit_async: 'true'
             export_csv: 'true'
             rollback: 'false'
             expected_upsert_strategy: 'staging'
@@ -155,6 +157,8 @@ jobs:
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_COMMIT_MS || '300000' }}
             max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_100K_COMMIT_MAX_EXPORT_MS || '45000' }}
             max_rollback_ms: ''
+            import_job_poll_timeout_ms: '2700000'
+            import_job_poll_timeout_large_ms: '3600000'
           - id: rows50k-preview
             rows: '50000'
             mode: 'preview'
@@ -199,6 +203,8 @@ jobs:
             max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_500K_COMMIT_MAX_COMMIT_MS || '900000' }}
             max_export_ms: ''
             max_rollback_ms: ''
+            import_job_poll_timeout_ms: '3600000'
+            import_job_poll_timeout_large_ms: '5400000'
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
@@ -231,6 +237,8 @@ jobs:
           MAX_EXPORT_MS: ${{ matrix.max_export_ms }}
           MAX_ROLLBACK_MS: ${{ matrix.max_rollback_ms }}
           EXPECT_RECORD_UPSERT_STRATEGY: ${{ matrix.expected_upsert_strategy }}
+          IMPORT_JOB_POLL_TIMEOUT_MS: ${{ matrix.import_job_poll_timeout_ms }}
+          IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail

@@ -1597,6 +1597,10 @@ async function run() {
     }
 
     const summaryBits = []
+    const isPerfGate = gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run'
+    const regressionsCountValue = String(meta?.regressionsCount ?? '').trim()
+    const hasPerfRegressions = regressionsCountValue !== '' && regressionsCountValue !== '0'
+    const includePerfMeta = !isPerfGate || Boolean(gate?.ok) || Boolean(meta?.reason) || hasPerfRegressions
     if (meta) {
       if (gate.name === 'Remote Preflight') {
         if (meta.rc) summaryBits.push(`rc=${meta.rc}`)
@@ -1624,17 +1628,19 @@ async function run() {
           summaryBits.push(`reasons=${pairs.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ')}`)
         }
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
-        if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
-        if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
-        if (meta.recordUpsertStrategy) summaryBits.push(`upsert=${meta.recordUpsertStrategy}`)
-        if (meta.expectedRecordUpsertStrategy) summaryBits.push(`upsert_expected=${meta.expectedRecordUpsertStrategy}`)
-        if (meta.processedRows) summaryBits.push(`processed=${meta.processedRows}`)
-        if (meta.failedRows) summaryBits.push(`failed=${meta.failedRows}`)
-        if (meta.elapsedMs) summaryBits.push(`elapsed=${meta.elapsedMs}`)
-        if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
-        if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
-        if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
-        if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
+        if (includePerfMeta) {
+          if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+          if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
+          if (meta.recordUpsertStrategy) summaryBits.push(`upsert=${meta.recordUpsertStrategy}`)
+          if (meta.expectedRecordUpsertStrategy) summaryBits.push(`upsert_expected=${meta.expectedRecordUpsertStrategy}`)
+          if (meta.processedRows) summaryBits.push(`processed=${meta.processedRows}`)
+          if (meta.failedRows) summaryBits.push(`failed=${meta.failedRows}`)
+          if (meta.elapsedMs) summaryBits.push(`elapsed=${meta.elapsedMs}`)
+          if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
+          if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
+          if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
+          if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
+        }
       }
     }
 
@@ -1686,24 +1692,26 @@ async function run() {
         flat.failedGates = meta.failedGates ?? null
         flat.failedGateReasons = meta.failedGateReasons ?? null
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
-        flat.summarySchemaVersion = meta.schemaVersion ?? null
-        flat.engine = meta.engine ?? null
-        flat.requestedEngine = meta.requestedEngine ?? null
-        flat.recordUpsertStrategy = meta.recordUpsertStrategy ?? null
-        flat.expectedRecordUpsertStrategy = meta.expectedRecordUpsertStrategy ?? null
-        flat.processedRows = meta.processedRows ?? null
-        flat.failedRows = meta.failedRows ?? null
-        flat.elapsedMs = meta.elapsedMs ?? null
-        flat.scenario = meta.scenario ?? null
-        flat.rows = meta.rows ?? null
-        flat.mode = meta.mode ?? null
-        flat.uploadCsv = meta.uploadCsv ?? null
-        flat.previewMs = meta.previewMs ?? null
-        flat.commitMs = meta.commitMs ?? null
-        flat.exportMs = meta.exportMs ?? null
-        flat.rollbackMs = meta.rollbackMs ?? null
-        flat.regressionsCount = meta.regressionsCount ?? null
-        flat.regressionsSample = meta.regressionsSample ?? null
+        if (includePerfMeta) {
+          flat.summarySchemaVersion = meta.schemaVersion ?? null
+          flat.engine = meta.engine ?? null
+          flat.requestedEngine = meta.requestedEngine ?? null
+          flat.recordUpsertStrategy = meta.recordUpsertStrategy ?? null
+          flat.expectedRecordUpsertStrategy = meta.expectedRecordUpsertStrategy ?? null
+          flat.processedRows = meta.processedRows ?? null
+          flat.failedRows = meta.failedRows ?? null
+          flat.elapsedMs = meta.elapsedMs ?? null
+          flat.scenario = meta.scenario ?? null
+          flat.rows = meta.rows ?? null
+          flat.mode = meta.mode ?? null
+          flat.uploadCsv = meta.uploadCsv ?? null
+          flat.previewMs = meta.previewMs ?? null
+          flat.commitMs = meta.commitMs ?? null
+          flat.exportMs = meta.exportMs ?? null
+          flat.rollbackMs = meta.rollbackMs ?? null
+          flat.regressionsCount = meta.regressionsCount ?? null
+          flat.regressionsSample = meta.regressionsSample ?? null
+        }
       }
     }
 
