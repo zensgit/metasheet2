@@ -153,8 +153,6 @@ function isRetryableMutationFailure(resp) {
 
 function isRetryableAsyncCommitFailure(error) {
   const message = String(error?.message || error || '').toLowerCase()
-  if (message.includes('async commit job timed out')) return true
-  if (message.includes('async commit job poll timed out')) return true
   if (!message.startsWith('async commit job failed:')) return false
   return message.includes('deadlock detected')
     || message.includes('serialization failure')
@@ -752,12 +750,13 @@ async function run() {
         }
       } catch (error) {
         let retryableError = error
-        if (isAsyncCommitPollTimeoutFailure(retryableError)) {
+        const pollTimedOut = isAsyncCommitPollTimeoutFailure(retryableError)
+        if (pollTimedOut) {
           try {
             const recovered = await recoverAsyncCommitJobByIdempotency({
               basePayload,
               idempotencyKey: commitIdempotencyKey,
-              timeoutMs: pollTimeoutMs + importJobPollRecoveryGraceMs,
+              timeoutMs: importJobPollRecoveryGraceMs,
               intervalMs: importJobPollIntervalMs,
             })
             finalAsyncJob = recovered
@@ -773,6 +772,9 @@ async function run() {
             const recoverMessage = (recoverError && recoverError.message) || String(recoverError)
             log(`WARN: commit-async idempotency recovery failed (${recoverMessage})`)
           }
+        }
+        if (pollTimedOut && isAsyncCommitPollTimeoutFailure(retryableError)) {
+          throw retryableError
         }
         if (isRetryableAsyncCommitFailure(retryableError) && attempt < activeCommitRetryAttempts) {
           const delayMs = computeRetryDelayMs({
