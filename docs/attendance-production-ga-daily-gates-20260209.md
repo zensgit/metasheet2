@@ -3230,3 +3230,33 @@ Observed highlights:
   - holiday metadata still sourced from existing holiday sync pipeline (`holiday-cn` + manual holidays);
   - zh locale shows lunar label in date cell (`zh-CN-u-ca-chinese`) and holiday name badge when available.
 - Post-merge gate status remains green (`strict=PASS`, `dashboard=PASS`).
+
+## Latest Notes (2026-03-01): zh Admin i18n + Dashboard Contract/Gating Fixes
+
+Merged to `main`:
+
+1. PR [#288](https://github.com/zensgit/metasheet2/pull/288)
+   - Localized Attendance Admin Center labels/actions for `zh-CN`.
+   - Added zh locale smoke script: `scripts/verify-attendance-locale-zh-smoke.mjs`.
+2. PR [#289](https://github.com/zensgit/metasheet2/pull/289)
+   - Fixed daily-dashboard JSON contract validator (`reasonCode` parsing for FAIL perf gates).
+3. PR [#290](https://github.com/zensgit/metasheet2/pull/290)
+   - Perf Baseline default switched to `commit_async=true`.
+4. PR [#291](https://github.com/zensgit/metasheet2/pull/291)
+   - Perf Baseline async timeout budget increased (`timeout-minutes=45`, poll timeout env defaults added).
+5. PR [#292](https://github.com/zensgit/metasheet2/pull/292)
+   - Daily Dashboard workflow now fails only on `report_p0_status != pass` (P1 remains visible in report/issue tracking).
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, post `#292`) | [#22537677656](https://github.com/zensgit/metasheet2/actions/runs/22537677656) | PASS | `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-1/gate-summary.json`, `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-2/gate-summary.json` |
+| Daily Dashboard (main, post `#292`) | [#22537661629](https://github.com/zensgit/metasheet2/actions/runs/22537661629) | PASS | `output/playwright/ga/22537661629-r2/attendance-daily-gate-dashboard-22537661629-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22537661629-r2/attendance-daily-gate-dashboard-22537661629-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (100k, async) | [#22536896331](https://github.com/zensgit/metasheet2/actions/runs/22536896331) | FAIL (P1) | `output/playwright/ga/22536896331-r2/attendance-import-perf-22536896331-1/perf.log` |
+| Perf Longrun (daily) | [#22536868864](https://github.com/zensgit/metasheet2/actions/runs/22536868864) | FAIL (P1) | `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows100k-commit-22536868864-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows500k-commit-22536868864-1/current/rows500k-commit/perf.log` |
+
+Current P1 perf signal (tracked, non-paging):
+
+- [#213](https://github.com/zensgit/metasheet2/issues/213) `[Attendance P1] Perf baseline alert` is OPEN.
+- Longrun failing scenarios currently show repeated upstream `502 Bad Gateway` on import commit/job polling under large-load paths.

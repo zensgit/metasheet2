@@ -2636,6 +2636,31 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-01): i18n/Calendar Delivery + Gate Semantics Alignment
+
+Merged changes:
+
+- [#288](https://github.com/zensgit/metasheet2/pull/288): Admin Center zh localization + locale smoke script.
+- [#289](https://github.com/zensgit/metasheet2/pull/289): daily dashboard JSON contract parser fix.
+- [#290](https://github.com/zensgit/metasheet2/pull/290): Perf Baseline default `commit_async=true`.
+- [#291](https://github.com/zensgit/metasheet2/pull/291): Perf Baseline timeout/poll budget tuning for async path.
+- [#292](https://github.com/zensgit/metasheet2/pull/292): Daily Dashboard workflow fails on P0 only (keeps P1 visible/non-paging).
+
+Validation matrix:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (post `#292`) | [#22537677656](https://github.com/zensgit/metasheet2/actions/runs/22537677656) | PASS | `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-1/gate-summary.json`, `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-2/gate-summary.json` |
+| Daily Dashboard (post `#292`) | [#22537661629](https://github.com/zensgit/metasheet2/actions/runs/22537661629) | PASS | `output/playwright/ga/22537661629-r2/attendance-daily-gate-dashboard-22537661629-1/attendance-daily-gate-dashboard.json` |
+| Perf Baseline (100k async) | [#22536896331](https://github.com/zensgit/metasheet2/actions/runs/22536896331) | FAIL (P1) | `output/playwright/ga/22536896331-r2/attendance-import-perf-22536896331-1/perf.log` |
+| Perf Longrun | [#22536868864](https://github.com/zensgit/metasheet2/actions/runs/22536868864) | FAIL (P1) | `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows100k-commit-22536868864-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows500k-commit-22536868864-1/current/rows500k-commit/perf.log` |
+
+Assessment:
+
+- P0 gates remain green (`strict=PASS`, dashboard workflow now correctly keyed on `report_p0_status`).
+- P1 performance reliability remains open (upstream 502/timeouts on large import commit paths).
+- Active tracker: [#213](https://github.com/zensgit/metasheet2/issues/213) (`[Attendance P1] Perf baseline alert`).
+
 ## Post-Go Verification (2026-02-28): Mainline Localization + Lunar/Holiday Calendar Labels
 
 Goal:
