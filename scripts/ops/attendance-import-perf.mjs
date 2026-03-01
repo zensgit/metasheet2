@@ -51,6 +51,10 @@ const importJobPollTimeoutLargeMs = Math.max(
   importJobPollTimeoutMs,
   Number(process.env.IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || 45 * 60 * 1000),
 )
+const importJobPollRecoveryGraceMs = Math.max(
+  60_000,
+  Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 10 * 60 * 1000),
+)
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -149,11 +153,19 @@ function isRetryableMutationFailure(resp) {
 
 function isRetryableAsyncCommitFailure(error) {
   const message = String(error?.message || error || '').toLowerCase()
+  if (message.includes('async commit job timed out')) return true
+  if (message.includes('async commit job poll timed out')) return true
   if (!message.startsWith('async commit job failed:')) return false
   return message.includes('deadlock detected')
     || message.includes('serialization failure')
     || message.includes('could not serialize access')
     || message.includes('lock timeout')
+}
+
+function isAsyncCommitPollTimeoutFailure(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('async commit job timed out')
+    || message.includes('async commit job poll timed out')
 }
 
 function buildCommitAttemptIdempotencyKey(baseKey, attempt) {
@@ -440,6 +452,41 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
   }
 }
 
+async function recoverAsyncCommitJobByIdempotency({
+  basePayload,
+  idempotencyKey,
+  timeoutMs,
+  intervalMs,
+}) {
+  if (!idempotencyKey) return null
+  const recover = await apiFetch('/attendance/import/commit-async', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...basePayload,
+      idempotencyKey,
+    }),
+  })
+  assertOk(recover, 'POST /attendance/import/commit-async (idempotency recovery)')
+  const job = recover.body?.data?.job
+  if (!job || typeof job !== 'object') {
+    throw new Error('commit-async idempotency recovery missing job')
+  }
+  const jobId = typeof job.id === 'string' ? job.id.trim() : ''
+  const status = String(job.status || '').toLowerCase()
+  if (!jobId) {
+    throw new Error('commit-async idempotency recovery missing job.id')
+  }
+  if (status === 'completed') {
+    return job
+  }
+  if (status === 'failed') {
+    const message = job.error ? String(job.error) : 'job failed'
+    throw new Error(`async commit job failed: ${message}`)
+  }
+  log(`WARN: recovered async job by idempotency key; continue polling job=${jobId} status=${status || 'unknown'}`)
+  return pollImportJob(jobId, { timeoutMs, intervalMs })
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -451,7 +498,7 @@ async function run() {
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
-    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs}`,
+    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs}`,
   )
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
@@ -644,6 +691,7 @@ async function run() {
   const baseCommitIdempotencyKey = runId
   let commitIdempotencyKey = baseCommitIdempotencyKey
   let finalAsyncJob = null
+  let finalAsyncJobId = null
   for (let attempt = 1; attempt <= activeCommitRetryAttempts; attempt += 1) {
     const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
     assertOk(prepCommit, `POST /attendance/import/prepare (commit attempt ${attempt})`)
@@ -690,16 +738,43 @@ async function run() {
       const attemptJob = commit.body?.data?.job
       const attemptJobId = attemptJob?.id
       if (!attemptJobId) die('commit-async did not return job.id')
+      finalAsyncJobId = attemptJobId
+      const pollTimeoutMs = rows >= 500_000
+        ? importJobPollTimeoutLargeMs
+        : importJobPollTimeoutMs
       try {
-        const pollTimeoutMs = rows >= 500_000
-          ? importJobPollTimeoutLargeMs
-          : importJobPollTimeoutMs
         finalAsyncJob = await pollImportJob(attemptJobId, {
           timeoutMs: pollTimeoutMs,
           intervalMs: importJobPollIntervalMs,
         })
+        if (typeof finalAsyncJob?.id === 'string' && finalAsyncJob.id.trim()) {
+          finalAsyncJobId = finalAsyncJob.id.trim()
+        }
       } catch (error) {
-        if (isRetryableAsyncCommitFailure(error) && attempt < activeCommitRetryAttempts) {
+        let retryableError = error
+        if (isAsyncCommitPollTimeoutFailure(retryableError)) {
+          try {
+            const recovered = await recoverAsyncCommitJobByIdempotency({
+              basePayload,
+              idempotencyKey: commitIdempotencyKey,
+              timeoutMs: pollTimeoutMs + importJobPollRecoveryGraceMs,
+              intervalMs: importJobPollIntervalMs,
+            })
+            finalAsyncJob = recovered
+            if (typeof recovered?.id === 'string' && recovered.id.trim()) {
+              finalAsyncJobId = recovered.id.trim()
+            }
+            log(
+              `WARN: commit-async poll timeout recovered via idempotency key (attempt=${attempt}/${activeCommitRetryAttempts} jobId=${finalAsyncJobId || attemptJobId})`,
+            )
+            break
+          } catch (recoverError) {
+            retryableError = recoverError
+            const recoverMessage = (recoverError && recoverError.message) || String(recoverError)
+            log(`WARN: commit-async idempotency recovery failed (${recoverMessage})`)
+          }
+        }
+        if (isRetryableAsyncCommitFailure(retryableError) && attempt < activeCommitRetryAttempts) {
           const delayMs = computeRetryDelayMs({
             baseDelayMs: mutationRetryDelayMs,
             attempt,
@@ -708,12 +783,12 @@ async function run() {
           })
           const nextAttempt = attempt + 1
           commitIdempotencyKey = buildCommitAttemptIdempotencyKey(baseCommitIdempotencyKey, nextAttempt)
-          const message = (error && error.message) || String(error)
+          const message = (retryableError && retryableError.message) || String(retryableError)
           log(`WARN: commit-async job attempt ${attempt}/${activeCommitRetryAttempts} failed (${message}); retrying with idempotencyKey=${commitIdempotencyKey} in ${delayMs}ms`)
           await sleep(delayMs)
           continue
         }
-        throw error
+        throw retryableError
       }
     }
     break
@@ -733,7 +808,7 @@ async function run() {
   let recordUpsertStrategy = null
   if (commitAsync) {
     const job = commit.body?.data?.job
-    jobId = job?.id
+    jobId = finalAsyncJobId || job?.id
     if (!jobId) die('commit-async did not return job.id')
     const finalJob = finalAsyncJob
     if (!finalJob) die('commit-async job result missing')
