@@ -3397,3 +3397,15 @@ GA run after JWT rotation:
   - Workflow still executed pre-stabilization script from `main` (strict temp-holiday badge assertion).
 - Action:
   - Merge stabilized smoke script (holiday API check + visible badge probe across months) and rerun this workflow.
+
+### Update (2026-03-01): GA zh Locale Smoke Recovery PASS
+
+After merging stabilization changes (PR [#305](https://github.com/zensgit/metasheet2/pull/305)):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | [#22546819896](https://github.com/zensgit/metasheet2/actions/runs/22546819896) | PASS | `output/playwright/ga/22546819896/attendance-zh-locale-calendar.png` |
+
+Observed:
+- `Run zh locale smoke` step succeeded.
+- Artifact now includes production screenshot showing zh locale attendance calendar with lunar/holiday markers.
