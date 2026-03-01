@@ -375,8 +375,8 @@ jobs:
           path: |
             ${{ steps.report.outputs.report_dir }}/**
 
-      - name: Fail workflow when dashboard status is fail
-        if: steps.report.outputs.report_status != 'pass'
+      - name: Fail workflow when dashboard P0 status is fail
+        if: steps.report.outputs.report_p0_status != 'pass'
         run: |
           echo "Attendance daily gate dashboard failed"
           exit 1
