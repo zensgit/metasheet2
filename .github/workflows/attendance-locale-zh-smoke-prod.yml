@@ -37,6 +37,8 @@ jobs:
       ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
       HEADLESS: 'true'
       OUTPUT_DIR: output/playwright/attendance-locale-zh-smoke
     steps:
@@ -60,7 +62,48 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+
+          validate_token() {
+            local token="$1"
+            if [[ -z "$token" ]]; then
+              return 1
+            fi
+            local code
+            code="$(curl -s -o /tmp/attendance_auth_me.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${token}" \
+              "${API_BASE}/auth/me" || true)"
+            [[ "$code" == "200" ]]
+          }
+
+          if validate_token "${AUTH_TOKEN:-}"; then
+            echo "AUTH_TOKEN_EFFECTIVE=${AUTH_TOKEN}" >> "$GITHUB_ENV"
+            echo "auth_source=secret_jwt" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ -n "${LOGIN_EMAIL:-}" && -n "${LOGIN_PASSWORD:-}" ]]; then
+            login_json="$(mktemp)"
+            curl -sS -X POST "${API_BASE}/auth/login" \
+              -H 'Content-Type: application/json' \
+              -d "{\"email\":\"${LOGIN_EMAIL}\",\"password\":\"${LOGIN_PASSWORD}\"}" > "${login_json}"
+            login_token="$(jq -r '.data.token // empty' "${login_json}")"
+            if validate_token "${login_token}"; then
+              echo "AUTH_TOKEN_EFFECTIVE=${login_token}" >> "$GITHUB_ENV"
+              echo "auth_source=login_secret" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
+          exit 1
+
       - name: Run zh locale smoke
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: pnpm verify:attendance-locale-zh
 
       - name: Write step summary
@@ -74,6 +117,7 @@ jobs:
             echo "- API_BASE: \`${API_BASE}\`"
             echo "- ORG_ID: \`${ORG_ID}\`"
             echo "- VERIFY_HOLIDAY: \`${VERIFY_HOLIDAY}\`"
+            echo "- AUTH SOURCE: \`${{ steps.resolve-auth-token.outputs.auth_source || 'unknown' }}\`"
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
