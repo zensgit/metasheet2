@@ -4210,7 +4210,8 @@ const recordMap = computed(() => {
 const holidayMap = computed(() => {
   const map = new Map<string, AttendanceHoliday>()
   holidays.value.forEach((holiday) => {
-    map.set(holiday.date, holiday)
+    const key = normalizeDateKey(holiday.date)
+    if (key) map.set(key, holiday)
   })
   return map
 })
@@ -4445,6 +4446,16 @@ function toDateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function normalizeDateKey(value: string | null | undefined): string | null {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  const direct = raw.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (direct) return direct[1]
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString().slice(0, 10)
 }
 
 function formatDateTime(value: string | null): string {

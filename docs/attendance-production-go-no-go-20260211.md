@@ -2697,6 +2697,22 @@ Decision:
 
 - **GO maintained (P0 unaffected)**; zh screenshot gate is operational and auditable, currently blocked only by admin credential secret freshness.
 
+## Post-Go Development Note (2026-03-01): Holiday Badge Date-Key Mismatch Fix
+
+Finding:
+- Production live smoke proved holiday create/list API works, but calendar holiday badge remained empty.
+- Root cause: frontend keyed holiday map by raw ISO datetime (`YYYY-MM-DDT...Z`) instead of day key (`YYYY-MM-DD`).
+
+Fix prepared:
+- `apps/web/src/views/AttendanceView.vue`
+  - holiday map now normalizes `holiday.date` to `YYYY-MM-DD` before lookup.
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - strengthened month/date selection and failure diagnostics for holiday badge assertion.
+
+Validation (local):
+- `pnpm --filter @metasheet/web build` PASS.
+- Production re-verification pending deployment of this fix.
+
 ## Post-Go Validation (2026-03-01): i18n/Calendar Delivery + Gate Semantics Alignment
 
 Merged changes:

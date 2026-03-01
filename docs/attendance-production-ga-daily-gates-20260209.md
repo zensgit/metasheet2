@@ -3364,3 +3364,19 @@ Observed:
 - Current remaining blocker for screenshot capture is credential rotation:
   - rotate `ATTENDANCE_ADMIN_JWT`, or
   - set `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`.
+
+### Update (2026-03-01): Holiday Badge Rendering Root Cause & Fix Prepared
+
+Root cause found during live smoke retries:
+- API holiday date is returned as ISO datetime (`YYYY-MM-DDT00:00:00.000Z`), while calendar day key uses `YYYY-MM-DD`.
+- Frontend holiday map keyed by raw `holiday.date` caused mismatch, so `.attendance__calendar-holiday` stayed empty even when holidays existed.
+
+Fix prepared on codebase:
+- Normalize holiday date key before map insert in attendance view.
+- Hardened zh smoke script:
+  - month selection based on current UI month context;
+  - richer failure screenshot/debug output.
+
+Status:
+- Code/build validated locally.
+- Production verification requires deploying the new web bundle, then rerunning `attendance-locale-zh-smoke-prod.yml`.

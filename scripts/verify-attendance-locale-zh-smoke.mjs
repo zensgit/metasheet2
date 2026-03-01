@@ -90,16 +90,101 @@ async function apiRequestJson(pathname, init = {}) {
   return payload
 }
 
-function pickHolidayDate(existingDates) {
-  const now = new Date()
-  const year = now.getFullYear()
-  const month = now.getMonth()
-  for (let day = 1; day <= 28; day += 1) {
-    const date = new Date(year, month, day)
+function pickHolidayDate(existingDates, year, monthIndex) {
+  const preferredDays = [15, 16, 17, 18, 19, 20, 10, 11, 12, 13, 14, 21, 22, 23, 24, 25, 26, 27, 28, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+  for (const day of preferredDays) {
+    const date = new Date(year, monthIndex - 1, day)
     const key = toDateKey(date)
     if (!existingDates.has(key)) return key
   }
   return null
+}
+
+function parseCalendarYearMonth(label) {
+  const text = String(label || '').replace(/\s+/g, ' ').trim()
+  const zhMatch = text.match(/(\d{4})\D+(\d{1,2})/)
+  if (zhMatch) {
+    return {
+      year: Number(zhMatch[1]),
+      month: Number(zhMatch[2]),
+    }
+  }
+  const enMatch = text.match(/^([A-Za-z]+)\s+(\d{4})$/)
+  if (enMatch) {
+    const monthMap = {
+      january: 1,
+      february: 2,
+      march: 3,
+      april: 4,
+      may: 5,
+      june: 6,
+      july: 7,
+      august: 8,
+      september: 9,
+      october: 10,
+      november: 11,
+      december: 12,
+    }
+    const month = monthMap[String(enMatch[1]).toLowerCase()]
+    if (month) {
+      return {
+        year: Number(enMatch[2]),
+        month,
+      }
+    }
+  }
+  return null
+}
+
+function monthRange(year, monthIndex) {
+  const start = new Date(year, monthIndex - 1, 1)
+  const end = new Date(year, monthIndex, 0)
+  return {
+    monthStart: toDateKey(start),
+    monthEnd: toDateKey(end),
+  }
+}
+
+async function ensureHolidayExistsForMonth(from, to, expectedId) {
+  const listQuery = buildApiPath('/attendance/holidays', { orgId, from, to })
+  const listPayload = await apiRequestJson(listQuery, { method: 'GET' })
+  const items = Array.isArray(listPayload?.data?.items) ? listPayload.data.items : []
+  if (!items.some(item => String(item?.id || '') === String(expectedId || ''))) {
+    throw new Error(`Created holiday id not found via API list (${from}..${to})`)
+  }
+}
+
+async function findHolidayBadgeAcrossMonths(page, holidayName) {
+  const target = page.locator('.attendance__calendar-holiday', { hasText: holidayName }).first()
+  const navPlan = [
+    null,
+    'next',
+    'next',
+    'prev',
+    'prev',
+    'prev',
+  ]
+  const navButtonByStep = {
+    next: page.getByRole('button', { name: /^(Next|下月)$/ }),
+    prev: page.getByRole('button', { name: /^(Prev|上月)$/ }),
+  }
+
+  for (const step of navPlan) {
+    if (step) {
+      await navButtonByStep[step].first().click()
+      await page.waitForLoadState('networkidle', { timeout: timeoutMs })
+    }
+    const count = await target.count()
+    if (count > 0) {
+      await target.waitFor({ timeout: 5000 })
+      return true
+    }
+  }
+  const calendarLabel = await page.locator('.attendance__calendar-label').first().textContent().catch(() => '')
+  const badgeTexts = await page.locator('.attendance__calendar-holiday').allTextContents().catch(() => [])
+  throw new Error(
+    `Holiday badge not visible for "${holidayName}". calendarLabel="${(calendarLabel || '').trim()}", badges=${JSON.stringify(badgeTexts.slice(0, 12))}`,
+  )
 }
 
 async function run() {
@@ -109,46 +194,9 @@ async function run() {
 
   await ensureDir(outputDir)
 
-  const monthStartDate = new Date()
-  monthStartDate.setDate(1)
-  const monthEndDate = new Date(monthStartDate.getFullYear(), monthStartDate.getMonth() + 1, 0)
-  const monthStart = toDateKey(monthStartDate)
-  const monthEnd = toDateKey(monthEndDate)
-
   let createdHolidayId = null
   let createdHolidayName = null
   let createdHolidayDate = null
-
-  if (verifyHoliday) {
-    const listQuery = buildApiPath('/attendance/holidays', {
-      orgId,
-      from: monthStart,
-      to: monthEnd,
-    })
-    const listPayload = await apiRequestJson(listQuery, { method: 'GET' })
-    const items = Array.isArray(listPayload?.data?.items) ? listPayload.data.items : []
-    const existingDates = new Set(items.map(item => String(item?.date || '')))
-    const candidateDate = pickHolidayDate(existingDates)
-    if (!candidateDate) {
-      throw new Error('Unable to allocate a holiday date in the current month (days 1-28 all occupied)')
-    }
-    createdHolidayName = `回归节-${Date.now().toString().slice(-6)}`
-    const createPayload = await apiRequestJson('/attendance/holidays', {
-      method: 'POST',
-      body: JSON.stringify({
-        orgId,
-        date: candidateDate,
-        name: createdHolidayName,
-        isWorkingDay: false,
-      }),
-    })
-    createdHolidayId = String(createPayload?.data?.id || '')
-    createdHolidayDate = candidateDate
-    if (!createdHolidayId) {
-      throw new Error('Create holiday returned empty id')
-    }
-    log(`created holiday: ${createdHolidayDate} ${createdHolidayName} (${createdHolidayId})`)
-  }
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({
@@ -182,18 +230,77 @@ async function run() {
       throw new Error('Expected lunar labels in calendar cells, found none')
     }
 
-    if (verifyHoliday && createdHolidayName && createdHolidayDate) {
+    if (verifyHoliday) {
+      const calendarLabelNode = page.locator('.attendance__calendar-label').first()
+      await calendarLabelNode.waitFor({ timeout: timeoutMs })
+      const calendarLabelText = await calendarLabelNode.textContent().catch(() => '')
+      let ym = parseCalendarYearMonth(calendarLabelText)
+      if (!ym) {
+        const toDateValue = await page.locator('#attendance-to-date').inputValue().catch(() => '')
+        const toDateMatch = String(toDateValue).match(/^(\d{4})-(\d{2})-/)
+        if (toDateMatch) {
+          ym = {
+            year: Number(toDateMatch[1]),
+            month: Number(toDateMatch[2]),
+          }
+        } else {
+          ym = await page.evaluate(() => {
+            const d = new Date()
+            return { year: d.getFullYear(), month: d.getMonth() + 1 }
+          })
+        }
+      }
+      const { monthStart, monthEnd } = monthRange(ym.year, ym.month)
+      const listQuery = buildApiPath('/attendance/holidays', {
+        orgId,
+        from: monthStart,
+        to: monthEnd,
+      })
+      const listPayload = await apiRequestJson(listQuery, { method: 'GET' })
+      const items = Array.isArray(listPayload?.data?.items) ? listPayload.data.items : []
+      const existingDates = new Set(items.map(item => String(item?.date || '')))
+      const candidateDate = pickHolidayDate(existingDates, ym.year, ym.month)
+      if (!candidateDate) {
+        throw new Error(`Unable to allocate a holiday date for ${ym.year}-${String(ym.month).padStart(2, '0')} (days 1-28 all occupied)`)
+      }
+      createdHolidayName = `回归节-${Date.now().toString().slice(-6)}`
+      const createPayload = await apiRequestJson('/attendance/holidays', {
+        method: 'POST',
+        body: JSON.stringify({
+          orgId,
+          date: candidateDate,
+          name: createdHolidayName,
+          isWorkingDay: false,
+        }),
+      })
+      createdHolidayId = String(createPayload?.data?.id || '')
+      createdHolidayDate = candidateDate
+      if (!createdHolidayId) {
+        throw new Error('Create holiday returned empty id')
+      }
+      log(`created holiday: ${createdHolidayDate} ${createdHolidayName} (${createdHolidayId})`)
+
+      await ensureHolidayExistsForMonth(monthStart, monthEnd, createdHolidayId)
       await page.locator('#attendance-from-date').fill(monthStart)
       await page.locator('#attendance-to-date').fill(monthEnd)
       await page.getByRole('button', { name: '刷新', exact: true }).click()
       await page.waitForLoadState('networkidle', { timeout: timeoutMs })
-      await page.locator('.attendance__calendar-holiday', { hasText: createdHolidayName }).first().waitFor({ timeout: timeoutMs })
+      await findHolidayBadgeAcrossMonths(page, createdHolidayName)
     }
 
     const screenshotPath = path.join(outputDir, 'attendance-zh-locale-calendar.png')
     await page.screenshot({ path: screenshotPath, fullPage: true })
 
     log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, screenshot=${screenshotPath}`)
+  } catch (error) {
+    const failShot = path.join(outputDir, 'attendance-zh-locale-calendar-fail.png')
+    try {
+      await page.screenshot({ path: failShot, fullPage: true })
+      log(`captured failure screenshot: ${failShot}`)
+    } catch {
+      // ignore screenshot failure
+    }
+    throw error
   } finally {
     await browser.close()
     if (createdHolidayId) {
