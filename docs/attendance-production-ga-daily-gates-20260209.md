@@ -3341,6 +3341,8 @@ gh workflow run attendance-locale-zh-smoke-prod.yml \
 
 Artifact:
 - `attendance-locale-zh-smoke-prod-<runId>-<attempt>/attendance-zh-locale-calendar.png`
+- If auth bootstrap fails, artifact still contains:
+  - `attendance-locale-zh-smoke-prod-<runId>-<attempt>/auth-error.txt`
 
 Auth note:
 - Workflow first validates `ATTENDANCE_ADMIN_JWT`.

@@ -62,6 +62,9 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Prepare output directory
+        run: mkdir -p output/playwright/attendance-locale-zh-smoke
+
       - name: Resolve valid auth token
         id: resolve-auth-token
         run: |
@@ -98,6 +101,15 @@ jobs:
             fi
           fi
 
+          cat > output/playwright/attendance-locale-zh-smoke/auth-error.txt <<EOF
+          No valid attendance admin token.
+          Tried: ATTENDANCE_ADMIN_JWT validation via /api/auth/me.
+          Fallback: ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login.
+          Remediation:
+          - Rotate ATTENDANCE_ADMIN_JWT, or
+          - Configure ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD secrets.
+          API_BASE=${API_BASE}
+          EOF
           echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
           exit 1
 
