@@ -2636,6 +2636,40 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-01): zh Calendar Lunar + Holiday Visibility Smoke Upgrade
+
+Goal:
+
+- Make the zh locale smoke check assert not only lunar labels, but also real holiday badge rendering in calendar cells.
+
+Code changes:
+
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - Added API-assisted setup/cleanup for temporary holiday (`POST/DELETE /api/attendance/holidays`).
+  - Added UI assertion for `.attendance__calendar-holiday` with created holiday name.
+- `package.json`
+  - Added script alias: `verify:attendance-locale-zh`.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Script syntax | local | PASS | `node --check scripts/verify-attendance-locale-zh-smoke.mjs` |
+
+Re-run command (prod/staging):
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
+Decision:
+
+- **GO maintained** (feature validation coverage strengthened; remote run requires fresh admin JWT at execution time).
+
 ## Post-Go Validation (2026-03-01): i18n/Calendar Delivery + Gate Semantics Alignment
 
 Merged changes:

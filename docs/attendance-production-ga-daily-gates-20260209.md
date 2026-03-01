@@ -3297,3 +3297,34 @@ Verification:
 Observed:
 - 500k scenarios were skipped as configured; 100k async commit still timed out with intermittent `GET /attendance/import/jobs/:id` 5xx/connection errors.
 - This confirms current bottleneck is beyond client poll cadence tuning and requires backend/infra performance remediation.
+
+## Latest Notes (2026-03-01): zh Calendar Smoke Covers Lunar + Holiday Badge
+
+Execution summary:
+
+1. Enhanced `scripts/verify-attendance-locale-zh-smoke.mjs` to verify **both**:
+   - lunar day labels rendered in calendar cells (`zh-CN-u-ca-chinese`);
+   - holiday badge rendered by creating a temporary holiday via `/api/attendance/holidays`, checking UI, then auto-cleaning it.
+2. Added npm entrypoint:
+   - `pnpm verify:attendance-locale-zh`
+
+Local validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Script syntax (`node --check scripts/verify-attendance-locale-zh-smoke.mjs`) | PASS | local shell output |
+
+Run command (production/staging):
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
+Expected log markers:
+- `created holiday: ...`
+- `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on`
+- `deleted holiday: ...`
