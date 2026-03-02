@@ -3544,3 +3544,21 @@ Mainline verification:
 |---|---|---|---|
 | Attendance Gate Contract Matrix (main, post-merge) | [#22583854414](https://github.com/zensgit/metasheet2/actions/runs/22583854414) | PASS | `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-strict-22583854414-1/strict/gate-summary.json`, `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-dashboard-22583854414-1/dashboard.valid.json` |
 | Attendance Daily Gate Dashboard (main, post-merge) | [#22583881098](https://github.com/zensgit/metasheet2/actions/runs/22583881098) | PASS | `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.md` |
+
+### Update (2026-03-02): Admin zh Localization Phase 4 (Payroll/Leave/Overtime, PR #315)
+
+Merged:
+
+- PR [#315](https://github.com/zensgit/metasheet2/pull/315)
+  - localized admin sections:
+    - Payroll Templates
+    - Payroll Cycles
+    - Leave Types
+    - Overtime Rules
+
+Mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (main, post-merge) | [#22584291557](https://github.com/zensgit/metasheet2/actions/runs/22584291557) | PASS | `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-strict-22584291557-1/strict/gate-summary.json`, `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-dashboard-22584291557-1/dashboard.valid.json` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22584318268](https://github.com/zensgit/metasheet2/actions/runs/22584318268) | PASS | `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.md` |
