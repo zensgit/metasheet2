@@ -2636,6 +2636,37 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-02): Admin zh Localization Phase 3 + Copy Contract Gate (PR #313)
+
+Goal:
+
+- Continue admin zh localization coverage and prevent hard-coded English regressions in high-frequency attendance admin sections.
+
+Merged:
+
+- PR [#313](https://github.com/zensgit/metasheet2/pull/313)
+  - `apps/web/src/views/AttendanceView.vue`:
+    - localized Rule Sets / Rule Template Library
+    - localized Attendance Groups / Group Members
+    - localized Import panel and async/batch status text
+  - `scripts/ops/attendance-verify-zh-copy-contract.mjs`:
+    - checks guarded legacy English snippets are absent
+  - `scripts/ops/attendance-run-gate-contract-case.sh`:
+    - executes copy contract script in contract matrix runs
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| PR checks (`contracts`, `coverage`, `e2e`, `test`) | [#313](https://github.com/zensgit/metasheet2/pull/313) | PASS | PR checks panel |
+| Contract Matrix (main, post-merge) | [#22583854414](https://github.com/zensgit/metasheet2/actions/runs/22583854414) | PASS | `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-strict-22583854414-1/strict/gate-summary.json`, `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-dashboard-22583854414-1/dashboard.valid.json` |
+| Daily Gate Dashboard (main, post-merge) | [#22583881098](https://github.com/zensgit/metasheet2/actions/runs/22583881098) | PASS | `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.md` |
+| Branch zh smoke (manual, token health probe) | [#22583727656](https://github.com/zensgit/metasheet2/actions/runs/22583727656) | FAIL (non-code, secret stale) | `output/playwright/ga/22583727656-zh-admin-zh3/attendance-locale-zh-smoke-prod-22583727656-1/auth-error.txt` |
+
+Decision:
+
+- **GO maintained** (P0 chain unaffected; copy regression guard integrated into required contract checks).
+
 ## Post-Go Verification (2026-03-02): zh Locale Gate Determinism (Created-Holiday Assertion)
 
 Goal:
