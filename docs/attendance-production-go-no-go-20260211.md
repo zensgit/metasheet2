@@ -2650,6 +2650,7 @@ Code changes (branch):
   - recover async commit timeout by replaying `commit-async` with the same `idempotencyKey` (no `commitToken`)
   - bound recovery polling to `IMPORT_JOB_POLL_RECOVERY_GRACE_MS`
   - avoid rotating to a new idempotency key for timeout-class failures
+  - serialize longrun matrix execution (`max-parallel=1`) to reduce async worker contention during production trend runs
 
 Verification runs:
 

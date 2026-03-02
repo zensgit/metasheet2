@@ -3425,6 +3425,7 @@ Runs:
 
 Observed:
 - The script now recovers async poll timeouts via idempotency replay and bounded grace polling.
+- Longrun workflow matrix is serialized (`max-parallel=1`) to reduce cross-scenario pressure on production async import workers.
 - Drill issue lifecycle remains correct:
   - [#156](https://github.com/zensgit/metasheet2/issues/156) opened on FAIL and closed on recovery.
 - Remaining blocker is production-side longrunning async commit completion for `rows100k-commit`:
