@@ -2076,14 +2076,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Payroll Templates</h4>
+                <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
-                  {{ payrollTemplateLoading ? 'Loading...' : 'Reload templates' }}
+                  {{ payrollTemplateLoading ? tr('Loading...', '加载中...') : tr('Reload templates', '重载模板') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-payroll-template-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input
                     id="attendance-payroll-template-name"
                     name="payrollTemplateName"
@@ -2092,7 +2092,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input
                     id="attendance-payroll-template-timezone"
                     name="payrollTemplateTimezone"
@@ -2101,7 +2101,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-start">
-                  <span>Start day</span>
+                  <span>{{ tr('Start day', '起始日') }}</span>
                   <input
                     id="attendance-payroll-template-start"
                     name="payrollTemplateStartDay"
@@ -2112,7 +2112,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-end">
-                  <span>End day</span>
+                  <span>{{ tr('End day', '结束日') }}</span>
                   <input
                     id="attendance-payroll-template-end"
                     name="payrollTemplateEndDay"
@@ -2123,18 +2123,18 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-offset">
-                  <span>End month offset</span>
+                  <span>{{ tr('End month offset', '结束月偏移') }}</span>
                   <select
                     id="attendance-payroll-template-offset"
                     name="payrollTemplateOffset"
                     v-model.number="payrollTemplateForm.endMonthOffset"
                   >
-                    <option :value="0">Same month</option>
-                    <option :value="1">Next month</option>
+                    <option :value="0">{{ tr('Same month', '当月') }}</option>
+                    <option :value="1">{{ tr('Next month', '次月') }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-auto">
-                  <span>Auto generate</span>
+                  <span>{{ tr('Auto generate', '自动生成') }}</span>
                   <input
                     id="attendance-payroll-template-auto"
                     name="payrollTemplateAuto"
@@ -2143,7 +2143,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-payroll-template-default">
-                  <span>Default</span>
+                  <span>{{ tr('Default', '默认') }}</span>
                   <input
                     id="attendance-payroll-template-default"
                     name="payrollTemplateDefault"
@@ -2152,7 +2152,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-payroll-template-config">
-                  <span>Config (JSON)</span>
+                  <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
                   <textarea
                     id="attendance-payroll-template-config"
                     name="payrollTemplateConfig"
@@ -2168,7 +2168,7 @@
                   :disabled="payrollTemplateSaving"
                   @click="savePayrollTemplate"
                 >
-                  {{ payrollTemplateSaving ? 'Saving...' : payrollTemplateEditingId ? 'Update template' : 'Create template' }}
+                  {{ payrollTemplateSaving ? tr('Saving...', '保存中...') : payrollTemplateEditingId ? tr('Update template', '更新模板') : tr('Create template', '创建模板') }}
                 </button>
                 <button
                   v-if="payrollTemplateEditingId"
@@ -2176,21 +2176,21 @@
                   :disabled="payrollTemplateSaving"
                   @click="resetPayrollTemplateForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="payrollTemplates.length === 0" class="attendance__empty">No payroll templates yet.</div>
+              <div v-if="payrollTemplates.length === 0" class="attendance__empty">{{ tr('No payroll templates yet.', '暂无计薪模板。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Timezone</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Offset</th>
-                      <th>Default</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Timezone', '时区') }}</th>
+                      <th>{{ tr('Start', '开始') }}</th>
+                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Offset', '偏移') }}</th>
+                      <th>{{ tr('Default', '默认') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2200,11 +2200,11 @@
                       <td>{{ item.startDay }}</td>
                       <td>{{ item.endDay }}</td>
                       <td>{{ item.endMonthOffset }}</td>
-                      <td>{{ item.isDefault ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.isDefault ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editPayrollTemplate(item)">Edit</button>
+                        <button class="attendance__btn" @click="editPayrollTemplate(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deletePayrollTemplate(item.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2215,38 +2215,38 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Payroll Cycles</h4>
+                <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
                 <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
-                  {{ payrollCycleLoading ? 'Loading...' : 'Reload cycles' }}
+                  {{ payrollCycleLoading ? tr('Loading...', '加载中...') : tr('Reload cycles', '重载周期') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-payroll-cycle-template">
-                  <span>Template</span>
+                  <span>{{ tr('Template', '模板') }}</span>
                   <select
                     id="attendance-payroll-cycle-template"
                     name="payrollCycleTemplate"
                     v-model="payrollCycleForm.templateId"
                     :disabled="payrollTemplates.length === 0"
                   >
-                    <option value="">Manual</option>
+                    <option value="">{{ tr('Manual', '手工') }}</option>
                     <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
                       {{ item.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input
                     id="attendance-payroll-cycle-name"
                     name="payrollCycleName"
                     v-model="payrollCycleForm.name"
                     type="text"
-                    placeholder="Optional"
+                    :placeholder="tr('Optional', '可选')"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-anchor">
-                  <span>Anchor date</span>
+                  <span>{{ tr('Anchor date', '锚点日期') }}</span>
                   <input
                     id="attendance-payroll-cycle-anchor"
                     name="payrollCycleAnchor"
@@ -2255,7 +2255,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-start">
-                  <span>Start date</span>
+                  <span>{{ tr('Start date', '开始日期') }}</span>
                   <input
                     id="attendance-payroll-cycle-start"
                     name="payrollCycleStartDate"
@@ -2264,7 +2264,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-end">
-                  <span>End date</span>
+                  <span>{{ tr('End date', '结束日期') }}</span>
                   <input
                     id="attendance-payroll-cycle-end"
                     name="payrollCycleEndDate"
@@ -2273,15 +2273,15 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-payroll-cycle-status">
-                  <span>Status</span>
+                  <span>{{ tr('Status', '状态') }}</span>
                   <select
                     id="attendance-payroll-cycle-status"
                     name="payrollCycleStatus"
                     v-model="payrollCycleForm.status"
                   >
-                    <option value="open">Open</option>
-                    <option value="closed">Closed</option>
-                    <option value="archived">Archived</option>
+                    <option value="open">{{ tr('Open', '开启') }}</option>
+                    <option value="closed">{{ tr('Closed', '关闭') }}</option>
+                    <option value="archived">{{ tr('Archived', '归档') }}</option>
                   </select>
                 </label>
               </div>
@@ -2291,13 +2291,13 @@
                   :disabled="payrollCycleSaving"
                   @click="savePayrollCycle"
                 >
-                  {{ payrollCycleSaving ? 'Saving...' : payrollCycleEditingId ? 'Update cycle' : 'Create cycle' }}
+                  {{ payrollCycleSaving ? tr('Saving...', '保存中...') : payrollCycleEditingId ? tr('Update cycle', '更新周期') : tr('Create cycle', '创建周期') }}
                 </button>
                 <button class="attendance__btn" :disabled="payrollCycleSaving" @click="loadPayrollCycleSummary">
-                  Load summary
+                  {{ tr('Load summary', '加载汇总') }}
                 </button>
                 <button class="attendance__btn" :disabled="payrollCycleSaving" @click="exportPayrollCycleSummary">
-                  Export CSV
+                  {{ tr('Export CSV', '导出 CSV') }}
                 </button>
                 <button
                   v-if="payrollCycleEditingId"
@@ -2305,29 +2305,29 @@
                   :disabled="payrollCycleSaving"
                   @click="resetPayrollCycleForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
 
               <details class="attendance__details">
-                <summary class="attendance__details-summary">Batch generate cycles</summary>
+                <summary class="attendance__details-summary">{{ tr('Batch generate cycles', '批量生成周期') }}</summary>
                 <div class="attendance__admin-grid attendance__admin-grid--compact">
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-template">
-                    <span>Template</span>
+                    <span>{{ tr('Template', '模板') }}</span>
                     <select
                       id="attendance-payroll-cycle-gen-template"
                       name="payrollCycleGenTemplate"
                       v-model="payrollCycleGenerateForm.templateId"
                       :disabled="payrollTemplates.length === 0"
                     >
-                      <option value="">Default template</option>
+                      <option value="">{{ tr('Default template', '默认模板') }}</option>
                       <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
                         {{ item.name }}
                       </option>
                     </select>
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-anchor">
-                    <span>Anchor date</span>
+                    <span>{{ tr('Anchor date', '锚点日期') }}</span>
                     <input
                       id="attendance-payroll-cycle-gen-anchor"
                       name="payrollCycleGenAnchor"
@@ -2336,7 +2336,7 @@
                     />
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-count">
-                    <span>Count</span>
+                    <span>{{ tr('Count', '数量') }}</span>
                     <input
                       id="attendance-payroll-cycle-gen-count"
                       name="payrollCycleGenCount"
@@ -2347,29 +2347,29 @@
                     />
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-status">
-                    <span>Status</span>
+                    <span>{{ tr('Status', '状态') }}</span>
                     <select
                       id="attendance-payroll-cycle-gen-status"
                       name="payrollCycleGenStatus"
                       v-model="payrollCycleGenerateForm.status"
                     >
-                      <option value="open">Open</option>
-                      <option value="closed">Closed</option>
-                      <option value="archived">Archived</option>
+                      <option value="open">{{ tr('Open', '开启') }}</option>
+                      <option value="closed">{{ tr('Closed', '关闭') }}</option>
+                      <option value="archived">{{ tr('Archived', '归档') }}</option>
                     </select>
                   </label>
                   <label class="attendance__field" for="attendance-payroll-cycle-gen-prefix">
-                    <span>Name prefix</span>
+                    <span>{{ tr('Name prefix', '名称前缀') }}</span>
                     <input
                       id="attendance-payroll-cycle-gen-prefix"
                       name="payrollCycleGenPrefix"
                       v-model="payrollCycleGenerateForm.namePrefix"
                       type="text"
-                      placeholder="Optional"
+                      :placeholder="tr('Optional', '可选')"
                     />
                   </label>
                   <label class="attendance__field attendance__field--full" for="attendance-payroll-cycle-gen-metadata">
-                    <span>Metadata (JSON)</span>
+                    <span>{{ tr('Metadata (JSON)', '元数据（JSON）') }}</span>
                     <textarea
                       id="attendance-payroll-cycle-gen-metadata"
                       name="payrollCycleGenMetadata"
@@ -2385,49 +2385,49 @@
                     :disabled="payrollCycleGenerating"
                     @click="generatePayrollCycles"
                   >
-                    {{ payrollCycleGenerating ? 'Generating...' : 'Generate cycles' }}
+                    {{ payrollCycleGenerating ? tr('Generating...', '生成中...') : tr('Generate cycles', '生成周期') }}
                   </button>
                   <button class="attendance__btn" :disabled="payrollCycleGenerating" @click="resetPayrollCycleGenerateForm">
-                    Reset
+                    {{ tr('Reset', '重置') }}
                   </button>
                   <span v-if="payrollCycleGenerateResult" class="attendance__empty">
-                    Created {{ payrollCycleGenerateResult.created }}, skipped {{ payrollCycleGenerateResult.skipped }}.
+                    {{ tr('Created', '已创建') }} {{ payrollCycleGenerateResult.created }}，{{ tr('skipped', '跳过') }} {{ payrollCycleGenerateResult.skipped }}。
                   </span>
                 </div>
               </details>
               <div v-if="payrollCycleSummary" class="attendance__summary">
                 <div class="attendance__summary-item">
-                  <span>Cycle total minutes</span>
+                  <span>{{ tr('Cycle total minutes', '周期总分钟数') }}</span>
                   <strong>{{ payrollCycleSummary.total_minutes }}</strong>
                 </div>
                 <div class="attendance__summary-item">
-                  <span>Leave minutes</span>
+                  <span>{{ tr('Leave minutes', '请假分钟数') }}</span>
                   <strong>{{ payrollCycleSummary.leave_minutes ?? 0 }}</strong>
                 </div>
                 <div class="attendance__summary-item">
-                  <span>Overtime minutes</span>
+                  <span>{{ tr('Overtime minutes', '加班分钟数') }}</span>
                   <strong>{{ payrollCycleSummary.overtime_minutes ?? 0 }}</strong>
                 </div>
                 <div class="attendance__summary-item">
-                  <span>Late minutes</span>
+                  <span>{{ tr('Late minutes', '迟到分钟数') }}</span>
                   <strong>{{ payrollCycleSummary.total_late_minutes ?? 0 }}</strong>
                 </div>
                 <div class="attendance__summary-item">
-                  <span>Early leave minutes</span>
+                  <span>{{ tr('Early leave minutes', '早退分钟数') }}</span>
                   <strong>{{ payrollCycleSummary.total_early_leave_minutes ?? 0 }}</strong>
                 </div>
               </div>
-              <div v-if="payrollCycles.length === 0" class="attendance__empty">No payroll cycles yet.</div>
+              <div v-if="payrollCycles.length === 0" class="attendance__empty">{{ tr('No payroll cycles yet.', '暂无计薪周期。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Template</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Status</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Template', '模板') }}</th>
+                      <th>{{ tr('Start', '开始') }}</th>
+                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2438,9 +2438,9 @@
                       <td>{{ item.endDate }}</td>
                       <td>{{ item.status }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editPayrollCycle(item)">Edit</button>
+                        <button class="attendance__btn" @click="editPayrollCycle(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deletePayrollCycle(item.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2451,22 +2451,22 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Leave Types</h4>
+                <h4>{{ tr('Leave Types', '请假类型') }}</h4>
                 <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
-                  {{ leaveTypeLoading ? 'Loading...' : 'Reload leave types' }}
+                  {{ leaveTypeLoading ? tr('Loading...', '加载中...') : tr('Reload leave types', '重载请假类型') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-leave-code">
-                  <span>Code</span>
+                  <span>{{ tr('Code', '编码') }}</span>
                   <input id="attendance-leave-code" name="leaveCode" v-model="leaveTypeForm.code" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-leave-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-leave-name" name="leaveName" v-model="leaveTypeForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-leave-minutes">
-                  <span>Minutes / day</span>
+                  <span>{{ tr('Minutes / day', '每日分钟数') }}</span>
                   <input
                     id="attendance-leave-minutes"
                     name="leaveMinutes"
@@ -2476,7 +2476,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-approval">
-                  <span>Requires approval</span>
+                  <span>{{ tr('Requires approval', '需要审批') }}</span>
                   <input
                     id="attendance-leave-approval"
                     name="leaveRequiresApproval"
@@ -2485,7 +2485,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-attachment">
-                  <span>Requires attachment</span>
+                  <span>{{ tr('Requires attachment', '需要附件') }}</span>
                   <input
                     id="attendance-leave-attachment"
                     name="leaveRequiresAttachment"
@@ -2494,7 +2494,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-leave-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-leave-active"
                     name="leaveActive"
@@ -2505,7 +2505,7 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="leaveTypeSaving" @click="saveLeaveType">
-                  {{ leaveTypeSaving ? 'Saving...' : leaveTypeEditingId ? 'Update leave type' : 'Create leave type' }}
+                  {{ leaveTypeSaving ? tr('Saving...', '保存中...') : leaveTypeEditingId ? tr('Update leave type', '更新请假类型') : tr('Create leave type', '创建请假类型') }}
                 </button>
                 <button
                   v-if="leaveTypeEditingId"
@@ -2513,35 +2513,35 @@
                   :disabled="leaveTypeSaving"
                   @click="resetLeaveTypeForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="leaveTypes.length === 0" class="attendance__empty">No leave types yet.</div>
+              <div v-if="leaveTypes.length === 0" class="attendance__empty">{{ tr('No leave types yet.', '暂无请假类型。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Code</th>
-                      <th>Name</th>
-                      <th>Approval</th>
-                      <th>Attachment</th>
-                      <th>Minutes</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Code', '编码') }}</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th>{{ tr('Attachment', '附件') }}</th>
+                      <th>{{ tr('Minutes', '分钟') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr v-for="item in leaveTypes" :key="item.id">
                       <td>{{ item.code }}</td>
                       <td>{{ item.name }}</td>
-                      <td>{{ item.requiresApproval ? 'Yes' : 'No' }}</td>
-                      <td>{{ item.requiresAttachment ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.requiresApproval ? tr('Yes', '是') : tr('No', '否') }}</td>
+                      <td>{{ item.requiresAttachment ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td>{{ item.defaultMinutesPerDay }}</td>
-                      <td>{{ item.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editLeaveType(item)">Edit</button>
+                        <button class="attendance__btn" @click="editLeaveType(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteLeaveType(item.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2552,18 +2552,18 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Overtime Rules</h4>
+                <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
                 <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
-                  {{ overtimeRuleLoading ? 'Loading...' : 'Reload overtime rules' }}
+                  {{ overtimeRuleLoading ? tr('Loading...', '加载中...') : tr('Reload overtime rules', '重载加班规则') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-overtime-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-overtime-name" name="overtimeName" v-model="overtimeRuleForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-overtime-min">
-                  <span>Min minutes</span>
+                  <span>{{ tr('Min minutes', '最小分钟数') }}</span>
                   <input
                     id="attendance-overtime-min"
                     name="overtimeMinMinutes"
@@ -2573,7 +2573,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-overtime-rounding">
-                  <span>Rounding</span>
+                  <span>{{ tr('Rounding', '取整') }}</span>
                   <input
                     id="attendance-overtime-rounding"
                     name="overtimeRounding"
@@ -2583,7 +2583,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-overtime-max">
-                  <span>Max / day</span>
+                  <span>{{ tr('Max / day', '每日上限') }}</span>
                   <input
                     id="attendance-overtime-max"
                     name="overtimeMax"
@@ -2593,7 +2593,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-approval">
-                  <span>Requires approval</span>
+                  <span>{{ tr('Requires approval', '需要审批') }}</span>
                   <input
                     id="attendance-overtime-approval"
                     name="overtimeRequiresApproval"
@@ -2602,7 +2602,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-overtime-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-overtime-active"
                     name="overtimeActive"
@@ -2617,7 +2617,7 @@
                   :disabled="overtimeRuleSaving"
                   @click="saveOvertimeRule"
                 >
-                  {{ overtimeRuleSaving ? 'Saving...' : overtimeRuleEditingId ? 'Update rule' : 'Create rule' }}
+                  {{ overtimeRuleSaving ? tr('Saving...', '保存中...') : overtimeRuleEditingId ? tr('Update rule', '更新规则') : tr('Create rule', '创建规则') }}
                 </button>
                 <button
                   v-if="overtimeRuleEditingId"
@@ -2625,21 +2625,21 @@
                   :disabled="overtimeRuleSaving"
                   @click="resetOvertimeRuleForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="overtimeRules.length === 0" class="attendance__empty">No overtime rules yet.</div>
+              <div v-if="overtimeRules.length === 0" class="attendance__empty">{{ tr('No overtime rules yet.', '暂无加班规则。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Min</th>
-                      <th>Rounding</th>
-                      <th>Max</th>
-                      <th>Approval</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Min', '最小') }}</th>
+                      <th>{{ tr('Rounding', '取整') }}</th>
+                      <th>{{ tr('Max', '上限') }}</th>
+                      <th>{{ tr('Approval', '审批') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2648,12 +2648,12 @@
                       <td>{{ rule.minMinutes }}</td>
                       <td>{{ rule.roundingMinutes }}</td>
                       <td>{{ rule.maxMinutesPerDay }}</td>
-                      <td>{{ rule.requiresApproval ? 'Yes' : 'No' }}</td>
-                      <td>{{ rule.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ rule.requiresApproval ? tr('Yes', '是') : tr('No', '否') }}</td>
+                      <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editOvertimeRule(rule)">Edit</button>
+                        <button class="attendance__btn" @click="editOvertimeRule(rule)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteOvertimeRule(rule.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
