@@ -3519,3 +3519,28 @@ Mainline verification:
 |---|---|---|---|
 | Attendance Locale zh Smoke (main, post-merge) | [#22582909173](https://github.com/zensgit/metasheet2/actions/runs/22582909173) | PASS | `output/playwright/ga/22582909173-zh-main-post311-r2/attendance-locale-zh-smoke-prod-22582909173-1/attendance-zh-locale-calendar.png` |
 | Attendance Daily Gate Dashboard (main, post-merge) | [#22582916109](https://github.com/zensgit/metasheet2/actions/runs/22582916109) | PASS | `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.md` |
+
+### Update (2026-03-02): Contract Gate Adds zh Copy Regression Guard (PR #313)
+
+Merged:
+
+- PR [#313](https://github.com/zensgit/metasheet2/pull/313)
+  - localized additional admin sections in `AttendanceView`:
+    - Rule Sets / Rule Template Library
+    - Attendance Groups / Group Members
+    - Import panel + async status + batch tables
+  - added guard script:
+    - `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - wired into contract checks:
+    - `scripts/ops/attendance-run-gate-contract-case.sh`
+
+Notes:
+
+- Branch zh smoke run [#22583727656](https://github.com/zensgit/metasheet2/actions/runs/22583727656) failed because production admin auth secrets were stale (`No valid attendance admin token`), not due to UI regression.
+
+Mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (main, post-merge) | [#22583854414](https://github.com/zensgit/metasheet2/actions/runs/22583854414) | PASS | `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-strict-22583854414-1/strict/gate-summary.json`, `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-dashboard-22583854414-1/dashboard.valid.json` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22583881098](https://github.com/zensgit/metasheet2/actions/runs/22583881098) | PASS | `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.md` |
