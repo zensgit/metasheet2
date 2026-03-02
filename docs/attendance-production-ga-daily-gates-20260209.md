@@ -3456,3 +3456,35 @@ Verification:
 
 Tracker status:
 - [#157](https://github.com/zensgit/metasheet2/issues/157) (`[Attendance P1] Perf longrun alert`) is now `CLOSED` after run `#22568764021`.
+
+### Update (2026-03-02): zh Locale Smoke Hardening (Created-Holiday Hit + Lunar Semantics)
+
+Goal:
+
+- Eliminate false positives in `attendance-locale-zh-smoke-prod.yml` by requiring the UI to render the specific holiday created during the run, not just any existing holiday badge.
+
+Code changes:
+
+- Branch: `codex/attendance-zh-lunar-smoke-hardening`
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - Added lunar-label semantic check (must include Chinese lunar tokens, not just non-empty text).
+  - Switched holiday assertion to require `findHolidayBadgeAcrossMonths(page, createdHolidayName)`.
+  - Added month-window refresh after creating temporary holiday:
+    - update `#attendance-from-date` / `#attendance-to-date` to target month
+    - click `Refresh/刷新`
+    - wait for network idle before assertion
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (branch, pre-refresh-window fix) | [#22580243338](https://github.com/zensgit/metasheet2/actions/runs/22580243338) | FAIL (expected during hardening) | `output/playwright/ga/22580243338-zh-branch/attendance-locale-zh-smoke-prod-22580243338-1/attendance-zh-locale-calendar-fail.png` |
+| Attendance Locale zh Smoke (branch, post-fix) | [#22580353759](https://github.com/zensgit/metasheet2/actions/runs/22580353759) | PASS | `output/playwright/ga/22580353759-zh-branch/attendance-locale-zh-smoke-prod-22580353759-1/attendance-zh-locale-calendar.png` |
+
+Observed:
+
+- Failure run exposed a real gap: created holiday was outside the current UI query range and not fetched by calendar data load.
+- Recovery run confirms deterministic behavior:
+  - locale forced to `zh-CN`
+  - lunar labels present and meaningful
+  - created holiday badge rendered and cleaned up via API.

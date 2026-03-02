@@ -223,6 +223,22 @@ async function findAnyHolidayBadgeAcrossMonths(page) {
   throw new Error(`Holiday badges are not visible across probed months. calendarLabel="${String(calendarLabel || '').trim()}"`)
 }
 
+async function verifyLunarLabelsMeaningful(page) {
+  const sampleTexts = await page
+    .locator('.attendance__calendar-lunar')
+    .allTextContents()
+    .catch(() => [])
+  const normalized = sampleTexts.map(text => String(text || '').trim()).filter(Boolean)
+  if (normalized.length === 0) {
+    throw new Error('Expected lunar labels in calendar cells, found none')
+  }
+  const meaningful = normalized.some(text => /[初十廿卅正冬腊闰月]/.test(text))
+  if (!meaningful) {
+    throw new Error(`Lunar labels are present but not meaningful: ${JSON.stringify(normalized.slice(0, 12))}`)
+  }
+  return normalized
+}
+
 async function run() {
   if (!token) {
     throw new Error('AUTH_TOKEN is required')
@@ -260,11 +276,8 @@ async function run() {
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
 
-    const lunarLabels = page.locator('.attendance__calendar-lunar')
-    const lunarCount = await lunarLabels.count()
-    if (lunarCount <= 0) {
-      throw new Error('Expected lunar labels in calendar cells, found none')
-    }
+    const lunarSamples = await verifyLunarLabelsMeaningful(page)
+    const lunarCount = lunarSamples.length
 
     if (verifyHoliday) {
       const calendarLabelNode = page.locator('.attendance__calendar-label').first()
@@ -317,9 +330,19 @@ async function run() {
       log(`created holiday: ${createdHolidayDate} ${createdHolidayName} (${createdHolidayId})`)
 
       await ensureHolidayExistsForMonth(monthStart, monthEnd, createdHolidayId)
+      // Align the UI query window with the target month so the just-created holiday is fetched.
+      const fromInput = page.locator('#attendance-from-date')
+      const toInput = page.locator('#attendance-to-date')
+      await fromInput.fill(monthStart)
+      await toInput.fill(monthEnd)
+      await page.getByRole('button', { name: /^(Refresh|刷新)$/ }).first().click()
+      await page.waitForLoadState('networkidle', { timeout: timeoutMs })
+      await page.waitForTimeout(300)
+
+      await findHolidayBadgeAcrossMonths(page, createdHolidayName)
       const badgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
       log(
-        `holiday badges visible: count=${badgeProbe.count}, month=${badgeProbe.calendarLabel}, samples=${JSON.stringify(badgeProbe.badgeTexts)}`,
+        `holiday badges visible: target="${createdHolidayName}", count=${badgeProbe.count}, month=${badgeProbe.calendarLabel}, samples=${JSON.stringify(badgeProbe.badgeTexts)}`,
       )
     }
 
