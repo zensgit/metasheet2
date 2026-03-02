@@ -723,61 +723,61 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>User Access</h4>
+                <h4>{{ tr('User Access', '用户权限') }}</h4>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" :disabled="provisionLoading" @click="loadProvisioningUser">
-                    {{ provisionLoading ? 'Loading...' : 'Load' }}
+                    {{ provisionLoading ? tr('Loading...', '加载中...') : tr('Load', '加载') }}
                   </button>
                   <button class="attendance__btn attendance__btn--primary" :disabled="provisionLoading" @click="grantProvisioningRole">
-                    {{ provisionLoading ? 'Working...' : 'Assign role' }}
+                    {{ provisionLoading ? tr('Working...', '处理中...') : tr('Assign role', '分配角色') }}
                   </button>
                   <button class="attendance__btn" :disabled="provisionLoading" @click="revokeProvisioningRole">
-                    {{ provisionLoading ? 'Working...' : 'Remove role' }}
+                    {{ provisionLoading ? tr('Working...', '处理中...') : tr('Remove role', '移除角色') }}
                   </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-provision-search">
-                  <span>User search (email/name/id)</span>
+                  <span>{{ tr('User search (email/name/id)', '用户搜索（邮箱/姓名/ID）') }}</span>
                   <input
                     id="attendance-provision-search"
                     v-model="provisionSearchQuery"
                     type="text"
-                    placeholder="Search users to avoid pasting UUIDs"
+                    :placeholder="tr('Search users to avoid pasting UUIDs', '搜索用户，避免手工粘贴 UUID')"
                     @keydown.enter.prevent="searchProvisionUsers(1)"
                   />
                 </label>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn" :disabled="provisionSearchLoading" @click="searchProvisionUsers(1)">
-                  {{ provisionSearchLoading ? 'Searching...' : 'Search' }}
+                  {{ provisionSearchLoading ? tr('Searching...', '搜索中...') : tr('Search', '搜索') }}
                 </button>
                 <button
                   class="attendance__btn"
                   :disabled="provisionSearchLoading || provisionSearchPage <= 1"
                   @click="searchProvisionUsers(provisionSearchPage - 1)"
                 >
-                  Prev
+                  {{ tr('Prev', '上一页') }}
                 </button>
                 <button
                   class="attendance__btn"
                   :disabled="provisionSearchLoading || !provisionSearchHasNext"
                   @click="searchProvisionUsers(provisionSearchPage + 1)"
                 >
-                  Next
+                  {{ tr('Next', '下一页') }}
                 </button>
                 <span v-if="provisionSearchHasSearched" class="attendance__field-hint">
-                  Page {{ provisionSearchPage }} · {{ provisionSearchTotal }} result(s)
+                  {{ tr('Page', '页码') }} {{ provisionSearchPage }} · {{ provisionSearchTotal }} {{ tr('result(s)', '条结果') }}
                 </span>
               </div>
               <div v-if="provisionSearchResults.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Email</th>
-                      <th>Name</th>
-                      <th>User ID</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Email', '邮箱') }}</th>
+                      <th>{{ tr('Name', '姓名') }}</th>
+                      <th>{{ tr('User ID', '用户 ID') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -786,37 +786,37 @@
                       <td>{{ user.name || '--' }}</td>
                       <td><code>{{ user.id.slice(0, 8) }}</code></td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="selectProvisionUser(user)">Select</button>
+                        <button class="attendance__btn" @click="selectProvisionUser(user)">{{ tr('Select', '选择') }}</button>
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p v-else-if="provisionSearchHasSearched" class="attendance__empty">No users found.</p>
+              <p v-else-if="provisionSearchHasSearched" class="attendance__empty">{{ tr('No users found.', '未找到用户。') }}</p>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-provision-user-id">
-                  <span>User ID (UUID)</span>
+                  <span>{{ tr('User ID (UUID)', '用户 ID（UUID）') }}</span>
                   <input
                     id="attendance-provision-user-id"
                     name="provisionUserId"
                     v-model="provisionForm.userId"
                     type="text"
-                    placeholder="e.g. 0cdf4a9c-4fe1-471b-be08-854b683dc930"
+                    :placeholder="tr('e.g. 0cdf4a9c-4fe1-471b-be08-854b683dc930', '例如 0cdf4a9c-4fe1-471b-be08-854b683dc930')"
                   />
                   <small v-if="provisionUserProfile" class="attendance__field-hint">
-                    Selected: {{ provisionUserProfile.email }}{{ provisionUserProfile.name ? ` (${provisionUserProfile.name})` : '' }}
+                    {{ tr('Selected', '已选择') }}: {{ provisionUserProfile.email }}{{ provisionUserProfile.name ? ` (${provisionUserProfile.name})` : '' }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-provision-role">
-                  <span>Role template</span>
+                  <span>{{ tr('Role template', '角色模板') }}</span>
                   <select
                     id="attendance-provision-role"
                     name="provisionRole"
                     v-model="provisionForm.role"
                   >
-                    <option value="employee">employee</option>
-                    <option value="approver">approver</option>
-                    <option value="admin">admin</option>
+                    <option value="employee">{{ tr('employee', '员工') }}</option>
+                    <option value="approver">{{ tr('approver', '审批人') }}</option>
+                    <option value="admin">{{ tr('admin', '管理员') }}</option>
                   </select>
                 </label>
               </div>
@@ -836,42 +836,42 @@
                   isAdmin=true
                 </span>
               </div>
-              <p v-else-if="provisionHasLoaded" class="attendance__empty">No permissions loaded.</p>
+              <p v-else-if="provisionHasLoaded" class="attendance__empty">{{ tr('No permissions loaded.', '未加载到权限。') }}</p>
             </div>
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Batch Provisioning</h4>
+                <h4>{{ tr('Batch Provisioning', '批量授权') }}</h4>
                 <div class="attendance__admin-actions">
                   <button
                     class="attendance__btn"
                     :disabled="provisionBatchLoading || provisionBatchPreviewLoading"
                     @click="previewProvisionBatchUsers"
                   >
-                    {{ provisionBatchPreviewLoading ? 'Previewing...' : 'Preview users' }}
+                    {{ provisionBatchPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview users', '预览用户') }}
                   </button>
                   <button
                     class="attendance__btn attendance__btn--primary"
                     :disabled="provisionBatchLoading"
                     @click="grantProvisioningRoleBatch"
                   >
-                    {{ provisionBatchLoading ? 'Working...' : 'Assign role (batch)' }}
+                    {{ provisionBatchLoading ? tr('Working...', '处理中...') : tr('Assign role (batch)', '分配角色（批量）') }}
                   </button>
                   <button
                     class="attendance__btn"
                     :disabled="provisionBatchLoading"
                     @click="revokeProvisioningRoleBatch"
                   >
-                    {{ provisionBatchLoading ? 'Working...' : 'Remove role (batch)' }}
+                    {{ provisionBatchLoading ? tr('Working...', '处理中...') : tr('Remove role (batch)', '移除角色（批量）') }}
                   </button>
                   <button class="attendance__btn" :disabled="provisionBatchLoading" @click="clearProvisionBatch">
-                    Clear
+                    {{ tr('Clear', '清空') }}
                   </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-provision-batch-user-ids">
-                  <span>User IDs (UUIDs)</span>
+                  <span>{{ tr('User IDs (UUIDs)', '用户 ID（UUID）') }}</span>
                   <textarea
                     id="attendance-provision-batch-user-ids"
                     v-model="provisionBatchUserIdsText"
@@ -879,22 +879,22 @@
                     placeholder="uuid1\nuuid2\n..."
                   />
                   <small class="attendance__field-hint">
-                    Parsed: {{ provisionBatchIds.length }} user(s)
+                    {{ tr('Parsed', '已解析') }}: {{ provisionBatchIds.length }} {{ tr('user(s)', '个用户') }}
                     <template v-if="provisionBatchInvalidIds.length">
-                      · Invalid: {{ provisionBatchInvalidIds.length }}
+                      · {{ tr('Invalid', '无效') }}: {{ provisionBatchInvalidIds.length }}
                     </template>
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-provision-batch-role">
-                  <span>Role template</span>
+                  <span>{{ tr('Role template', '角色模板') }}</span>
                   <select
                     id="attendance-provision-batch-role"
                     name="provisionBatchRole"
                     v-model="provisionBatchRole"
                   >
-                    <option value="employee">employee</option>
-                    <option value="approver">approver</option>
-                    <option value="admin">admin</option>
+                    <option value="employee">{{ tr('employee', '员工') }}</option>
+                    <option value="approver">{{ tr('approver', '审批人') }}</option>
+                    <option value="admin">{{ tr('admin', '管理员') }}</option>
                   </select>
                 </label>
               </div>
@@ -906,18 +906,18 @@
                 {{ provisionBatchStatusMessage }}
               </p>
               <p v-if="provisionBatchPreviewHasResult" class="attendance__field-hint">
-                Preview: {{ provisionBatchPreviewItems.length }}/{{ provisionBatchPreviewRequested }} found
-                · Missing {{ provisionBatchPreviewMissingIds.length }}
-                · Inactive {{ provisionBatchPreviewInactiveIds.length }}
+                {{ tr('Preview', '预览') }}: {{ provisionBatchPreviewItems.length }}/{{ provisionBatchPreviewRequested }} {{ tr('found', '已找到') }}
+                · {{ tr('Missing', '缺失') }} {{ provisionBatchPreviewMissingIds.length }}
+                · {{ tr('Inactive', '未激活') }} {{ provisionBatchPreviewInactiveIds.length }}
               </p>
               <div v-if="provisionBatchPreviewItems.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Email</th>
-                      <th>Name</th>
-                      <th>User ID</th>
-                      <th>Active</th>
+                      <th>{{ tr('Email', '邮箱') }}</th>
+                      <th>{{ tr('Name', '姓名') }}</th>
+                      <th>{{ tr('User ID', '用户 ID') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -925,23 +925,23 @@
                       <td>{{ item.email }}</td>
                       <td>{{ item.name || '--' }}</td>
                       <td><code>{{ item.id.slice(0, 8) }}</code></td>
-                      <td>{{ item.is_active ? 'yes' : 'no' }}</td>
+                      <td>{{ item.is_active ? tr('yes', '是') : tr('no', '否') }}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
               <p v-if="provisionBatchPreviewMissingIds.length > 0" class="attendance__field-hint">
-                Missing user IDs:
+                {{ tr('Missing user IDs', '缺失用户 ID') }}:
                 <code>{{ provisionBatchPreviewMissingIds.slice(0, 6).join(', ') }}</code>
                 <template v-if="provisionBatchPreviewMissingIds.length > 6"> ...</template>
               </p>
               <p v-if="provisionBatchAffectedIds.length > 0" class="attendance__field-hint">
-                Affected user IDs:
+                {{ tr('Affected user IDs', '受影响用户 ID') }}:
                 <code>{{ provisionBatchAffectedIds.slice(0, 6).join(', ') }}</code>
                 <template v-if="provisionBatchAffectedIds.length > 6"> ...</template>
               </p>
               <p v-if="provisionBatchUnchangedIds.length > 0" class="attendance__field-hint">
-                Unchanged user IDs:
+                {{ tr('Unchanged user IDs', '未变更用户 ID') }}:
                 <code>{{ provisionBatchUnchangedIds.slice(0, 6).join(', ') }}</code>
                 <template v-if="provisionBatchUnchangedIds.length > 6"> ...</template>
               </p>
@@ -949,44 +949,44 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Audit Logs</h4>
+                <h4>{{ tr('Audit Logs', '审计日志') }}</h4>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" :disabled="auditLogLoading || auditSummaryLoading" @click="reloadAuditLogs">
-                    {{ auditLogLoading ? 'Loading...' : 'Reload logs' }}
+                    {{ auditLogLoading ? tr('Loading...', '加载中...') : tr('Reload logs', '重载日志') }}
                   </button>
                   <button class="attendance__btn" :disabled="auditLogExporting" @click="exportAuditLogsCsv">
-                    {{ auditLogExporting ? 'Exporting...' : 'Export CSV' }}
+                    {{ auditLogExporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
                   </button>
                 </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-audit-search">
-                  <span>Search (action/actor/resource/route)</span>
+                  <span>{{ tr('Search (action/actor/resource/route)', '搜索（动作/操作人/资源/路由）') }}</span>
                   <input
                     id="attendance-audit-search"
                     v-model="auditLogQuery"
                     type="text"
-                    placeholder="commit, export.csv, userId..."
+                    :placeholder="tr('commit, export.csv, userId...', 'commit, export.csv, userId...')"
                     @keydown.enter.prevent="loadAuditLogs(1)"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-audit-action-prefix">
-                  <span>Action prefix</span>
+                  <span>{{ tr('Action prefix', '动作前缀') }}</span>
                   <input
                     id="attendance-audit-action-prefix"
                     v-model="auditLogActionPrefix"
                     type="text"
-                    placeholder="attendance_http:POST:/api/attendance-admin"
+                    :placeholder="tr('attendance_http:POST:/api/attendance-admin', 'attendance_http:POST:/api/attendance-admin')"
                     @keydown.enter.prevent="loadAuditLogs(1)"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-audit-status-class">
-                  <span>Status class</span>
+                  <span>{{ tr('Status class', '状态分类') }}</span>
                   <select
                     id="attendance-audit-status-class"
                     v-model="auditLogStatusClass"
                   >
-                    <option value="">All</option>
+                    <option value="">{{ tr('All', '全部') }}</option>
                     <option value="2xx">2xx</option>
                     <option value="3xx">3xx</option>
                     <option value="4xx">4xx</option>
@@ -994,17 +994,17 @@
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-audit-error-code">
-                  <span>Error code</span>
+                  <span>{{ tr('Error code', '错误代码') }}</span>
                   <input
                     id="attendance-audit-error-code"
                     v-model="auditLogErrorCode"
                     type="text"
-                    placeholder="RATE_LIMITED"
+                    :placeholder="tr('RATE_LIMITED', 'RATE_LIMITED')"
                     @keydown.enter.prevent="loadAuditLogs(1)"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-audit-from">
-                  <span>From</span>
+                  <span>{{ tr('From', '开始') }}</span>
                   <input
                     id="attendance-audit-from"
                     v-model="auditLogFrom"
@@ -1012,7 +1012,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-audit-to">
-                  <span>To</span>
+                  <span>{{ tr('To', '结束') }}</span>
                   <input
                     id="attendance-audit-to"
                     v-model="auditLogTo"
@@ -1022,35 +1022,35 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn" :disabled="auditLogLoading || auditLogPage <= 1" @click="loadAuditLogs(auditLogPage - 1)">
-                  Prev
+                  {{ tr('Prev', '上一页') }}
                 </button>
                 <button
                   class="attendance__btn"
                   :disabled="auditLogLoading || auditLogPage >= auditLogTotalPages"
                   @click="loadAuditLogs(auditLogPage + 1)"
                 >
-                  Next
+                  {{ tr('Next', '下一页') }}
                 </button>
                 <span v-if="auditLogTotal" class="attendance__field-hint">
-                  Page {{ auditLogPage }} / {{ auditLogTotalPages }} · {{ auditLogTotal }} row(s)
+                  {{ tr('Page', '页码') }} {{ auditLogPage }} / {{ auditLogTotalPages }} · {{ auditLogTotal }} {{ tr('row(s)', '行') }}
                 </span>
               </div>
               <div class="attendance__admin-grid">
                 <div class="attendance__field attendance__field--full">
                   <div class="attendance__requests-header">
-                    <span>Audit summary (last 60m)</span>
+                    <span>{{ tr('Audit summary (last 60m)', '审计汇总（最近 60 分钟）') }}</span>
                     <button class="attendance__btn" :disabled="auditSummaryLoading" @click="loadAuditSummary">
-                      {{ auditSummaryLoading ? 'Loading...' : 'Reload summary' }}
+                      {{ auditSummaryLoading ? tr('Loading...', '加载中...') : tr('Reload summary', '重载汇总') }}
                     </button>
                   </div>
                   <div class="attendance__table-wrapper" v-if="auditSummaryActions.length || auditSummaryErrors.length">
                     <table class="attendance__table">
                       <thead>
                         <tr>
-                          <th>Top actions</th>
-                          <th>Count</th>
-                          <th>Top error codes</th>
-                          <th>Count</th>
+                          <th>{{ tr('Top actions', '高频动作') }}</th>
+                          <th>{{ tr('Count', '次数') }}</th>
+                          <th>{{ tr('Top error codes', '高频错误码') }}</th>
+                          <th>{{ tr('Count', '次数') }}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1063,7 +1063,7 @@
                       </tbody>
                     </table>
                   </div>
-                  <div v-else class="attendance__empty">No summary data.</div>
+                  <div v-else class="attendance__empty">{{ tr('No summary data.', '暂无汇总数据。') }}</div>
                 </div>
               </div>
               <p
@@ -1073,18 +1073,18 @@
               >
                 {{ auditLogStatusMessage }}
               </p>
-              <div v-if="auditLogs.length === 0" class="attendance__empty">No audit logs.</div>
+              <div v-if="auditLogs.length === 0" class="attendance__empty">{{ tr('No audit logs.', '暂无审计日志。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Time</th>
-                      <th>Actor</th>
-                      <th>Action</th>
-                      <th>Route</th>
-                      <th>Status</th>
-                      <th>Latency</th>
-                      <th>Error</th>
+                      <th>{{ tr('Time', '时间') }}</th>
+                      <th>{{ tr('Actor', '操作人') }}</th>
+                      <th>{{ tr('Action', '动作') }}</th>
+                      <th>{{ tr('Route', '路由') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
+                      <th>{{ tr('Latency', '延迟') }}</th>
+                      <th>{{ tr('Error', '错误') }}</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -1100,7 +1100,7 @@
                         <td>{{ item.meta?.error?.code || '--' }}</td>
                         <td class="attendance__table-actions">
                           <button class="attendance__btn" @click="toggleAuditLogMeta(item)">
-                            {{ auditLogSelectedId === item.id ? 'Hide' : 'View' }}
+                            {{ auditLogSelectedId === item.id ? tr('Hide', '隐藏') : tr('View', '查看') }}
                           </button>
                         </td>
                       </tr>
