@@ -2636,6 +2636,43 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-02): Perf Longrun Async Timeout Recovery Follow-up (PR #307)
+
+Goal:
+
+- Re-verify P1 longrun reliability after adding idempotency-based timeout recovery in `scripts/ops/attendance-import-perf.mjs` and tightening recovery window behavior.
+
+Code changes (branch):
+
+- PR: [#307](https://github.com/zensgit/metasheet2/pull/307)
+- Branch: `codex/attendance-longrun-poll-recovery`
+- Script updates:
+  - recover async commit timeout by replaying `commit-async` with the same `idempotencyKey` (no `commitToken`)
+  - bound recovery polling to `IMPORT_JOB_POLL_RECOVERY_GRACE_MS`
+  - avoid rotating to a new idempotency key for timeout-class failures
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun drill (issue open path) | [#22550229839](https://github.com/zensgit/metasheet2/actions/runs/22550229839) | FAIL (expected) | `output/playwright/ga/22550229839/attendance-import-perf-longrun-drill-22550229839-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun drill recovery (issue close path) | [#22550248100](https://github.com/zensgit/metasheet2/actions/runs/22550248100) | PASS | `output/playwright/ga/22550248100/attendance-import-perf-longrun-drill-22550248100-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun non-drill (upload path, post-fix) | [#22555028596](https://github.com/zensgit/metasheet2/actions/runs/22555028596) | FAIL (P1) | `output/playwright/ga/22555028596/attendance-import-perf-longrun-rows100k-commit-22555028596-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22555028596/attendance-import-perf-longrun-trend-22555028596-1/20260302-002955/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
+
+Observed highlights:
+
+- Timeout recovery path is active in failure log:
+  - `recovered async job by idempotency key; continue polling job=... status=running`
+- Final attribution remains:
+  - `Failed: async commit job timed out`
+  - Trend bucket: `ASYNC_JOB_TIMEOUT` (`rows100k-commit`)
+- P1 tracker state:
+  - [#157](https://github.com/zensgit/metasheet2/issues/157) is `OPEN`
+
+Decision:
+
+- **GO maintained for production P0 gates**, but **P1 longrun reliability remains open** until #157 is closed by stable non-drill longrun runs.
+
 ## Post-Go Verification (2026-03-01): zh Calendar Lunar + Holiday Visibility Smoke Upgrade
 
 Goal:

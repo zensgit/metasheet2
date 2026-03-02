@@ -3409,3 +3409,24 @@ After merging stabilization changes (PR [#305](https://github.com/zensgit/metash
 Observed:
 - `Run zh locale smoke` step succeeded.
 - Artifact now includes production screenshot showing zh locale attendance calendar with lunar/holiday markers.
+
+### Update (2026-03-02): Perf Longrun Timeout Recovery Re-Verification (Branch)
+
+Branch under verification:
+- `codex/attendance-longrun-poll-recovery` (PR [#307](https://github.com/zensgit/metasheet2/pull/307))
+
+Runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun drill (issue open path) | [#22550229839](https://github.com/zensgit/metasheet2/actions/runs/22550229839) | FAIL (expected) | `output/playwright/ga/22550229839/attendance-import-perf-longrun-drill-22550229839-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun drill recovery (issue close path) | [#22550248100](https://github.com/zensgit/metasheet2/actions/runs/22550248100) | PASS | `output/playwright/ga/22550248100/attendance-import-perf-longrun-drill-22550248100-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun non-drill (post-fix validation) | [#22555028596](https://github.com/zensgit/metasheet2/actions/runs/22555028596) | FAIL (P1) | `output/playwright/ga/22555028596/attendance-import-perf-longrun-rows100k-commit-22555028596-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22555028596/attendance-import-perf-longrun-trend-22555028596-1/20260302-002955/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
+
+Observed:
+- The script now recovers async poll timeouts via idempotency replay and bounded grace polling.
+- Drill issue lifecycle remains correct:
+  - [#156](https://github.com/zensgit/metasheet2/issues/156) opened on FAIL and closed on recovery.
+- Remaining blocker is production-side longrunning async commit completion for `rows100k-commit`:
+  - trend attribution: `ASYNC_JOB_TIMEOUT`
+  - tracking issue: [#157](https://github.com/zensgit/metasheet2/issues/157) (OPEN)
