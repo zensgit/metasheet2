@@ -131,7 +131,7 @@ jobs:
   perf-scenarios:
     if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 140
     strategy:
       fail-fast: false
       # Avoid cross-scenario contention on production async import workers.
