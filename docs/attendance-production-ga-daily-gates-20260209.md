@@ -3562,3 +3562,26 @@ Mainline verification:
 |---|---|---|---|
 | Attendance Gate Contract Matrix (main, post-merge) | [#22584291557](https://github.com/zensgit/metasheet2/actions/runs/22584291557) | PASS | `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-strict-22584291557-1/strict/gate-summary.json`, `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-dashboard-22584291557-1/dashboard.valid.json` |
 | Attendance Daily Gate Dashboard (main, post-merge) | [#22584318268](https://github.com/zensgit/metasheet2/actions/runs/22584318268) | PASS | `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.md` |
+
+### Update (2026-03-03): Admin zh Localization Phase 5 (Approval/Rotation/Shifts/Assignments/Holidays)
+
+Scope:
+
+- localized remaining Admin Center sections in `apps/web/src/views/AttendanceView.vue`:
+  - Approval Flows
+  - Rotation Rules
+  - Rotation Assignments
+  - Shifts
+  - Assignments
+  - Holidays
+- localized related action labels and delete-confirm prompts in the same module.
+- extended zh copy regression guard in `scripts/ops/attendance-verify-zh-copy-contract.mjs` to cover the above sections.
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
