@@ -390,28 +390,28 @@
 
       <section class="attendance__card" v-if="showOverview">
         <div class="attendance__records-header">
-          <h3>Records</h3>
+          <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="loadRecords">Reload</button>
+            <button class="attendance__btn" :disabled="loading" @click="loadRecords">{{ tr('Reload', '重载') }}</button>
             <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
-              {{ exporting ? 'Exporting...' : 'Export CSV' }}
+              {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
           </div>
         </div>
-        <div v-if="records.length === 0" class="attendance__empty">No records.</div>
+        <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
         <div v-else class="attendance__table-wrapper">
           <table class="attendance__table attendance__table--records">
             <thead>
               <tr>
-                <th>Date</th>
-                <th>First in</th>
-                <th>Last out</th>
-                <th>Work (min)</th>
-                <th>Late</th>
-                <th>Early leave</th>
-                <th>Leave</th>
-                <th>Overtime</th>
-                <th>Status</th>
+                <th>{{ tr('Date', '日期') }}</th>
+                <th>{{ tr('First in', '首次打卡') }}</th>
+                <th>{{ tr('Last out', '最后打卡') }}</th>
+                <th>{{ tr('Work (min)', '工时（分钟）') }}</th>
+                <th>{{ tr('Late', '迟到') }}</th>
+                <th>{{ tr('Early leave', '早退') }}</th>
+                <th>{{ tr('Leave', '请假') }}</th>
+                <th>{{ tr('Overtime', '加班') }}</th>
+                <th>{{ tr('Status', '状态') }}</th>
               </tr>
             </thead>
             <tbody>
