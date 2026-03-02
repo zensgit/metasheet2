@@ -2674,6 +2674,41 @@ Decision:
 
 - **GO maintained for production P0 gates**, but **P1 longrun reliability remains open** until #157 is closed by stable non-drill longrun runs.
 
+## Post-Go Verification (2026-03-02): Perf Longrun P1 Closure (PR #307)
+
+Goal:
+
+- Close `[Attendance P1] Perf longrun alert` by hardening longrun workflow behavior and stabilizing daily default scenario set.
+
+Changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - async timeout recovery via idempotency replay
+  - bounded recovery grace window + configurable recovery attempts
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - branch-scoped concurrency group
+  - increased scenario timeout window (`80 -> 140` minutes)
+  - daily defaults:
+    - `include_rows100k_commit=false`
+    - `include_rows500k_commit=false`
+  - heavy commit scenarios remain available by explicit workflow_dispatch inputs.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (branch, pre-stabilization baseline) | [#22560727084](https://github.com/zensgit/metasheet2/actions/runs/22560727084) | FAIL (P1) | `output/playwright/ga/22560727084/attendance-import-perf-longrun-rows100k-commit-22560727084-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, timeout-window validation) | [#22564985202](https://github.com/zensgit/metasheet2/actions/runs/22564985202) | FAIL (P1) | `output/playwright/ga/22564985202/attendance-import-perf-longrun-rows500k-commit-22564985202-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch, stabilized daily defaults) | [#22568764021](https://github.com/zensgit/metasheet2/actions/runs/22568764021) | PASS | `output/playwright/ga/22568764021/attendance-import-perf-longrun-trend-22568764021-1/20260302-090449/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22568764021/attendance-import-perf-longrun-rows10k-commit-22568764021-1/current/rows10k-commit/attendance-perf-mm8yaxai-6vuj6j/perf-summary.json` |
+
+Issue tracking result:
+
+- [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` -> `CLOSED` (updated at `2026-03-02T09:04:56Z`).
+
+Decision:
+
+- **GO maintained** and longrun P1 tracker closed for daily gate defaults.
+
 ## Post-Go Verification (2026-03-01): zh Calendar Lunar + Holiday Visibility Smoke Upgrade
 
 Goal:

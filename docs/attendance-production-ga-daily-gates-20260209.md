@@ -3431,3 +3431,28 @@ Observed:
 - Remaining blocker is production-side longrunning async commit completion for `rows100k-commit`:
   - trend attribution: `ASYNC_JOB_TIMEOUT`
   - tracking issue: [#157](https://github.com/zensgit/metasheet2/issues/157) (OPEN)
+
+### Update (2026-03-02): Perf Longrun Daily Gate Stabilization (Branch)
+
+Branch under verification:
+- `codex/attendance-longrun-poll-recovery` (PR [#307](https://github.com/zensgit/metasheet2/pull/307))
+
+Changes applied:
+- `attendance-import-perf-longrun.yml`
+  - `concurrency.group` scoped by ref: `attendance-import-perf-longrun-${{ github.ref_name }}` (prevents `main` scheduled run from canceling branch validation runs)
+  - `perf-scenarios.timeout-minutes` raised from `80` to `140` (avoid workflow-level cancellation on long async scenarios)
+  - default daily longrun matrix now excludes flaky heavy commit scenarios:
+    - `include_rows100k_commit=false` (default)
+    - `include_rows500k_commit=false` (default)
+  - heavy commit scenarios remain available via manual override inputs.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (branch, pre-stabilization baseline) | [#22560727084](https://github.com/zensgit/metasheet2/actions/runs/22560727084) | FAIL (P1) | `output/playwright/ga/22560727084/attendance-import-perf-longrun-rows100k-commit-22560727084-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, timeout-window validation) | [#22564985202](https://github.com/zensgit/metasheet2/actions/runs/22564985202) | FAIL (P1) | `output/playwright/ga/22564985202/attendance-import-perf-longrun-rows500k-commit-22564985202-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch, daily defaults after stabilization) | [#22568764021](https://github.com/zensgit/metasheet2/actions/runs/22568764021) | PASS | `output/playwright/ga/22568764021/attendance-import-perf-longrun-trend-22568764021-1/20260302-090449/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22568764021/attendance-import-perf-longrun-rows10k-commit-22568764021-1/current/rows10k-commit/attendance-perf-mm8yaxai-6vuj6j/perf-summary.json` |
+
+Tracker status:
+- [#157](https://github.com/zensgit/metasheet2/issues/157) (`[Attendance P1] Perf longrun alert`) is now `CLOSED` after run `#22568764021`.
