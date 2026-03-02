@@ -2691,6 +2691,31 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-02): Admin Center zh Localization Phase 2 (PR #311)
+
+Goal:
+
+- Continue zh localization in Attendance Admin Center and remove remaining English UI text in high-frequency admin workflows.
+
+Merged:
+
+- PR [#311](https://github.com/zensgit/metasheet2/pull/311)
+  - localized:
+    - User Access
+    - Batch Provisioning
+    - Audit Logs
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (main, post-merge) | [#22582909173](https://github.com/zensgit/metasheet2/actions/runs/22582909173) | PASS | `output/playwright/ga/22582909173-zh-main-post311-r2/attendance-locale-zh-smoke-prod-22582909173-1/attendance-zh-locale-calendar.png` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22582916109](https://github.com/zensgit/metasheet2/actions/runs/22582916109) | PASS | `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.md` |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-02): Perf Longrun Async Timeout Recovery Follow-up (PR #307)
 
 Goal:
