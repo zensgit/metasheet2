@@ -330,6 +330,15 @@ async function run() {
       log(`created holiday: ${createdHolidayDate} ${createdHolidayName} (${createdHolidayId})`)
 
       await ensureHolidayExistsForMonth(monthStart, monthEnd, createdHolidayId)
+      // Align the UI query window with the target month so the just-created holiday is fetched.
+      const fromInput = page.locator('#attendance-from-date')
+      const toInput = page.locator('#attendance-to-date')
+      await fromInput.fill(monthStart)
+      await toInput.fill(monthEnd)
+      await page.getByRole('button', { name: /^(Refresh|刷新)$/ }).first().click()
+      await page.waitForLoadState('networkidle', { timeout: timeoutMs })
+      await page.waitForTimeout(300)
+
       await findHolidayBadgeAcrossMonths(page, createdHolidayName)
       const badgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
       log(
