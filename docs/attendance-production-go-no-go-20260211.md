@@ -2667,6 +2667,33 @@ Decision:
 
 - **GO maintained** (P0 chain unaffected; copy regression guard integrated into required contract checks).
 
+## Post-Go Verification (2026-03-02): Admin zh Localization Phase 4 (Payroll/Leave/Overtime, PR #315)
+
+Goal:
+
+- Continue zh localization for remaining high-frequency admin operation areas tied to payroll and policy management.
+
+Merged:
+
+- PR [#315](https://github.com/zensgit/metasheet2/pull/315)
+  - localized:
+    - Payroll Templates
+    - Payroll Cycles
+    - Leave Types
+    - Overtime Rules
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| PR checks (`contracts`, `coverage`, `e2e`, `test`) | [#315](https://github.com/zensgit/metasheet2/pull/315) | PASS | PR checks panel |
+| Contract Matrix (main, post-merge) | [#22584291557](https://github.com/zensgit/metasheet2/actions/runs/22584291557) | PASS | `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-strict-22584291557-1/strict/gate-summary.json`, `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-dashboard-22584291557-1/dashboard.valid.json` |
+| Daily Gate Dashboard (main, post-merge) | [#22584318268](https://github.com/zensgit/metasheet2/actions/runs/22584318268) | PASS | `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.md` |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-02): zh Locale Gate Determinism (Created-Holiday Assertion)
 
 Goal:
