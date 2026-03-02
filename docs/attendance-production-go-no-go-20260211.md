@@ -2669,6 +2669,28 @@ Decision:
 
 - **GO maintained** (P0 production chain unchanged; zh locale gate reliability improved).
 
+## Post-Go Verification (2026-03-02): Records Panel zh Localization (PR #309)
+
+Goal:
+
+- Remove remaining English strings from Attendance Overview `Records` panel under zh locale.
+
+Merged:
+
+- PR [#309](https://github.com/zensgit/metasheet2/pull/309)
+  - localized records title, reload/export buttons, empty state, and table headers via `tr()` mapping.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (main, post-merge) | [#22580807870](https://github.com/zensgit/metasheet2/actions/runs/22580807870) | PASS | `output/playwright/ga/22580807870-zh-main-post309/attendance-locale-zh-smoke-prod-22580807870-1/attendance-zh-locale-calendar.png` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22580875100](https://github.com/zensgit/metasheet2/actions/runs/22580875100) | PASS | `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.md` |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-02): Perf Longrun Async Timeout Recovery Follow-up (PR #307)
 
 Goal:
