@@ -130,7 +130,8 @@ jobs:
     timeout-minutes: 80
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # Avoid cross-scenario contention on production async import workers.
+      max-parallel: 1
       matrix:
         include:
           - id: rows10k-commit
