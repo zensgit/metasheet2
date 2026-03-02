@@ -2636,6 +2636,79 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-02): Perf Longrun Async Timeout Recovery Follow-up (PR #307)
+
+Goal:
+
+- Re-verify P1 longrun reliability after adding idempotency-based timeout recovery in `scripts/ops/attendance-import-perf.mjs` and tightening recovery window behavior.
+
+Code changes (branch):
+
+- PR: [#307](https://github.com/zensgit/metasheet2/pull/307)
+- Branch: `codex/attendance-longrun-poll-recovery`
+- Script updates:
+  - recover async commit timeout by replaying `commit-async` with the same `idempotencyKey` (no `commitToken`)
+  - bound recovery polling to `IMPORT_JOB_POLL_RECOVERY_GRACE_MS`
+  - avoid rotating to a new idempotency key for timeout-class failures
+  - serialize longrun matrix execution (`max-parallel=1`) to reduce async worker contention during production trend runs
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun drill (issue open path) | [#22550229839](https://github.com/zensgit/metasheet2/actions/runs/22550229839) | FAIL (expected) | `output/playwright/ga/22550229839/attendance-import-perf-longrun-drill-22550229839-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun drill recovery (issue close path) | [#22550248100](https://github.com/zensgit/metasheet2/actions/runs/22550248100) | PASS | `output/playwright/ga/22550248100/attendance-import-perf-longrun-drill-22550248100-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
+| Perf Longrun non-drill (upload path, post-fix) | [#22555028596](https://github.com/zensgit/metasheet2/actions/runs/22555028596) | FAIL (P1) | `output/playwright/ga/22555028596/attendance-import-perf-longrun-rows100k-commit-22555028596-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22555028596/attendance-import-perf-longrun-trend-22555028596-1/20260302-002955/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
+
+Observed highlights:
+
+- Timeout recovery path is active in failure log:
+  - `recovered async job by idempotency key; continue polling job=... status=running`
+- Final attribution remains:
+  - `Failed: async commit job timed out`
+  - Trend bucket: `ASYNC_JOB_TIMEOUT` (`rows100k-commit`)
+- P1 tracker state:
+  - [#157](https://github.com/zensgit/metasheet2/issues/157) is `OPEN`
+
+Decision:
+
+- **GO maintained for production P0 gates**, but **P1 longrun reliability remains open** until #157 is closed by stable non-drill longrun runs.
+
+## Post-Go Verification (2026-03-02): Perf Longrun P1 Closure (PR #307)
+
+Goal:
+
+- Close `[Attendance P1] Perf longrun alert` by hardening longrun workflow behavior and stabilizing daily default scenario set.
+
+Changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - async timeout recovery via idempotency replay
+  - bounded recovery grace window + configurable recovery attempts
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - branch-scoped concurrency group
+  - increased scenario timeout window (`80 -> 140` minutes)
+  - daily defaults:
+    - `include_rows100k_commit=false`
+    - `include_rows500k_commit=false`
+  - heavy commit scenarios remain available by explicit workflow_dispatch inputs.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (branch, pre-stabilization baseline) | [#22560727084](https://github.com/zensgit/metasheet2/actions/runs/22560727084) | FAIL (P1) | `output/playwright/ga/22560727084/attendance-import-perf-longrun-rows100k-commit-22560727084-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, timeout-window validation) | [#22564985202](https://github.com/zensgit/metasheet2/actions/runs/22564985202) | FAIL (P1) | `output/playwright/ga/22564985202/attendance-import-perf-longrun-rows500k-commit-22564985202-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch, stabilized daily defaults) | [#22568764021](https://github.com/zensgit/metasheet2/actions/runs/22568764021) | PASS | `output/playwright/ga/22568764021/attendance-import-perf-longrun-trend-22568764021-1/20260302-090449/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22568764021/attendance-import-perf-longrun-rows10k-commit-22568764021-1/current/rows10k-commit/attendance-perf-mm8yaxai-6vuj6j/perf-summary.json` |
+
+Issue tracking result:
+
+- [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` -> `CLOSED` (updated at `2026-03-02T09:04:56Z`).
+
+Decision:
+
+- **GO maintained** and longrun P1 tracker closed for daily gate defaults.
+
 ## Post-Go Verification (2026-03-01): zh Calendar Lunar + Holiday Visibility Smoke Upgrade
 
 Goal:
