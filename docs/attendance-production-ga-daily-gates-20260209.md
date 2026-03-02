@@ -3585,3 +3585,21 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+Merged:
+
+- PR [#317](https://github.com/zensgit/metasheet2/pull/317)
+
+Post-merge mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (main, post-merge) | [#22585014328](https://github.com/zensgit/metasheet2/actions/runs/22585014328) | FAIL (env credential) | `output/playwright/ga/22585014328/attendance-locale-zh-smoke-prod-22585014328-1/auth-error.txt` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22585014372](https://github.com/zensgit/metasheet2/actions/runs/22585014372) | PASS | `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.md` |
+
+Observed:
+
+- zh smoke failure is from `Resolve valid auth token` guard:
+  - no valid `ATTENDANCE_ADMIN_JWT`
+  - no fallback `ATTENDANCE_ADMIN_EMAIL`/`ATTENDANCE_ADMIN_PASSWORD`
+- this is an environment credential rotation issue, not a UI localization regression.
