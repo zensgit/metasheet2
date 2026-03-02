@@ -2696,6 +2696,36 @@ Decision:
 
 - **Conditional GO maintained**: code quality gates are green; rotate attendance admin secrets before requiring zh smoke as blocking PASS.
 
+## Post-Go Development Verification (2026-03-03): Admin zh Localization Phase 6
+
+Goal:
+
+- remove remaining English confirms and operation-status copy in Attendance Admin workflows to reduce mixed-locale UX.
+
+Code changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - localized confirm prompts and status/error copy for:
+    - import rollback
+    - leave/overtime
+    - rule sets / attendance groups / template library
+    - payroll templates / payroll cycles / payroll summary actions
+- `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added guarded legacy snippets for the above confirms.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Contract case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Contract case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+Decision:
+
+- **GO maintained** (phase-6 zh copy changes pass build and contract gates).
+
 ## Post-Go Verification (2026-03-02): Admin zh Localization Phase 3 + Copy Contract Gate (PR #313)
 
 Goal:

@@ -5847,7 +5847,7 @@ function toggleImportBatchSnapshot(item: AttendanceImportItem) {
 }
 
 async function rollbackImportBatch(batchId: string) {
-  if (!batchId || !window.confirm('Rollback this import batch?')) return
+  if (!batchId || !window.confirm(tr('Rollback this import batch?', '确认回滚该导入批次吗？'))) return
   importLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, { method: 'POST' })
@@ -5865,9 +5865,9 @@ async function rollbackImportBatch(batchId: string) {
       importBatchSnapshot.value = null
       importBatchSelectedId.value = ''
     }
-    setStatus('Import batch rolled back.')
+    setStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to rollback import batch', 'error')
+    setStatus(error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'), 'error')
   } finally {
     importLoading.value = false
   }
@@ -7893,7 +7893,7 @@ async function loadLeaveTypes() {
       requestForm.leaveTypeId = leaveTypes.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load leave types', 'error')
+    setStatus(error?.message || tr('Failed to load leave types', '加载请假类型失败'), 'error')
   } finally {
     leaveTypeLoading.value = false
   }
@@ -7933,16 +7933,16 @@ async function saveLeaveType() {
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
-    setStatus(isEditing ? 'Leave type updated.' : 'Leave type created.')
+    setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save leave type', 'error')
+    setStatus(error?.message || tr('Failed to save leave type', '保存请假类型失败'), 'error')
   } finally {
     leaveTypeSaving.value = false
   }
 }
 
 async function deleteLeaveType(id: string) {
-  if (!window.confirm('Delete this leave type?')) return
+  if (!window.confirm(tr('Delete this leave type?', '确认删除该请假类型吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/leave-types/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -7955,9 +7955,9 @@ async function deleteLeaveType(id: string) {
     }
     adminForbidden.value = false
     await loadLeaveTypes()
-    setStatus('Leave type deleted.')
+    setStatus(tr('Leave type deleted.', '请假类型已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete leave type', 'error')
+    setStatus(error?.message || tr('Failed to delete leave type', '删除请假类型失败'), 'error')
   }
 }
 
@@ -8000,7 +8000,7 @@ async function loadOvertimeRules() {
       requestForm.overtimeRuleId = overtimeRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load overtime rules', 'error')
+    setStatus(error?.message || tr('Failed to load overtime rules', '加载加班规则失败'), 'error')
   } finally {
     overtimeRuleLoading.value = false
   }
@@ -8040,16 +8040,20 @@ async function saveOvertimeRule() {
     adminForbidden.value = false
     await loadOvertimeRules()
     resetOvertimeRuleForm()
-    setStatus(isEditing ? 'Overtime rule updated.' : 'Overtime rule created.')
+    setStatus(
+      isEditing
+        ? tr('Overtime rule updated.', '加班规则已更新。')
+        : tr('Overtime rule created.', '加班规则已创建。')
+    )
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save overtime rule', 'error')
+    setStatus(error?.message || tr('Failed to save overtime rule', '保存加班规则失败'), 'error')
   } finally {
     overtimeRuleSaving.value = false
   }
 }
 
 async function deleteOvertimeRule(id: string) {
-  if (!window.confirm('Delete this overtime rule?')) return
+  if (!window.confirm(tr('Delete this overtime rule?', '确认删除该加班规则吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/overtime-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8062,9 +8066,9 @@ async function deleteOvertimeRule(id: string) {
     }
     adminForbidden.value = false
     await loadOvertimeRules()
-    setStatus('Overtime rule deleted.')
+    setStatus(tr('Overtime rule deleted.', '加班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete overtime rule', 'error')
+    setStatus(error?.message || tr('Failed to delete overtime rule', '删除加班规则失败'), 'error')
   }
 }
 
@@ -8726,12 +8730,12 @@ async function loadRuleSets() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rule sets')
+      throw new Error(data?.error?.message || tr('Failed to load rule sets', '加载规则集失败'))
     }
     adminForbidden.value = false
     ruleSets.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rule sets', 'error')
+    setStatus(error?.message || tr('Failed to load rule sets', '加载规则集失败'), 'error')
   } finally {
     ruleSetLoading.value = false
   }
@@ -8742,7 +8746,7 @@ async function saveRuleSet() {
   try {
     const config = parseJsonConfig(ruleSetForm.config)
     if (!config) {
-      throw new Error('Rule set config must be valid JSON')
+      throw new Error(tr('Rule set config must be valid JSON', '规则集配置必须是合法 JSON'))
     }
 
     const payload = {
@@ -8768,21 +8772,21 @@ async function saveRuleSet() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save rule set')
+      throw new Error(data?.error?.message || tr('Failed to save rule set', '保存规则集失败'))
     }
     adminForbidden.value = false
     resetRuleSetForm()
     await loadRuleSets()
-    setStatus('Rule set saved.')
+    setStatus(tr('Rule set saved.', '规则集已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save rule set', 'error')
+    setStatus(error?.message || tr('Failed to save rule set', '保存规则集失败'), 'error')
   } finally {
     ruleSetSaving.value = false
   }
 }
 
 async function deleteRuleSet(id: string) {
-  if (!window.confirm('Delete this rule set?')) return
+  if (!window.confirm(tr('Delete this rule set?', '确认删除该规则集吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/rule-sets/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8791,13 +8795,13 @@ async function deleteRuleSet(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete rule set')
+      throw new Error(data?.error?.message || tr('Failed to delete rule set', '删除规则集失败'))
     }
     adminForbidden.value = false
     await loadRuleSets()
-    setStatus('Rule set deleted.')
+    setStatus(tr('Rule set deleted.', '规则集已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete rule set', 'error')
+    setStatus(error?.message || tr('Failed to delete rule set', '删除规则集失败'), 'error')
   }
 }
 
@@ -8820,8 +8824,8 @@ function editAttendanceGroup(item: AttendanceGroup) {
 }
 
 function resolveRuleSetName(ruleSetId?: string | null): string {
-  if (!ruleSetId) return 'Default'
-  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? 'Default'
+  if (!ruleSetId) return tr('Default', '默认')
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? tr('Default', '默认')
 }
 
 async function loadAttendanceGroups() {
@@ -8835,7 +8839,7 @@ async function loadAttendanceGroups() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load attendance groups')
+      throw new Error(data?.error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'))
     }
     adminForbidden.value = false
     attendanceGroups.value = data.data?.items ?? []
@@ -8843,7 +8847,7 @@ async function loadAttendanceGroups() {
       attendanceGroupMemberGroupId.value = attendanceGroups.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load attendance groups', 'error')
+    setStatus(error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'), 'error')
   } finally {
     attendanceGroupLoading.value = false
   }
@@ -8861,7 +8865,7 @@ async function saveAttendanceGroup() {
       orgId: normalizedOrgId(),
     }
     if (!payload.name) {
-      throw new Error('Attendance group name is required')
+      throw new Error(tr('Attendance group name is required', '考勤分组名称为必填项'))
     }
     const response = await apiFetch(
       attendanceGroupEditingId.value
@@ -8878,14 +8882,14 @@ async function saveAttendanceGroup() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save attendance group')
+      throw new Error(data?.error?.message || tr('Failed to save attendance group', '保存考勤分组失败'))
     }
     adminForbidden.value = false
     resetAttendanceGroupForm()
     await loadAttendanceGroups()
-    setStatus('Attendance group saved.')
+    setStatus(tr('Attendance group saved.', '考勤分组已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save attendance group', 'error')
+    setStatus(error?.message || tr('Failed to save attendance group', '保存考勤分组失败'), 'error')
   } finally {
     attendanceGroupSaving.value = false
   }
@@ -8906,12 +8910,12 @@ async function loadAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load group members')
+      throw new Error(data?.error?.message || tr('Failed to load group members', '加载分组成员失败'))
     }
     adminForbidden.value = false
     attendanceGroupMembers.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load group members', 'error')
+    setStatus(error?.message || tr('Failed to load group members', '加载分组成员失败'), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
   }
@@ -8921,11 +8925,11 @@ async function addAttendanceGroupMembers() {
   const groupId = attendanceGroupMemberGroupId.value
   const userIds = parseUserIdList(attendanceGroupMemberUserIds.value)
   if (!groupId) {
-    setStatus('Select an attendance group first.', 'error')
+    setStatus(tr('Select an attendance group first.', '请先选择考勤分组。'), 'error')
     return
   }
   if (userIds.length === 0) {
-    setStatus('Enter at least one user ID.', 'error')
+    setStatus(tr('Enter at least one user ID.', '请至少输入一个用户 ID。'), 'error')
     return
   }
   attendanceGroupMemberSaving.value = true
@@ -8940,14 +8944,14 @@ async function addAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to add group members')
+      throw new Error(data?.error?.message || tr('Failed to add group members', '添加分组成员失败'))
     }
     adminForbidden.value = false
     attendanceGroupMemberUserIds.value = ''
     await loadAttendanceGroupMembers()
-    setStatus('Group members added.')
+    setStatus(tr('Group members added.', '分组成员已添加。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to add group members', 'error')
+    setStatus(error?.message || tr('Failed to add group members', '添加分组成员失败'), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
@@ -8967,20 +8971,20 @@ async function removeAttendanceGroupMember(userId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to remove group member')
+      throw new Error(data?.error?.message || tr('Failed to remove group member', '移除分组成员失败'))
     }
     adminForbidden.value = false
     await loadAttendanceGroupMembers()
-    setStatus('Group member removed.')
+    setStatus(tr('Group member removed.', '分组成员已移除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to remove group member', 'error')
+    setStatus(error?.message || tr('Failed to remove group member', '移除分组成员失败'), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
 }
 
 async function deleteAttendanceGroup(id: string) {
-  if (!window.confirm('Delete this attendance group?')) return
+  if (!window.confirm(tr('Delete this attendance group?', '确认删除该考勤分组吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8989,13 +8993,13 @@ async function deleteAttendanceGroup(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete attendance group')
+      throw new Error(data?.error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'))
     }
     adminForbidden.value = false
     await loadAttendanceGroups()
-    setStatus('Attendance group deleted.')
+    setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete attendance group', 'error')
+    setStatus(error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'), 'error')
   }
 }
 
@@ -9008,12 +9012,12 @@ async function loadRuleSetTemplate() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rule set template')
+      throw new Error(data?.error?.message || tr('Failed to load rule set template', '加载规则集模板失败'))
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
-    setStatus('Rule set template loaded.')
+    setStatus(tr('Rule set template loaded.', '规则集模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rule set template', 'error')
+    setStatus(error?.message || tr('Failed to load rule set template', '加载规则集模板失败'), 'error')
   }
 }
 
@@ -9027,7 +9031,7 @@ async function loadRuleTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rule templates')
+      throw new Error(data?.error?.message || tr('Failed to load rule templates', '加载规则模板失败'))
     }
     adminForbidden.value = false
     const systemTemplates = data.data?.system ?? []
@@ -9035,9 +9039,9 @@ async function loadRuleTemplates() {
     ruleTemplateVersions.value = Array.isArray(data.data?.versions) ? data.data.versions : []
     ruleTemplateSystemText.value = JSON.stringify(systemTemplates, null, 2)
     ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
-    setStatus('Rule templates loaded.')
+    setStatus(tr('Rule templates loaded.', '规则模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rule templates', 'error')
+    setStatus(error?.message || tr('Failed to load rule templates', '加载规则模板失败'), 'error')
   } finally {
     ruleTemplateLoading.value = false
   }
@@ -9048,12 +9052,12 @@ async function saveRuleTemplates() {
   try {
     const templates = parseTemplateLibrary(ruleTemplateLibraryText.value)
     if (!templates) {
-      throw new Error('Template library must be valid JSON array')
+      throw new Error(tr('Template library must be valid JSON array', '模板库必须是合法 JSON 数组'))
     }
     const validation = validateTemplateLibrarySchema(templates)
     if (!validation.ok) {
       const preview = validation.errors.slice(0, 3).join('; ')
-      throw new Error(`Template schema errors: ${preview}`)
+      throw new Error(tr(`Template schema errors: ${preview}`, `模板结构校验失败：${preview}`))
     }
     const response = await apiFetch('/api/attendance/rule-templates', {
       method: 'PUT',
@@ -9065,13 +9069,13 @@ async function saveRuleTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save rule templates')
+      throw new Error(data?.error?.message || tr('Failed to save rule templates', '保存规则模板失败'))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? templates, null, 2)
-    setStatus('Rule templates saved.')
+    setStatus(tr('Rule templates saved.', '规则模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save rule templates', 'error')
+    setStatus(error?.message || tr('Failed to save rule templates', '保存规则模板失败'), 'error')
   } finally {
     ruleTemplateSaving.value = false
   }
@@ -9079,7 +9083,7 @@ async function saveRuleTemplates() {
 
 async function restoreRuleTemplates(versionId: string) {
   if (!versionId) return
-  if (!window.confirm('Restore this template version? This will overwrite the current library.')) return
+  if (!window.confirm(tr('Restore this template version? This will overwrite the current library.', '确认恢复该模板版本吗？当前模板库会被覆盖。'))) return
   ruleTemplateRestoring.value = true
   try {
     const response = await apiFetch('/api/attendance/rule-templates/restore', {
@@ -9092,14 +9096,14 @@ async function restoreRuleTemplates(versionId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to restore rule templates')
+      throw new Error(data?.error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? [], null, 2)
     await loadRuleTemplates()
-    setStatus('Rule templates restored.')
+    setStatus(tr('Rule templates restored.', '规则模板已恢复。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to restore rule templates', 'error')
+    setStatus(error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'), 'error')
   } finally {
     ruleTemplateRestoring.value = false
   }
@@ -9107,7 +9111,7 @@ async function restoreRuleTemplates(versionId: string) {
 
 function copySystemTemplates() {
   ruleTemplateLibraryText.value = ruleTemplateSystemText.value
-  setStatus('System templates copied to library.')
+  setStatus(tr('System templates copied to library.', '系统模板已复制到模板库。'))
 }
 
 function resetPayrollTemplateForm() {
@@ -9145,12 +9149,12 @@ async function loadPayrollTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load payroll templates')
+      throw new Error(data?.error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'))
     }
     adminForbidden.value = false
     payrollTemplates.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load payroll templates', 'error')
+    setStatus(error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'), 'error')
   } finally {
     payrollTemplateLoading.value = false
   }
@@ -9161,7 +9165,7 @@ async function savePayrollTemplate() {
   try {
     const config = parseJsonConfig(payrollTemplateForm.config)
     if (!config) {
-      throw new Error('Payroll template config must be valid JSON')
+      throw new Error(tr('Payroll template config must be valid JSON', '计薪模板配置必须是合法 JSON'))
     }
 
     const payload = {
@@ -9191,21 +9195,21 @@ async function savePayrollTemplate() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save payroll template')
+      throw new Error(data?.error?.message || tr('Failed to save payroll template', '保存计薪模板失败'))
     }
     adminForbidden.value = false
     resetPayrollTemplateForm()
     await loadPayrollTemplates()
-    setStatus('Payroll template saved.')
+    setStatus(tr('Payroll template saved.', '计薪模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save payroll template', 'error')
+    setStatus(error?.message || tr('Failed to save payroll template', '保存计薪模板失败'), 'error')
   } finally {
     payrollTemplateSaving.value = false
   }
 }
 
 async function deletePayrollTemplate(id: string) {
-  if (!window.confirm('Delete this payroll template?')) return
+  if (!window.confirm(tr('Delete this payroll template?', '确认删除该计薪模板吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/payroll-templates/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -9214,13 +9218,13 @@ async function deletePayrollTemplate(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete payroll template')
+      throw new Error(data?.error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'))
     }
     adminForbidden.value = false
     await loadPayrollTemplates()
-    setStatus('Payroll template deleted.')
+    setStatus(tr('Payroll template deleted.', '计薪模板已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete payroll template', 'error')
+    setStatus(error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'), 'error')
   }
 }
 
@@ -9267,12 +9271,12 @@ async function loadPayrollCycles() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load payroll cycles')
+      throw new Error(data?.error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'))
     }
     adminForbidden.value = false
     payrollCycles.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load payroll cycles', 'error')
+    setStatus(error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'), 'error')
   } finally {
     payrollCycleLoading.value = false
   }
@@ -9283,12 +9287,12 @@ async function generatePayrollCycles() {
   try {
     const anchorDate = payrollCycleGenerateForm.anchorDate
     if (!anchorDate) {
-      throw new Error('Anchor date is required for generation')
+      throw new Error(tr('Anchor date is required for generation', '生成周期需要锚点日期'))
     }
 
     const metadata = parseJsonConfig(payrollCycleGenerateForm.metadata)
     if (!metadata) {
-      throw new Error('Metadata must be valid JSON')
+      throw new Error(tr('Metadata must be valid JSON', '元数据必须是合法 JSON'))
     }
 
     const payload: Record<string, any> = {
@@ -9311,7 +9315,7 @@ async function generatePayrollCycles() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to generate payroll cycles')
+      throw new Error(data?.error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'))
     }
 
     const created = Array.isArray(data.data?.created) ? data.data.created.length : 0
@@ -9319,9 +9323,9 @@ async function generatePayrollCycles() {
     payrollCycleGenerateResult.value = { created, skipped }
     adminForbidden.value = false
     await loadPayrollCycles()
-    setStatus('Payroll cycles generated.')
+    setStatus(tr('Payroll cycles generated.', '计薪周期已生成。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to generate payroll cycles', 'error')
+    setStatus(error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'), 'error')
   } finally {
     payrollCycleGenerating.value = false
   }
@@ -9355,21 +9359,21 @@ async function savePayrollCycle() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save payroll cycle')
+      throw new Error(data?.error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'))
     }
     adminForbidden.value = false
     resetPayrollCycleForm()
     await loadPayrollCycles()
-    setStatus('Payroll cycle saved.')
+    setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save payroll cycle', 'error')
+    setStatus(error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'), 'error')
   } finally {
     payrollCycleSaving.value = false
   }
 }
 
 async function deletePayrollCycle(id: string) {
-  if (!window.confirm('Delete this payroll cycle?')) return
+  if (!window.confirm(tr('Delete this payroll cycle?', '确认删除该计薪周期吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -9378,21 +9382,21 @@ async function deletePayrollCycle(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete payroll cycle')
+      throw new Error(data?.error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'))
     }
     adminForbidden.value = false
     await loadPayrollCycles()
     payrollCycleSummary.value = null
-    setStatus('Payroll cycle deleted.')
+    setStatus(tr('Payroll cycle deleted.', '计薪周期已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete payroll cycle', 'error')
+    setStatus(error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'), 'error')
   }
 }
 
 async function loadPayrollCycleSummary() {
   const cycleId = payrollCycleEditingId.value
   if (!cycleId) {
-    setStatus('Select or create a payroll cycle first.', 'error')
+    setStatus(tr('Select or create a payroll cycle first.', '请先选择或创建计薪周期。'), 'error')
     return
   }
   try {
@@ -9404,19 +9408,19 @@ async function loadPayrollCycleSummary() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load payroll summary')
+      throw new Error(data?.error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'))
     }
     payrollCycleSummary.value = data.data?.summary ?? null
-    setStatus('Payroll summary loaded.')
+    setStatus(tr('Payroll summary loaded.', '计薪汇总已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load payroll summary', 'error')
+    setStatus(error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'), 'error')
   }
 }
 
 async function exportPayrollCycleSummary() {
   const cycleId = payrollCycleEditingId.value
   if (!cycleId) {
-    setStatus('Select or create a payroll cycle first.', 'error')
+    setStatus(tr('Select or create a payroll cycle first.', '请先选择或创建计薪周期。'), 'error')
     return
   }
   try {
@@ -9424,7 +9428,7 @@ async function exportPayrollCycleSummary() {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${cycleId}/summary/export?${query.toString()}`)
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(text || 'Failed to export payroll summary')
+      throw new Error(text || tr('Failed to export payroll summary', '导出计薪汇总失败'))
     }
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
@@ -9435,9 +9439,9 @@ async function exportPayrollCycleSummary() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus('Payroll summary exported.')
+    setStatus(tr('Payroll summary exported.', '计薪汇总已导出。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to export payroll summary', 'error')
+    setStatus(error?.message || tr('Failed to export payroll summary', '导出计薪汇总失败'), 'error')
   }
 }
 

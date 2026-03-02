@@ -3603,3 +3603,22 @@ Observed:
   - no valid `ATTENDANCE_ADMIN_JWT`
   - no fallback `ATTENDANCE_ADMIN_EMAIL`/`ATTENDANCE_ADMIN_PASSWORD`
 - this is an environment credential rotation issue, not a UI localization regression.
+
+### Update (2026-03-03): Admin zh Localization Phase 6 (Confirm/Status Copy Sweep)
+
+Scope:
+
+- localized remaining admin operation prompts and status copy in `apps/web/src/views/AttendanceView.vue`:
+  - import rollback confirm/status
+  - leave/overtime delete confirm/status
+  - rule-set/group/template/payroll confirms + status/error copy
+- extended `scripts/ops/attendance-verify-zh-copy-contract.mjs` to guard the newly localized prompt snippets.
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |

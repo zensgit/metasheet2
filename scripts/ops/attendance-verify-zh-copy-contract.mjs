@@ -46,6 +46,14 @@ const legacySnippets = [
   'if (!window.confirm(\'Delete this shift? Assignments will be removed.\')) return',
   'if (!window.confirm(\'Delete this assignment?\')) return',
   'if (!window.confirm(\'Delete this holiday?\')) return',
+  'if (!window.confirm(\'Rollback this import batch?\')) return',
+  'if (!window.confirm(\'Delete this leave type?\')) return',
+  'if (!window.confirm(\'Delete this overtime rule?\')) return',
+  'if (!window.confirm(\'Delete this rule set?\')) return',
+  'if (!window.confirm(\'Delete this attendance group?\')) return',
+  'if (!window.confirm(\'Restore this template version? This will overwrite the current library.\')) return',
+  'if (!window.confirm(\'Delete this payroll template?\')) return',
+  'if (!window.confirm(\'Delete this payroll cycle?\')) return',
 ]
 
 function fail(message) {
