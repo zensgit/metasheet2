@@ -2671,6 +2671,31 @@ Decision:
 
 - **GO maintained** (phase-5 zh copy changes passed local build + contract gates).
 
+## Post-Go Mainline Verification (2026-03-03): PR #317 Merge + Gate Refresh
+
+Merged:
+
+- PR [#317](https://github.com/zensgit/metasheet2/pull/317)
+  - commit: `ce84edfa7b0d63cc48a0e29abd74dd3bcc0cf1f9`
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (main, post-merge) | [#22585014328](https://github.com/zensgit/metasheet2/actions/runs/22585014328) | FAIL (env credential) | `output/playwright/ga/22585014328/attendance-locale-zh-smoke-prod-22585014328-1/auth-error.txt` |
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22585014372](https://github.com/zensgit/metasheet2/actions/runs/22585014372) | PASS | `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.md` |
+
+Observed:
+
+- zh smoke failed in `Resolve valid auth token`:
+  - no valid `ATTENDANCE_ADMIN_JWT`
+  - fallback login secrets not configured (`ATTENDANCE_ADMIN_EMAIL`/`ATTENDANCE_ADMIN_PASSWORD`)
+- dashboard remained green; no new strict/perf/protection regressions detected.
+
+Decision:
+
+- **Conditional GO maintained**: code quality gates are green; rotate attendance admin secrets before requiring zh smoke as blocking PASS.
+
 ## Post-Go Verification (2026-03-02): Admin zh Localization Phase 3 + Copy Contract Gate (PR #313)
 
 Goal:
