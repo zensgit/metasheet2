@@ -2636,6 +2636,39 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-02): zh Locale Gate Determinism (Created-Holiday Assertion)
+
+Goal:
+
+- Strengthen zh locale gate so it verifies rendering of the exact holiday created by the test run and validates meaningful lunar labels.
+
+Code changes:
+
+- Branch: `codex/attendance-zh-lunar-smoke-hardening`
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - Added lunar semantic assertion (Chinese lunar tokens required).
+  - Added strict created-holiday assertion (`findHolidayBadgeAcrossMonths(page, createdHolidayName)`).
+  - Added UI month-window refresh (`from/to + Refresh`) before calendar badge checks.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| zh smoke (branch, before refresh-window alignment) | [#22580243338](https://github.com/zensgit/metasheet2/actions/runs/22580243338) | FAIL (expected during hardening) | `output/playwright/ga/22580243338-zh-branch/attendance-locale-zh-smoke-prod-22580243338-1/attendance-zh-locale-calendar-fail.png` |
+| zh smoke (branch, after fix) | [#22580353759](https://github.com/zensgit/metasheet2/actions/runs/22580353759) | PASS | `output/playwright/ga/22580353759-zh-branch/attendance-locale-zh-smoke-prod-22580353759-1/attendance-zh-locale-calendar.png` |
+
+Observed:
+
+- The failing run exposed a real gate gap (holiday created successfully but outside current UI fetch window).
+- The recovery run confirms deterministic end-to-end behavior:
+  - locale `zh-CN`
+  - lunar labels present and meaningful
+  - created holiday badge rendered, then cleaned by API delete.
+
+Decision:
+
+- **GO maintained** (P0 production chain unchanged; zh locale gate reliability improved).
+
 ## Post-Go Verification (2026-03-02): Perf Longrun Async Timeout Recovery Follow-up (PR #307)
 
 Goal:
