@@ -151,7 +151,7 @@ jobs:
           - id: rows100k-commit
             rows: '100000'
             mode: 'commit'
-            commit_async: 'true'
+            commit_async: 'false'
             export_csv: 'true'
             rollback: 'false'
             expected_upsert_strategy: 'staging'
