@@ -59,7 +59,7 @@ on:
     - cron: '10 5 * * *'
 
 concurrency:
-  group: attendance-import-perf-longrun
+  group: attendance-import-perf-longrun-${{ github.ref_name }}
   cancel-in-progress: true
 
 permissions:
