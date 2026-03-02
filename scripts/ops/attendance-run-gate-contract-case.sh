@@ -15,6 +15,9 @@ function info() {
 
 [[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard> [output_root]"
 
+info "running zh copy contract guard"
+node ./scripts/ops/attendance-verify-zh-copy-contract.mjs
+
 case_dir="${OUTPUT_ROOT}/${CASE_ID}"
 mkdir -p "$case_dir"
 

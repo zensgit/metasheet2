@@ -1324,7 +1324,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-working-days">
-                  <span>Working days (0-6)</span>
+                  <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
                   <input
                     id="attendance-rule-working-days"
                     name="ruleWorkingDays"
@@ -1335,34 +1335,34 @@
                 </label>
               </div>
               <button class="attendance__btn attendance__btn--primary" :disabled="ruleLoading" @click="saveRule">
-                {{ ruleLoading ? 'Saving...' : 'Save rule' }}
+                {{ ruleLoading ? tr('Saving...', '保存中...') : tr('Save rule', '保存规则') }}
               </button>
             </div>
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Rule Sets</h4>
+                <h4>{{ tr('Rule Sets', '规则集') }}</h4>
                 <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
-                  {{ ruleSetLoading ? 'Loading...' : 'Reload rule sets' }}
+                  {{ ruleSetLoading ? tr('Loading...', '加载中...') : tr('Reload rule sets', '重载规则集') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rule-set-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-rule-set-name" name="ruleSetName" v-model="ruleSetForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-rule-set-scope">
-                  <span>Scope</span>
+                  <span>{{ tr('Scope', '范围') }}</span>
                   <select id="attendance-rule-set-scope" name="ruleSetScope" v-model="ruleSetForm.scope">
-                    <option value="org">Org</option>
-                    <option value="department">Department</option>
-                    <option value="project">Project</option>
-                    <option value="user">User</option>
-                    <option value="custom">Custom</option>
+                    <option value="org">{{ tr('Org', '组织') }}</option>
+                    <option value="department">{{ tr('Department', '部门') }}</option>
+                    <option value="project">{{ tr('Project', '项目') }}</option>
+                    <option value="user">{{ tr('User', '用户') }}</option>
+                    <option value="custom">{{ tr('Custom', '自定义') }}</option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-rule-set-version">
-                  <span>Version</span>
+                  <span>{{ tr('Version', '版本') }}</span>
                   <input
                     id="attendance-rule-set-version"
                     name="ruleSetVersion"
@@ -1372,7 +1372,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-rule-set-default">
-                  <span>Default</span>
+                  <span>{{ tr('Default', '默认') }}</span>
                   <input
                     id="attendance-rule-set-default"
                     name="ruleSetDefault"
@@ -1381,17 +1381,17 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
-                  <span>Description</span>
+                  <span>{{ tr('Description', '描述') }}</span>
                   <input
                     id="attendance-rule-set-description"
                     name="ruleSetDescription"
                     v-model="ruleSetForm.description"
                     type="text"
-                    placeholder="Optional"
+                    :placeholder="tr('Optional', '可选')"
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
-                  <span>Config (JSON)</span>
+                  <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
                   <textarea
                     id="attendance-rule-set-config"
                     name="ruleSetConfig"
@@ -1403,10 +1403,10 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
-                  {{ ruleSetSaving ? 'Saving...' : ruleSetEditingId ? 'Update rule set' : 'Create rule set' }}
+                  {{ ruleSetSaving ? tr('Saving...', '保存中...') : ruleSetEditingId ? tr('Update rule set', '更新规则集') : tr('Create rule set', '创建规则集') }}
                 </button>
                 <button class="attendance__btn" :disabled="ruleSetSaving" @click="loadRuleSetTemplate">
-                  Load template
+                  {{ tr('Load template', '加载模板') }}
                 </button>
                 <button
                   v-if="ruleSetEditingId"
@@ -1414,19 +1414,19 @@
                   :disabled="ruleSetSaving"
                   @click="resetRuleSetForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="ruleSets.length === 0" class="attendance__empty">No rule sets yet.</div>
+              <div v-if="ruleSets.length === 0" class="attendance__empty">{{ tr('No rule sets yet.', '暂无规则集。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Scope</th>
-                      <th>Version</th>
-                      <th>Default</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Scope', '范围') }}</th>
+                      <th>{{ tr('Version', '版本') }}</th>
+                      <th>{{ tr('Default', '默认') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1434,11 +1434,11 @@
                       <td>{{ item.name }}</td>
                       <td>{{ item.scope }}</td>
                       <td>{{ item.version }}</td>
-                      <td>{{ item.isDefault ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.isDefault ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editRuleSet(item)">Edit</button>
+                        <button class="attendance__btn" @click="editRuleSet(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteRuleSet(item.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -1449,18 +1449,18 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Rule Template Library</h4>
+                <h4>{{ tr('Rule Template Library', '规则模板库') }}</h4>
                 <button
                   class="attendance__btn"
                   :disabled="ruleTemplateLoading || ruleTemplateSaving || ruleTemplateRestoring"
                   @click="loadRuleTemplates"
                 >
-                  {{ ruleTemplateLoading ? 'Loading...' : 'Reload templates' }}
+                  {{ ruleTemplateLoading ? tr('Loading...', '加载中...') : tr('Reload templates', '重载模板') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--full" for="attendance-rule-template-system">
-                  <span>System templates (read-only)</span>
+                  <span>{{ tr('System templates (read-only)', '系统模板（只读）') }}</span>
                   <textarea
                     id="attendance-rule-template-system"
                     name="ruleTemplateSystem"
@@ -1470,7 +1470,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-template-library">
-                  <span>Library templates (JSON)</span>
+                  <span>{{ tr('Library templates (JSON)', '库模板（JSON）') }}</span>
                   <textarea
                     id="attendance-rule-template-library"
                     name="ruleTemplateLibrary"
@@ -1482,30 +1482,30 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn" :disabled="ruleTemplateSaving || ruleTemplateRestoring" @click="copySystemTemplates">
-                  Copy system to library
+                  {{ tr('Copy system to library', '复制系统模板到库') }}
                 </button>
                 <button
                   class="attendance__btn attendance__btn--primary"
                   :disabled="ruleTemplateSaving || ruleTemplateRestoring"
                   @click="saveRuleTemplates"
                 >
-                  {{ ruleTemplateSaving ? 'Saving...' : 'Save library' }}
+                  {{ ruleTemplateSaving ? tr('Saving...', '保存中...') : tr('Save library', '保存模板库') }}
                 </button>
               </div>
               <div class="attendance__admin-subsection">
                 <div class="attendance__admin-section-header">
-                  <h5>Template Versions</h5>
+                  <h5>{{ tr('Template Versions', '模板版本') }}</h5>
                 </div>
-                <div v-if="ruleTemplateVersions.length === 0" class="attendance__empty">No versions yet.</div>
+                <div v-if="ruleTemplateVersions.length === 0" class="attendance__empty">{{ tr('No versions yet.', '暂无版本。') }}</div>
                 <div v-else class="attendance__table-wrapper">
                   <table class="attendance__table">
                     <thead>
                       <tr>
-                        <th>Version</th>
-                        <th>Items</th>
-                        <th>Created</th>
-                        <th>Created by</th>
-                        <th>Actions</th>
+                        <th>{{ tr('Version', '版本') }}</th>
+                        <th>{{ tr('Items', '条目') }}</th>
+                        <th>{{ tr('Created', '创建时间') }}</th>
+                        <th>{{ tr('Created by', '创建人') }}</th>
+                        <th>{{ tr('Actions', '操作') }}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1520,7 +1520,7 @@
                             :disabled="ruleTemplateRestoring || ruleTemplateSaving"
                             @click="restoreRuleTemplates(version.id)"
                           >
-                            Restore
+                            {{ tr('Restore', '恢复') }}
                           </button>
                         </td>
                       </tr>
@@ -1532,26 +1532,26 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Attendance groups</h4>
+                <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
-                  {{ attendanceGroupLoading ? 'Loading...' : 'Reload groups' }}
+                  {{ attendanceGroupLoading ? tr('Loading...', '加载中...') : tr('Reload groups', '重载分组') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-group-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-group-name" v-model="attendanceGroupForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-group-code">
-                  <span>Code</span>
-                  <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" placeholder="optional" />
+                  <span>{{ tr('Code', '编码') }}</span>
+                  <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
                 </label>
                 <label class="attendance__field" for="attendance-group-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input id="attendance-group-timezone" v-model="attendanceGroupForm.timezone" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-group-rule-set">
-                  <span>Rule set</span>
+                  <span>{{ tr('Rule set', '规则集') }}</span>
                   <select
                     id="attendance-group-rule-set"
                     v-model="attendanceGroupForm.ruleSetId"
@@ -1564,7 +1564,7 @@
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-group-description">
-                  <span>Description</span>
+                  <span>{{ tr('Description', '描述') }}</span>
                   <input id="attendance-group-description" v-model="attendanceGroupForm.description" type="text" />
                 </label>
               </div>
@@ -1574,22 +1574,22 @@
                   :disabled="attendanceGroupSaving"
                   @click="saveAttendanceGroup"
                 >
-                  {{ attendanceGroupSaving ? 'Saving...' : attendanceGroupEditingId ? 'Update group' : 'Create group' }}
+                  {{ attendanceGroupSaving ? tr('Saving...', '保存中...') : attendanceGroupEditingId ? tr('Update group', '更新分组') : tr('Create group', '创建分组') }}
                 </button>
                 <button class="attendance__btn" :disabled="attendanceGroupSaving" @click="resetAttendanceGroupForm">
-                  Reset
+                  {{ tr('Reset', '重置') }}
                 </button>
               </div>
-              <div v-if="attendanceGroups.length === 0" class="attendance__empty">No attendance groups.</div>
+              <div v-if="attendanceGroups.length === 0" class="attendance__empty">{{ tr('No attendance groups.', '暂无考勤组。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Code</th>
-                      <th>Timezone</th>
-                      <th>Rule set</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Code', '编码') }}</th>
+                      <th>{{ tr('Timezone', '时区') }}</th>
+                      <th>{{ tr('Rule set', '规则集') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1599,9 +1599,9 @@
                       <td>{{ item.timezone }}</td>
                       <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editAttendanceGroup(item)">Edit</button>
+                        <button class="attendance__btn" @click="editAttendanceGroup(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteAttendanceGroup(item.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -1612,38 +1612,38 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Group members</h4>
+                <h4>{{ tr('Group members', '分组成员') }}</h4>
                 <button
                   class="attendance__btn"
                   :disabled="attendanceGroupMemberLoading"
                   @click="loadAttendanceGroupMembers"
                 >
-                  {{ attendanceGroupMemberLoading ? 'Loading...' : 'Reload members' }}
+                  {{ attendanceGroupMemberLoading ? tr('Loading...', '加载中...') : tr('Reload members', '重载成员') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-group-member-group">
-                  <span>Group</span>
+                  <span>{{ tr('Group', '分组') }}</span>
                   <select
                     id="attendance-group-member-group"
                     v-model="attendanceGroupMemberGroupId"
                     :disabled="attendanceGroups.length === 0"
                   >
-                    <option value="">Select a group</option>
+                    <option value="">{{ tr('Select a group', '选择分组') }}</option>
                     <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
                       {{ group.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-group-member-user-ids">
-                  <span>User IDs</span>
+                  <span>{{ tr('User IDs', '用户 ID') }}</span>
                   <input
                     id="attendance-group-member-user-ids"
                     v-model="attendanceGroupMemberUserIds"
                     type="text"
-                    placeholder="userId1, userId2"
+                    :placeholder="tr('userId1, userId2', 'userId1, userId2')"
                   />
-                  <small class="attendance__field-hint">Separate multiple IDs with commas or spaces.</small>
+                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces.', '多个 ID 请用逗号或空格分隔。') }}</small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
@@ -1652,17 +1652,17 @@
                   :disabled="attendanceGroupMemberSaving"
                   @click="addAttendanceGroupMembers"
                 >
-                  {{ attendanceGroupMemberSaving ? 'Saving...' : 'Add members' }}
+                  {{ attendanceGroupMemberSaving ? tr('Saving...', '保存中...') : tr('Add members', '添加成员') }}
                 </button>
               </div>
-              <div v-if="attendanceGroupMembers.length === 0" class="attendance__empty">No group members yet.</div>
+              <div v-if="attendanceGroupMembers.length === 0" class="attendance__empty">{{ tr('No group members yet.', '暂无分组成员。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>User ID</th>
-                      <th>Joined</th>
-                      <th>Actions</th>
+                      <th>{{ tr('User ID', '用户 ID') }}</th>
+                      <th>{{ tr('Joined', '加入时间') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1675,7 +1675,7 @@
                           :disabled="attendanceGroupMemberSaving"
                           @click="removeAttendanceGroupMember(member.userId)"
                         >
-                          Remove
+                          {{ tr('Remove', '移除') }}
                         </button>
                       </td>
                     </tr>
@@ -1686,44 +1686,45 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Import (DingTalk / Manual)</h4>
+                <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
-                  {{ importLoading ? 'Loading...' : 'Load template' }}
+                  {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-import-rule-set">
-                  <span>Rule set</span>
+                  <span>{{ tr('Rule set', '规则集') }}</span>
                   <select
                     id="attendance-import-rule-set"
                     name="importRuleSetId"
                     v-model="importForm.ruleSetId"
                     :disabled="ruleSets.length === 0"
                   >
-                    <option value="">(Optional) Use default rule</option>
+                    <option value="">{{ tr('(Optional) Use default rule', '（可选）使用默认规则') }}</option>
                     <option v-for="item in ruleSets" :key="item.id" :value="item.id">
                       {{ item.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-import-mode">
-                  <span>Import mode</span>
+                  <span>{{ tr('Import mode', '导入模式') }}</span>
                   <select id="attendance-import-mode" v-model="importMode">
-                    <option value="override">override</option>
-                    <option value="merge">merge</option>
+                    <option value="override">{{ tr('override', '覆盖') }}</option>
+                    <option value="merge">{{ tr('merge', '合并') }}</option>
                   </select>
                   <small class="attendance__field-hint">
-                    <code>override</code>: overwrite same user/date. <code>merge</code>: keep existing fields when present.
+                    <code>{{ tr('override', '覆盖') }}</code>: {{ tr('overwrite same user/date.', '覆盖同用户同日期记录。') }}
+                    <code>{{ tr('merge', '合并') }}</code>: {{ tr('keep existing fields when present.', '存在字段时保留已有值。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-import-profile">
-                  <span>Mapping profile</span>
+                  <span>{{ tr('Mapping profile', '映射配置') }}</span>
                   <select
                     id="attendance-import-profile"
                     v-model="importProfileId"
                     :disabled="importMappingProfiles.length === 0"
                   >
-                    <option value="">(Optional) Select profile</option>
+                    <option value="">{{ tr('(Optional) Select profile', '（可选）选择配置') }}</option>
                     <option v-for="profile in importMappingProfiles" :key="profile.id" :value="profile.id">
                       {{ profile.name }}
                     </option>
@@ -1732,31 +1733,31 @@
                     {{ selectedImportProfile.description }}
                   </small>
                   <small v-if="selectedImportProfile?.requiredFields?.length" class="attendance__field-hint">
-                    Required fields: {{ selectedImportProfile.requiredFields.join(', ') }}
+                    {{ tr('Required fields', '必填字段') }}: {{ selectedImportProfile.requiredFields.join(', ') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-import-csv">
-                  <span>CSV file (optional)</span>
+                  <span>{{ tr('CSV file (optional)', 'CSV 文件（可选）') }}</span>
                   <input
                     id="attendance-import-csv"
                     type="file"
                     accept=".csv,text/csv"
                     @change="handleImportCsvChange"
                   />
-                  <small v-if="importCsvFileName" class="attendance__field-hint">Selected: {{ importCsvFileName }}</small>
+                  <small v-if="importCsvFileName" class="attendance__field-hint">{{ tr('Selected', '已选择') }}: {{ importCsvFileName }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-import-csv-header">
-                  <span>CSV header row</span>
+                  <span>{{ tr('CSV header row', 'CSV 表头行') }}</span>
                   <input
                     id="attendance-import-csv-header"
                     v-model="importCsvHeaderRow"
                     type="number"
                     min="0"
-                    placeholder="Auto-detect"
+                    :placeholder="tr('Auto-detect', '自动识别')"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-import-csv-delimiter">
-                  <span>CSV delimiter</span>
+                  <span>{{ tr('CSV delimiter', 'CSV 分隔符') }}</span>
                   <input
                     id="attendance-import-csv-delimiter"
                     v-model="importCsvDelimiter"
@@ -1766,7 +1767,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-import-user-map">
-                  <span>User map JSON (optional)</span>
+                  <span>{{ tr('User map JSON (optional)', '用户映射 JSON（可选）') }}</span>
                   <input
                     id="attendance-import-user-map"
                     type="file"
@@ -1774,14 +1775,14 @@
                     @change="handleImportUserMapChange"
                   />
                   <small v-if="importUserMapFileName" class="attendance__field-hint">
-                    Selected: {{ importUserMapFileName }} · {{ importUserMapCount }} entries
+                    {{ tr('Selected', '已选择') }}: {{ importUserMapFileName }} · {{ importUserMapCount }} {{ tr('entries', '条') }}
                   </small>
                   <small v-if="importUserMapError" class="attendance__field-hint attendance__field-hint--error">
                     {{ importUserMapError }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user-map-key">
-                  <span>User map key field</span>
+                  <span>{{ tr('User map key field', '用户映射键字段') }}</span>
                   <input
                     id="attendance-import-user-map-key"
                     v-model="importUserMapKeyField"
@@ -1789,11 +1790,11 @@
                     placeholder="工号"
                   />
                   <small v-if="selectedImportProfile?.userMapKeyField" class="attendance__field-hint">
-                    Default: {{ selectedImportProfile.userMapKeyField }}
+                    {{ tr('Default', '默认') }}: {{ selectedImportProfile.userMapKeyField }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user-map-source">
-                  <span>User map source fields</span>
+                  <span>{{ tr('User map source fields', '用户映射源字段') }}</span>
                   <input
                     id="attendance-import-user-map-source"
                     v-model="importUserMapSourceFields"
@@ -1801,32 +1802,32 @@
                     placeholder="empNo,工号,姓名"
                   />
                   <small v-if="selectedImportProfile?.userMapSourceFields?.length" class="attendance__field-hint">
-                    Default: {{ selectedImportProfile.userMapSourceFields.join(', ') }}
+                    {{ tr('Default', '默认') }}: {{ selectedImportProfile.userMapSourceFields.join(', ') }}
                   </small>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-import-group-create">
-                  <span>Auto-create groups</span>
+                  <span>{{ tr('Auto-create groups', '自动创建分组') }}</span>
                   <input id="attendance-import-group-create" v-model="importGroupAutoCreate" type="checkbox" />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-import-group-assign">
-                  <span>Auto-assign group members</span>
+                  <span>{{ tr('Auto-assign group members', '自动分配分组成员') }}</span>
                   <input id="attendance-import-group-assign" v-model="importGroupAutoAssign" type="checkbox" />
                 </label>
                 <label class="attendance__field" for="attendance-import-group-rule-set">
-                  <span>Group rule set</span>
+                  <span>{{ tr('Group rule set', '分组规则集') }}</span>
                   <select
                     id="attendance-import-group-rule-set"
                     v-model="importGroupRuleSetId"
                     :disabled="ruleSets.length === 0"
                   >
-                    <option value="">(Optional) Use import rule set</option>
+                    <option value="">{{ tr('(Optional) Use import rule set', '（可选）使用导入规则集') }}</option>
                     <option v-for="item in ruleSets" :key="item.id" :value="item.id">
                       {{ item.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-import-group-timezone">
-                  <span>Group timezone (optional)</span>
+                  <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
                   <input
                     id="attendance-import-group-timezone"
                     v-model="importGroupTimezone"
@@ -1835,17 +1836,17 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-import-user">
-                  <span>User ID</span>
+                  <span>{{ tr('User ID', '用户 ID') }}</span>
                   <input
                     id="attendance-import-user"
                     name="importUserId"
                     v-model="importForm.userId"
                     type="text"
-                    placeholder="Required if not in payload"
+                    :placeholder="tr('Required if not in payload', '若 payload 无该字段则必填')"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-import-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input
                     id="attendance-import-timezone"
                     name="importTimezone"
@@ -1854,7 +1855,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-import-payload">
-                  <span>Payload (JSON)</span>
+                  <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
                   <textarea
                     id="attendance-import-payload"
                     name="importPayload"
@@ -1863,23 +1864,24 @@
                     placeholder='{\"source\":\"dingtalk\",\"userId\":\"...\",\"columns\":[],\"data\":{}}'
                   />
                   <small class="attendance__field-hint">
-                    Default import mode is <strong>override</strong> (same user/date will be overwritten). Use
-                    <code>mode: \"merge\"</code> in payload if needed.
+                    {{ tr('Default import mode is', '默认导入模式为') }} <strong>{{ tr('override', '覆盖') }}</strong>
+                    {{ tr('(same user/date will be overwritten). Use', '（同用户同日期将被覆盖）。如需保留已存在字段，请在 payload 使用') }}
+                    <code>mode: \"merge\"</code>.
                   </small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn" :disabled="importLoading" @click="applyImportCsvFile">
-                  Load CSV
+                  {{ tr('Load CSV', '加载 CSV') }}
                 </button>
                 <button class="attendance__btn" :disabled="importLoading" @click="applyImportProfile">
-                  Apply profile
+                  {{ tr('Apply profile', '应用配置') }}
                 </button>
                 <button class="attendance__btn" :disabled="importLoading" @click="previewImport">
-                  {{ importLoading ? 'Working...' : 'Preview' }}
+                  {{ importLoading ? tr('Working...', '处理中...') : tr('Preview', '预览') }}
                 </button>
                 <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
-                  {{ importLoading ? 'Importing...' : 'Import' }}
+                  {{ importLoading ? tr('Importing...', '导入中...') : tr('Import', '导入') }}
                 </button>
               </div>
               <small class="attendance__field-hint">
@@ -1891,19 +1893,19 @@
                 :class="{ 'attendance__status--error': importPreviewTask.status === 'failed' }"
               >
                 <div class="attendance__requests-header">
-                  <span>{{ importPreviewTask.mode === 'chunked' ? 'Chunked preview task' : 'Preview task' }}</span>
+                  <span>{{ importPreviewTask.mode === 'chunked' ? tr('Chunked preview task', '分块预览任务') : tr('Preview task', '预览任务') }}</span>
                   <button class="attendance__btn" type="button" @click="clearImportPreviewTask">
-                    Clear
+                    {{ tr('Clear', '清空') }}
                   </button>
                 </div>
                 <div>
-                  Status: <strong>{{ importPreviewTask.status }}</strong>
+                  {{ tr('Status', '状态') }}: <strong>{{ importPreviewTask.status }}</strong>
                   <template v-if="importPreviewTask.mode === 'chunked'">
-                    · Chunks {{ importPreviewTask.completedChunks }} / {{ importPreviewTask.totalChunks }}
+                    · {{ tr('Chunks', '分块') }} {{ importPreviewTask.completedChunks }} / {{ importPreviewTask.totalChunks }}
                   </template>
                 </div>
                 <div v-if="importPreviewTask.totalRows">
-                  Progress: {{ importPreviewTask.processedRows }} / {{ importPreviewTask.totalRows }}
+                  {{ tr('Progress', '进度') }}: {{ importPreviewTask.processedRows }} / {{ importPreviewTask.totalRows }}
                 </div>
                 <div v-if="importPreviewTask.message">{{ importPreviewTask.message }}</div>
               </div>
@@ -1913,7 +1915,7 @@
                 :class="{ 'attendance__status--error': importAsyncJob.status === 'failed' }"
               >
                 <div class="attendance__requests-header">
-                  <span>{{ importAsyncJob.kind === 'preview' ? 'Async preview job' : 'Async import job' }}</span>
+                  <span>{{ importAsyncJob.kind === 'preview' ? tr('Async preview job', '异步预览任务') : tr('Async import job', '异步导入任务') }}</span>
                   <div class="attendance__table-actions">
                     <button
                       class="attendance__btn"
@@ -1921,7 +1923,7 @@
                       :disabled="importAsyncPolling"
                       @click="refreshImportAsyncJob()"
                     >
-                      Reload job
+                      {{ tr('Reload job', '重载任务') }}
                     </button>
                     <button
                       v-if="importAsyncJob.status === 'queued' || importAsyncJob.status === 'running'"
@@ -1930,46 +1932,46 @@
                       :disabled="importAsyncPolling"
                       @click="resumeImportAsyncJobPolling"
                     >
-                      {{ importAsyncPolling ? 'Polling...' : 'Resume polling' }}
+                      {{ importAsyncPolling ? tr('Polling...', '轮询中...') : tr('Resume polling', '恢复轮询') }}
                     </button>
                     <button class="attendance__btn" type="button" @click="clearImportAsyncJob">
-                      Clear
+                      {{ tr('Clear', '清空') }}
                     </button>
                   </div>
                 </div>
                 <div>
-                  Status: <strong>{{ importAsyncJob.status }}</strong>
-                  <span v-if="importAsyncPolling"> · polling...</span>
+                  {{ tr('Status', '状态') }}: <strong>{{ importAsyncJob.status }}</strong>
+                  <span v-if="importAsyncPolling"> · {{ tr('polling...', '轮询中...') }}</span>
                 </div>
                 <div v-if="importAsyncJob.total">
-                  Progress: {{ importAsyncJob.progress }} / {{ importAsyncJob.total }}
+                  {{ tr('Progress', '进度') }}: {{ importAsyncJob.progress }} / {{ importAsyncJob.total }}
                   <span v-if="typeof importAsyncJob.progressPercent === 'number'">
                     ({{ importAsyncJob.progressPercent }}%)
                   </span>
                 </div>
                 <div v-if="importAsyncJobTelemetryText">{{ importAsyncJobTelemetryText }}</div>
-                <div v-if="importAsyncJob.kind !== 'preview' && importAsyncJob.batchId">Batch: {{ importAsyncJob.batchId }}</div>
+                <div v-if="importAsyncJob.kind !== 'preview' && importAsyncJob.batchId">{{ tr('Batch', '批次') }}: {{ importAsyncJob.batchId }}</div>
                 <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
-                  Preview rows: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
+                  {{ tr('Preview rows', '预览行数') }}: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
                 </div>
-                <div v-if="importAsyncJob.error">Error: {{ importAsyncJob.error }}</div>
+                <div v-if="importAsyncJob.error">{{ tr('Error', '错误') }}: {{ importAsyncJob.error }}</div>
               </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
-                CSV warnings: {{ importCsvWarnings.join('; ') }}
+                {{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}
               </div>
-              <div v-if="importPreview.length === 0" class="attendance__empty">No preview data.</div>
+              <div v-if="importPreview.length === 0" class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Work date</th>
-                      <th>User ID</th>
-                      <th>Work minutes</th>
-                      <th>Late</th>
-                      <th>Early leave</th>
-                      <th>Status</th>
-                      <th>Warnings</th>
-                      <th>Policies</th>
+                      <th>{{ tr('Work date', '工作日期') }}</th>
+                      <th>{{ tr('User ID', '用户 ID') }}</th>
+                      <th>{{ tr('Work minutes', '工作分钟') }}</th>
+                      <th>{{ tr('Late', '迟到') }}</th>
+                      <th>{{ tr('Early leave', '早退') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
+                      <th>{{ tr('Warnings', '警告') }}</th>
+                      <th>{{ tr('Policies', '规则') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1988,25 +1990,25 @@
               </div>
 
               <div class="attendance__admin-section-header">
-                <h4>Import batches</h4>
+                <h4>{{ tr('Import batches', '导入批次') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
-                  {{ importLoading ? 'Loading...' : 'Reload batches' }}
+                  {{ importLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
                 </button>
               </div>
-              <div v-if="importBatches.length === 0" class="attendance__empty">No import batches.</div>
+              <div v-if="importBatches.length === 0" class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Batch</th>
-                      <th>Status</th>
-                      <th>Rows</th>
-                      <th>Engine</th>
-                      <th>Chunk</th>
-                      <th>Source</th>
-                      <th>Rule set</th>
-                      <th>Created</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Batch', '批次') }}</th>
+                      <th>{{ tr('Status', '状态') }}</th>
+                      <th>{{ tr('Rows', '行数') }}</th>
+                      <th>{{ tr('Engine', '引擎') }}</th>
+                      <th>{{ tr('Chunk', '分块') }}</th>
+                      <th>{{ tr('Source', '来源') }}</th>
+                      <th>{{ tr('Rule set', '规则集') }}</th>
+                      <th>{{ tr('Created', '创建时间') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2020,13 +2022,13 @@
                       <td>{{ resolveRuleSetName(batch.ruleSetId) }}</td>
                       <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">View items</button>
+                        <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">{{ tr('View items', '查看条目') }}</button>
                         <button
                           class="attendance__btn attendance__btn--danger"
                           :disabled="importLoading"
                           @click="rollbackImportBatch(batch.id)"
                         >
-                          Rollback
+                          {{ tr('Rollback', '回滚') }}
                         </button>
                       </td>
                     </tr>
@@ -2036,23 +2038,23 @@
 
               <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
                 <div class="attendance__subheading-row">
-                  <h5 class="attendance__subheading">Batch items</h5>
+                  <h5 class="attendance__subheading">{{ tr('Batch items', '批次条目') }}</h5>
                   <div class="attendance__table-actions">
                     <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(false)">
-                      Export items CSV
+                      {{ tr('Export items CSV', '导出条目 CSV') }}
                     </button>
                     <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(true)">
-                      Export anomalies CSV
+                      {{ tr('Export anomalies CSV', '导出异常 CSV') }}
                     </button>
                   </div>
                 </div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Work date</th>
-                      <th>User ID</th>
-                      <th>Record</th>
-                      <th>Snapshot</th>
+                      <th>{{ tr('Work date', '工作日期') }}</th>
+                      <th>{{ tr('User ID', '用户 ID') }}</th>
+                      <th>{{ tr('Record', '记录') }}</th>
+                      <th>{{ tr('Snapshot', '快照') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2062,7 +2064,7 @@
                       <td>{{ item.recordId || '--' }}</td>
                       <td>
                         <button class="attendance__btn" @click="toggleImportBatchSnapshot(item)">
-                          {{ importBatchSnapshot === item.previewSnapshot ? 'Hide' : 'View' }}
+                          {{ importBatchSnapshot === item.previewSnapshot ? tr('Hide', '隐藏') : tr('View', '查看') }}
                         </button>
                       </td>
                     </tr>
