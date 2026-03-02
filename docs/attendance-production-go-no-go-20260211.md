@@ -2636,6 +2636,41 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Development Verification (2026-03-03): Admin zh Localization Phase 5
+
+Goal:
+
+- complete zh localization coverage for remaining Attendance Admin modules:
+  - Approval Flows
+  - Rotation Rules
+  - Rotation Assignments
+  - Shifts
+  - Assignments
+  - Holidays
+- ensure regression guard includes these sections and their delete-confirm interactions.
+
+Code changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - localized UI labels/buttons/empty-states/table headers for the above admin sections.
+  - localized `statusActionLabel` computed action labels.
+  - localized delete-confirm prompts and section-specific status/error messages.
+- `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added guarded legacy snippets for phase-5 sections to prevent hard-coded English regressions.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Contract case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Contract case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+Decision:
+
+- **GO maintained** (phase-5 zh copy changes passed local build + contract gates).
+
 ## Post-Go Verification (2026-03-02): Admin zh Localization Phase 3 + Copy Contract Gate (PR #313)
 
 Goal:

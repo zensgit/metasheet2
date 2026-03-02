@@ -2664,14 +2664,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Approval Flows</h4>
+                <h4>{{ tr('Approval Flows', '审批流') }}</h4>
                 <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
-                  {{ approvalFlowLoading ? 'Loading...' : 'Reload flows' }}
+                  {{ approvalFlowLoading ? tr('Loading...', '加载中...') : tr('Reload flows', '重载流程') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-approval-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input
                     id="attendance-approval-name"
                     name="approvalName"
@@ -2680,17 +2680,17 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-approval-type">
-                  <span>Request type</span>
+                  <span>{{ tr('Request type', '申请类型') }}</span>
                   <select id="attendance-approval-type" name="approvalType" v-model="approvalFlowForm.requestType">
-                    <option value="missed_check_in">Missed check-in</option>
-                    <option value="missed_check_out">Missed check-out</option>
-                    <option value="time_correction">Time correction</option>
-                    <option value="leave">Leave</option>
-                    <option value="overtime">Overtime</option>
+                    <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
+                    <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
+                    <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
+                    <option value="leave">{{ tr('Leave', '请假') }}</option>
+                    <option value="overtime">{{ tr('Overtime', '加班') }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-approval-active"
                     name="approvalActive"
@@ -2699,7 +2699,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
-                  <span>Steps (JSON)</span>
+                  <span>{{ tr('Steps (JSON)', '步骤（JSON）') }}</span>
                   <textarea
                     id="attendance-approval-steps"
                     name="approvalSteps"
@@ -2715,7 +2715,7 @@
                   :disabled="approvalFlowSaving"
                   @click="saveApprovalFlow"
                 >
-                  {{ approvalFlowSaving ? 'Saving...' : approvalFlowEditingId ? 'Update flow' : 'Create flow' }}
+                  {{ approvalFlowSaving ? tr('Saving...', '保存中...') : approvalFlowEditingId ? tr('Update flow', '更新流程') : tr('Create flow', '创建流程') }}
                 </button>
                 <button
                   v-if="approvalFlowEditingId"
@@ -2723,19 +2723,19 @@
                   :disabled="approvalFlowSaving"
                   @click="resetApprovalFlowForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="approvalFlows.length === 0" class="attendance__empty">No approval flows yet.</div>
+              <div v-if="approvalFlows.length === 0" class="attendance__empty">{{ tr('No approval flows yet.', '暂无审批流程。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Request</th>
-                      <th>Steps</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Request', '申请') }}</th>
+                      <th>{{ tr('Steps', '步骤') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2743,11 +2743,11 @@
                       <td>{{ flow.name }}</td>
                       <td>{{ formatRequestType(flow.requestType) }}</td>
                       <td>{{ flow.steps.length }}</td>
-                      <td>{{ flow.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ flow.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editApprovalFlow(flow)">Edit</button>
+                        <button class="attendance__btn" @click="editApprovalFlow(flow)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteApprovalFlow(flow.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2758,14 +2758,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Rotation Rules</h4>
+                <h4>{{ tr('Rotation Rules', '轮班规则') }}</h4>
                 <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
-                  {{ rotationRuleLoading ? 'Loading...' : 'Reload rotation rules' }}
+                  {{ rotationRuleLoading ? tr('Loading...', '加载中...') : tr('Reload rotation rules', '重载轮班规则') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rotation-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input
                     id="attendance-rotation-name"
                     name="rotationName"
@@ -2774,7 +2774,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rotation-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input
                     id="attendance-rotation-timezone"
                     name="rotationTimezone"
@@ -2783,17 +2783,17 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
-                  <span>Shift sequence (IDs)</span>
+                  <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
                   <input
                     id="attendance-rotation-sequence"
                     name="rotationSequence"
                     v-model="rotationRuleForm.shiftSequence"
                     type="text"
-                    placeholder="shiftId1, shiftId2"
+                    :placeholder="tr('shiftId1, shiftId2', '班次ID1, 班次ID2')"
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-rotation-active"
                     name="rotationActive"
@@ -2808,7 +2808,7 @@
                   :disabled="rotationRuleSaving"
                   @click="saveRotationRule"
                 >
-                  {{ rotationRuleSaving ? 'Saving...' : rotationRuleEditingId ? 'Update rotation' : 'Create rotation' }}
+                  {{ rotationRuleSaving ? tr('Saving...', '保存中...') : rotationRuleEditingId ? tr('Update rotation', '更新轮班') : tr('Create rotation', '创建轮班') }}
                 </button>
                 <button
                   v-if="rotationRuleEditingId"
@@ -2816,19 +2816,19 @@
                   :disabled="rotationRuleSaving"
                   @click="resetRotationRuleForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="rotationRules.length === 0" class="attendance__empty">No rotation rules yet.</div>
+              <div v-if="rotationRules.length === 0" class="attendance__empty">{{ tr('No rotation rules yet.', '暂无轮班规则。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Timezone</th>
-                      <th>Sequence</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Timezone', '时区') }}</th>
+                      <th>{{ tr('Sequence', '序列') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2836,11 +2836,11 @@
                       <td>{{ rule.name }}</td>
                       <td>{{ rule.timezone }}</td>
                       <td>{{ rule.shiftSequence.join(', ') }}</td>
-                      <td>{{ rule.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editRotationRule(rule)">Edit</button>
+                        <button class="attendance__btn" @click="editRotationRule(rule)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteRotationRule(rule.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2851,14 +2851,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Rotation Assignments</h4>
+                <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
                 <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
-                  {{ rotationAssignmentLoading ? 'Loading...' : 'Reload rotations' }}
+                  {{ rotationAssignmentLoading ? tr('Loading...', '加载中...') : tr('Reload rotations', '重载轮班分配') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rotation-user">
-                  <span>User ID</span>
+                  <span>{{ tr('User ID', '用户 ID') }}</span>
                   <input
                     id="attendance-rotation-user"
                     name="rotationUserId"
@@ -2867,21 +2867,21 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rotation-rule">
-                  <span>Rotation rule</span>
+                  <span>{{ tr('Rotation rule', '轮班规则') }}</span>
                   <select
                     id="attendance-rotation-rule"
                     name="rotationRuleId"
                     v-model="rotationAssignmentForm.rotationRuleId"
                     :disabled="rotationRules.length === 0"
                   >
-                    <option value="" disabled>Select rotation</option>
+                    <option value="" disabled>{{ tr('Select rotation', '选择轮班') }}</option>
                     <option v-for="rule in rotationRules" :key="rule.id" :value="rule.id">
                       {{ rule.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-rotation-start">
-                  <span>Start date</span>
+                  <span>{{ tr('Start date', '开始日期') }}</span>
                   <input
                     id="attendance-rotation-start"
                     name="rotationStartDate"
@@ -2890,7 +2890,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-rotation-end">
-                  <span>End date</span>
+                  <span>{{ tr('End date', '结束日期') }}</span>
                   <input
                     id="attendance-rotation-end"
                     name="rotationEndDate"
@@ -2899,7 +2899,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-rotation-active"
                     name="rotationActive"
@@ -2914,7 +2914,7 @@
                   :disabled="rotationAssignmentSaving"
                   @click="saveRotationAssignment"
                 >
-                  {{ rotationAssignmentSaving ? 'Saving...' : rotationAssignmentEditingId ? 'Update assignment' : 'Create assignment' }}
+                  {{ rotationAssignmentSaving ? tr('Saving...', '保存中...') : rotationAssignmentEditingId ? tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
                 </button>
                 <button
                   v-if="rotationAssignmentEditingId"
@@ -2922,20 +2922,20 @@
                   :disabled="rotationAssignmentSaving"
                   @click="resetRotationAssignmentForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="rotationAssignments.length === 0" class="attendance__empty">No rotation assignments yet.</div>
+              <div v-if="rotationAssignments.length === 0" class="attendance__empty">{{ tr('No rotation assignments yet.', '暂无轮班分配。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>User</th>
-                      <th>Rotation</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('User', '用户') }}</th>
+                      <th>{{ tr('Rotation', '轮班') }}</th>
+                      <th>{{ tr('Start', '开始') }}</th>
+                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2944,14 +2944,14 @@
                       <td>{{ item.rotation.name }}</td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
-                      <td>{{ item.assignment.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.assignment.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editRotationAssignment(item)">Edit</button>
+                        <button class="attendance__btn" @click="editRotationAssignment(item)">{{ tr('Edit', '编辑') }}</button>
                         <button
                           class="attendance__btn attendance__btn--danger"
                           @click="deleteRotationAssignment(item.assignment.id)"
                         >
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -2962,18 +2962,18 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Shifts</h4>
+                <h4>{{ tr('Shifts', '班次') }}</h4>
                 <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
-                  {{ shiftLoading ? 'Loading...' : 'Reload shifts' }}
+                  {{ shiftLoading ? tr('Loading...', '加载中...') : tr('Reload shifts', '重载班次') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-shift-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input id="attendance-shift-name" name="shiftName" v-model="shiftForm.name" type="text" />
                 </label>
                 <label class="attendance__field" for="attendance-shift-timezone">
-                  <span>Timezone</span>
+                  <span>{{ tr('Timezone', '时区') }}</span>
                   <input
                     id="attendance-shift-timezone"
                     name="shiftTimezone"
@@ -2982,7 +2982,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-shift-start">
-                  <span>Work start</span>
+                  <span>{{ tr('Work start', '上班开始') }}</span>
                   <input
                     id="attendance-shift-start"
                     name="shiftWorkStartTime"
@@ -2991,7 +2991,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-shift-end">
-                  <span>Work end</span>
+                  <span>{{ tr('Work end', '下班结束') }}</span>
                   <input
                     id="attendance-shift-end"
                     name="shiftWorkEndTime"
@@ -3000,7 +3000,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-shift-late-grace">
-                  <span>Late grace (min)</span>
+                  <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
                   <input
                     id="attendance-shift-late-grace"
                     name="shiftLateGraceMinutes"
@@ -3010,7 +3010,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-shift-early-grace">
-                  <span>Early grace (min)</span>
+                  <span>{{ tr('Early grace (min)', '早退宽限（分钟）') }}</span>
                   <input
                     id="attendance-shift-early-grace"
                     name="shiftEarlyGraceMinutes"
@@ -3020,7 +3020,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-shift-rounding">
-                  <span>Rounding (min)</span>
+                  <span>{{ tr('Rounding (min)', '取整（分钟）') }}</span>
                   <input
                     id="attendance-shift-rounding"
                     name="shiftRoundingMinutes"
@@ -3030,35 +3030,35 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-shift-working-days">
-                  <span>Working days (0-6)</span>
+                  <span>{{ tr('Working days (0-6)', '工作日（0-6）') }}</span>
                   <input
                     id="attendance-shift-working-days"
                     name="shiftWorkingDays"
                     v-model="shiftForm.workingDays"
                     type="text"
-                    placeholder="1,2,3,4,5"
+                    :placeholder="tr('1,2,3,4,5', '1,2,3,4,5')"
                   />
                 </label>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="shiftSaving" @click="saveShift">
-                  {{ shiftSaving ? 'Saving...' : shiftEditingId ? 'Update shift' : 'Create shift' }}
+                  {{ shiftSaving ? tr('Saving...', '保存中...') : shiftEditingId ? tr('Update shift', '更新班次') : tr('Create shift', '创建班次') }}
                 </button>
                 <button v-if="shiftEditingId" class="attendance__btn" :disabled="shiftSaving" @click="resetShiftForm">
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="shifts.length === 0" class="attendance__empty">No shifts yet.</div>
+              <div v-if="shifts.length === 0" class="attendance__empty">{{ tr('No shifts yet.', '暂无班次。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Timezone</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Working days</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Timezone', '时区') }}</th>
+                      <th>{{ tr('Start', '开始') }}</th>
+                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Working days', '工作日') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3069,9 +3069,9 @@
                       <td>{{ shift.workEndTime }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editShift(shift)">Edit</button>
+                        <button class="attendance__btn" @click="editShift(shift)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteShift(shift.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -3082,14 +3082,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Assignments</h4>
+                <h4>{{ tr('Assignments', '排班分配') }}</h4>
                 <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
-                  {{ assignmentLoading ? 'Loading...' : 'Reload assignments' }}
+                  {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-assignment-user-id">
-                  <span>User ID</span>
+                  <span>{{ tr('User ID', '用户 ID') }}</span>
                   <input
                     id="attendance-assignment-user-id"
                     name="assignmentUserId"
@@ -3098,21 +3098,21 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-assignment-shift-id">
-                  <span>Shift</span>
+                  <span>{{ tr('Shift', '班次') }}</span>
                   <select
                     id="attendance-assignment-shift-id"
                     name="assignmentShiftId"
                     v-model="assignmentForm.shiftId"
                     :disabled="shifts.length === 0"
                   >
-                    <option value="" disabled>Select shift</option>
+                    <option value="" disabled>{{ tr('Select shift', '选择班次') }}</option>
                     <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
                       {{ shift.name }}
                     </option>
                   </select>
                 </label>
                 <label class="attendance__field" for="attendance-assignment-start-date">
-                  <span>Start date</span>
+                  <span>{{ tr('Start date', '开始日期') }}</span>
                   <input
                     id="attendance-assignment-start-date"
                     name="assignmentStartDate"
@@ -3121,7 +3121,7 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-assignment-end-date">
-                  <span>End date</span>
+                  <span>{{ tr('End date', '结束日期') }}</span>
                   <input
                     id="attendance-assignment-end-date"
                     name="assignmentEndDate"
@@ -3130,7 +3130,7 @@
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-assignment-active">
-                  <span>Active</span>
+                  <span>{{ tr('Active', '启用') }}</span>
                   <input
                     id="attendance-assignment-active"
                     name="assignmentActive"
@@ -3141,7 +3141,7 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="assignmentSaving" @click="saveAssignment">
-                  {{ assignmentSaving ? 'Saving...' : assignmentEditingId ? 'Update assignment' : 'Create assignment' }}
+                  {{ assignmentSaving ? tr('Saving...', '保存中...') : assignmentEditingId ? tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
                 </button>
                 <button
                   v-if="assignmentEditingId"
@@ -3149,20 +3149,20 @@
                   :disabled="assignmentSaving"
                   @click="resetAssignmentForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="assignments.length === 0" class="attendance__empty">No assignments yet.</div>
+              <div v-if="assignments.length === 0" class="attendance__empty">{{ tr('No assignments yet.', '暂无排班分配。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>User</th>
-                      <th>Shift</th>
-                      <th>Start</th>
-                      <th>End</th>
-                      <th>Active</th>
-                      <th>Actions</th>
+                      <th>{{ tr('User', '用户') }}</th>
+                      <th>{{ tr('Shift', '班次') }}</th>
+                      <th>{{ tr('Start', '开始') }}</th>
+                      <th>{{ tr('End', '结束') }}</th>
+                      <th>{{ tr('Active', '启用') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3171,14 +3171,14 @@
                       <td>{{ item.shift.name }}</td>
                       <td>{{ item.assignment.startDate }}</td>
                       <td>{{ item.assignment.endDate || '--' }}</td>
-                      <td>{{ item.assignment.isActive ? 'Yes' : 'No' }}</td>
+                      <td>{{ item.assignment.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editAssignment(item)">Edit</button>
+                        <button class="attendance__btn" @click="editAssignment(item)">{{ tr('Edit', '编辑') }}</button>
                         <button
                           class="attendance__btn attendance__btn--danger"
                           @click="deleteAssignment(item.assignment.id)"
                         >
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -3189,14 +3189,14 @@
 
             <div class="attendance__admin-section">
               <div class="attendance__admin-section-header">
-                <h4>Holidays</h4>
+                <h4>{{ tr('Holidays', '节假日') }}</h4>
                 <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
-                  {{ holidayLoading ? 'Loading...' : 'Reload holidays' }}
+                  {{ holidayLoading ? tr('Loading...', '加载中...') : tr('Reload holidays', '重载节假日') }}
                 </button>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-holiday-date">
-                  <span>Date</span>
+                  <span>{{ tr('Date', '日期') }}</span>
                   <input
                     id="attendance-holiday-date"
                     name="holidayDate"
@@ -3205,17 +3205,17 @@
                   />
                 </label>
                 <label class="attendance__field" for="attendance-holiday-name">
-                  <span>Name</span>
+                  <span>{{ tr('Name', '名称') }}</span>
                   <input
                     id="attendance-holiday-name"
                     name="holidayName"
                     v-model="holidayForm.name"
                     type="text"
-                    placeholder="Optional"
+                    :placeholder="tr('Optional', '可选')"
                   />
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-working">
-                  <span>Working day override</span>
+                  <span>{{ tr('Working day override', '工作日覆盖') }}</span>
                   <input
                     id="attendance-holiday-working"
                     name="holidayWorkingDay"
@@ -3226,7 +3226,7 @@
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="holidaySaving" @click="saveHoliday">
-                  {{ holidaySaving ? 'Saving...' : holidayEditingId ? 'Update holiday' : 'Create holiday' }}
+                  {{ holidaySaving ? tr('Saving...', '保存中...') : holidayEditingId ? tr('Update holiday', '更新节假日') : tr('Create holiday', '创建节假日') }}
                 </button>
                 <button
                   v-if="holidayEditingId"
@@ -3234,29 +3234,29 @@
                   :disabled="holidaySaving"
                   @click="resetHolidayForm"
                 >
-                  Cancel edit
+                  {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="holidays.length === 0" class="attendance__empty">No holidays in this range.</div>
+              <div v-if="holidays.length === 0" class="attendance__empty">{{ tr('No holidays in this range.', '当前范围内暂无节假日。') }}</div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
                     <tr>
-                      <th>Date</th>
-                      <th>Name</th>
-                      <th>Working day</th>
-                      <th>Actions</th>
+                      <th>{{ tr('Date', '日期') }}</th>
+                      <th>{{ tr('Name', '名称') }}</th>
+                      <th>{{ tr('Working day', '工作日') }}</th>
+                      <th>{{ tr('Actions', '操作') }}</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr v-for="holiday in holidays" :key="holiday.id">
                       <td>{{ holiday.date }}</td>
                       <td>{{ holiday.name || '--' }}</td>
-                      <td>{{ holiday.isWorkingDay ? 'Yes' : 'No' }}</td>
+                      <td>{{ holiday.isWorkingDay ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editHoliday(holiday)">Edit</button>
+                        <button class="attendance__btn" @click="editHoliday(holiday)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deleteHoliday(holiday.id)">
-                          Delete
+                          {{ tr('Delete', '删除') }}
                         </button>
                       </td>
                     </tr>
@@ -4149,18 +4149,18 @@ const canResumeImportJobFromStatus = computed(() => {
 const statusActionLabel = computed(() => {
   const action = statusMeta.value?.action
   if (!action) return ''
-  if (action === 'refresh-overview') return 'Retry refresh'
-  if (action === 'reload-admin') return 'Reload admin'
-  if (action === 'reload-import-job') return 'Reload import job'
-  if (action === 'resume-import-job') return 'Resume import job'
-  if (action === 'reload-import-csv') return 'Re-apply CSV'
-  if (action === 'retry-save-settings') return 'Retry save settings'
-  if (action === 'retry-save-rule') return 'Retry save rule'
-  if (action === 'retry-preview-import') return 'Retry preview'
-  if (action === 'retry-run-import' && canResumeImportJobFromStatus.value) return 'Resume import job'
-  if (action === 'retry-run-import') return 'Retry import'
-  if (action === 'retry-submit-request') return 'Retry submit request'
-  if (action === 'reload-requests') return 'Reload requests'
+  if (action === 'refresh-overview') return tr('Retry refresh', '重试刷新')
+  if (action === 'reload-admin') return tr('Reload admin', '重载管理数据')
+  if (action === 'reload-import-job') return tr('Reload import job', '重载导入任务')
+  if (action === 'resume-import-job') return tr('Resume import job', '恢复导入任务')
+  if (action === 'reload-import-csv') return tr('Re-apply CSV', '重新应用 CSV')
+  if (action === 'retry-save-settings') return tr('Retry save settings', '重试保存设置')
+  if (action === 'retry-save-rule') return tr('Retry save rule', '重试保存规则')
+  if (action === 'retry-preview-import') return tr('Retry preview', '重试预览')
+  if (action === 'retry-run-import' && canResumeImportJobFromStatus.value) return tr('Resume import job', '恢复导入任务')
+  if (action === 'retry-run-import') return tr('Retry import', '重试导入')
+  if (action === 'retry-submit-request') return tr('Retry submit request', '重试提交申请')
+  if (action === 'reload-requests') return tr('Reload requests', '重载申请')
   return ''
 })
 
@@ -8095,12 +8095,12 @@ async function loadApprovalFlows() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load approval flows')
+      throw new Error(data?.error?.message || tr('Failed to load approval flows', '加载审批流程失败'))
     }
     adminForbidden.value = false
     approvalFlows.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load approval flows', 'error')
+    setStatus(error?.message || tr('Failed to load approval flows', '加载审批流程失败'), 'error')
   } finally {
     approvalFlowLoading.value = false
   }
@@ -8111,11 +8111,11 @@ async function saveApprovalFlow() {
   const isEditing = Boolean(approvalFlowEditingId.value)
   try {
     if (!approvalFlowForm.name.trim()) {
-      throw new Error('Name is required')
+      throw new Error(tr('Name is required', '名称为必填项'))
     }
     const steps = parseApprovalStepsInput(approvalFlowForm.steps)
     if (steps === null) {
-      throw new Error('Invalid steps JSON')
+      throw new Error(tr('Invalid steps JSON', '步骤 JSON 格式无效'))
     }
     const payload = {
       name: approvalFlowForm.name.trim(),
@@ -8137,21 +8137,21 @@ async function saveApprovalFlow() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save approval flow')
+      throw new Error(data?.error?.message || tr('Failed to save approval flow', '保存审批流程失败'))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
     resetApprovalFlowForm()
-    setStatus(isEditing ? 'Approval flow updated.' : 'Approval flow created.')
+    setStatus(isEditing ? tr('Approval flow updated.', '审批流程已更新。') : tr('Approval flow created.', '审批流程已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save approval flow', 'error')
+    setStatus(error?.message || tr('Failed to save approval flow', '保存审批流程失败'), 'error')
   } finally {
     approvalFlowSaving.value = false
   }
 }
 
 async function deleteApprovalFlow(id: string) {
-  if (!window.confirm('Delete this approval flow?')) return
+  if (!window.confirm(tr('Delete this approval flow?', '确认删除该审批流程吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/approval-flows/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8160,13 +8160,13 @@ async function deleteApprovalFlow(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete approval flow')
+      throw new Error(data?.error?.message || tr('Failed to delete approval flow', '删除审批流程失败'))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
-    setStatus('Approval flow deleted.')
+    setStatus(tr('Approval flow deleted.', '审批流程已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete approval flow', 'error')
+    setStatus(error?.message || tr('Failed to delete approval flow', '删除审批流程失败'), 'error')
   }
 }
 
@@ -8197,7 +8197,7 @@ async function loadRotationRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rotation rules')
+      throw new Error(data?.error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'))
     }
     adminForbidden.value = false
     rotationRules.value = data.data.items || []
@@ -8205,7 +8205,7 @@ async function loadRotationRules() {
       rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rotation rules', 'error')
+    setStatus(error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'), 'error')
   } finally {
     rotationRuleLoading.value = false
   }
@@ -8216,11 +8216,11 @@ async function saveRotationRule() {
   const isEditing = Boolean(rotationRuleEditingId.value)
   try {
     if (!rotationRuleForm.name.trim()) {
-      throw new Error('Name is required')
+      throw new Error(tr('Name is required', '名称为必填项'))
     }
     const shiftSequence = parseShiftSequenceInput(rotationRuleForm.shiftSequence)
     if (shiftSequence.length === 0) {
-      throw new Error('Shift sequence required')
+      throw new Error(tr('Shift sequence required', '班次序列为必填项'))
     }
     const payload = {
       name: rotationRuleForm.name.trim(),
@@ -8242,21 +8242,21 @@ async function saveRotationRule() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save rotation rule')
+      throw new Error(data?.error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'))
     }
     adminForbidden.value = false
     await loadRotationRules()
     resetRotationRuleForm()
-    setStatus(isEditing ? 'Rotation rule updated.' : 'Rotation rule created.')
+    setStatus(isEditing ? tr('Rotation rule updated.', '轮班规则已更新。') : tr('Rotation rule created.', '轮班规则已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save rotation rule', 'error')
+    setStatus(error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'), 'error')
   } finally {
     rotationRuleSaving.value = false
   }
 }
 
 async function deleteRotationRule(id: string) {
-  if (!window.confirm('Delete this rotation rule?')) return
+  if (!window.confirm(tr('Delete this rotation rule?', '确认删除该轮班规则吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/rotation-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8265,14 +8265,14 @@ async function deleteRotationRule(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete rotation rule')
+      throw new Error(data?.error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'))
     }
     adminForbidden.value = false
     await loadRotationRules()
     await loadRotationAssignments()
-    setStatus('Rotation rule deleted.')
+    setStatus(tr('Rotation rule deleted.', '轮班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete rotation rule', 'error')
+    setStatus(error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'), 'error')
   }
 }
 
@@ -8305,12 +8305,12 @@ async function loadRotationAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rotation assignments')
+      throw new Error(data?.error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'))
     }
     adminForbidden.value = false
     rotationAssignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load rotation assignments', 'error')
+    setStatus(error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'), 'error')
   } finally {
     rotationAssignmentLoading.value = false
   }
@@ -8321,10 +8321,10 @@ async function saveRotationAssignment() {
   const isEditing = Boolean(rotationAssignmentEditingId.value)
   try {
     if (!rotationAssignmentForm.userId.trim()) {
-      throw new Error('User ID is required')
+      throw new Error(tr('User ID is required', '用户 ID 为必填项'))
     }
     if (!rotationAssignmentForm.rotationRuleId) {
-      throw new Error('Rotation rule is required')
+      throw new Error(tr('Rotation rule is required', '轮班规则为必填项'))
     }
     const endDate = rotationAssignmentForm.endDate.trim()
     const payload = {
@@ -8348,21 +8348,25 @@ async function saveRotationAssignment() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save rotation assignment')
+      throw new Error(data?.error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
     resetRotationAssignmentForm()
-    setStatus(isEditing ? 'Rotation assignment updated.' : 'Rotation assignment created.')
+    setStatus(
+      isEditing
+        ? tr('Rotation assignment updated.', '轮班分配已更新。')
+        : tr('Rotation assignment created.', '轮班分配已创建。')
+    )
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save rotation assignment', 'error')
+    setStatus(error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'), 'error')
   } finally {
     rotationAssignmentSaving.value = false
   }
 }
 
 async function deleteRotationAssignment(id: string) {
-  if (!window.confirm('Delete this rotation assignment?')) return
+  if (!window.confirm(tr('Delete this rotation assignment?', '确认删除该轮班分配吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/rotation-assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8371,13 +8375,13 @@ async function deleteRotationAssignment(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete rotation assignment')
+      throw new Error(data?.error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
-    setStatus('Rotation assignment deleted.')
+    setStatus(tr('Rotation assignment deleted.', '轮班分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete rotation assignment', 'error')
+    setStatus(error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'), 'error')
   }
 }
 
@@ -8416,7 +8420,7 @@ async function loadShifts() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load shifts')
+      throw new Error(data?.error?.message || tr('Failed to load shifts', '加载班次失败'))
     }
     adminForbidden.value = false
     shifts.value = data.data.items || []
@@ -8424,7 +8428,7 @@ async function loadShifts() {
       assignmentForm.shiftId = shifts.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load shifts', 'error')
+    setStatus(error?.message || tr('Failed to load shifts', '加载班次失败'), 'error')
   } finally {
     shiftLoading.value = false
   }
@@ -8458,21 +8462,21 @@ async function saveShift() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save shift')
+      throw new Error(data?.error?.message || tr('Failed to save shift', '保存班次失败'))
     }
     adminForbidden.value = false
     await loadShifts()
     resetShiftForm()
-    setStatus(isEditing ? 'Shift updated.' : 'Shift created.')
+    setStatus(isEditing ? tr('Shift updated.', '班次已更新。') : tr('Shift created.', '班次已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save shift', 'error')
+    setStatus(error?.message || tr('Failed to save shift', '保存班次失败'), 'error')
   } finally {
     shiftSaving.value = false
   }
 }
 
 async function deleteShift(id: string) {
-  if (!window.confirm('Delete this shift? Assignments will be removed.')) return
+  if (!window.confirm(tr('Delete this shift? Assignments will be removed.', '确认删除该班次吗？关联分配也会被移除。'))) return
   try {
     const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8481,14 +8485,14 @@ async function deleteShift(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete shift')
+      throw new Error(data?.error?.message || tr('Failed to delete shift', '删除班次失败'))
     }
     adminForbidden.value = false
     await loadShifts()
     await loadAssignments()
-    setStatus('Shift deleted.')
+    setStatus(tr('Shift deleted.', '班次已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete shift', 'error')
+    setStatus(error?.message || tr('Failed to delete shift', '删除班次失败'), 'error')
   }
 }
 
@@ -8521,12 +8525,12 @@ async function loadAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load assignments')
+      throw new Error(data?.error?.message || tr('Failed to load assignments', '加载分配失败'))
     }
     adminForbidden.value = false
     assignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load assignments', 'error')
+    setStatus(error?.message || tr('Failed to load assignments', '加载分配失败'), 'error')
   } finally {
     assignmentLoading.value = false
   }
@@ -8537,10 +8541,10 @@ async function saveAssignment() {
   const isEditing = Boolean(assignmentEditingId.value)
   try {
     if (!assignmentForm.userId.trim()) {
-      throw new Error('User ID is required')
+      throw new Error(tr('User ID is required', '用户 ID 为必填项'))
     }
     if (!assignmentForm.shiftId) {
-      throw new Error('Shift selection is required')
+      throw new Error(tr('Shift selection is required', '班次为必选项'))
     }
     const endDate = assignmentForm.endDate.trim()
     const payload = {
@@ -8564,21 +8568,21 @@ async function saveAssignment() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save assignment')
+      throw new Error(data?.error?.message || tr('Failed to save assignment', '保存分配失败'))
     }
     adminForbidden.value = false
     await loadAssignments()
     resetAssignmentForm()
-    setStatus(isEditing ? 'Assignment updated.' : 'Assignment created.')
+    setStatus(isEditing ? tr('Assignment updated.', '分配已更新。') : tr('Assignment created.', '分配已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save assignment', 'error')
+    setStatus(error?.message || tr('Failed to save assignment', '保存分配失败'), 'error')
   } finally {
     assignmentSaving.value = false
   }
 }
 
 async function deleteAssignment(id: string) {
-  if (!window.confirm('Delete this assignment?')) return
+  if (!window.confirm(tr('Delete this assignment?', '确认删除该分配吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8587,13 +8591,13 @@ async function deleteAssignment(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete assignment')
+      throw new Error(data?.error?.message || tr('Failed to delete assignment', '删除分配失败'))
     }
     adminForbidden.value = false
     await loadAssignments()
-    setStatus('Assignment deleted.')
+    setStatus(tr('Assignment deleted.', '分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete assignment', 'error')
+    setStatus(error?.message || tr('Failed to delete assignment', '删除分配失败'), 'error')
   }
 }
 
@@ -8622,11 +8626,11 @@ async function loadHolidays() {
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load holidays')
+      throw new Error(data?.error?.message || tr('Failed to load holidays', '加载节假日失败'))
     }
     holidays.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load holidays', 'error')
+    setStatus(error?.message || tr('Failed to load holidays', '加载节假日失败'), 'error')
   } finally {
     holidayLoading.value = false
   }
@@ -8637,7 +8641,7 @@ async function saveHoliday() {
   const isEditing = Boolean(holidayEditingId.value)
   try {
     if (!holidayForm.date) {
-      throw new Error('Holiday date is required')
+      throw new Error(tr('Holiday date is required', '节假日日期为必填项'))
     }
     const payload = {
       date: holidayForm.date,
@@ -8658,21 +8662,21 @@ async function saveHoliday() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save holiday')
+      throw new Error(data?.error?.message || tr('Failed to save holiday', '保存节假日失败'))
     }
     adminForbidden.value = false
     await loadHolidays()
     resetHolidayForm()
-    setStatus(isEditing ? 'Holiday updated.' : 'Holiday created.')
+    setStatus(isEditing ? tr('Holiday updated.', '节假日已更新。') : tr('Holiday created.', '节假日已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to save holiday', 'error')
+    setStatus(error?.message || tr('Failed to save holiday', '保存节假日失败'), 'error')
   } finally {
     holidaySaving.value = false
   }
 }
 
 async function deleteHoliday(id: string) {
-  if (!window.confirm('Delete this holiday?')) return
+  if (!window.confirm(tr('Delete this holiday?', '确认删除该节假日吗？'))) return
   try {
     const response = await apiFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
@@ -8681,13 +8685,13 @@ async function deleteHoliday(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete holiday')
+      throw new Error(data?.error?.message || tr('Failed to delete holiday', '删除节假日失败'))
     }
     adminForbidden.value = false
     await loadHolidays()
-    setStatus('Holiday deleted.')
+    setStatus(tr('Holiday deleted.', '节假日已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to delete holiday', 'error')
+    setStatus(error?.message || tr('Failed to delete holiday', '删除节假日失败'), 'error')
   }
 }
 
