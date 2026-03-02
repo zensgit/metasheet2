@@ -55,6 +55,10 @@ const importJobPollRecoveryGraceMs = Math.max(
   60_000,
   Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 10 * 60 * 1000),
 )
+const importJobRecoveryAttemptsRaw = Number(process.env.IMPORT_JOB_RECOVERY_ATTEMPTS || 3)
+const importJobRecoveryAttempts = Number.isFinite(importJobRecoveryAttemptsRaw)
+  ? Math.min(8, Math.max(1, Math.floor(importJobRecoveryAttemptsRaw)))
+  : 3
 
 // Disabled by default: group creation/membership is persistent (not rolled back with import rollback).
 const groupSyncEnabled = process.env.GROUP_SYNC === 'true'
@@ -485,6 +489,44 @@ async function recoverAsyncCommitJobByIdempotency({
   return pollImportJob(jobId, { timeoutMs, intervalMs })
 }
 
+async function recoverAsyncCommitJobWithRetry({
+  basePayload,
+  idempotencyKey,
+  timeoutMs,
+  intervalMs,
+}) {
+  let lastError = null
+  for (let recoveryAttempt = 1; recoveryAttempt <= importJobRecoveryAttempts; recoveryAttempt += 1) {
+    try {
+      return await recoverAsyncCommitJobByIdempotency({
+        basePayload,
+        idempotencyKey,
+        timeoutMs,
+        intervalMs,
+      })
+    } catch (error) {
+      lastError = error
+      const message = (error && error.message) || String(error)
+      const timedOut = isAsyncCommitPollTimeoutFailure(error)
+      log(
+        `WARN: commit-async idempotency recovery attempt ${recoveryAttempt}/${importJobRecoveryAttempts} failed (${message})`,
+      )
+      if (!timedOut || recoveryAttempt >= importJobRecoveryAttempts) {
+        throw error
+      }
+      const delayMs = computeRetryDelayMs({
+        baseDelayMs: mutationRetryDelayMs,
+        attempt: recoveryAttempt,
+        maxDelayMs: mutationRetryMaxDelayMs,
+        jitterRatio: retryJitterRatio,
+      })
+      log(`WARN: commit-async recovery retrying after timeout in ${delayMs}ms`)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError || new Error('commit-async idempotency recovery failed')
+}
+
 async function run() {
   if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
@@ -496,7 +538,7 @@ async function run() {
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
-    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs}`,
+    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} recovery_attempts=${importJobRecoveryAttempts}`,
   )
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
@@ -753,7 +795,7 @@ async function run() {
         const pollTimedOut = isAsyncCommitPollTimeoutFailure(retryableError)
         if (pollTimedOut) {
           try {
-            const recovered = await recoverAsyncCommitJobByIdempotency({
+            const recovered = await recoverAsyncCommitJobWithRetry({
               basePayload,
               idempotencyKey: commitIdempotencyKey,
               timeoutMs: importJobPollRecoveryGraceMs,
