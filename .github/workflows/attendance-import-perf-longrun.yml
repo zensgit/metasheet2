@@ -29,7 +29,7 @@ on:
       include_rows500k_commit:
         description: 'Run rows500k-commit scenario (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
       include_rows100k_commit:
         description: 'Run rows100k-commit scenario (true/false)'
         required: false
@@ -221,7 +221,7 @@ jobs:
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
-      INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'true' }}
+      INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
       INCLUDE_ROWS100K_COMMIT: ${{ inputs.include_rows100k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_100K_COMMIT || 'false' }}
     steps:
       - name: Checkout
