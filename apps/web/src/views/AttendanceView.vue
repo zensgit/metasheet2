@@ -4994,7 +4994,7 @@ function syncImportModeToPayload() {
 }
 
 function payrollTemplateName(templateId?: string | null): string {
-  if (!templateId) return 'Manual'
+  if (!templateId) return tr('Manual', '手工')
   const found = payrollTemplates.value.find(item => item.id === templateId)
   return found?.name ?? templateId
 }
@@ -5006,15 +5006,15 @@ async function loadImportTemplate() {
     const response = await apiFetch('/api/attendance/import/template')
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import template')
+      throw new Error(data?.error?.message || tr('Failed to load import template', '加载导入模板失败'))
     }
     const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
     importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
     importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
-    setStatus('Import template loaded.')
+    setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
-    setStatus((error as Error).message || 'Failed to load import template', 'error')
+    setStatus((error as Error).message || tr('Failed to load import template', '加载导入模板失败'), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5023,12 +5023,12 @@ async function loadImportTemplate() {
 function applyImportProfile() {
   const profile = selectedImportProfile.value
   if (!profile) {
-    setStatus('Select an import mapping profile first.', 'error')
+    setStatus(tr('Select an import mapping profile first.', '请先选择导入映射配置。'), 'error')
     return
   }
   const base = parseJsonConfig(importForm.payload)
   if (!base) {
-    setStatus('Import payload must be valid JSON before applying profile.', 'error')
+    setStatus(tr('Import payload must be valid JSON before applying profile.', '应用配置前，导入载荷必须是合法 JSON。'), 'error')
     return
   }
   let next = { ...base }
@@ -5042,7 +5042,7 @@ function applyImportProfile() {
   }
   next.mappingProfileId = profile.id
   importForm.payload = JSON.stringify(next, null, 2)
-  setStatus(`Applied mapping profile: ${profile.name}`)
+  setStatus(tr(`Applied mapping profile: ${profile.name}`, `已应用映射配置：${profile.name}`))
 }
 
 function splitListInput(value: string): string[] {
@@ -5112,13 +5112,13 @@ async function handleImportUserMapChange(event: Event) {
     const keyField = resolveImportUserMapKeyField()
     const normalized = normalizeUserMapPayload(parsed, keyField)
     if (!normalized) {
-      throw new Error('User map JSON format not recognized. Provide mapping object or array with key field.')
+      throw new Error(tr('User map JSON format not recognized. Provide mapping object or array with key field.', '无法识别用户映射 JSON 格式。请提供映射对象或包含关键字段的数组。'))
     }
     importUserMap.value = normalized
-    setStatus(`User map loaded (${Object.keys(normalized).length} entries).`)
+    setStatus(tr(`User map loaded (${Object.keys(normalized).length} entries).`, `用户映射已加载（${Object.keys(normalized).length} 条）。`))
   } catch (error) {
     importUserMap.value = null
-    importUserMapError.value = (error as Error).message || 'Failed to parse user map JSON'
+    importUserMapError.value = (error as Error).message || tr('Failed to parse user map JSON', '解析用户映射 JSON 失败')
     setStatus(importUserMapError.value, 'error')
   }
 }
@@ -5141,10 +5141,10 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
 
   const data = await response.json().catch(() => ({} as any))
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || `Failed to upload CSV (HTTP ${response.status})`)
+    throw new Error(data?.error?.message || tr(`Failed to upload CSV (HTTP ${response.status})`, `上传 CSV 失败（HTTP ${response.status}）`))
   }
   const fileId = String(data.data?.fileId || '')
-  if (!fileId) throw new Error('Upload did not return fileId')
+  if (!fileId) throw new Error(tr('Upload did not return fileId', '上传接口未返回 fileId'))
   const rowCount = Number(data.data?.rowCount ?? 0)
   const bytes = Number(data.data?.bytes ?? 0)
   const expiresAt = String(data.data?.expiresAt ?? '')
@@ -5153,8 +5153,8 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
 
 async function applyImportCsvFile() {
   if (!importCsvFile.value) {
-    setStatus('Select a CSV file first.', 'error', {
-      hint: 'Choose a CSV file, then retry preview/import.',
+    setStatus(tr('Select a CSV file first.', '请先选择 CSV 文件。'), 'error', {
+      hint: tr('Choose a CSV file, then retry preview/import.', '选择 CSV 文件后，再重试预览或导入。'),
       action: 'retry-preview-import',
     })
     return
@@ -5189,7 +5189,12 @@ async function applyImportCsvFile() {
       importCsvFileExpiresAt.value = uploaded.expiresAt
       next.csvFileId = uploaded.fileId
       delete next.csvText
-      setStatus(`CSV uploaded: ${importCsvFileName.value || 'file'} (${importCsvFileRowCountHint.value ?? 'unknown'} rows).`)
+      setStatus(
+        tr(
+          `CSV uploaded: ${importCsvFileName.value || 'file'} (${importCsvFileRowCountHint.value ?? 'unknown'} rows).`,
+          `CSV 已上传：${importCsvFileName.value || '文件'}（${importCsvFileRowCountHint.value ?? '未知'} 行）。`
+        )
+      )
     } else {
       const csvText = await file.text()
       importCsvFileId.value = ''
@@ -5197,12 +5202,12 @@ async function applyImportCsvFile() {
       importCsvFileExpiresAt.value = ''
       next.csvText = csvText
       delete next.csvFileId
-      setStatus(`CSV loaded: ${importCsvFileName.value || 'file'}`)
+      setStatus(tr(`CSV loaded: ${importCsvFileName.value || 'file'}`, `CSV 已加载：${importCsvFileName.value || '文件'}`))
     }
 
     importForm.payload = JSON.stringify(next, null, 2)
   } catch (error) {
-    setStatusFromError(error, 'Failed to load CSV', 'import-preview')
+    setStatusFromError(error, tr('Failed to load CSV', '加载 CSV 失败'), 'import-preview')
   }
 }
 
@@ -5229,13 +5234,13 @@ async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {})
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to prepare import token')
+      throw new Error(data?.error?.message || tr('Failed to prepare import token', '准备导入令牌失败'))
     }
     importCommitToken.value = data.data?.commitToken ?? ''
     importCommitTokenExpiresAt.value = data.data?.expiresAt ?? ''
     return Boolean(importCommitToken.value)
   } catch (error) {
-    setStatus((error as Error).message || 'Failed to prepare import token', 'error')
+    setStatus((error as Error).message || tr('Failed to prepare import token', '准备导入令牌失败'), 'error')
     return false
   }
 }
@@ -5267,13 +5272,13 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
 
   for (let chunkIndex = 0; chunkIndex < plan.chunkCount; chunkIndex += 1) {
     if (seq !== importPreviewTaskSeq) {
-      throw new Error('Preview task canceled')
+      throw new Error(tr('Preview task canceled', '预览任务已取消'))
     }
 
     const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
     const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
     const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
-    if (!tokenOk) throw new Error('Failed to prepare import token')
+    if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
     if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
     const response = await apiFetch('/api/attendance/import/preview', {
@@ -5282,7 +5287,10 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
     })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || `Failed to preview chunk ${chunkIndex + 1}/${plan.chunkCount}`)
+      throw new Error(data?.error?.message || tr(
+        `Failed to preview chunk ${chunkIndex + 1}/${plan.chunkCount}`,
+        `预览分片 ${chunkIndex + 1}/${plan.chunkCount} 失败`
+      ))
     }
 
     const chunkItems = Array.isArray(data.data?.items) ? data.data.items as AttendanceImportPreviewItem[] : []
@@ -5324,14 +5332,19 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
   }
 
   if (seq !== importPreviewTaskSeq) {
-    throw new Error('Preview task canceled')
+    throw new Error(tr('Preview task canceled', '预览任务已取消'))
   }
 
   importPreview.value = aggregatedItems
   importCsvWarnings.value = Array.from(warningSet)
   const shown = aggregatedItems.length
-  const message = `Preview loaded (chunked ${plan.chunkCount} chunks, showing ${shown}/${totalRowCount} rows).`
-  const suffix = invalidCount || duplicateCount ? ` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.` : ''
+  const message = tr(
+    `Preview loaded (chunked ${plan.chunkCount} chunks, showing ${shown}/${totalRowCount} rows).`,
+    `预览已加载（分片 ${plan.chunkCount} 个，显示 ${shown}/${totalRowCount} 行）。`
+  )
+  const suffix = invalidCount || duplicateCount
+    ? tr(` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.`, ` 无效：${invalidCount}。重复：${duplicateCount}。`)
+    : ''
   setStatus(`${message}${suffix}`)
 
   importPreviewTask.value = {
@@ -5341,7 +5354,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
     processedRows: plan.totalRows,
     totalChunks: plan.chunkCount,
     completedChunks: plan.chunkCount,
-    message: `Completed in ${plan.chunkCount} chunk(s).`,
+    message: tr(`Completed in ${plan.chunkCount} chunk(s).`, `已完成，共 ${plan.chunkCount} 个分片。`),
   }
 }
 
@@ -5353,7 +5366,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     processedRows: 0,
     totalChunks: 1,
     completedChunks: 0,
-    message: 'Queued async preview job.',
+    message: tr('Queued async preview job.', '已排队异步预览任务。'),
   }
 
   const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
@@ -5375,7 +5388,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
       importCommitTokenExpiresAt.value = ''
       const refreshed = await ensureImportCommitToken({ forceRefresh: true })
       if (!refreshed || !importCommitToken.value) {
-        throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
+        throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
       }
       payload.commitToken = importCommitToken.value
       asyncResponse = await apiFetch('/api/attendance/import/preview-async', {
@@ -5387,22 +5400,22 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
   }
 
   if (!asyncResponse.ok || !asyncData?.ok) {
-    throw createApiError(asyncResponse, asyncData, 'Failed to queue async preview')
+    throw createApiError(asyncResponse, asyncData, tr('Failed to queue async preview', '排队异步预览失败'))
   }
 
   const job = asyncData.data?.job as AttendanceImportJob | undefined
   if (!job?.id) {
-    throw new Error('Async preview did not return job id')
+    throw new Error(tr('Async preview did not return job id', '异步预览未返回任务 ID'))
   }
 
   adminForbidden.value = false
   importAsyncJob.value = job
-  setStatus(`Preview job queued (${job.status}).`)
+  setStatus(tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`))
 
   const finalJob = await pollImportJob(job.id)
   const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
   if (!previewData) {
-    throw new Error('Async preview completed without preview payload')
+    throw new Error(tr('Async preview completed without preview payload', '异步预览完成但缺少预览载荷'))
   }
 
   const items = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
@@ -5420,9 +5433,11 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
   const invalidCount = stats && Number.isFinite(Number((stats as any).invalid)) ? Number((stats as any).invalid) : 0
   const dupCount = stats && Number.isFinite(Number((stats as any).duplicates)) ? Number((stats as any).duplicates) : 0
   const baseMsg = truncated && Number.isFinite(rowCount)
-    ? `Preview loaded (async, showing ${shown}/${rowCount} rows).`
-    : `Preview loaded (async ${shown} rows).`
-  const suffix = invalidCount || dupCount ? ` Invalid: ${invalidCount}. Duplicates: ${dupCount}.` : ''
+    ? tr(`Preview loaded (async, showing ${shown}/${rowCount} rows).`, `预览已加载（异步，显示 ${shown}/${rowCount} 行）。`)
+    : tr(`Preview loaded (async ${shown} rows).`, `预览已加载（异步 ${shown} 行）。`)
+  const suffix = invalidCount || dupCount
+    ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
+    : ''
   setStatus(`${baseMsg}${suffix}`)
 
   importPreviewTask.value = {
@@ -5432,7 +5447,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     processedRows: Number.isFinite(rowCount) ? rowCount : shown,
     totalChunks: 1,
     completedChunks: 1,
-    message: `Completed via async preview job (${job.id.slice(0, 8)}...).`,
+    message: tr(`Completed via async preview job (${job.id.slice(0, 8)}...).`, `异步预览任务已完成（${job.id.slice(0, 8)}...）。`),
   }
 
   importCommitToken.value = ''
@@ -5445,8 +5460,8 @@ async function previewImport() {
   clearImportAsyncJob()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus('Invalid JSON payload for import.', 'error', {
-      hint: 'Fix JSON syntax in payload and retry preview.',
+    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+      hint: tr('Fix JSON syntax in payload and retry preview.', '请修复载荷 JSON 语法后重试预览。'),
       action: 'retry-preview-import',
     })
     return
@@ -5482,7 +5497,7 @@ async function previewImport() {
         importPreviewTask.value = {
           ...importPreviewTask.value,
           status: 'failed',
-          message: 'Failed to prepare import token',
+          message: tr('Failed to prepare import token', '准备导入令牌失败'),
         }
       }
       return
@@ -5494,7 +5509,7 @@ async function previewImport() {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Failed to preview import')
+      throw createApiError(response, data, tr('Failed to preview import', '预览导入失败'))
     }
     importPreview.value = data.data?.items ?? []
     const rowCount = Number(data.data?.rowCount)
@@ -5509,9 +5524,11 @@ async function previewImport() {
     const invalidCount = stats && Number.isFinite(Number((stats as any).invalid)) ? Number((stats as any).invalid) : 0
     const dupCount = stats && Number.isFinite(Number((stats as any).duplicates)) ? Number((stats as any).duplicates) : 0
     const baseMsg = truncated && Number.isFinite(rowCount)
-      ? `Preview loaded (showing ${shown}/${rowCount} rows).`
-      : `Preview loaded (${shown} rows).`
-    const suffix = invalidCount || dupCount ? ` Invalid: ${invalidCount}. Duplicates: ${dupCount}.` : ''
+      ? tr(`Preview loaded (showing ${shown}/${rowCount} rows).`, `预览已加载（显示 ${shown}/${rowCount} 行）。`)
+      : tr(`Preview loaded (${shown} rows).`, `预览已加载（${shown} 行）。`)
+    const suffix = invalidCount || dupCount
+      ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
+      : ''
     setStatus(`${baseMsg}${suffix}`)
     importPreviewTask.value = {
       mode: 'single',
@@ -5530,10 +5547,10 @@ async function previewImport() {
       importPreviewTask.value = {
         ...importPreviewTask.value,
         status: 'failed',
-        message: (error as Error).message || 'Preview failed',
+        message: (error as Error).message || tr('Preview failed', '预览失败'),
       }
     }
-    setStatusFromError(error, 'Failed to preview import', 'import-preview')
+    setStatusFromError(error, tr('Failed to preview import', '预览导入失败'), 'import-preview')
   } finally {
     importLoading.value = false
   }
@@ -5545,7 +5562,7 @@ async function fetchImportJob(jobId: string): Promise<AttendanceImportJob> {
   const response = await apiFetch(`/api/attendance/import/jobs/${encodeURIComponent(jobId)}`)
   const data = await response.json().catch(() => ({}))
   if (!response.ok || !data.ok) {
-    throw createApiError(response, data, 'Failed to load import job')
+    throw createApiError(response, data, tr('Failed to load import job', '加载导入任务失败'))
   }
   return (data.data ?? data) as AttendanceImportJob
 }
@@ -5564,23 +5581,23 @@ async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
     while (seq === importJobPollSeq) {
       if (importDebugTimeoutPending) {
         importDebugTimeoutPending = false
-        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', 'Import job timed out')
+        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', tr('Import job timed out', '导入任务超时'))
       }
       const job = await fetchImportJob(jobId)
       importAsyncJob.value = job
       if (job.status === 'completed') return job
       if (job.status === 'failed') {
-        throw createImportJobStateError('IMPORT_JOB_FAILED', job.error || 'Import job failed')
+        throw createImportJobStateError('IMPORT_JOB_FAILED', job.error || tr('Import job failed', '导入任务失败'))
       }
       if (job.status === 'canceled') {
-        throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job canceled')
+        throw createImportJobStateError('IMPORT_JOB_CANCELED', tr('Import job canceled', '导入任务已取消'))
       }
       if (Date.now() - startedAt > importAsyncPollTimeoutMs) {
-        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', 'Import job timed out')
+        throw createImportJobStateError('IMPORT_JOB_TIMEOUT', tr('Import job timed out', '导入任务超时'))
       }
       await sleep(importAsyncPollIntervalMs)
     }
-    throw createImportJobStateError('IMPORT_JOB_CANCELED', 'Import job polling canceled')
+    throw createImportJobStateError('IMPORT_JOB_CANCELED', tr('Import job polling canceled', '导入任务轮询已取消'))
   } finally {
     if (seq === importJobPollSeq) importAsyncPolling.value = false
   }
@@ -5589,16 +5606,16 @@ async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
 async function refreshImportAsyncJob(options: { silent?: boolean } = {}) {
   const jobId = String(importAsyncJob.value?.id || '').trim()
   if (!jobId) {
-    if (!options.silent) setStatus('No async import job selected.', 'error')
+    if (!options.silent) setStatus(tr('No async import job selected.', '未选择异步导入任务。'), 'error')
     return
   }
   try {
     const job = await fetchImportJob(jobId)
     importAsyncJob.value = job
-    if (!options.silent) setStatus(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`)
+    if (!options.silent) setStatus(tr(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`, `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`))
   } catch (error) {
     if (!options.silent) {
-      setStatusFromError(error, 'Failed to reload import job', 'import-run')
+      setStatusFromError(error, tr('Failed to reload import job', '重载导入任务失败'), 'import-run')
     }
   }
 }
@@ -5606,7 +5623,7 @@ async function refreshImportAsyncJob(options: { silent?: boolean } = {}) {
 async function resumeImportAsyncJobPolling() {
   const jobId = String(importAsyncJob.value?.id || '').trim()
   if (!jobId) {
-    setStatus('No async import job selected.', 'error')
+    setStatus(tr('No async import job selected.', '未选择异步导入任务。'), 'error')
     return
   }
   try {
@@ -5616,20 +5633,20 @@ async function resumeImportAsyncJobPolling() {
       if (previewData) {
         importPreview.value = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
       }
-      setStatus(`Preview job completed (${jobId.slice(0, 8)}).`)
+      setStatus(tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`))
       return
     }
     const imported = Number(finalJob.progress ?? 0)
     const total = Number(finalJob.total ?? 0)
     if (total && imported !== total) {
-      setStatus(`Imported ${imported}/${total} rows (async job).`)
+      setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
     } else {
-      setStatus(`Imported ${imported} rows (async job).`)
+      setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
     }
     await loadRecords()
     await loadImportBatches()
   } catch (error) {
-    setStatusFromError(error, 'Failed while polling import job', 'import-run')
+    setStatusFromError(error, tr('Failed while polling import job', '轮询导入任务失败'), 'import-run')
   }
 }
 
@@ -5644,8 +5661,8 @@ async function runImport() {
   clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus('Invalid JSON payload for import.', 'error', {
-      hint: 'Fix JSON syntax in payload and retry import.',
+    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+      hint: tr('Fix JSON syntax in payload and retry import.', '请修复载荷 JSON 语法后重试导入。'),
       action: 'retry-run-import',
     })
     return
@@ -5676,7 +5693,7 @@ async function runImport() {
           importCommitTokenExpiresAt.value = ''
           const refreshed = await ensureImportCommitToken({ forceRefresh: true })
           if (!refreshed || !importCommitToken.value) {
-            throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
+            throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
           }
           payload.commitToken = importCommitToken.value
           asyncResponse = await apiFetch('/api/attendance/import/commit-async', {
@@ -5690,18 +5707,18 @@ async function runImport() {
       if (asyncResponse && asyncResponse.ok && asyncData?.ok) {
         const job = asyncData.data?.job as AttendanceImportJob | undefined
         if (!job?.id) {
-          throw new Error('Async import did not return job id')
+          throw new Error(tr('Async import did not return job id', '异步导入未返回任务 ID'))
         }
         adminForbidden.value = false
         importAsyncJob.value = job
-        setStatus(`Import job queued (${job.status}).`)
+        setStatus(tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`))
 
         const finalJob = await pollImportJob(job.id)
         const imported = Number(finalJob.progress ?? 0)
         const total = Number(finalJob.total ?? 0)
-        setStatus(`Imported ${imported} rows (async job).`)
+        setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
         if (total && imported !== total) {
-          setStatus(`Imported ${imported}/${total} rows (async job).`)
+          setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
         }
 
         await loadRecords()
@@ -5736,7 +5753,7 @@ async function runImport() {
         importCommitTokenExpiresAt.value = ''
         const refreshed = await ensureImportCommitToken({ forceRefresh: true })
         if (!refreshed || !importCommitToken.value) {
-          throw new Error('Failed to refresh import commit token. Check server deployment/migrations.')
+          throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
         }
         payload.commitToken = importCommitToken.value
         response = await apiFetch('/api/attendance/import/commit', {
@@ -5747,7 +5764,7 @@ async function runImport() {
       }
     }
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Failed to import attendance')
+      throw createApiError(response, data, tr('Failed to import attendance', '导入考勤失败'))
     }
     adminForbidden.value = false
     const importWarnings = [
@@ -5759,16 +5776,16 @@ async function runImport() {
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
     if (groupCreated || groupMembersAdded) {
-      setStatus(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`)
+      setStatus(tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`))
     } else {
-      setStatus(`Imported ${count} rows.`)
+      setStatus(tr(`Imported ${count} rows.`, `已导入 ${count} 行。`))
     }
     await loadRecords()
     await loadImportBatches()
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    setStatusFromError(error, 'Failed to import attendance', 'import-run')
+    setStatusFromError(error, tr('Failed to import attendance', '导入考勤失败'), 'import-run')
   } finally {
     importLoading.value = false
   }
@@ -5801,11 +5818,11 @@ async function loadImportBatches() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import batches')
+      throw new Error(data?.error?.message || tr('Failed to load import batches', '加载导入批次失败'))
     }
     importBatches.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load import batches', 'error')
+    setStatus(error?.message || tr('Failed to load import batches', '加载导入批次失败'), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5822,13 +5839,13 @@ async function loadImportBatchItems(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import batch items')
+      throw new Error(data?.error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'))
     }
     importBatchSelectedId.value = batchId
     importBatchItems.value = data.data?.items ?? []
     importBatchSnapshot.value = null
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load import batch items', 'error')
+    setStatus(error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5857,7 +5874,7 @@ async function rollbackImportBatch(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to rollback import batch')
+      throw new Error(data?.error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'))
     }
     await loadImportBatches()
     if (importBatchSelectedId.value === batchId) {
@@ -5929,11 +5946,11 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
     const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${params.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || 'Failed to load import items')
+      throw new Error(data?.error?.message || tr('Failed to load import items', '加载导入条目失败'))
     }
     const pageItems = Array.isArray(data.data?.items) ? data.data.items : []
     items.push(...pageItems)
@@ -5950,7 +5967,7 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
 async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
   const batchId = importBatchSelectedId.value
   if (!batchId) {
-    setStatus('Select a batch first.', 'error')
+    setStatus(tr('Select a batch first.', '请先选择批次。'), 'error')
     return
   }
   importLoading.value = true
@@ -5966,26 +5983,26 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     })
     if (serverResponse.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     if (serverResponse.ok) {
       const csvText = await serverResponse.text()
       const stamp = new Date().toISOString().slice(0, 10)
       const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
       downloadCsvText(filename, csvText)
-      setStatus('CSV exported.')
+      setStatus(tr('CSV exported.', 'CSV 已导出。'))
       return
     }
 
     // Backward-compatible fallback for older deployments without the export endpoint.
     if (serverResponse.status !== 404) {
       const errorText = await serverResponse.text().catch(() => '')
-      throw new Error(errorText || `Failed to export CSV (HTTP ${serverResponse.status})`)
+      throw new Error(errorText || tr(`Failed to export CSV (HTTP ${serverResponse.status})`, `导出 CSV 失败（HTTP ${serverResponse.status}）`))
     }
 
     const allItems = await fetchAllImportBatchItems(batchId)
     if (allItems.length === 0) {
-      setStatus('No batch items found.', 'error')
+      setStatus(tr('No batch items found.', '未找到批次明细。'), 'error')
       return
     }
     allItems.sort((a, b) => {
@@ -6067,9 +6084,9 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     const stamp = new Date().toISOString().slice(0, 10)
     const filename = `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`
     downloadCsvText(filename, lines.join('\n'))
-    setStatus(`CSV exported (${rows.length}/${allItems.length}).`)
+    setStatus(tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`))
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to export CSV', 'error')
+    setStatus(error?.message || tr('Failed to export CSV', '导出 CSV 失败'), 'error')
   } finally {
     importLoading.value = false
   }
@@ -7123,19 +7140,19 @@ async function loadAuditLogs(page: number) {
     }
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || 'Failed to load audit logs')
+      throw new Error(data?.error?.message || tr('Failed to load audit logs', '加载审计日志失败'))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     auditLogs.value = items
     auditLogTotal.value = Number(data.data?.total ?? items.length) || 0
     auditLogPage.value = Number(data.data?.page ?? page) || page
-    setAuditLogStatus(`Loaded ${items.length} log(s).`)
+    setAuditLogStatus(tr(`Loaded ${items.length} log(s).`, `已加载 ${items.length} 条日志。`))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || 'Failed to load audit logs', 'error')
+    setAuditLogStatus(error?.message || tr('Failed to load audit logs', '加载审计日志失败'), 'error')
   } finally {
     auditLogLoading.value = false
   }
@@ -7154,12 +7171,12 @@ async function punch(eventType: 'check_in' | 'check_out') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Punch failed')
+      throw new Error(data?.error?.message || tr('Punch failed', '打卡失败'))
     }
-    setStatus(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`)
+    setStatus(tr(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`, `${eventType === 'check_in' ? '上班打卡' : '下班打卡'}已记录。`))
     await refreshAll()
   } catch (error: any) {
-    setStatus(error?.message || 'Punch failed', 'error')
+    setStatus(error?.message || tr('Punch failed', '打卡失败'), 'error')
   } finally {
     punching.value = false
   }
@@ -7175,7 +7192,7 @@ async function loadSummary() {
   const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || 'Failed to load summary')
+    throw new Error(data?.error?.message || tr('Failed to load summary', '加载汇总失败'))
   }
   summary.value = data.data
 }
@@ -7192,7 +7209,7 @@ async function loadRecords() {
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || 'Failed to load records')
+    throw new Error(data?.error?.message || tr('Failed to load records', '加载记录失败'))
   }
   records.value = data.data.items
   recordsTotal.value = data.data.total
@@ -7210,7 +7227,7 @@ async function loadRequests() {
   const response = await apiFetch(`/api/attendance/requests?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || 'Failed to load requests')
+    throw new Error(data?.error?.message || tr('Failed to load requests', '加载申请失败'))
   }
   requests.value = data.data.items
 }
@@ -7229,7 +7246,7 @@ async function loadAnomalies() {
     const response = await apiFetch(`/api/attendance/anomalies?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load anomalies')
+      throw new Error(data?.error?.message || tr('Failed to load anomalies', '加载异常失败'))
     }
     anomalies.value = data.data?.items ?? []
   } finally {
@@ -7249,11 +7266,11 @@ async function loadRequestReport() {
     const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load request report')
+      throw new Error(data?.error?.message || tr('Failed to load request report', '加载申请报表失败'))
     }
     requestReport.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || 'Failed to load request report', 'error')
+    setStatus(error?.message || tr('Failed to load request report', '加载申请报表失败'), 'error')
   } finally {
     reportLoading.value = false
   }
@@ -7267,7 +7284,7 @@ async function refreshAll() {
   try {
     await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
-    setStatusFromError(error, 'Refresh failed', 'refresh')
+    setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
     loading.value = false
   }
@@ -7284,7 +7301,7 @@ function shiftMonth(delta: number) {
 }
 
 function validateRequestForm(): string | null {
-  if (!requestForm.workDate) return 'Work date is required'
+  if (!requestForm.workDate) return tr('Work date is required', '工作日期为必填项')
 
   const requestType = requestForm.requestType
   const hasIn = Boolean(requestForm.requestedInAt)
@@ -7294,36 +7311,36 @@ function validateRequestForm(): string | null {
     const inTime = new Date(requestForm.requestedInAt).getTime()
     const outTime = new Date(requestForm.requestedOutAt).getTime()
     if (Number.isFinite(inTime) && Number.isFinite(outTime) && outTime <= inTime) {
-      return 'End time must be after start time'
+      return tr('End time must be after start time', '结束时间必须晚于开始时间')
     }
   }
 
   if (requestType === 'missed_check_in' && !hasIn) {
-    return 'Requested in time is required'
+    return tr('Requested in time is required', '补签上班时间为必填项')
   }
   if (requestType === 'missed_check_out' && !hasOut) {
-    return 'Requested out time is required'
+    return tr('Requested out time is required', '补签下班时间为必填项')
   }
   if (requestType === 'time_correction' && !hasIn && !hasOut) {
-    return 'Provide requested in or out time'
+    return tr('Provide requested in or out time', '请提供补签上班或下班时间')
   }
 
   if (requestType === 'leave') {
-    if (!requestForm.leaveTypeId) return 'Leave type is required'
+    if (!requestForm.leaveTypeId) return tr('Leave type is required', '请假类型为必选项')
     const leaveType = leaveTypes.value.find(item => item.id === requestForm.leaveTypeId)
     if (leaveType?.requiresAttachment && !requestForm.attachmentUrl.trim()) {
-      return 'Attachment URL required for this leave type'
+      return tr('Attachment URL required for this leave type', '该请假类型要求填写附件 URL')
     }
   }
 
   if (requestType === 'overtime') {
-    if (!requestForm.overtimeRuleId) return 'Overtime rule is required'
+    if (!requestForm.overtimeRuleId) return tr('Overtime rule is required', '加班规则为必选项')
     const minutesValue = String(requestForm.minutes ?? '').trim()
     const minutes = minutesValue.length > 0 ? Number(minutesValue) : Number.NaN
     const hasMinutes = Number.isFinite(minutes) && minutes > 0
     const hasRange = hasIn && hasOut
     if (!hasMinutes && !hasRange) {
-      return 'Overtime duration required'
+      return tr('Overtime duration required', '请填写加班时长')
     }
   }
 
@@ -7359,12 +7376,12 @@ async function submitRequest() {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Request failed')
+      throw createApiError(response, data, tr('Request failed', '申请失败'))
     }
-    setStatus('Request submitted.')
+    setStatus(tr('Request submitted.', '申请已提交。'))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, 'Request failed', 'request-submit')
+    setStatusFromError(error, tr('Request failed', '申请失败'), 'request-submit')
   } finally {
     requestSubmitting.value = false
   }
@@ -7378,14 +7395,15 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Request update failed')
+      throw createApiError(response, data, tr('Request update failed', '申请处理失败'))
     }
-    setStatus(`Request ${action}d.`)
+    const actionText = action === 'approve' ? tr('approved', '已批准') : tr('rejected', '已驳回')
+    setStatus(tr(`Request ${action}d.`, `申请${actionText}。`))
     await loadRequests()
     await loadSummary()
     await loadRecords()
   } catch (error: any) {
-    setStatusFromError(error, 'Request update failed', 'request-resolve')
+    setStatusFromError(error, tr('Request update failed', '申请处理失败'), 'request-resolve')
   }
 }
 
@@ -7397,12 +7415,12 @@ async function cancelRequest(id: string) {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Request cancel failed')
+      throw createApiError(response, data, tr('Request cancel failed', '申请取消失败'))
     }
-    setStatus('Request cancelled.')
+    setStatus(tr('Request cancelled.', '申请已取消。'))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, 'Request cancel failed', 'request-cancel')
+    setStatusFromError(error, tr('Request cancel failed', '申请取消失败'), 'request-cancel')
   }
 }
 
@@ -7425,7 +7443,7 @@ async function exportCsv() {
     const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
     const text = await response.text()
     if (!response.ok) {
-      let message = 'Export failed'
+      let message = tr('Export failed', '导出失败')
       try {
         const parsed = JSON.parse(text)
         message = parsed?.error?.message || message
@@ -7446,9 +7464,9 @@ async function exportCsv() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus('Export ready.')
+    setStatus(tr('Export ready.', '导出完成。'))
   } catch (error: any) {
-    setStatus(error?.message || 'Export failed', 'error')
+    setStatus(error?.message || tr('Export failed', '导出失败'), 'error')
   } finally {
     exporting.value = false
   }
@@ -7572,12 +7590,12 @@ async function loadSettings() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load settings')
+      throw new Error(data?.error?.message || tr('Failed to load settings', '加载设置失败'))
     }
     adminForbidden.value = false
     applySettingsToForm(data.data || {})
   } catch (error: any) {
-    setStatusFromError(error, 'Failed to load settings', 'admin')
+    setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
   } finally {
     settingsLoading.value = false
   }
@@ -7690,13 +7708,13 @@ async function saveSettings() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Failed to save settings')
+      throw createApiError(response, data, tr('Failed to save settings', '保存设置失败'))
     }
     adminForbidden.value = false
     applySettingsToForm(data.data || payload)
-    setStatus('Settings updated.')
+    setStatus(tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
-    setStatusFromError(error, 'Failed to save settings', 'save-settings')
+    setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
@@ -7715,18 +7733,18 @@ async function syncHolidays() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Holiday sync failed')
+      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
-    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+    setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || 'Holiday sync failed', 'error')
+    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -7769,18 +7787,18 @@ async function syncHolidaysForYears(years: number[]) {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Holiday sync failed')
+      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
-    setStatus(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`)
+    setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || 'Holiday sync failed', 'error')
+    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -7793,7 +7811,7 @@ async function loadRule() {
     const response = await apiFetchWithTimeout(`/api/attendance/rules/default?${query.toString()}`, {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load rule')
+      throw new Error(data?.error?.message || tr('Failed to load rule', '加载规则失败'))
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || 'Default'
@@ -7805,7 +7823,7 @@ async function loadRule() {
     ruleForm.roundingMinutes = rule.roundingMinutes ?? 5
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : '1,2,3,4,5'
   } catch (error: any) {
-    setStatusFromError(error, 'Failed to load rule', 'admin')
+    setStatusFromError(error, tr('Failed to load rule', '加载规则失败'), 'admin')
   } finally {
     ruleLoading.value = false
   }
@@ -7835,7 +7853,7 @@ async function saveRule() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, 'Failed to save rule')
+      throw createApiError(response, data, tr('Failed to save rule', '保存规则失败'))
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || ruleForm.name
@@ -7846,9 +7864,9 @@ async function saveRule() {
     ruleForm.earlyGraceMinutes = rule.earlyGraceMinutes ?? ruleForm.earlyGraceMinutes
     ruleForm.roundingMinutes = rule.roundingMinutes ?? ruleForm.roundingMinutes
     ruleForm.workingDays = Array.isArray(rule.workingDays) ? rule.workingDays.join(',') : ruleForm.workingDays
-    setStatus('Rule updated.')
+    setStatus(tr('Rule updated.', '规则已更新。'))
   } catch (error: any) {
-    setStatusFromError(error, 'Failed to save rule', 'save-rule')
+    setStatusFromError(error, tr('Failed to save rule', '保存规则失败'), 'save-rule')
   } finally {
     ruleLoading.value = false
   }

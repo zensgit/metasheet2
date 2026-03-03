@@ -3622,3 +3622,23 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+### Update (2026-03-03): Admin zh Localization Phase 7 (Import + Core Status Copy)
+
+Scope:
+
+- localized high-frequency runtime copy in `apps/web/src/views/AttendanceView.vue`:
+  - import template/profile/csv/upload/preview/commit/async polling statuses
+  - import batch export and rollback statuses
+  - punch/request/summary/records/report/export status and validation messages
+  - settings/rule/holiday sync status fallbacks
+- no API contract changes; copy-only hardening for zh runtime UX consistency.
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
