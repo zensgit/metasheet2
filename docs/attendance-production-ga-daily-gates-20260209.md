@@ -3586,6 +3586,12 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+Mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22607986793](https://github.com/zensgit/metasheet2/actions/runs/22607986793) | PASS | `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.md` |
+
 Merged:
 
 - PR [#317](https://github.com/zensgit/metasheet2/pull/317)
