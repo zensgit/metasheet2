@@ -6572,7 +6572,7 @@ async function searchProvisionUsers(page: number) {
     provisionSearchResults.value = []
     provisionSearchTotal.value = 0
     provisionSearchPage.value = 1
-    setProvisionStatus('Enter a search query (email/name/id).', 'error')
+    setProvisionStatus(tr('Enter a search query (email/name/id).', '请输入搜索关键词（邮箱/姓名/ID）。'), 'error')
     return
   }
   provisionSearchLoading.value = true
@@ -6585,18 +6585,18 @@ async function searchProvisionUsers(page: number) {
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || 'Failed to search users')
+      throw new Error(data?.error?.message || tr('Failed to search users', '搜索用户失败'))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     provisionSearchResults.value = items
     provisionSearchTotal.value = Number(data.data?.total ?? items.length) || 0
     provisionSearchPage.value = Number(data.data?.page ?? page) || page
   } catch (error: any) {
-    setProvisionStatus(error?.message || 'Failed to search users', 'error')
+    setProvisionStatus(error?.message || tr('Failed to search users', '搜索用户失败'), 'error')
   } finally {
     provisionSearchLoading.value = false
   }
@@ -6614,11 +6614,11 @@ async function fetchProvisioningUser(userId: string) {
   const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
   if (response.status === 403) {
     adminForbidden.value = true
-    throw new Error('Admin permissions required')
+    throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
   const data: PermissionUserResponse = await response.json()
   if (!response.ok) {
-    const message = (data as any)?.error || (data as any)?.message || 'Failed to load permissions'
+    const message = (data as any)?.error || (data as any)?.message || tr('Failed to load permissions', '加载权限失败')
     throw new Error(message)
   }
   provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
@@ -6634,11 +6634,11 @@ async function fetchProvisioningUserAccess(userId: string) {
   }
   if (response.status === 403) {
     adminForbidden.value = true
-    throw new Error('Admin permissions required')
+    throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || 'Failed to load user access')
+    throw new Error(data?.error?.message || tr('Failed to load user access', '加载用户访问权限失败'))
   }
   applyProvisionAccessPayload(data.data, userId)
 }
@@ -6647,15 +6647,15 @@ async function loadProvisioningUser() {
   const userId = provisionForm.userId.trim()
   provisionHasLoaded.value = true
   if (!isUuid(userId)) {
-    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    setProvisionStatus(tr('Please enter a valid UUID for User ID.', '请输入有效的用户 ID（UUID）。'), 'error')
     return
   }
   provisionLoading.value = true
   try {
     await fetchProvisioningUserAccess(userId)
-    setProvisionStatus(`Loaded ${provisionPermissions.value.length} permission(s).`)
+    setProvisionStatus(tr(`Loaded ${provisionPermissions.value.length} permission(s).`, `已加载 ${provisionPermissions.value.length} 项权限。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || 'Failed to load permissions', 'error')
+    setProvisionStatus(error?.message || tr('Failed to load permissions', '加载权限失败'), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6665,7 +6665,7 @@ async function grantProvisioningRole() {
   const userId = provisionForm.userId.trim()
   provisionHasLoaded.value = true
   if (!isUuid(userId)) {
-    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    setProvisionStatus(tr('Please enter a valid UUID for User ID.', '请输入有效的用户 ID（UUID）。'), 'error')
     return
   }
   provisionLoading.value = true
@@ -6679,14 +6679,14 @@ async function grantProvisioningRole() {
     if (modern.status !== 404) {
       if (modern.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || 'Failed to assign role')
+        throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
       }
       applyProvisionAccessPayload(modernData.data, userId)
-      setProvisionStatus(`Role '${role}' assigned.`)
+      setProvisionStatus(tr(`Role '${role}' assigned.`, `角色 '${role}' 已分配。`))
       return
     }
 
@@ -6699,17 +6699,17 @@ async function grantProvisioningRole() {
       })
       if (response.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const data = await response.json()
       if (!response.ok) {
-        throw new Error(data?.error || data?.message || `Failed to grant ${permission}`)
+        throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
       }
     }
     await fetchProvisioningUser(userId)
-    setProvisionStatus(`Role '${role}' granted.`)
+    setProvisionStatus(tr(`Role '${role}' granted.`, `角色 '${role}' 已授权。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || 'Failed to grant role', 'error')
+    setProvisionStatus(error?.message || tr('Failed to grant role', '授权角色失败'), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6719,7 +6719,7 @@ async function revokeProvisioningRole() {
   const userId = provisionForm.userId.trim()
   provisionHasLoaded.value = true
   if (!isUuid(userId)) {
-    setProvisionStatus('Please enter a valid UUID for User ID.', 'error')
+    setProvisionStatus(tr('Please enter a valid UUID for User ID.', '请输入有效的用户 ID（UUID）。'), 'error')
     return
   }
   provisionLoading.value = true
@@ -6733,14 +6733,14 @@ async function revokeProvisioningRole() {
     if (modern.status !== 404) {
       if (modern.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || 'Failed to remove role')
+        throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
       }
       applyProvisionAccessPayload(modernData.data, userId)
-      setProvisionStatus(`Role '${role}' removed.`)
+      setProvisionStatus(tr(`Role '${role}' removed.`, `角色 '${role}' 已移除。`))
       return
     }
 
@@ -6753,18 +6753,18 @@ async function revokeProvisioningRole() {
       })
       if (response.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const data = await response.json()
       // 404 is fine for revokes (permission not present).
       if (!response.ok && response.status !== 404) {
-        throw new Error(data?.error || data?.message || `Failed to revoke ${permission}`)
+        throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
       }
     }
     await fetchProvisioningUser(userId)
-    setProvisionStatus(`Role '${role}' revoked.`)
+    setProvisionStatus(tr(`Role '${role}' revoked.`, `角色 '${role}' 已撤销。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || 'Failed to revoke role', 'error')
+    setProvisionStatus(error?.message || tr('Failed to revoke role', '撤销角色失败'), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6774,11 +6774,11 @@ async function previewProvisionBatchUsers() {
   provisionBatchStatusMessage.value = ''
   const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
   if (invalid.length) {
-    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    setProvisionBatchStatus(tr(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, `无效 UUID：${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`), 'error')
     return
   }
   if (valid.length === 0) {
-    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    setProvisionBatchStatus(tr('Please enter at least one valid User ID (UUID).', '请至少输入一个有效的用户 ID（UUID）。'), 'error')
     clearProvisionBatchPreview()
     return
   }
@@ -6794,17 +6794,17 @@ async function previewProvisionBatchUsers() {
       // Backward compatibility: old deployments may not expose this endpoint.
       clearProvisionBatchPreview()
       provisionBatchPreviewRequested.value = valid.length
-      setProvisionBatchStatus('Batch preview API not available on this deployment.', 'error')
+      setProvisionBatchStatus(tr('Batch preview API not available on this deployment.', '当前部署不支持批量预览 API。'), 'error')
       return
     }
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
 
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || 'Failed to preview batch users')
+      throw new Error(data?.error?.message || tr('Failed to preview batch users', '批量预览用户失败'))
     }
 
     applyProvisionBatchResolvePayload(data.data, valid)
@@ -6812,9 +6812,9 @@ async function previewProvisionBatchUsers() {
     const missing = provisionBatchPreviewMissingIds.value.length
     const inactive = provisionBatchPreviewInactiveIds.value.length
     const kind = missing > 0 ? 'error' : 'info'
-    setProvisionBatchStatus(`Preview ready: found ${found}/${valid.length}, missing ${missing}, inactive ${inactive}.`, kind)
+    setProvisionBatchStatus(tr(`Preview ready: found ${found}/${valid.length}, missing ${missing}, inactive ${inactive}.`, `预览完成：找到 ${found}/${valid.length}，缺失 ${missing}，停用 ${inactive}。`), kind)
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || 'Failed to preview batch users', 'error')
+    setProvisionBatchStatus(error?.message || tr('Failed to preview batch users', '批量预览用户失败'), 'error')
   } finally {
     provisionBatchPreviewLoading.value = false
   }
@@ -6825,11 +6825,11 @@ async function grantProvisioningRoleBatch() {
   const role = provisionBatchRole.value
   const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
   if (invalid.length) {
-    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    setProvisionBatchStatus(tr(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, `无效 UUID：${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`), 'error')
     return
   }
   if (valid.length === 0) {
-    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    setProvisionBatchStatus(tr('Please enter at least one valid User ID (UUID).', '请至少输入一个有效的用户 ID（UUID）。'), 'error')
     return
   }
 
@@ -6842,11 +6842,11 @@ async function grantProvisioningRoleBatch() {
     if (batch.status !== 404) {
       if (batch.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || 'Failed to batch assign role')
+        throw new Error(batchData?.error?.message || tr('Failed to batch assign role', '批量分配角色失败'))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -6855,7 +6855,7 @@ async function grantProvisioningRoleBatch() {
       const inactive = provisionBatchPreviewInactiveIds.value.length
       const unchanged = provisionBatchUnchangedIds.value.length
       const kind = missing > 0 ? 'error' : 'info'
-      setProvisionBatchStatus(`Role '${role}' assigned to ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, kind)
+      setProvisionBatchStatus(tr(`Role '${role}' assigned to ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, `角色 '${role}' 已分配给 ${updated}/${eligible} 个可处理用户。未变更 ${unchanged}。缺失 ${missing}，停用 ${inactive}。`), kind)
       return
     }
 
@@ -6871,11 +6871,11 @@ async function grantProvisioningRoleBatch() {
         if (modern.status !== 404) {
           if (modern.status === 403) {
             adminForbidden.value = true
-            throw new Error('Admin permissions required')
+            throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || 'Failed to assign role')
+            throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
           }
           updated += 1
           continue
@@ -6889,11 +6889,11 @@ async function grantProvisioningRoleBatch() {
           })
           if (response.status === 403) {
             adminForbidden.value = true
-            throw new Error('Admin permissions required')
+            throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
           const data = await response.json().catch(() => null)
           if (!response.ok) {
-            throw new Error(data?.error || data?.message || `Failed to grant ${permission}`)
+            throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
           }
         }
         updated += 1
@@ -6903,11 +6903,11 @@ async function grantProvisioningRoleBatch() {
     }
 
     const message = failed.length
-      ? `Role '${role}' assigned to ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`
-      : `Role '${role}' assigned to ${updated}/${valid.length} user(s).`
+      ? tr(`Role '${role}' assigned to ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`, `角色 '${role}' 已分配给 ${updated}/${valid.length} 个用户。失败：${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`)
+      : tr(`Role '${role}' assigned to ${updated}/${valid.length} user(s).`, `角色 '${role}' 已分配给 ${updated}/${valid.length} 个用户。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || 'Failed to batch assign role', 'error')
+    setProvisionBatchStatus(error?.message || tr('Failed to batch assign role', '批量分配角色失败'), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -6918,11 +6918,11 @@ async function revokeProvisioningRoleBatch() {
   const role = provisionBatchRole.value
   const { valid, invalid } = parseUserIdListText(provisionBatchUserIdsText.value)
   if (invalid.length) {
-    setProvisionBatchStatus(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, 'error')
+    setProvisionBatchStatus(tr(`Invalid UUID(s): ${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`, `无效 UUID：${invalid.slice(0, 5).join(', ')}${invalid.length > 5 ? '…' : ''}`), 'error')
     return
   }
   if (valid.length === 0) {
-    setProvisionBatchStatus('Please enter at least one valid User ID (UUID).', 'error')
+    setProvisionBatchStatus(tr('Please enter at least one valid User ID (UUID).', '请至少输入一个有效的用户 ID（UUID）。'), 'error')
     return
   }
 
@@ -6935,11 +6935,11 @@ async function revokeProvisioningRoleBatch() {
     if (batch.status !== 404) {
       if (batch.status === 403) {
         adminForbidden.value = true
-        throw new Error('Admin permissions required')
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || 'Failed to batch remove role')
+        throw new Error(batchData?.error?.message || tr('Failed to batch remove role', '批量移除角色失败'))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -6948,7 +6948,7 @@ async function revokeProvisioningRoleBatch() {
       const inactive = provisionBatchPreviewInactiveIds.value.length
       const unchanged = provisionBatchUnchangedIds.value.length
       const kind = missing > 0 ? 'error' : 'info'
-      setProvisionBatchStatus(`Role '${role}' removed from ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, kind)
+      setProvisionBatchStatus(tr(`Role '${role}' removed from ${updated}/${eligible} eligible user(s). Unchanged ${unchanged}. Missing ${missing}, inactive ${inactive}.`, `角色 '${role}' 已从 ${updated}/${eligible} 个可处理用户移除。未变更 ${unchanged}。缺失 ${missing}，停用 ${inactive}。`), kind)
       return
     }
 
@@ -6964,11 +6964,11 @@ async function revokeProvisioningRoleBatch() {
         if (modern.status !== 404) {
           if (modern.status === 403) {
             adminForbidden.value = true
-            throw new Error('Admin permissions required')
+            throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || 'Failed to remove role')
+            throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
           }
           updated += 1
           continue
@@ -6982,11 +6982,11 @@ async function revokeProvisioningRoleBatch() {
           })
           if (response.status === 403) {
             adminForbidden.value = true
-            throw new Error('Admin permissions required')
+            throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
           const data = await response.json().catch(() => null)
           if (!response.ok && response.status !== 404) {
-            throw new Error(data?.error || data?.message || `Failed to revoke ${permission}`)
+            throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
           }
         }
         updated += 1
@@ -6996,11 +6996,11 @@ async function revokeProvisioningRoleBatch() {
     }
 
     const message = failed.length
-      ? `Role '${role}' removed from ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`
-      : `Role '${role}' removed from ${updated}/${valid.length} user(s).`
+      ? tr(`Role '${role}' removed from ${updated}/${valid.length} user(s). Failed: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`, `角色 '${role}' 已从 ${updated}/${valid.length} 个用户移除。失败：${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`)
+      : tr(`Role '${role}' removed from ${updated}/${valid.length} user(s).`, `角色 '${role}' 已从 ${updated}/${valid.length} 个用户移除。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || 'Failed to batch remove role', 'error')
+    setProvisionBatchStatus(error?.message || tr('Failed to batch remove role', '批量移除角色失败'), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -7054,11 +7054,11 @@ async function loadAuditSummary() {
     }
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || 'Failed to load audit summary')
+      throw new Error(data?.error?.message || tr('Failed to load audit summary', '加载审计汇总失败'))
     }
 
     const actionsRaw = Array.isArray(data.data?.actions) ? data.data.actions : []
@@ -7073,7 +7073,7 @@ async function loadAuditSummary() {
       total: Number(row?.total ?? 0) || 0,
     }))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || 'Failed to load audit summary', 'error')
+    setAuditLogStatus(error?.message || tr('Failed to load audit summary', '加载审计汇总失败'), 'error')
   } finally {
     auditSummaryLoading.value = false
   }
@@ -7097,25 +7097,25 @@ async function exportAuditLogsCsv() {
     })
 
     if (response.status === 404) {
-      setAuditLogStatus('Audit log export API not available on this deployment.', 'error')
+      setAuditLogStatus(tr('Audit log export API not available on this deployment.', '当前部署不支持审计日志导出 API。'), 'error')
       return
     }
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
 
     const csvText = await response.text()
     if (!response.ok) {
-      throw new Error(csvText.slice(0, 200) || `Export failed (HTTP ${response.status})`)
+      throw new Error(csvText.slice(0, 200) || tr(`Export failed (HTTP ${response.status})`, `导出失败（HTTP ${response.status}）`))
     }
 
     const now = new Date()
     const filename = `attendance-audit-logs-${now.toISOString().replace(/[:.]/g, '-')}.csv`
     downloadCsvText(filename, csvText)
-    setAuditLogStatus('Audit logs exported.')
+    setAuditLogStatus(tr('Audit logs exported.', '审计日志已导出。'))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || 'Failed to export audit logs', 'error')
+    setAuditLogStatus(error?.message || tr('Failed to export audit logs', '导出审计日志失败'), 'error')
   } finally {
     auditLogExporting.value = false
   }
@@ -7135,7 +7135,7 @@ async function loadAuditLogs(page: number) {
       auditLogs.value = []
       auditLogTotal.value = 0
       auditLogPage.value = 1
-      setAuditLogStatus('Audit log API not available on this deployment.', 'error')
+      setAuditLogStatus(tr('Audit log API not available on this deployment.', '当前部署不支持审计日志 API。'), 'error')
       return
     }
     if (response.status === 403) {
