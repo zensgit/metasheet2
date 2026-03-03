@@ -2726,6 +2726,36 @@ Decision:
 
 - **GO maintained** (phase-6 zh copy changes pass build and contract gates).
 
+## Post-Go Development Verification (2026-03-03): Admin zh Localization Phase 7
+
+Goal:
+
+- localize remaining high-frequency runtime status and validation copy in import/overview flows, reducing mixed-language feedback during daily operations.
+
+Code changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - localized import flow statuses/errors:
+    - template/profile application
+    - CSV upload/load, preview, async polling, commit
+    - import batch export/rollback statuses
+  - localized overview/admin runtime statuses:
+    - punch, request submit/resolve/cancel, summary/report/export
+    - settings/rule/holiday sync fallback messages
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Contract case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Contract case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+Decision:
+
+- **GO maintained** (phase-7 copy hardening passes local build and gate contract checks).
+
 ## Post-Go Verification (2026-03-02): Admin zh Localization Phase 3 + Copy Contract Gate (PR #313)
 
 Goal:
