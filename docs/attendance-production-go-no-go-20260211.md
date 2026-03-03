@@ -2636,6 +2636,30 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-03): zh Runtime Localization Phase 8 (PR #322)
+
+Goal:
+
+- Complete remaining Chinese runtime copy hardening for Attendance Admin user-access and audit flows without changing API behavior.
+
+Code changes merged:
+
+- [#322](https://github.com/zensgit/metasheet2/pull/322)
+  - Localized user-access search/load/grant/revoke runtime messages.
+  - Localized batch provisioning preview/assign/revoke status and errors.
+  - Localized audit summary/load/export statuses and fallback errors.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| PR checks (`contracts strict/dashboard`, `test 18/20`, `coverage`, `e2e`, `pr-validate`) | [#322 checks](https://github.com/zensgit/metasheet2/pull/322/checks) | PASS | GitHub checks list on PR |
+| Daily Gate Dashboard (main, post-merge) | [#22609282963](https://github.com/zensgit/metasheet2/actions/runs/22609282963) | PASS | `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.md` |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Development Verification (2026-03-03): Admin zh Localization Phase 5
 
 Goal:

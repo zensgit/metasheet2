@@ -3586,6 +3586,35 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+### Update (2026-03-03): Admin zh Localization Phase 8 (User Access + Audit Runtime Copy)
+
+Scope:
+
+- localized remaining user access and audit runtime copy in `apps/web/src/views/AttendanceView.vue`:
+  - user search/load/grant/revoke status and error messages
+  - batch role preview/assign/revoke status and fallback errors
+  - audit summary/load/export status and fallback errors
+- no API contract changes; copy-only hardening for zh runtime UX consistency.
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-03) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+Mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Daily Gate Dashboard (main, post-merge) | [#22609282963](https://github.com/zensgit/metasheet2/actions/runs/22609282963) | PASS | `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.md` |
+
+Merged:
+
+- PR [#322](https://github.com/zensgit/metasheet2/pull/322)
+
 Mainline verification:
 
 | Gate | Run | Status | Evidence |
