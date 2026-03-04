@@ -2636,6 +2636,36 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-04): Import Row-Cap Guardrail + Baseline Default
+
+Goal:
+
+- Prevent production drift where oversized CSV limits (`rows=100000+`) reintroduce unstable `502` behavior on current infra class.
+- Make the default perf baseline match production-safe capacity while preserving manual override for stress runs.
+
+Code changes:
+
+- `scripts/ops/attendance-preflight.sh`
+  - new hard gate: `ATTENDANCE_IMPORT_CSV_MAX_ROWS` must exist, must be numeric, and must not exceed `ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS` (default `20000`).
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - baseline default rows changed from `100000` to `20000` (inputs and env fallback).
+- `docker/app.env.example`
+  - added `ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| preflight syntax | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/bash-n.txt` |
+| preflight with safe cap (`20000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-pass.log` |
+| preflight with oversized cap (`100000`) | local (2026-03-04) | FAIL (expected) | `output/playwright/local/20260304-preflight-row-cap/preflight-fail.log`, `output/playwright/local/20260304-preflight-row-cap/preflight-fail.rc` |
+| preflight with temporary override (`ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS=120000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-override-pass.log` |
+
+Decision:
+
+- **GO maintained** with stricter production guardrails.
+- For new server rollout, keep `ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000` unless a higher cap is validated by dedicated perf evidence.
+
 ## Post-Go Validation (2026-03-04): Strict Re-Run + Perf Baseline Incident/Recovery + Workflow Hardening
 
 Goal:

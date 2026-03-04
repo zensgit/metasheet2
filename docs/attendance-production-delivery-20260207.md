@@ -61,7 +61,13 @@ Out of scope for this delivery:
 4. If large imports (200k+ rows) return `413 Payload Too Large`:
    - Ensure the backend is on a build that supports per-route import payload limits (shipped on `main` after `3b85463d`).
    - Optional env (override only when needed): `ATTENDANCE_IMPORT_JSON_LIMIT=50mb` (must be <= reverse proxy `client_max_body_size`).
-5. For extreme-scale imports (200k-500k+ rows), prefer the CSV upload channel (`csvFileId`) instead of embedding `csvText` in JSON:
+5. Enforce production-safe CSV row cap:
+   - Set `ATTENDANCE_IMPORT_CSV_MAX_ROWS` explicitly in `docker/app.env`.
+   - `scripts/ops/attendance-preflight.sh` now hard-fails when:
+     - `ATTENDANCE_IMPORT_CSV_MAX_ROWS` is missing/invalid.
+     - `ATTENDANCE_IMPORT_CSV_MAX_ROWS` exceeds `ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS` (default: `20000`).
+   - Override `ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS` only after capacity validation and evidence capture.
+6. For extreme-scale imports (200k-500k+ rows), prefer the CSV upload channel (`csvFileId`) instead of embedding `csvText` in JSON:
    - Ensure `ATTENDANCE_IMPORT_UPLOAD_DIR` is on a persistent volume (see `docker-compose.app.yml`).
    - Ensure nginx allows a larger body specifically for the upload endpoint:
      - `location /api/attendance/import/upload { client_max_body_size 120m; }` (see `docker/nginx.conf`)
@@ -167,7 +173,8 @@ P1 (1-2 weeks, production hardening):
       a second idempotency read inside the transaction before insert, reducing duplicate-batch risk under concurrent retries.
   - Additional hardening (implemented 2026-02-12):
     - Streaming-style CSV row iteration (avoid full parsed matrix allocation).
-    - Server-side CSV row cap guardrail via `ATTENDANCE_IMPORT_CSV_MAX_ROWS` (default `500000`, minimum `1000`).
+    - Server-side CSV row cap guardrail via `ATTENDANCE_IMPORT_CSV_MAX_ROWS` (backend default `500000`, minimum `1000`).
+    - Production deploy preflight now requires explicit `ATTENDANCE_IMPORT_CSV_MAX_ROWS` and enforces a safe bound (default `<=20000`).
     - `CSV_TOO_LARGE` mapped to explicit `HTTP 400` on preview/commit/import endpoints.
   - Import persistence tuning (implemented 2026-02-12):
     - Import chunk sizes are now env-tunable:

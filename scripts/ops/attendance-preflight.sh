@@ -59,6 +59,8 @@ NODE_ENV="$(get_env_value NODE_ENV)"
 PRODUCT_MODE="$(get_env_value PRODUCT_MODE)"
 REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
 UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
+CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
+PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-20000}"
 
 [[ -n "$JWT_SECRET" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
 [[ "$JWT_SECRET" != "change-me" ]] || die "JWT_SECRET is still 'change-me' in ${ENV_FILE}"
@@ -73,6 +75,26 @@ fi
 
 if [[ "${REQUIRE_TOKEN}" != "1" ]]; then
   die "ATTENDANCE_IMPORT_REQUIRE_TOKEN must be set to '1' in ${ENV_FILE} for production import safety."
+fi
+
+if [[ ! "${PREFLIGHT_MAX_CSV_ROWS}" =~ ^[0-9]+$ ]]; then
+  die "ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS must be an integer when set (got: '${PREFLIGHT_MAX_CSV_ROWS}')."
+fi
+if (( PREFLIGHT_MAX_CSV_ROWS < 1000 )); then
+  die "ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS must be >= 1000 (got: ${PREFLIGHT_MAX_CSV_ROWS})."
+fi
+
+if [[ -z "${CSV_MAX_ROWS}" ]]; then
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in ${ENV_FILE}. Set a production-safe cap (recommended: 20000)."
+fi
+if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS must be an integer (got: '${CSV_MAX_ROWS}')."
+fi
+if (( CSV_MAX_ROWS < 1000 )); then
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS must be >= 1000 (got: ${CSV_MAX_ROWS})."
+fi
+if (( CSV_MAX_ROWS > PREFLIGHT_MAX_CSV_ROWS )); then
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS=${CSV_MAX_ROWS} exceeds safe preflight bound ${PREFLIGHT_MAX_CSV_ROWS}. Lower ATTENDANCE_IMPORT_CSV_MAX_ROWS or explicitly override ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS after capacity validation."
 fi
 
 # CSV upload channel requires a persistent upload directory and a larger nginx body size for the upload route.
