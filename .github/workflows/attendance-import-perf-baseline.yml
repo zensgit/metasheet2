@@ -63,7 +63,8 @@ on:
     - cron: '20 3 * * *'
 
 concurrency:
-  group: attendance-import-perf-baseline
+  # Avoid schedule/manual cross-cancellation while preserving dedupe per trigger source.
+  group: attendance-import-perf-baseline-${{ github.event_name == 'schedule' && 'schedule' || github.event_name == 'workflow_dispatch' && 'manual' || 'other' }}
   cancel-in-progress: true
 
 permissions:
