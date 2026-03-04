@@ -87,6 +87,9 @@ const expectRecordUpsertStrategy = (() => {
   }
   die('EXPECT_RECORD_UPSERT_STRATEGY must be one of: values|unnest|staging')
 })()
+const perfUserPoolSize = parseOptionalPositiveInt('PERF_USER_POOL_SIZE')
+const perfWorkDateSpanDaysRaw = parseOptionalPositiveInt('PERF_WORK_DATE_SPAN_DAYS') ?? 180
+const perfWorkDateSpanDays = Math.max(1, Math.min(366, perfWorkDateSpanDaysRaw))
 
 function die(message) {
   console.error(`[attendance-import-perf] ERROR: ${message}`)
@@ -393,14 +396,38 @@ function normalizeRecordUpsertStrategy(value) {
   return ''
 }
 
-function makeCsv({ startDate, userId, groupName }) {
+function resolveSyntheticImportShape(totalRows) {
+  const normalizedRows = Math.max(1, Math.floor(Number(totalRows) || 1))
+  if (perfUserPoolSize) {
+    const workDateSpanDaysForPool = Math.ceil(normalizedRows / perfUserPoolSize)
+    if (workDateSpanDaysForPool > 366) {
+      die(`PERF_USER_POOL_SIZE=${perfUserPoolSize} too small for ROWS=${normalizedRows}; requires work date span > 366`)
+    }
+    return {
+      userPoolSize: perfUserPoolSize,
+      workDateSpanDays: Math.max(1, workDateSpanDaysForPool),
+    }
+  }
+
+  const workDateSpanDays = Math.min(perfWorkDateSpanDays, normalizedRows)
+  const userPoolSize = Math.max(1, Math.ceil(normalizedRows / workDateSpanDays))
+  return { userPoolSize, workDateSpanDays }
+}
+
+function makeCsv({ startDate, userId, groupName, userPoolSize, workDateSpanDays }) {
   const lines = new Array(rows + 1)
   lines[0] = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
   for (let i = 0; i < rows; i++) {
+    const userIndex = i % userPoolSize
+    const dayIndex = Math.floor(i / userPoolSize)
+    const boundedDayIndex = dayIndex % workDateSpanDays
     const d = new Date(startDate)
-    d.setUTCDate(d.getUTCDate() - i)
+    d.setUTCDate(d.getUTCDate() - boundedDayIndex)
     const workDate = toDateOnly(d)
-    lines[i + 1] = `${workDate},${userId},${groupName},09:00,18:00,正常`
+    const rowUserId = userPoolSize > 1
+      ? `${userId}-perf-${String(userIndex + 1).padStart(4, '0')}`
+      : userId
+    lines[i + 1] = `${workDate},${rowUserId},${groupName},09:00,18:00,正常`
   }
   return lines.join('\n')
 }
@@ -574,7 +601,15 @@ async function run() {
     'dingtalk_csv_daily_summary'
 
   const groupName = `Perf Group ${Date.now().toString(36)}`
-  const csvText = makeCsv({ startDate: new Date(), userId, groupName })
+  const syntheticShape = resolveSyntheticImportShape(rows)
+  log(`synthetic_shape users=${syntheticShape.userPoolSize} work_date_span_days=${syntheticShape.workDateSpanDays}`)
+  const csvText = makeCsv({
+    startDate: new Date(),
+    userId,
+    groupName,
+    userPoolSize: syntheticShape.userPoolSize,
+    workDateSpanDays: syntheticShape.workDateSpanDays,
+  })
 
   const memAfterCsv = process.memoryUsage()
 
@@ -617,6 +652,8 @@ async function run() {
       perfScenario: scenario,
       perfRows: rows,
       requestedImportEngine,
+      syntheticUserPoolSize: syntheticShape.userPoolSize,
+      syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
     },
     previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
     returnItems,
@@ -991,6 +1028,8 @@ async function run() {
       },
     },
     uploadCsv,
+    syntheticUserPoolSize: syntheticShape.userPoolSize,
+    syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
     commitIdempotencyKey,
     jobId,
     previewMs: tPreview1 - tPreview0,
