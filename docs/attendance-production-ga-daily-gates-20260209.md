@@ -490,7 +490,7 @@ Optional repo variables (threshold guardrails):
 - `ATTENDANCE_PERF_MAX_COMMIT_MS`
 - `ATTENDANCE_PERF_MAX_EXPORT_MS`
 - `ATTENDANCE_PERF_MAX_ROLLBACK_MS`
-- `ATTENDANCE_PERF_BASELINE_ROWS` (optional; default baseline rows, current default is `100000`)
+- `ATTENDANCE_PERF_BASELINE_ROWS` (optional; default baseline rows, current default is `20000`)
 
 Artifacts:
 
@@ -502,7 +502,7 @@ P1 tracking issue (no paging): `[Attendance P1] Perf baseline alert` (opened/reo
 
 Defaults (current):
 
-- `rows=100000` (daily baseline)
+- `rows=20000` (daily baseline, stability-first default)
 - `upload_csv=true`
 - `commit_async=true`
 - `mode=commit`
@@ -3585,6 +3585,34 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+### Update (2026-03-04): Production Safety Guardrail for Import Rows
+
+Scope:
+
+- Added deploy preflight hard gate for `ATTENDANCE_IMPORT_CSV_MAX_ROWS`.
+- Baseline workflow default row count moved from `100000` to `20000` for production-v1 stability.
+
+Code changes:
+
+- `scripts/ops/attendance-preflight.sh`
+  - requires `ATTENDANCE_IMPORT_CSV_MAX_ROWS` to be present and numeric.
+  - enforces `ATTENDANCE_IMPORT_CSV_MAX_ROWS <= ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS` (default `20000`).
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - manual input default `rows=20000`
+  - workflow fallback default `ROWS=20000`
+  - drill summary sample updated to `rows=20000`
+- `docker/app.env.example`
+  - added `ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| preflight syntax (`bash -n`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/bash-n.txt` |
+| preflight pass case (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-pass.log` |
+| preflight fail case (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=100000`) | local (2026-03-04) | FAIL (expected) | `output/playwright/local/20260304-preflight-row-cap/preflight-fail.log`, `output/playwright/local/20260304-preflight-row-cap/preflight-fail.rc` |
+| preflight override pass (`ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS=120000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-override-pass.log` |
 
 ### Update (2026-03-04): Strict PASS + Perf Baseline Recovery + Concurrency Hardening
 
