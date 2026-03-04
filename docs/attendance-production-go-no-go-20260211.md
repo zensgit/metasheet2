@@ -2636,6 +2636,35 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-04): Remote Preflight Drift Fix + Gate Recovery
+
+Goal:
+
+- Close the production drift detected by remote preflight after enabling the row-cap hard gate.
+- Restore full gate green status with auditable remediation evidence.
+
+Context:
+
+- Drift detector run [#22655883421](https://github.com/zensgit/metasheet2/actions/runs/22655883421) failed as expected:
+  - `ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in docker/app.env`.
+- Remediation workflow introduced in PR [#329](https://github.com/zensgit/metasheet2/pull/329):
+  - `.github/workflows/attendance-remote-env-reconcile-prod.yml`
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Preflight (drift detection) | [#22655883421](https://github.com/zensgit/metasheet2/actions/runs/22655883421) | FAIL (expected) | `output/playwright/ga/22655883421/preflight.log`, `output/playwright/ga/22655883421/step-summary.md` |
+| Remote Env Reconcile (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) | [#22656041689](https://github.com/zensgit/metasheet2/actions/runs/22656041689) | PASS | `output/playwright/ga/22656041689/reconcile.log`, `output/playwright/ga/22656041689/step-summary.md` |
+| Remote Preflight (post-fix) | [#22656062644](https://github.com/zensgit/metasheet2/actions/runs/22656062644) | PASS | `output/playwright/ga/22656062644/preflight.log`, `output/playwright/ga/22656062644/step-summary.md` |
+| Strict Gates (post-fix revalidation) | [#22656062651](https://github.com/zensgit/metasheet2/actions/runs/22656062651) | PASS | `output/playwright/ga/22656062651/20260304-051221-1/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-api-smoke.log` |
+| Daily Gate Dashboard (post-fix snapshot) | [#22656162339](https://github.com/zensgit/metasheet2/actions/runs/22656162339) | PASS | `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.md` |
+
+Decision:
+
+- **GO maintained**.
+- Remote preflight drift is remediated and production gates are green again.
+
 ## Post-Go Verification (2026-03-04): Import Row-Cap Guardrail + Baseline Default
 
 Goal:
