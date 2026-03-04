@@ -1,0 +1,222 @@
+name: Attendance Remote Env Reconcile (Prod)
+
+run-name: Attendance Remote Env Reconcile (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.skip_host_sync == 'true' && ' [DEBUG]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_max_rows:
+        description: 'Value for ATTENDANCE_IMPORT_CSV_MAX_ROWS (default 20000)'
+        required: false
+        default: '20000'
+      skip_host_sync:
+        description: 'Optional: skip deploy-host git sync step (true/false). Use for debugging when host sync is broken.'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: attendance-remote-env-reconcile-prod
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Remote env reconcile (with host sync logs)
+        id: remote_reconcile
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '20000' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          CSV_MAX_ROWS="${CSV_MAX_ROWS:-20000}"
+          SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
+
+          if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
+            echo "CSV_MAX_ROWS must be an integer (got: '${CSV_MAX_ROWS}')" >&2
+            exit 2
+          fi
+          if (( CSV_MAX_ROWS < 1000 )); then
+            echo "CSV_MAX_ROWS must be >= 1000 (got: ${CSV_MAX_ROWS})" >&2
+            exit 2
+          fi
+
+          mkdir -p output/env-reconcile
+          reconcile_log="output/env-reconcile/reconcile.log"
+
+          remote_cmds=(
+            "set -euo pipefail"
+            "DEPLOY_PATH=\"${DEPLOY_PATH}\""
+            "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\""
+            "CSV_MAX_ROWS=\"${CSV_MAX_ROWS}\""
+            "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
+            "cd \"${DEPLOY_PATH}\""
+            "echo \"=== HOST SYNC START ===\""
+            "host_sync_rc=0"
+            "host_sync_attempts=3"
+            'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
+              '  echo "[host-sync] skipped (skip_host_sync=true)"'
+              '  host_sync_rc=0'
+            "else"
+              "  set +e"
+              '  for attempt in $(seq 1 "$host_sync_attempts"); do'
+              '    git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main'
+              '    host_sync_rc=$?'
+              '    echo "[host-sync] attempt=$attempt rc=$host_sync_rc"'
+              '    if [[ "$host_sync_rc" == "0" ]]; then break; fi'
+              '    if [[ "$attempt" -lt "$host_sync_attempts" ]]; then sleep $((attempt * 2)); fi'
+              '  done'
+              "  set -e"
+            "fi"
+            'echo "[host-sync] rc=$host_sync_rc attempts=$host_sync_attempts"'
+            "echo \"=== HOST SYNC END ===\""
+            "echo \"=== ENV RECONCILE START ===\""
+            "reconcile_rc=0"
+            'if [[ "$host_sync_rc" != "0" ]]; then'
+              '  echo "[attendance-env-reconcile][skip] host sync failed: rc=$host_sync_rc"'
+              '  reconcile_rc="$host_sync_rc"'
+            "else"
+              "  set +e"
+              '  env_file="docker/app.env"'
+              '  key="ATTENDANCE_IMPORT_CSV_MAX_ROWS"'
+              '  value="${CSV_MAX_ROWS}"'
+              '  if [[ ! -f "$env_file" ]]; then'
+              '    echo "[attendance-env-reconcile] ERROR: missing $env_file"'
+              '    reconcile_rc=3'
+              '  else'
+              '    backup="${env_file}.bak.$(date -u +%Y%m%d-%H%M%S)"'
+              '    cp "$env_file" "$backup"'
+              '    echo "[attendance-env-reconcile] backup=$backup"'
+              '    if grep -qE "^${key}=" "$env_file"; then'
+              '      sed -i -E "s#^${key}=.*#${key}=${value}#g" "$env_file"'
+              '      echo "[attendance-env-reconcile] updated ${key}=${value}"'
+              '    else'
+              '      printf "\n%s=%s\n" "$key" "$value" >> "$env_file"'
+              '      echo "[attendance-env-reconcile] appended ${key}=${value}"'
+              '    fi'
+              '    applied_line="$(grep -E "^${key}=" "$env_file" | tail -n 1 || true)"'
+              '    if [[ -z "$applied_line" ]]; then'
+              '      echo "[attendance-env-reconcile] ERROR: failed to verify ${key} in ${env_file}"'
+              '      reconcile_rc=4'
+              '    else'
+              '      echo "[attendance-env-reconcile] applied_line=${applied_line}"'
+              '      COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" ENV_FILE="docker/app.env" NGINX_CONF="docker/nginx.conf" scripts/ops/attendance-preflight.sh'
+              '      reconcile_rc=$?'
+              '    fi'
+              '  fi'
+              "  set -e"
+            "fi"
+            "echo \"=== ENV RECONCILE END ===\""
+            'if [[ "$reconcile_rc" != "0" ]]; then exit "$reconcile_rc"; fi'
+          )
+
+          set +e
+          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$reconcile_log"
+          rc=${PIPESTATUS[1]}
+          set -e
+
+          echo "reconcile_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "reconcile_log=$reconcile_log" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          RECONCILE_RC: ${{ steps.remote_reconcile.outputs.reconcile_rc }}
+          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '20000' }}
+          SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
+        run: |
+          set -euo pipefail
+          reconcile_log="output/env-reconcile/reconcile.log"
+          artifact_name="attendance-remote-env-reconcile-prod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          overall="UNKNOWN"
+          if [[ -n "${RECONCILE_RC:-}" ]]; then
+            overall="PASS"
+            if [[ "${RECONCILE_RC}" != "0" ]]; then
+              overall="FAIL"
+            fi
+          fi
+
+          echo "## Remote Env Reconcile (Prod)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Remote exit code: \`${RECONCILE_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Applied target: \`ATTENDANCE_IMPORT_CSV_MAX_ROWS=${CSV_MAX_ROWS}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Skip host sync: \`${SKIP_HOST_SYNC}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Output (snippet)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$reconcile_log" ]]; then
+            block="$(
+              awk '
+                /^=== ENV RECONCILE START ===$/ { printing=1; next }
+                /^=== ENV RECONCILE END ===$/ { printing=0; after=1; next }
+                printing { print; next }
+                after {
+                  print
+                  count++
+                  if (count >= 20) exit
+                }
+              ' "$reconcile_log" | head -n 120
+            )"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${block:-'(markers missing; see reconcile.log artifact)'}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- reconcile.log missing; see artifacts" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Env reconcile logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/reconcile.log\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "gh run download ${GITHUB_RUN_ID} -n \"${artifact_name}\" -D \"output/playwright/ga/${GITHUB_RUN_ID}\"" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          mkdir -p output/env-reconcile
+          cp "$GITHUB_STEP_SUMMARY" output/env-reconcile/step-summary.md
+
+      - name: Upload reconcile artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-remote-env-reconcile-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/env-reconcile/**
+
+      - name: Fail when remote reconcile failed
+        if: always()
+        run: |
+          rc="${{ steps.remote_reconcile.outputs.reconcile_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "reconcile_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote env reconcile failed: rc=$rc" >&2
+            exit 1
+          fi
