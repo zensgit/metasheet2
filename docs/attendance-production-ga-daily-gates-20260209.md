@@ -3614,6 +3614,12 @@ Local verification:
 | preflight fail case (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=100000`) | local (2026-03-04) | FAIL (expected) | `output/playwright/local/20260304-preflight-row-cap/preflight-fail.log`, `output/playwright/local/20260304-preflight-row-cap/preflight-fail.rc` |
 | preflight override pass (`ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS=120000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-override-pass.log` |
 
+Mainline verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (main, default rows after PR #327) | [#22655694180](https://github.com/zensgit/metasheet2/actions/runs/22655694180) | PASS | `output/playwright/ga/22655694180/perf.log`, `output/playwright/ga/22655694180/attendance-perf-mmbkcie0-7r2922/perf-summary.json` (`rows=20000`, `uploadCsv=true`, `regressions=[]`) |
+
 ### Update (2026-03-04): Strict PASS + Perf Baseline Recovery + Concurrency Hardening
 
 Scope:
