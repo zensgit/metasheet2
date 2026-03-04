@@ -3586,6 +3586,32 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+### Update (2026-03-04): Strict PASS + Perf Baseline Recovery + Concurrency Hardening
+
+Scope:
+
+- verified latest strict gates evidence on `main` with upload/idempotency/export checks.
+- identified perf baseline instability source as intermittent `HTTP 502` on import prepare/commit during 100k runs.
+- merged workflow hardening to prevent schedule/manual cross-cancellation:
+  - PR [#324](https://github.com/zensgit/metasheet2/pull/324)
+  - merge commit: `2b87a2aa976a2560d32f9e2623a226a2c8edac97`
+  - file: `.github/workflows/attendance-import-perf-baseline.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | [#22653324504](https://github.com/zensgit/metasheet2/actions/runs/22653324504) | PASS | `output/playwright/ga/22653324504/20260304-031111-1/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-api-smoke.log` (`import upload ok`, `idempotency ok`, `export csv ok`) |
+| Attendance Import Perf Baseline (100k, async poll path) | [#22653075003](https://github.com/zensgit/metasheet2/actions/runs/22653075003) | CANCELLED | `output/playwright/ga/22653075003/perf.log` |
+| Attendance Import Perf Baseline (100k, sync commit) | [#22654163663](https://github.com/zensgit/metasheet2/actions/runs/22654163663) | FAIL (502) | `output/playwright/ga/22654163663/perf.log` (`POST /attendance/import/prepare|commit` returned `HTTP 502`) |
+| Attendance Import Perf Baseline (recovery run, 10k, sync commit) | [#22654274646](https://github.com/zensgit/metasheet2/actions/runs/22654274646) | PASS | `output/playwright/ga/22654274646/attendance-perf-mmbi4gd9-30hf5h/perf-summary.json`, `output/playwright/ga/22654274646/perf.log` |
+| Attendance Daily Gate Dashboard | [#22654315534](https://github.com/zensgit/metasheet2/actions/runs/22654315534) | PASS | `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.md` |
+
+Notes:
+
+- dashboard recovered to `overallStatus=pass` / `p0Status=pass` after the baseline recovery run.
+- `rows=100000` baseline still requires dedicated P1 backend performance stabilization under current remote load.
+
 ### Update (2026-03-03): Admin zh Localization Phase 8 (User Access + Audit Runtime Copy)
 
 Scope:

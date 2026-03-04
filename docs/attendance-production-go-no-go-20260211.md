@@ -2636,6 +2636,41 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-04): Strict Re-Run + Perf Baseline Incident/Recovery + Workflow Hardening
+
+Goal:
+
+- Re-validate strict production gates after phase8 merges.
+- Document perf baseline instability (`HTTP 502` on import endpoints) with reproducible evidence.
+- Land CI hardening so schedule/manual perf baseline runs do not cross-cancel.
+
+Code changes merged:
+
+- [#324](https://github.com/zensgit/metasheet2/pull/324)
+  - Split `Attendance Import Perf Baseline` concurrency group by trigger source (`schedule` vs `workflow_dispatch`).
+  - Preserve `cancel-in-progress: true` within each trigger source.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (main, upload/idempotency/export covered) | [#22653324504](https://github.com/zensgit/metasheet2/actions/runs/22653324504) | PASS | `output/playwright/ga/22653324504/20260304-031111-1/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-api-smoke.log` |
+| Perf Baseline (100k, async poll path) | [#22653075003](https://github.com/zensgit/metasheet2/actions/runs/22653075003) | CANCELLED | `output/playwright/ga/22653075003/perf.log` |
+| Perf Baseline (100k, sync commit) | [#22654163663](https://github.com/zensgit/metasheet2/actions/runs/22654163663) | FAIL (`HTTP 502`) | `output/playwright/ga/22654163663/perf.log` |
+| Perf Baseline Recovery (10k, sync commit, upload path) | [#22654274646](https://github.com/zensgit/metasheet2/actions/runs/22654274646) | PASS | `output/playwright/ga/22654274646/attendance-perf-mmbi4gd9-30hf5h/perf-summary.json`, `output/playwright/ga/22654274646/perf.log` |
+| Daily Gate Dashboard (post-recovery) | [#22654315534](https://github.com/zensgit/metasheet2/actions/runs/22654315534) | PASS | `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.md` |
+
+Observed:
+
+- strict gate remains stable and fully passing.
+- baseline failures are backend gateway errors under heavier import load, not client script contract regressions.
+- dashboard is currently green after recovery run, with no open Attendance P0/P1 gate issues.
+
+Decision:
+
+- **GO maintained** for production v1 operations.
+- keep `rows=100000` perf baseline hardening as P1 ongoing workstream.
+
 ## Post-Go Validation (2026-03-03): zh Runtime Localization Phase 8 (PR #322)
 
 Goal:
