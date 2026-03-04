@@ -3586,6 +3586,39 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+### Update (2026-03-04): Remote Preflight Drift Recovery (`ATTENDANCE_IMPORT_CSV_MAX_ROWS`)
+
+Scope:
+
+- After enabling preflight hard gate in PR [#327](https://github.com/zensgit/metasheet2/pull/327), remote preflight correctly detected production env drift:
+  - `ATTENDANCE_IMPORT_CSV_MAX_ROWS` missing on deploy host.
+- Added manual remediation workflow in PR [#329](https://github.com/zensgit/metasheet2/pull/329):
+  - `.github/workflows/attendance-remote-env-reconcile-prod.yml`
+  - Reconciles `docker/app.env` on deploy host and re-runs `attendance-preflight.sh`.
+
+Command (manual remediation):
+
+```bash
+gh workflow run attendance-remote-env-reconcile-prod.yml \
+  -f csv_max_rows=20000 \
+  -f skip_host_sync=false
+```
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Remote Preflight (detect drift) | [#22655883421](https://github.com/zensgit/metasheet2/actions/runs/22655883421) | FAIL (expected) | `output/playwright/ga/22655883421/preflight.log`, `output/playwright/ga/22655883421/step-summary.md` (`ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing`) |
+| Remote Env Reconcile (apply `ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) | [#22656041689](https://github.com/zensgit/metasheet2/actions/runs/22656041689) | PASS | `output/playwright/ga/22656041689/reconcile.log`, `output/playwright/ga/22656041689/step-summary.md` |
+| Remote Preflight (post-reconcile) | [#22656062644](https://github.com/zensgit/metasheet2/actions/runs/22656062644) | PASS | `output/playwright/ga/22656062644/preflight.log`, `output/playwright/ga/22656062644/step-summary.md` |
+| Strict Gates (post-reconcile revalidation) | [#22656062651](https://github.com/zensgit/metasheet2/actions/runs/22656062651) | PASS | `output/playwright/ga/22656062651/20260304-051221-1/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-api-smoke.log` |
+| Daily Gate Dashboard (post-reconcile snapshot) | [#22656162339](https://github.com/zensgit/metasheet2/actions/runs/22656162339) | PASS | `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.md` |
+
+Observed:
+
+- Dashboard recovered to all-pass state (`overallStatus=pass`, `p0Status=pass`, `gateFlat.preflight=PASS`).
+- No open `[Attendance Gate]` or `[Attendance P1]` tracking issue remained after recovery.
+
 ### Update (2026-03-04): Production Safety Guardrail for Import Rows
 
 Scope:
