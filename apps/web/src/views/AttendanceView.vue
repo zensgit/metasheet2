@@ -6134,7 +6134,12 @@ function inferErrorCodeFromMessage(message: string): string {
   if (normalized.includes('SERVICE_UNAVAILABLE') || normalized.includes('DB_NOT_READY')) return 'SERVICE_UNAVAILABLE'
 
   const codeMatch = normalized.match(/\b[A-Z][A-Z0-9_]{2,}\b/)
-  return codeMatch ? codeMatch[0] : ''
+  if (!codeMatch) return ''
+  const candidate = codeMatch[0]
+  if (candidate === 'FAILED' || candidate === 'ERROR' || candidate === 'REQUEST' || candidate === 'UNKNOWN') {
+    return ''
+  }
+  return candidate
 }
 
 function createApiError(response: { status: number }, payload: any, fallbackMessage: string): AttendanceApiError {
@@ -6195,11 +6200,39 @@ async function apiFetchWithTimeout(path: string, options: RequestInit = {}, time
   }
 }
 
-function createForbiddenError(message = 'Admin permissions required'): AttendanceApiError {
+function createForbiddenError(message = tr('Admin permissions required', '需要管理员权限')): AttendanceApiError {
   const error = new Error(message) as AttendanceApiError
   error.status = 403
   error.code = 'FORBIDDEN'
   return error
+}
+
+function localizeRuntimeErrorMessage(rawMessage: string, fallbackMessage: string): string {
+  const message = String(rawMessage || '').trim()
+  if (!message) return fallbackMessage
+  if (!isZh.value) return message
+
+  const mappings: Array<[RegExp, string]> = [
+    [/^failed to load anomalies\b/i, '加载异常失败'],
+    [/^failed to load requests\b/i, '加载申请失败'],
+    [/^failed to load request report\b/i, '加载申请报表失败'],
+    [/^failed to load admin data\b/i, '加载管理数据失败'],
+    [/^refresh failed\b/i, '刷新失败'],
+    [/^request failed\b/i, '申请失败'],
+    [/^request update failed\b/i, '申请处理失败'],
+    [/^request cancel failed\b/i, '申请取消失败'],
+    [/\bpunch too soon\b|\bpunch_too_soon\b/i, '打卡间隔过短，请稍后再试。'],
+    [/\binvalid token\b|\btoken expired\b|session expired/i, '登录已过期或令牌无效。'],
+    [/\bpermission denied\b|\bforbidden\b/i, '当前操作无权限。'],
+  ]
+  for (const [pattern, localized] of mappings) {
+    if (pattern.test(message)) return localized
+  }
+
+  const hasChinese = /[\u4e00-\u9fff]/.test(message)
+  const hasLatin = /[A-Za-z]/.test(message)
+  if (hasLatin && !hasChinese) return fallbackMessage
+  return message
 }
 
 function classifyStatusError(
@@ -6208,40 +6241,41 @@ function classifyStatusError(
   context: AttendanceStatusContext,
 ): { message: string; meta: AttendanceStatusMeta } {
   const err = error as Record<string, unknown> | null
-  const rawMessage = typeof err?.message === 'string' && err.message.trim().length > 0
+  const originalMessage = typeof err?.message === 'string' && err.message.trim().length > 0
     ? String(err.message)
     : fallbackMessage
+  const rawMessage = localizeRuntimeErrorMessage(originalMessage, fallbackMessage)
   const status = typeof err?.status === 'number' ? Number(err.status) : Number.NaN
   const explicitCode = typeof err?.code === 'string' ? normalizeErrorCode(String(err.code)) : ''
-  const code = explicitCode || inferErrorCodeFromMessage(rawMessage)
+  const code = explicitCode || inferErrorCodeFromMessage(originalMessage)
   const defaultAction = defaultStatusActionForContext(context)
   const meta: AttendanceStatusMeta = {}
   let message = rawMessage
-  const nestedCode = inferErrorCodeFromMessage(rawMessage)
+  const nestedCode = inferErrorCodeFromMessage(originalMessage)
 
   if (code) meta.code = code
 
   if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
-    message = 'Import token expired before request completed.'
-    meta.hint = 'Click retry to refresh commit token and submit again.'
+    message = tr('Import token expired before request completed.', '导入令牌已过期，请重试。')
+    meta.hint = tr('Click retry to refresh commit token and submit again.', '点击重试以刷新导入令牌并重新提交。')
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (
     context === 'import-preview'
     && (code === 'EXPIRED' || code === 'INVALID_CSV_FILE_ID')
   ) {
     message = code === 'EXPIRED'
-      ? 'Uploaded CSV file has expired on the server.'
-      : 'Uploaded CSV reference is invalid.'
-    meta.hint = 'Click "Re-apply CSV" to upload again, then retry preview.'
+      ? tr('Uploaded CSV file has expired on the server.', '上传的 CSV 文件在服务端已过期。')
+      : tr('Uploaded CSV reference is invalid.', '上传的 CSV 引用无效。')
+    meta.hint = tr('Click "Re-apply CSV" to upload again, then retry preview.', '点击“重新应用 CSV”重新上传后再试预览。')
     meta.action = 'reload-import-csv'
   } else if (
     context === 'import-run'
     && (code === 'EXPIRED' || code === 'INVALID_CSV_FILE_ID')
   ) {
     message = code === 'EXPIRED'
-      ? 'Uploaded CSV file has expired on the server.'
-      : 'Uploaded CSV reference is invalid.'
-    meta.hint = 'Click "Re-apply CSV" to upload again, then retry import.'
+      ? tr('Uploaded CSV file has expired on the server.', '上传的 CSV 文件在服务端已过期。')
+      : tr('Uploaded CSV reference is invalid.', '上传的 CSV 引用无效。')
+    meta.hint = tr('Click "Re-apply CSV" to upload again, then retry import.', '点击“重新应用 CSV”重新上传后再试导入。')
     meta.action = 'reload-import-csv'
   } else if (
     (context === 'import-preview' || context === 'import-run')
@@ -6249,79 +6283,79 @@ function classifyStatusError(
   ) {
     message = code === 'CSV_TOO_LARGE'
       ? rawMessage
-      : 'CSV upload exceeds server size limit.'
-    meta.hint = 'Use a smaller file or split the CSV by date/user range, then retry.'
+      : tr('CSV upload exceeds server size limit.', 'CSV 上传超过服务端大小限制。')
+    meta.hint = tr('Use a smaller file or split the CSV by date/user range, then retry.', '请缩小文件或按日期/用户拆分 CSV 后重试。')
     meta.action = 'reload-import-csv'
   } else if (code === 'IMPORT_JOB_TIMEOUT') {
-    message = 'Async import job is still running in background.'
-    meta.hint = 'Use "Resume import job" to continue polling, or open the async job card for manual controls.'
+    message = tr('Async import job is still running in background.', '异步导入任务仍在后台运行。')
+    meta.hint = tr('Use "Resume import job" to continue polling, or open the async job card for manual controls.', '可点击“恢复导入任务”继续轮询，或在异步任务卡片中手动处理。')
     meta.action = 'resume-import-job'
   } else if (code === 'IMPORT_JOB_FAILED') {
     if (nestedCode === 'EXPIRED' || nestedCode === 'INVALID_CSV_FILE_ID') {
       message = nestedCode === 'EXPIRED'
-        ? 'Uploaded CSV file expired while async import was running.'
-        : 'Uploaded CSV reference is invalid for async import.'
-      meta.hint = 'Re-apply CSV and retry import.'
+        ? tr('Uploaded CSV file expired while async import was running.', '异步导入运行期间，上传的 CSV 已过期。')
+        : tr('Uploaded CSV reference is invalid for async import.', '异步导入使用的 CSV 引用无效。')
+      meta.hint = tr('Re-apply CSV and retry import.', '请重新应用 CSV 后重试导入。')
       meta.action = 'reload-import-csv'
     } else if (nestedCode === 'COMMIT_TOKEN_INVALID' || nestedCode === 'COMMIT_TOKEN_REQUIRED') {
-      message = 'Import token expired while async import was running.'
-      meta.hint = 'Retry import to request a new commit token.'
+      message = tr('Import token expired while async import was running.', '异步导入运行期间，导入令牌已过期。')
+      meta.hint = tr('Retry import to request a new commit token.', '请重试导入以获取新的提交令牌。')
       meta.action = 'retry-run-import'
     } else if (nestedCode === 'CSV_TOO_LARGE' || nestedCode === 'PAYLOAD_TOO_LARGE') {
       message = nestedCode === 'CSV_TOO_LARGE'
         ? rawMessage
-        : 'CSV upload exceeds server size limit.'
-      meta.hint = 'Split the CSV into smaller files, then retry import.'
+        : tr('CSV upload exceeds server size limit.', 'CSV 上传超过服务端大小限制。')
+      meta.hint = tr('Split the CSV into smaller files, then retry import.', '请将 CSV 拆分为更小文件后重试导入。')
       meta.action = 'reload-import-csv'
     } else {
       message = rawMessage
-      meta.hint = 'Inspect job error details, then retry import.'
+      meta.hint = tr('Inspect job error details, then retry import.', '请先查看任务错误详情，再重试导入。')
       meta.action = 'retry-run-import'
     }
   } else if (code === 'IMPORT_JOB_CANCELED') {
-    message = 'Async import job was canceled before completion.'
-    meta.hint = 'Submit a new import when ready.'
+    message = tr('Async import job was canceled before completion.', '异步导入任务在完成前被取消。')
+    meta.hint = tr('Submit a new import when ready.', '准备好后可重新提交导入。')
     meta.action = 'retry-run-import'
   } else if (context === 'import-run' && code === 'IMPORT_JOB_NOT_FOUND') {
-    message = 'Async import job is no longer available.'
-    meta.hint = 'Submit a new import task and continue from the latest payload.'
+    message = tr('Async import job is no longer available.', '异步导入任务已不可用。')
+    meta.hint = tr('Submit a new import task and continue from the latest payload.', '请重新提交导入任务，并基于最新载荷继续。')
     meta.action = 'retry-run-import'
   } else if (
     (context === 'import-run' || context === 'import-preview')
     && (status === 502 || status === 503 || status === 504 || code === 'BAD_GATEWAY' || code === 'GATEWAY_TIMEOUT')
   ) {
     message = context === 'import-run'
-      ? 'Import request hit a temporary gateway error.'
-      : 'Import preview request hit a temporary gateway error.'
+      ? tr('Import request hit a temporary gateway error.', '导入请求遇到临时网关错误。')
+      : tr('Import preview request hit a temporary gateway error.', '导入预览请求遇到临时网关错误。')
     meta.hint = context === 'import-run'
-      ? 'Click retry. If an async job was already accepted, the flow will resume polling automatically.'
-      : 'Click retry preview in a moment. If this persists, check gateway/backend health.'
+      ? tr('Click retry. If an async job was already accepted, the flow will resume polling automatically.', '点击重试；若异步任务已被受理，流程会自动恢复轮询。')
+      : tr('Click retry preview in a moment. If this persists, check gateway/backend health.', '稍后重试预览；若持续失败，请检查网关/后端健康状态。')
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (code === 'RATE_LIMITED' || status === 429) {
-    message = 'Request was rate-limited by the server.'
-    meta.hint = 'Wait a few seconds before retrying to avoid repeated throttling.'
+    message = tr('Request was rate-limited by the server.', '请求被服务端限流。')
+    meta.hint = tr('Wait a few seconds before retrying to avoid repeated throttling.', '请等待几秒后再重试，避免持续触发限流。')
     meta.action = defaultAction
   } else if (code === 'REQUEST_TIMEOUT' || status === 408) {
-    message = 'Request timed out before the server responded.'
-    meta.hint = 'Retry the action. If this repeats, check network/server health.'
+    message = tr('Request timed out before the server responded.', '请求在服务端响应前已超时。')
+    meta.hint = tr('Retry the action. If this repeats, check network/server health.', '请重试当前操作；若持续出现，请检查网络与服务健康状态。')
     meta.action = defaultAction
   } else if (code === 'PUNCH_TOO_SOON') {
     message = rawMessage
-    meta.hint = 'Minimum punch interval is enforced by policy. Retry after the interval.'
+    meta.hint = tr('Minimum punch interval is enforced by policy. Retry after the interval.', '系统已启用最小打卡间隔，请稍后重试。')
     meta.action = 'refresh-overview'
   } else if (status === 401 || code === 'UNAUTHORIZED' || code === 'INVALID_TOKEN' || code === 'TOKEN_EXPIRED') {
-    message = 'Session expired or token is invalid.'
-    meta.hint = 'Sign in again, then retry the action.'
+    message = tr('Session expired or token is invalid.', '登录已过期或令牌无效。')
+    meta.hint = tr('Sign in again, then retry the action.', '请重新登录后再重试。')
     meta.action = 'refresh-overview'
   } else if (status === 403 || code === 'FORBIDDEN' || code === 'PERMISSION_DENIED') {
-    message = rawMessage === fallbackMessage ? 'Permission denied for this action.' : rawMessage
-    meta.hint = 'Use an account with required attendance permissions, then reload data.'
+    message = rawMessage === fallbackMessage ? tr('Permission denied for this action.', '当前操作无权限。') : rawMessage
+    meta.hint = tr('Use an account with required attendance permissions, then reload data.', '请使用具备所需考勤权限的账号，并重新加载数据。')
     meta.action = context === 'request-submit' || context === 'request-resolve' || context === 'request-cancel'
       ? 'reload-requests'
       : 'reload-admin'
   } else if (status >= 500 || code === 'SERVICE_UNAVAILABLE' || code === 'DB_NOT_READY') {
     if (!message) message = fallbackMessage
-    meta.hint = 'Server may be warming up or temporarily unavailable. Retry in a moment.'
+    meta.hint = tr('Server may be warming up or temporarily unavailable. Retry in a moment.', '服务可能正在预热或临时不可用，请稍后重试。')
     meta.action = defaultAction
   } else {
     meta.action = defaultAction
@@ -9487,7 +9521,7 @@ async function loadAdminData() {
       loadHolidays(),
     ])
   } catch (error) {
-    setStatusFromError(error, 'Failed to load admin data', 'admin')
+    setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
   }
 }
 

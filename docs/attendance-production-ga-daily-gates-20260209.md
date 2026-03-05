@@ -3586,6 +3586,27 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+### Update (2026-03-05): zh Locale Smoke Credential Recovery + Runtime Fallback Hardening (PR #331)
+
+Scope:
+
+- rotated `ATTENDANCE_ADMIN_JWT` secret using `/api/auth/refresh-token` flow (no secret value stored in docs/repo).
+- re-ran prod zh smoke successfully after credential recovery.
+- implemented runtime error-copy fallback hardening in `AttendanceView.vue` to avoid mixed-language status text when backend returns English messages.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | [#22695243476](https://github.com/zensgit/metasheet2/actions/runs/22695243476) | FAIL (expected before rotation) | `output/playwright/ga/22695243476/auth-error.txt` |
+| Attendance Locale zh Smoke (Prod) | [#22695413918](https://github.com/zensgit/metasheet2/actions/runs/22695413918) | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
+| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-anomalies-error-localized.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
+
+Notes:
+
+- PR [#331](https://github.com/zensgit/metasheet2/pull/331) is awaiting required human approval (`reviewDecision=REVIEW_REQUIRED`).
+- branch policy blocks self-approval/self-merge; use another write-access reviewer to approve, then merge.
+
 ### Update (2026-03-04): Remote Preflight Drift Recovery (`ATTENDANCE_IMPORT_CSV_MAX_ROWS`)
 
 Scope:

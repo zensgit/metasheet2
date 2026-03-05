@@ -2636,6 +2636,36 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-05): zh Runtime Error Copy Fallback Hardening (PR #331)
+
+Goal:
+
+- remove remaining mixed-language runtime status copy in Attendance Overview when backend returns English error payloads (for example `Failed to load anomalies`).
+
+Change scope:
+
+- file: `apps/web/src/views/AttendanceView.vue`
+- localized `classifyStatusError` message/hint branches with `tr(en, zh)`
+- added zh fallback mapping for common backend English error text
+- filtered generic pseudo-code `FAILED` from UI error-code rendering
+- localized admin fallback callsite:
+  - `setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-05) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-05) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| zh locale smoke (prod auth recovery) | [#22695413918](https://github.com/zensgit/metasheet2/actions/runs/22695413918) | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
+| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-anomalies-error-localized.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
+
+Notes:
+
+- PR [#331](https://github.com/zensgit/metasheet2/pull/331) checks are green.
+- merge is currently blocked by branch policy (`REVIEW_REQUIRED`, at least one approving review from another write user).
+- no secret/token is committed to repo docs.
+
 ## Post-Go Verification (2026-03-04): Remote Preflight Drift Fix + Gate Recovery
 
 Goal:
