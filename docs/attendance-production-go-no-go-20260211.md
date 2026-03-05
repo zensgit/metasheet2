@@ -2666,6 +2666,26 @@ Notes:
 - merge is currently blocked by branch policy (`REVIEW_REQUIRED`, at least one approving review from another write user).
 - no secret/token is committed to repo docs.
 
+### Update (2026-03-05): zh Status Chip Localization Sweep
+
+Scope:
+
+- localized remaining direct status rendering points in `apps/web/src/views/AttendanceView.vue`:
+  - recent request chips
+  - anomaly-linked request chips
+  - request report status column
+  - import preview/import async/import batch status display
+  - payroll cycle status display
+- expanded `formatStatus()` mapping to cover request/import/payroll lifecycle states (`pending/approved/rejected/...`) in zh/en.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-05) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-05) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| zh status chip runtime check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-status-chip-localized.png` (`sample=[待处理, 已批准, ...]`, `hasEnglishRequestState=false`) |
+
 ## Post-Go Verification (2026-03-04): Remote Preflight Drift Fix + Gate Recovery
 
 Goal:

@@ -283,7 +283,7 @@
                 <div>
                   <strong>{{ item.work_date }}</strong> · {{ formatRequestType(item.request_type) }}
                   <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
-                    {{ item.status }}
+                    {{ formatStatus(item.status) }}
                   </span>
                 </div>
                 <div class="attendance__request-meta" v-if="item.metadata">
@@ -337,7 +337,7 @@
                         class="attendance__status-chip"
                         :class="`attendance__status-chip--${item.request.status}`"
                       >
-                        {{ item.request.status }}
+                        {{ formatStatus(item.request.status) }}
                       </span>
                     </template>
                     <span v-else>--</span>
@@ -378,7 +378,7 @@
               <tbody>
                 <tr v-for="row in requestReport" :key="`${row.requestType}-${row.status}`">
                   <td>{{ formatRequestType(row.requestType) }}</td>
-                  <td>{{ row.status }}</td>
+                  <td>{{ formatStatus(row.status) }}</td>
                   <td>{{ row.total }}</td>
                   <td>{{ row.minutes }}</td>
                 </tr>
@@ -1899,7 +1899,7 @@
                   </button>
                 </div>
                 <div>
-                  {{ tr('Status', '状态') }}: <strong>{{ importPreviewTask.status }}</strong>
+                  {{ tr('Status', '状态') }}: <strong>{{ formatStatus(importPreviewTask.status) }}</strong>
                   <template v-if="importPreviewTask.mode === 'chunked'">
                     · {{ tr('Chunks', '分块') }} {{ importPreviewTask.completedChunks }} / {{ importPreviewTask.totalChunks }}
                   </template>
@@ -1940,7 +1940,7 @@
                   </div>
                 </div>
                 <div>
-                  {{ tr('Status', '状态') }}: <strong>{{ importAsyncJob.status }}</strong>
+                  {{ tr('Status', '状态') }}: <strong>{{ formatStatus(importAsyncJob.status) }}</strong>
                   <span v-if="importAsyncPolling"> · {{ tr('polling...', '轮询中...') }}</span>
                 </div>
                 <div v-if="importAsyncJob.total">
@@ -2014,7 +2014,7 @@
                   <tbody>
                     <tr v-for="batch in importBatches" :key="batch.id">
                       <td>{{ batch.id.slice(0, 8) }}</td>
-                      <td>{{ batch.status }}</td>
+                      <td>{{ formatStatus(batch.status) }}</td>
                       <td>{{ batch.rowCount }}</td>
                       <td>{{ resolveImportBatchEngine(batch) }}</td>
                       <td>{{ resolveImportBatchChunkLabel(batch) }}</td>
@@ -2436,7 +2436,7 @@
                       <td>{{ payrollTemplateName(item.templateId) }}</td>
                       <td>{{ item.startDate }}</td>
                       <td>{{ item.endDate }}</td>
-                      <td>{{ item.status }}</td>
+                      <td>{{ formatStatus(item.status) }}</td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editPayrollCycle(item)">{{ tr('Edit', '编辑') }}</button>
                         <button class="attendance__btn attendance__btn--danger" @click="deletePayrollCycle(item.id)">
@@ -4468,6 +4468,9 @@ function formatDateTime(value: string | null): string {
 }
 
 function formatStatus(value: string): string {
+  const raw = String(value || '').trim()
+  if (!raw) return '--'
+  const normalized = raw.toLowerCase()
   const map: Record<string, string> = isZh.value
     ? {
         normal: '正常',
@@ -4478,6 +4481,29 @@ function formatStatus(value: string): string {
         absent: '缺勤',
         adjusted: '已调整',
         off: '休息',
+        pending: '待处理',
+        approved: '已批准',
+        rejected: '已驳回',
+        cancelled: '已取消',
+        canceled: '已取消',
+        queued: '已排队',
+        running: '运行中',
+        processing: '处理中',
+        completed: '已完成',
+        success: '成功',
+        failed: '失败',
+        error: '错误',
+        committed: '已提交',
+        rolled_back: '已回滚',
+        rollback_pending: '回滚中',
+        active: '启用',
+        inactive: '停用',
+        enabled: '启用',
+        disabled: '停用',
+        open: '打开',
+        closed: '关闭',
+        draft: '草稿',
+        submitted: '已提交',
       }
     : {
         normal: 'Normal',
@@ -4488,8 +4514,31 @@ function formatStatus(value: string): string {
         absent: 'Absent',
         adjusted: 'Adjusted',
         off: 'Off',
+        pending: 'Pending',
+        approved: 'Approved',
+        rejected: 'Rejected',
+        cancelled: 'Cancelled',
+        canceled: 'Canceled',
+        queued: 'Queued',
+        running: 'Running',
+        processing: 'Processing',
+        completed: 'Completed',
+        success: 'Success',
+        failed: 'Failed',
+        error: 'Error',
+        committed: 'Committed',
+        rolled_back: 'Rolled back',
+        rollback_pending: 'Rollback pending',
+        active: 'Active',
+        inactive: 'Inactive',
+        enabled: 'Enabled',
+        disabled: 'Disabled',
+        open: 'Open',
+        closed: 'Closed',
+        draft: 'Draft',
+        submitted: 'Submitted',
       }
-  return map[value] ?? value
+  return map[normalized] ?? raw
 }
 
 function formatList(items?: Array<string> | null): string {
