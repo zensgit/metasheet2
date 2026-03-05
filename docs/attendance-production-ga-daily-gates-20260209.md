@@ -3600,7 +3600,7 @@ Verification:
 |---|---|---|---|
 | Attendance Locale zh Smoke (Prod) | [#22695243476](https://github.com/zensgit/metasheet2/actions/runs/22695243476) | FAIL (expected before rotation) | `output/playwright/ga/22695243476/auth-error.txt` |
 | Attendance Locale zh Smoke (Prod) | [#22695413918](https://github.com/zensgit/metasheet2/actions/runs/22695413918) | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
-| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-refresh-check.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
+| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-anomalies-error-localized.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
 
 Notes:
 

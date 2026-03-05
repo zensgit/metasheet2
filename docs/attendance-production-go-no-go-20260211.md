@@ -2658,7 +2658,7 @@ Verification:
 | Web build | local (2026-03-05) | PASS | command: `pnpm --filter @metasheet/web build` |
 | zh copy contract | local (2026-03-05) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | zh locale smoke (prod auth recovery) | [#22695413918](https://github.com/zensgit/metasheet2/actions/runs/22695413918) | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
-| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-refresh-check.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
+| Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-anomalies-error-localized.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
 
 Notes:
 
