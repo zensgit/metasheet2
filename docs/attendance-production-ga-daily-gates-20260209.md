@@ -3607,6 +3607,21 @@ Notes:
 - PR [#331](https://github.com/zensgit/metasheet2/pull/331) is awaiting required human approval (`reviewDecision=REVIEW_REQUIRED`).
 - branch policy blocks self-approval/self-merge; use another write-access reviewer to approve, then merge.
 
+### Update (2026-03-05): zh Status Chip Localization Sweep
+
+Scope:
+
+- removed remaining mixed-language status chips/tables in Attendance overview/admin by replacing direct `status` rendering with `formatStatus()`.
+- expanded `formatStatus()` map for request/import/payroll lifecycle statuses.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Web build | local (2026-03-05) | PASS | command: `pnpm --filter @metasheet/web build` |
+| zh copy contract | local (2026-03-05) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+| zh status chip runtime check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-status-chip-localized.png` (`hasEnglishRequestState=false`) |
+
 ### Update (2026-03-04): Remote Preflight Drift Recovery (`ATTENDANCE_IMPORT_CSV_MAX_ROWS`)
 
 Scope:
