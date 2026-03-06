@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useMemo } from 'react'
 import { MetaControls } from './components/MetaControls'
 import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
@@ -12,19 +12,14 @@ import { useMetaBackendLifecycle } from './useMetaBackendLifecycle'
 import { useMetaControlsState } from './useMetaControlsState'
 import { VIEW_TYPE_FILTER_OPTIONS } from './viewFilters'
 import {
-  createUniverRuntime,
-  disposeUniverRuntime,
-  renderWorkbook,
-  type UniverRuntime,
-} from './univerRuntime'
-
-const CONTAINER_ID = 'univer-container'
+  UNIVER_CONTAINER_ID,
+  useUniverRuntime,
+} from './useUniverRuntime'
 const META_API_BASE = import.meta.env.VITE_META_API_BASE || ''
 const META_SHEET_ID = import.meta.env.VITE_META_SHEET_ID || 'univer_demo_meta'
 const META_VIEW_ID = import.meta.env.VITE_META_VIEW_ID || ''
 
 export default function App() {
-  const univerRuntimeRef = useRef<UniverRuntime | null>(null)
   const {
     applyParams,
     canApply,
@@ -105,29 +100,6 @@ export default function App() {
     window.setTimeout(() => setCopyStatus('idle'), 2000)
   }
 
-  useEffect(() => {
-    const container = document.getElementById(CONTAINER_ID)
-    if (!container) {
-      return undefined
-    }
-
-    const runtime = createUniverRuntime(container)
-    univerRuntimeRef.current = runtime
-
-    return () => {
-      if (univerRuntimeRef.current) {
-        disposeUniverRuntime(univerRuntimeRef.current)
-        univerRuntimeRef.current = null
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!univerRuntimeRef.current) return
-
-    renderWorkbook(univerRuntimeRef.current, workbookData)
-  }, [workbookData])
-
   const {
     autoRefreshLabel,
     canRefresh,
@@ -167,6 +139,7 @@ export default function App() {
       viewTypeFilter,
     ],
   )
+  useUniverRuntime(workbookData)
 
   return (
     <div className="app">
@@ -224,7 +197,7 @@ export default function App() {
           viewTypeLabel={viewTypeLabel}
         />
       </header>
-      <div id={CONTAINER_ID} className="univer-container" />
+      <div id={UNIVER_CONTAINER_ID} className="univer-container" />
     </div>
   )
 }
