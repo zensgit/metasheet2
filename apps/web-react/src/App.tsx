@@ -27,8 +27,13 @@ import '@univerjs/docs-ui/facade'
 import '@univerjs/sheets-ui/facade'
 import '@univerjs/engine-formula/facade'
 import '@univerjs/sheets-formula/facade'
+import {
+  bootstrapMetaBackendSession,
+  createLocalMetaBackendState,
+  refreshMetaBackendState,
+} from './metaBackendController'
 import { buildWorkbookFromMeta } from './metaWorkbook'
-import { buildLastErrorInfo, createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
+import { createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
 import {
   clearStoredConfig,
   readStoredBackend,
@@ -235,51 +240,58 @@ export default function App() {
         setViewsStatus('loading')
         setViewsError(null)
       }
-      const nowLabel = new Date().toLocaleTimeString()
-      if (refreshViews) {
-        try {
-          const nextViews = await backendClient.fetchViews()
-          setViews(nextViews)
-          setViewsStatus('ready')
-          setLastViewsAt(nowLabel)
-          setViewsErrorAt(null)
-          setViewsError(null)
-          clearLastErrorForScope('views')
-        } catch (err) {
-          const info = buildLastErrorInfo('views', err)
-          setLastErrorInfo(info)
-          setViewsStatus('error')
-          setViewsError(info.message)
-          setViewsErrorAt(info.at)
-        }
-      }
-
       try {
-        const payload = await backendClient.fetchMetaView()
-        const { data } = payload
-        if (!data) {
-          throw new Error('Backend response missing data')
-        }
-        const next = buildWorkbookFromMeta(data.fields, data.rows)
-        setWorkbookData(next)
-        setStatus('ready')
-        setLastRefreshAt(nowLabel)
-        setDataErrorAt(null)
-        setError(null)
-        clearLastErrorForScope('data')
-      } catch (err) {
-        const info = buildLastErrorInfo('data', err)
-        setLastErrorInfo(info)
-        setStatus('error')
-        setError(info.message)
-        setDataErrorAt(info.at)
-        setWorkbookData(WORKBOOK_DATA)
+        const nextState = await refreshMetaBackendState({
+          client: backendClient,
+          current: {
+            status,
+            error,
+            lastErrorInfo,
+            views,
+            viewsStatus,
+            viewsError,
+            viewsErrorAt,
+            lastViewsAt,
+            lastRefreshAt,
+            dataErrorAt,
+            workbookData,
+          },
+          refreshViews,
+          fallbackWorkbook: WORKBOOK_DATA,
+          buildWorkbook: buildWorkbookFromMeta,
+        })
+
+        setStatus(nextState.status)
+        setError(nextState.error)
+        setLastErrorInfo(nextState.lastErrorInfo)
+        setViews(nextState.views)
+        setViewsStatus(nextState.viewsStatus)
+        setViewsError(nextState.viewsError)
+        setViewsErrorAt(nextState.viewsErrorAt)
+        setLastViewsAt(nextState.lastViewsAt)
+        setLastRefreshAt(nextState.lastRefreshAt)
+        setDataErrorAt(nextState.dataErrorAt)
+        setWorkbookData(nextState.workbookData)
       } finally {
         refreshInFlightRef.current = false
         setIsRefreshing(false)
       }
     },
-    [backendClient, useBackend],
+    [
+      backendClient,
+      dataErrorAt,
+      error,
+      lastErrorInfo,
+      lastRefreshAt,
+      lastViewsAt,
+      status,
+      useBackend,
+      views,
+      viewsError,
+      viewsErrorAt,
+      viewsStatus,
+      workbookData,
+    ],
   )
 
   const handleRefresh = () => {
@@ -298,19 +310,20 @@ export default function App() {
     let cancelled = false
     if (!useBackend) {
       tokenBootstrappedRef.current = false
-      setStatus('local')
-      setError(null)
-      setLastErrorInfo(null)
+      const localState = createLocalMetaBackendState(WORKBOOK_DATA)
+      setStatus(localState.status)
+      setError(localState.error)
+      setLastErrorInfo(localState.lastErrorInfo)
       setCopyStatus('idle')
-      setViews([])
-      setViewsStatus('idle')
-      setViewsError(null)
-      setViewsErrorAt(null)
-      setDataErrorAt(null)
+      setViews(localState.views)
+      setViewsStatus(localState.viewsStatus)
+      setViewsError(localState.viewsError)
+      setViewsErrorAt(localState.viewsErrorAt)
+      setDataErrorAt(localState.dataErrorAt)
       setIsRefreshing(false)
-      setLastRefreshAt(null)
-      setLastViewsAt(null)
-      setWorkbookData(WORKBOOK_DATA)
+      setLastRefreshAt(localState.lastRefreshAt)
+      setLastViewsAt(localState.lastViewsAt)
+      setWorkbookData(localState.workbookData)
       return () => {
         cancelled = true
       }
@@ -319,22 +332,25 @@ export default function App() {
     lastSheetIdRef.current = sheetId
 
     const run = async () => {
-      try {
-        if (!tokenBootstrappedRef.current) {
-          await backendClient.ensureDevToken(true)
-          tokenBootstrappedRef.current = true
-          clearLastErrorForScope('token')
-        }
-      } catch (err) {
+      const bootstrap = await bootstrapMetaBackendSession({
+        client: backendClient,
+        tokenBootstrapped: tokenBootstrappedRef.current,
+      })
+
+      if (!bootstrap.ok) {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : 'Failed to fetch dev token'
-        setLastErrorInfo(buildLastErrorInfo('token', err))
-        setStatus('error')
-        setError(message)
-        setViewsStatus('error')
-        setViewsError(message)
+        setLastErrorInfo(bootstrap.lastErrorInfo)
+        setStatus(bootstrap.status)
+        setError(bootstrap.error)
+        setViewsStatus(bootstrap.viewsStatus)
+        setViewsError(bootstrap.viewsError)
         setIsRefreshing(false)
         return
+      }
+
+      tokenBootstrappedRef.current = bootstrap.tokenBootstrapped
+      if (bootstrap.clearTokenError) {
+        clearLastErrorForScope('token')
       }
       if (cancelled) return
       refreshBackend({ refreshViews: shouldRefreshViews })
