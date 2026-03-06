@@ -43,6 +43,10 @@ ATTENDANCE_IMPORT_UPLOAD_DIR=/opt/metasheet/storage/attendance-import
 ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000
 ```
 
+如需可直接复用的生产模板（含校验命令）：
+
+- [attendance-onprem-app-env-template-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-onprem-app-env-template-20260306.md)
+
 创建上传目录：
 
 ```bash
@@ -117,6 +121,10 @@ SERVICE_MANAGER=auto \
 CHECK_NGINX=1 \
 scripts/ops/attendance-onprem-healthcheck.sh
 ```
+
+如需“部署后 30 分钟完整验收命令”：
+
+- [attendance-onprem-postdeploy-30min-verification-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-onprem-postdeploy-30min-verification-20260306.md)
 
 ---
 
