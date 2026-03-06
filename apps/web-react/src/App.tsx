@@ -1,38 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import {
-  CellValueType,
-  LocaleType,
-  LogLevel,
-  Univer,
-  UniverInstanceType,
-  type IWorkbookData
-} from '@univerjs/core'
-import { FUniver } from '@univerjs/core/facade'
-import { UniverDocsPlugin } from '@univerjs/docs'
-import { UniverDocsUIPlugin } from '@univerjs/docs-ui'
-import { UniverFormulaEnginePlugin } from '@univerjs/engine-formula'
-import { UniverRenderEnginePlugin } from '@univerjs/engine-render'
-import { UniverSheetsPlugin } from '@univerjs/sheets'
-import { UniverSheetsFormulaPlugin } from '@univerjs/sheets-formula'
-import { UniverSheetsUIPlugin } from '@univerjs/sheets-ui'
-import { UniverUIPlugin } from '@univerjs/ui'
-import uiEnUS from '@univerjs/ui/lib/locale/en-US'
-import sheetsUiEnUS from '@univerjs/sheets-ui/lib/locale/en-US'
-import docsUiEnUS from '@univerjs/docs-ui/lib/locale/en-US'
-
-import '@univerjs/sheets/facade'
-import '@univerjs/ui/facade'
-import '@univerjs/docs-ui/facade'
-import '@univerjs/sheets-ui/facade'
-import '@univerjs/engine-formula/facade'
-import '@univerjs/sheets-formula/facade'
+import type { IWorkbookData } from '@univerjs/core'
 import {
   bootstrapMetaBackendSession,
   createLocalMetaBackendState,
   refreshMetaBackendState,
   type MetaBackendStateSnapshot,
 } from './metaBackendController'
+import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
 import { createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
 import {
@@ -54,59 +29,20 @@ import {
   type ViewOption,
   type ViewTypeFilter,
 } from './viewFilters'
+import {
+  createUniverRuntime,
+  disposeUniverRuntime,
+  renderWorkbook,
+  type UniverRuntime,
+} from './univerRuntime'
 
 const CONTAINER_ID = 'univer-container'
 const META_API_BASE = import.meta.env.VITE_META_API_BASE || ''
 const META_SHEET_ID = import.meta.env.VITE_META_SHEET_ID || 'univer_demo_meta'
 const META_VIEW_ID = import.meta.env.VITE_META_VIEW_ID || ''
 
-const WORKBOOK_DATA: IWorkbookData = {
-  id: 'metasheet-poc',
-  appVersion: '0.12.0',
-  locale: LocaleType.EN_US,
-  name: 'MetaSheet POC',
-  sheetOrder: ['sheet-001'],
-  styles: {},
-  sheets: {
-    'sheet-001': {
-      id: 'sheet-001',
-      name: 'Sheet1',
-      rowCount: 20,
-      columnCount: 10,
-      cellData: {
-        0: {
-          0: { v: '产品' },
-          1: { v: '数量' },
-          2: { v: '单价' },
-          3: { v: '小计' }
-        },
-        1: {
-          0: { v: '产品A' },
-          1: { v: 12, t: CellValueType.NUMBER },
-          2: { v: 100, t: CellValueType.NUMBER },
-          3: { v: 1200, t: CellValueType.NUMBER }
-        },
-        2: {
-          0: { v: '产品B' },
-          1: { v: 20, t: CellValueType.NUMBER },
-          2: { v: 150, t: CellValueType.NUMBER },
-          3: { v: 3000, t: CellValueType.NUMBER }
-        },
-        3: {
-          0: { v: '产品C' },
-          1: { v: 15, t: CellValueType.NUMBER },
-          2: { v: 200, t: CellValueType.NUMBER },
-          3: { v: 3000, t: CellValueType.NUMBER }
-        }
-      }
-    }
-  }
-}
-
 export default function App() {
-  const univerRef = useRef<Univer | null>(null)
-  const univerApiRef = useRef<FUniver | null>(null)
-  const activeUnitIdRef = useRef<string | null>(null)
+  const univerRuntimeRef = useRef<UniverRuntime | null>(null)
   const [useBackend, setUseBackend] = useState(() => readStoredBackend())
   const [status, setStatus] = useState<'local' | 'loading' | 'ready' | 'error'>('local')
   const [error, setError] = useState<string | null>(null)
@@ -141,11 +77,11 @@ export default function App() {
     lastViewsAt: null,
     lastRefreshAt: null,
     dataErrorAt: null,
-    workbookData: WORKBOOK_DATA,
+    workbookData: DEMO_WORKBOOK_DATA,
   })
   const lastSheetIdRef = useRef<string | null>(null)
   const tokenBootstrappedRef = useRef(false)
-  const [workbookData, setWorkbookData] = useState<IWorkbookData>(WORKBOOK_DATA)
+  const [workbookData, setWorkbookData] = useState<IWorkbookData>(DEMO_WORKBOOK_DATA)
   const initialConfig = useMemo(() => {
     const stored = readStoredConfig()
     return {
@@ -288,7 +224,7 @@ export default function App() {
           client: backendClient,
           current: backendStateRef.current,
           refreshViews,
-          fallbackWorkbook: WORKBOOK_DATA,
+          fallbackWorkbook: DEMO_WORKBOOK_DATA,
           buildWorkbook: buildWorkbookFromMeta,
         })
 
@@ -327,7 +263,7 @@ export default function App() {
     let cancelled = false
     if (!useBackend) {
       tokenBootstrappedRef.current = false
-      const localState = createLocalMetaBackendState(WORKBOOK_DATA)
+      const localState = createLocalMetaBackendState(DEMO_WORKBOOK_DATA)
       setStatus(localState.status)
       setError(localState.error)
       setLastErrorInfo(localState.lastErrorInfo)
@@ -405,51 +341,21 @@ export default function App() {
       return undefined
     }
 
-    const univer = new Univer({
-      locale: LocaleType.EN_US,
-      locales: {
-        [LocaleType.EN_US]: {
-          ...uiEnUS,
-          ...sheetsUiEnUS,
-          ...docsUiEnUS
-        }
-      },
-      logLevel: LogLevel.ERROR
-    })
-
-    univer.registerPlugin(UniverDocsPlugin)
-    univer.registerPlugin(UniverRenderEnginePlugin)
-    univer.registerPlugin(UniverUIPlugin, { container })
-    univer.registerPlugin(UniverDocsUIPlugin)
-    univer.registerPlugin(UniverSheetsPlugin)
-    univer.registerPlugin(UniverSheetsUIPlugin)
-    univer.registerPlugin(UniverFormulaEnginePlugin)
-    univer.registerPlugin(UniverSheetsFormulaPlugin)
-
-    univerRef.current = univer
-    univerApiRef.current = FUniver.newAPI(univer)
+    const runtime = createUniverRuntime(container)
+    univerRuntimeRef.current = runtime
 
     return () => {
-      activeUnitIdRef.current = null
-      univerApiRef.current?.dispose()
-      univer.dispose()
-      univerApiRef.current = null
-      univerRef.current = null
+      if (univerRuntimeRef.current) {
+        disposeUniverRuntime(univerRuntimeRef.current)
+        univerRuntimeRef.current = null
+      }
     }
   }, [])
 
   useEffect(() => {
-    if (!univerRef.current) return
+    if (!univerRuntimeRef.current) return
 
-    if (activeUnitIdRef.current) {
-      univerApiRef.current?.disposeUnit(activeUnitIdRef.current)
-      activeUnitIdRef.current = null
-    }
-
-    const workbook = univerRef.current.createUnit(UniverInstanceType.UNIVER_SHEET, workbookData)
-    if (typeof workbook?.getUnitId === 'function') {
-      activeUnitIdRef.current = workbook.getUnitId()
-    }
+    renderWorkbook(univerRuntimeRef.current, workbookData)
   }, [workbookData])
 
   const canRefresh = useBackend && !isRefreshing
