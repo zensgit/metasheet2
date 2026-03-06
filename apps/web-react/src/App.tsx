@@ -139,18 +139,9 @@ export default function App() {
   const [sheetId, setSheetId] = useState(initialConfig.sheetId)
   const [viewId, setViewId] = useState(initialConfig.viewId)
 
-  const backendUrl = useMemo(() => {
-    const params = new URLSearchParams({ sheetId })
-    if (viewId) params.set('viewId', viewId)
-    return `${META_API_BASE}/api/univer-meta/view?${params.toString()}`
-  }, [sheetId, viewId])
-  const viewsUrl = useMemo(() => {
-    const params = new URLSearchParams({ sheetId })
-    return `${META_API_BASE}/api/univer-meta/views?${params.toString()}`
-  }, [sheetId])
   const backendClient = useMemo(
-    () => createMetaBackendClient({ backendUrl, viewsUrl }),
-    [backendUrl, viewsUrl],
+    () => createMetaBackendClient({ baseUrl: META_API_BASE, sheetId, viewId }),
+    [sheetId, viewId],
   )
 
   const canApply = sheetIdInput.trim() !== sheetId || viewIdInput.trim() !== viewId

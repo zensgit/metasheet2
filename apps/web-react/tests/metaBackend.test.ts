@@ -23,6 +23,9 @@ function createResponse(status: number, json: unknown, url: string) {
     ok: status >= 200 && status < 300,
     status,
     url,
+    headers: {
+      get: vi.fn(() => null),
+    },
     json: vi.fn(async () => json),
   }
 }
@@ -33,33 +36,35 @@ describe('metaBackend client', () => {
     const fetch = vi.fn()
 
     fetch
-      .mockResolvedValueOnce(createResponse(401, { error: 'expired' }, 'https://api.example.com/view'))
+      .mockResolvedValueOnce(createResponse(401, { error: 'expired' }, 'https://api.example.com/api/univer-meta/views?sheetId=sheet-1'))
       .mockResolvedValueOnce(createResponse(200, { token: 'fresh-token' }, '/api/auth/dev-token'))
-      .mockResolvedValueOnce(createResponse(200, { ok: true, data: { views: [] } }, 'https://api.example.com/view'))
+      .mockResolvedValueOnce(createResponse(200, { ok: true, data: { views: [] } }, 'https://api.example.com/api/univer-meta/views?sheetId=sheet-1'))
 
     const client = createMetaBackendClient({
-      backendUrl: 'https://api.example.com/view',
-      viewsUrl: 'https://api.example.com/views',
+      baseUrl: 'https://api.example.com',
+      sheetId: 'sheet-1',
       fetch: fetch as typeof globalThis.fetch,
       storage,
     })
 
-    await expect(client.fetchWithAuth('https://api.example.com/view')).resolves.toEqual(
-      expect.objectContaining({
-        status: 200,
-      }),
-    )
+    await expect(client.fetchViews()).resolves.toEqual([])
 
-    expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.com/view', {
+    expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.com/api/univer-meta/views?sheetId=sheet-1', {
+      method: 'GET',
       headers: {
-        Authorization: 'Bearer stale-token',
+        'content-type': 'application/json',
+        authorization: 'Bearer stale-token',
       },
+      body: undefined,
     })
     expect(fetch).toHaveBeenNthCalledWith(2, '/api/auth/dev-token')
-    expect(fetch).toHaveBeenNthCalledWith(3, 'https://api.example.com/view', {
+    expect(fetch).toHaveBeenNthCalledWith(3, 'https://api.example.com/api/univer-meta/views?sheetId=sheet-1', {
+      method: 'GET',
       headers: {
-        Authorization: 'Bearer fresh-token',
+        'content-type': 'application/json',
+        authorization: 'Bearer fresh-token',
       },
+      body: undefined,
     })
   })
 
@@ -67,11 +72,11 @@ describe('metaBackend client', () => {
     const fetch = vi.fn()
     fetch
       .mockResolvedValueOnce(createResponse(200, { token: 'token-1' }, '/api/auth/dev-token'))
-      .mockResolvedValueOnce(createResponse(200, { ok: false, error: { message: 'no data' } }, 'https://api.example.com/view'))
+      .mockResolvedValueOnce(createResponse(200, { ok: false, error: { message: 'no data' } }, 'https://api.example.com/api/univer-meta/view?sheetId=sheet-1'))
 
     const client = createMetaBackendClient({
-      backendUrl: 'https://api.example.com/view',
-      viewsUrl: 'https://api.example.com/views',
+      baseUrl: 'https://api.example.com',
+      sheetId: 'sheet-1',
       fetch: fetch as typeof globalThis.fetch,
       storage: createStorage(),
     })

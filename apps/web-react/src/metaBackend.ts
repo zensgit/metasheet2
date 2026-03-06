@@ -1,6 +1,9 @@
-import type { MetaField, MetaRecord } from './metaWorkbook'
+import {
+  createMetaSheetClient,
+  type MetaViewResponse,
+  type ViewOption,
+} from '../../../packages/openapi/dist-sdk/client.ts'
 import { DEV_TOKEN_KEY, type StorageLike } from './metaStorage'
-import type { ViewOption } from './viewFilters'
 
 export type ErrorScope = 'token' | 'views' | 'data'
 
@@ -14,32 +17,12 @@ export type LastErrorInfo = {
 
 export type HttpError = Error & { status?: number; url?: string }
 
-export type MetaViewResponse = {
-  ok: boolean
-  data?: {
-    fields: MetaField[]
-    rows: MetaRecord[]
-  }
-  error?: {
-    message?: string
-  }
-}
-
-export type MetaViewsResponse = {
-  ok: boolean
-  data?: {
-    views: ViewOption[]
-  }
-  error?: {
-    message?: string
-  }
-}
-
 type FetchLike = typeof globalThis.fetch
 
 interface MetaBackendClientOptions {
-  backendUrl: string
-  viewsUrl: string
+  baseUrl: string
+  sheetId: string
+  viewId?: string
   fetch?: FetchLike
   storage?: StorageLike | null
   tokenKey?: string
@@ -89,16 +72,9 @@ export function createMetaBackendClient(options: MetaBackendClientOptions) {
   const storage = resolveStorage(options.storage)
   const tokenKey = options.tokenKey ?? DEV_TOKEN_KEY
 
-  async function ensureDevToken(forceRefresh = false) {
+  async function refreshDevToken() {
     if (!storage) {
       throw new Error('Storage unavailable')
-    }
-
-    if (!forceRefresh) {
-      const cached = storage.getItem(tokenKey)
-      if (cached) {
-        return cached
-      }
     }
 
     const res = await fetchImpl('/api/auth/dev-token')
@@ -115,66 +91,48 @@ export function createMetaBackendClient(options: MetaBackendClientOptions) {
     return payload.token
   }
 
-  async function fetchWithAuth(url: string) {
-    try {
-      const token = await ensureDevToken()
-      let res = await fetchImpl(url, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+  async function ensureDevToken(forceRefresh = false) {
+    if (!storage) {
+      throw new Error('Storage unavailable')
+    }
 
-      if (res.status === 401) {
-        const refreshed = await ensureDevToken(true)
-        res = await fetchImpl(url, {
-          headers: {
-            Authorization: `Bearer ${refreshed}`,
-          },
-        })
+    if (!forceRefresh) {
+      const cached = storage.getItem(tokenKey)
+      if (cached) {
+        return cached
       }
+    }
 
-      if (!res.ok) {
-        throw attachHttpInfo(new Error(`HTTP ${res.status}`), res.status, res.url || url)
-      }
+    return refreshDevToken()
+  }
 
-      return res
-    } catch (err) {
-      if (err instanceof Error) {
-        const httpErr = err as HttpError
-        if (!httpErr.url) {
-          httpErr.url = url
-        }
-      }
+  const client = createMetaSheetClient({
+    baseUrl: options.baseUrl,
+    fetch: fetchImpl,
+    getToken: () => ensureDevToken(),
+    refreshToken: () => refreshDevToken(),
+  })
 
-      throw err
+  async function fetchMetaView(): Promise<MetaViewResponse> {
+    const data = await client.getUniverMetaView({
+      sheetId: options.sheetId,
+      viewId: options.viewId,
+    })
+
+    return {
+      ok: true,
+      data,
     }
   }
 
-  async function fetchMetaView() {
-    const res = await fetchWithAuth(options.backendUrl)
-    const payload = (await res.json()) as MetaViewResponse
-
-    if (!payload.ok || !payload.data) {
-      throw new Error(payload.error?.message || 'Backend response not ok')
-    }
-
-    return payload
-  }
-
-  async function fetchViews() {
-    const res = await fetchWithAuth(options.viewsUrl)
-    const payload = (await res.json()) as MetaViewsResponse
-
-    if (!payload.ok || !payload.data) {
-      throw new Error(payload.error?.message || 'Backend response not ok')
-    }
-
-    return payload.data.views
+  async function fetchViews(): Promise<ViewOption[]> {
+    return client.listUniverMetaViews({
+      sheetId: options.sheetId,
+    })
   }
 
   return {
     ensureDevToken,
-    fetchWithAuth,
     fetchMetaView,
     fetchViews,
   }

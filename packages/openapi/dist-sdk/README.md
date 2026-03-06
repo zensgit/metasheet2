@@ -24,9 +24,26 @@ Tiny client with If-Match retry:
 ```ts
 import { createClient } from '@metasheet/sdk/client'
 
-const client = createClient({ baseUrl: 'http://localhost:8910', getToken: async () => 'YOUR_TOKEN' })
+const client = createClient({
+  baseUrl: 'http://localhost:8910',
+  getToken: async () => 'YOUR_TOKEN',
+  refreshToken: async () => 'FRESH_TOKEN',
+})
 const g = await client.request('GET', '/api/approvals/demo-1')
 const ok = await client.requestWithRetry('POST', '/api/approvals/demo-1/approve', { note: 'ok' }, g.etag)
+```
+
+Typed helpers for the Univer meta endpoints:
+```ts
+import { createMetaSheetClient } from '@metasheet/sdk/client'
+
+const client = createMetaSheetClient({
+  baseUrl: 'http://localhost:8910',
+  getToken: async () => 'YOUR_TOKEN',
+})
+
+const views = await client.listUniverMetaViews({ sheetId: 'sheet-1' })
+const data = await client.getUniverMetaView({ sheetId: 'sheet-1', viewId: views[0]?.id })
 ```
 
 Package exports:
