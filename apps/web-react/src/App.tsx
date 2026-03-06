@@ -1,17 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { IWorkbookData } from '@univerjs/core'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { MetaControls } from './components/MetaControls'
-import {
-  bootstrapMetaBackendSession,
-  createLocalMetaBackendState,
-  refreshMetaBackendState,
-  type MetaBackendStateSnapshot,
-} from './metaBackendController'
 import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
-import { createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
+import { createMetaBackendClient } from './metaBackend'
 import {
-  clearLastErrorScope,
   copyLastErrorInfo,
   deriveMetaPageState,
   REFRESH_INTERVAL_OPTIONS,
@@ -28,7 +20,8 @@ import {
   saveStoredRefresh,
   saveStoredViewFilters,
 } from './metaStorage'
-import { VIEW_TYPE_FILTER_OPTIONS, type ViewOption, type ViewTypeFilter } from './viewFilters'
+import { useMetaBackendLifecycle } from './useMetaBackendLifecycle'
+import { VIEW_TYPE_FILTER_OPTIONS, type ViewTypeFilter } from './viewFilters'
 import {
   createUniverRuntime,
   disposeUniverRuntime,
@@ -44,44 +37,15 @@ const META_VIEW_ID = import.meta.env.VITE_META_VIEW_ID || ''
 export default function App() {
   const univerRuntimeRef = useRef<UniverRuntime | null>(null)
   const [useBackend, setUseBackend] = useState(() => readStoredBackend())
-  const [status, setStatus] = useState<'local' | 'loading' | 'ready' | 'error'>('local')
-  const [error, setError] = useState<string | null>(null)
-  const [lastErrorInfo, setLastErrorInfo] = useState<LastErrorInfo | null>(null)
   const [copyStatus, setCopyStatus] = useState<CopyStatus>('idle')
-  const [views, setViews] = useState<ViewOption[]>([])
-  const [viewsStatus, setViewsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
-  const [viewsError, setViewsError] = useState<string | null>(null)
-  const [viewsErrorAt, setViewsErrorAt] = useState<string | null>(null)
   const initialRefreshConfig = useMemo(() => readStoredRefresh(), [])
   const [autoRefresh, setAutoRefresh] = useState(initialRefreshConfig?.autoRefresh ?? false)
   const [refreshIntervalSec, setRefreshIntervalSec] = useState(initialRefreshConfig?.intervalSec ?? 10)
-  const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null)
-  const [lastViewsAt, setLastViewsAt] = useState<string | null>(null)
-  const [dataErrorAt, setDataErrorAt] = useState<string | null>(null)
-  const [isRefreshing, setIsRefreshing] = useState(false)
-  const [pageVisible, setPageVisible] = useState(true)
   const initialViewFilters = useMemo(() => readStoredViewFilters(), [])
   const [viewSearch, setViewSearch] = useState(initialViewFilters?.search ?? '')
   const [viewTypeFilter, setViewTypeFilter] = useState<ViewTypeFilter>(
     initialViewFilters?.type ?? 'all',
   )
-  const refreshInFlightRef = useRef(false)
-  const backendStateRef = useRef<MetaBackendStateSnapshot>({
-    status: 'local',
-    error: null,
-    lastErrorInfo: null,
-    views: [],
-    viewsStatus: 'idle',
-    viewsError: null,
-    viewsErrorAt: null,
-    lastViewsAt: null,
-    lastRefreshAt: null,
-    dataErrorAt: null,
-    workbookData: DEMO_WORKBOOK_DATA,
-  })
-  const lastSheetIdRef = useRef<string | null>(null)
-  const tokenBootstrappedRef = useRef(false)
-  const [workbookData, setWorkbookData] = useState<IWorkbookData>(DEMO_WORKBOOK_DATA)
   const initialConfig = useMemo(() => {
     const stored = readStoredConfig()
     return {
@@ -98,6 +62,35 @@ export default function App() {
     () => createMetaBackendClient({ baseUrl: META_API_BASE, sheetId, viewId }),
     [sheetId, viewId],
   )
+  const {
+    clearBackendErrors,
+    handleRefresh,
+    pageVisible,
+    retryData,
+    retryViews,
+    state: {
+      dataErrorAt,
+      error,
+      isRefreshing,
+      lastErrorInfo,
+      lastRefreshAt,
+      lastViewsAt,
+      status,
+      views,
+      viewsError,
+      viewsErrorAt,
+      viewsStatus,
+      workbookData,
+    },
+  } = useMetaBackendLifecycle({
+    autoRefresh,
+    buildWorkbook: buildWorkbookFromMeta,
+    client: backendClient,
+    fallbackWorkbook: DEMO_WORKBOOK_DATA,
+    refreshIntervalSec,
+    sheetId,
+    useBackend,
+  })
 
   const canApply = sheetIdInput.trim() !== sheetId || viewIdInput.trim() !== viewId
   const applyParams = () => {
@@ -121,11 +114,7 @@ export default function App() {
   const clearState = () => {
     setViewSearch('')
     setViewTypeFilter('all')
-    setLastErrorInfo(null)
-    setError(null)
-    setViewsError(null)
-    setViewsErrorAt(null)
-    setDataErrorAt(null)
+    clearBackendErrors()
     setCopyStatus('idle')
     setViewIdInput(META_VIEW_ID)
     setViewId(META_VIEW_ID)
@@ -154,10 +143,6 @@ export default function App() {
     window.setTimeout(() => setCopyStatus('idle'), 2000)
   }
 
-  const clearLastErrorForScope = (scope: ErrorScope) => {
-    setLastErrorInfo((prev) => clearLastErrorScope(prev, scope))
-  }
-
   useEffect(() => {
     saveStoredRefresh({ autoRefresh, intervalSec: refreshIntervalSec })
   }, [autoRefresh, refreshIntervalSec])
@@ -171,162 +156,10 @@ export default function App() {
   }, [viewSearch, viewTypeFilter])
 
   useEffect(() => {
-    // Keep refresh logic stable so the bootstrap effect only reruns when backend params change.
-    backendStateRef.current = {
-      status,
-      error,
-      lastErrorInfo,
-      views,
-      viewsStatus,
-      viewsError,
-      viewsErrorAt,
-      lastViewsAt,
-      lastRefreshAt,
-      dataErrorAt,
-      workbookData,
-    }
-  }, [
-    dataErrorAt,
-    error,
-    lastErrorInfo,
-    lastRefreshAt,
-    lastViewsAt,
-    status,
-    views,
-    viewsError,
-    viewsErrorAt,
-    viewsStatus,
-    workbookData,
-  ])
-
-  const refreshBackend = useCallback(
-    async ({ refreshViews = true, quiet = false }: { refreshViews?: boolean; quiet?: boolean } = {}) => {
-      if (!useBackend || refreshInFlightRef.current) return
-      refreshInFlightRef.current = true
-      setIsRefreshing(true)
-      if (!quiet) {
-        setStatus('loading')
-        setError(null)
-      }
-      if (refreshViews) {
-        setViewsStatus('loading')
-        setViewsError(null)
-      }
-      try {
-        const nextState = await refreshMetaBackendState({
-          client: backendClient,
-          current: backendStateRef.current,
-          refreshViews,
-          fallbackWorkbook: DEMO_WORKBOOK_DATA,
-          buildWorkbook: buildWorkbookFromMeta,
-        })
-
-        setStatus(nextState.status)
-        setError(nextState.error)
-        setLastErrorInfo(nextState.lastErrorInfo)
-        setViews(nextState.views)
-        setViewsStatus(nextState.viewsStatus)
-        setViewsError(nextState.viewsError)
-        setViewsErrorAt(nextState.viewsErrorAt)
-        setLastViewsAt(nextState.lastViewsAt)
-        setLastRefreshAt(nextState.lastRefreshAt)
-        setDataErrorAt(nextState.dataErrorAt)
-        setWorkbookData(nextState.workbookData)
-      } finally {
-        refreshInFlightRef.current = false
-        setIsRefreshing(false)
-      }
-    },
-    [backendClient, useBackend],
-  )
-
-  const handleRefresh = () => {
-    refreshBackend({ refreshViews: true })
-  }
-
-  const retryViews = () => {
-    refreshBackend({ refreshViews: true })
-  }
-
-  const retryData = () => {
-    refreshBackend({ refreshViews: false })
-  }
-
-  useEffect(() => {
-    let cancelled = false
     if (!useBackend) {
-      tokenBootstrappedRef.current = false
-      const localState = createLocalMetaBackendState(DEMO_WORKBOOK_DATA)
-      setStatus(localState.status)
-      setError(localState.error)
-      setLastErrorInfo(localState.lastErrorInfo)
       setCopyStatus('idle')
-      setViews(localState.views)
-      setViewsStatus(localState.viewsStatus)
-      setViewsError(localState.viewsError)
-      setViewsErrorAt(localState.viewsErrorAt)
-      setDataErrorAt(localState.dataErrorAt)
-      setIsRefreshing(false)
-      setLastRefreshAt(localState.lastRefreshAt)
-      setLastViewsAt(localState.lastViewsAt)
-      setWorkbookData(localState.workbookData)
-      return () => {
-        cancelled = true
-      }
     }
-    const shouldRefreshViews = lastSheetIdRef.current !== sheetId
-    lastSheetIdRef.current = sheetId
-
-    const run = async () => {
-      const bootstrap = await bootstrapMetaBackendSession({
-        client: backendClient,
-        tokenBootstrapped: tokenBootstrappedRef.current,
-      })
-
-      if (!bootstrap.ok) {
-        if (cancelled) return
-        setLastErrorInfo(bootstrap.lastErrorInfo)
-        setStatus(bootstrap.status)
-        setError(bootstrap.error)
-        setViewsStatus(bootstrap.viewsStatus)
-        setViewsError(bootstrap.viewsError)
-        setIsRefreshing(false)
-        return
-      }
-
-      tokenBootstrappedRef.current = bootstrap.tokenBootstrapped
-      if (bootstrap.clearTokenError) {
-        clearLastErrorForScope('token')
-      }
-      if (cancelled) return
-      refreshBackend({ refreshViews: shouldRefreshViews })
-    }
-
-    run()
-
-    return () => {
-      cancelled = true
-    }
-  }, [backendClient, refreshBackend, sheetId, useBackend, viewId])
-
-  useEffect(() => {
-    if (!useBackend || !autoRefresh) return
-    const timer = window.setInterval(() => {
-      if (!document.hidden) {
-        refreshBackend({ refreshViews: false, quiet: true })
-      }
-    }, refreshIntervalSec * 1000)
-    return () => window.clearInterval(timer)
-  }, [autoRefresh, refreshBackend, refreshIntervalSec, useBackend])
-
-  useEffect(() => {
-    const update = () => {
-      setPageVisible(!document.hidden)
-    }
-    update()
-    document.addEventListener('visibilitychange', update)
-    return () => document.removeEventListener('visibilitychange', update)
-  }, [])
+  }, [useBackend])
 
   useEffect(() => {
     const container = document.getElementById(CONTAINER_ID)
