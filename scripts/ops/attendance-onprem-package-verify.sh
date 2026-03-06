@@ -4,6 +4,8 @@ set -euo pipefail
 PACKAGE_FILE="${1:-}"
 VERIFY_SHA="${VERIFY_SHA:-1}"
 EXTRACT_ROOT="${EXTRACT_ROOT:-}"
+cleanup_extract_root=0
+list_file=""
 
 function die() {
   echo "[attendance-onprem-package-verify] ERROR: $*" >&2
@@ -48,13 +50,22 @@ fi
 
 if [[ -z "$EXTRACT_ROOT" ]]; then
   EXTRACT_ROOT="$(mktemp -d)"
-  trap 'rm -rf "$EXTRACT_ROOT"' EXIT
+  cleanup_extract_root=1
 else
   mkdir -p "$EXTRACT_ROOT"
 fi
 
 tar -xzf "$PACKAGE_FILE" -C "$EXTRACT_ROOT"
-pkg_name="$(tar -tzf "$PACKAGE_FILE" | head -n 1 | cut -d/ -f1)"
+list_file="$(mktemp)"
+cleanup() {
+  [[ -n "$list_file" ]] && rm -f "$list_file" || true
+  if [[ "$cleanup_extract_root" == "1" ]]; then
+    rm -rf "$EXTRACT_ROOT"
+  fi
+}
+trap cleanup EXIT
+tar -tzf "$PACKAGE_FILE" > "$list_file"
+pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 
 required=(
