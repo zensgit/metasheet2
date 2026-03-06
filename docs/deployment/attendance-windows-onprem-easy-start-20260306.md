@@ -145,6 +145,7 @@ scripts/ops/attendance-onprem-healthcheck.sh
   - 其中包含一键脚本：`scripts/ops/attendance-wsl-portproxy-refresh.ps1`
   - 以及开机自动刷新任务脚本：`scripts/ops/attendance-wsl-portproxy-task.ps1`
   - 复制执行命令版：`docs/deployment/attendance-windows-wsl-direct-commands-20260306.md`
+  - 参数集中填写版：`docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md`
 
 如需“只发安装包、不拉代码”的规范与升级命令，见：
 
