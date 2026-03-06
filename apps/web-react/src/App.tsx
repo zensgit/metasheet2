@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent } from 'react'
 import type { IWorkbookData } from '@univerjs/core'
+import { MetaControls } from './components/MetaControls'
 import {
   bootstrapMetaBackendSession,
   createLocalMetaBackendState,
@@ -132,22 +132,16 @@ export default function App() {
     saveStoredConfig({ sheetId, viewId: META_VIEW_ID })
   }
 
-  const handleViewSelect = (event: ChangeEvent<HTMLSelectElement>) => {
-    const nextViewId = event.target.value
+  const handleViewSelect = (nextViewId: string) => {
     setViewIdInput(nextViewId)
     setViewId(nextViewId)
     saveStoredConfig({ sheetId, viewId: nextViewId })
   }
 
-  const handleIntervalChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const nextValue = Number.parseInt(event.target.value, 10)
+  const handleIntervalChange = (nextValue: number) => {
     if (Number.isFinite(nextValue)) {
       setRefreshIntervalSec(nextValue)
     }
-  }
-
-  const handleViewSearch = (event: ChangeEvent<HTMLInputElement>) => {
-    setViewSearch(event.target.value)
   }
 
   const handleCopyError = async () => {
@@ -404,157 +398,54 @@ export default function App() {
           <h1>MetaSheet Univer POC</h1>
           <p>React + Univer minimal demo</p>
         </div>
-        <div className="app-actions">
-          <button
-            className={`toggle ${useBackend ? 'active' : ''}`}
-            type="button"
-            onClick={() => setUseBackend((prev) => !prev)}
-          >
-            {useBackend ? 'Backend ON' : 'Backend OFF'}
-          </button>
-          <button
-            className={`toggle ${autoRefresh ? 'active' : ''}`}
-            type="button"
-            onClick={() => setAutoRefresh((prev) => !prev)}
-            disabled={!useBackend}
-          >
-            {autoRefresh ? 'Auto Refresh ON' : 'Auto Refresh OFF'}
-          </button>
-          <label className="interval">
-            Interval
-            <select
-              value={refreshIntervalSec}
-              onChange={handleIntervalChange}
-              disabled={!useBackend}
-            >
-              {REFRESH_INTERVAL_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}s
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="status">
-            <span>{status}</span>
-            {error ? <span className="error">({error})</span> : null}
-            {useBackend ? <span className="hint">views: {viewsStatus}</span> : null}
-            {viewsStatus === 'error' && viewsError ? <span className="error">({viewsError})</span> : null}
-            {dataErrorAt ? <span className="error">(err@ {dataErrorAt})</span> : null}
-            {viewsErrorAt ? <span className="error">(views@ {viewsErrorAt})</span> : null}
-            {lastRefreshAt ? <span className="hint">last: {lastRefreshAt}</span> : null}
-            {lastViewsAt ? <span className="hint">views@ {lastViewsAt}</span> : null}
-            {viewTypeLabel ? <span className="hint">{viewTypeLabel}</span> : null}
-            {useBackend ? <span className="hint">{autoRefreshLabel}</span> : null}
-            {lastErrorInfo ? <span className="error">last error: {lastErrorLabel}</span> : null}
-            {lastErrorInfo ? (
-              <button className="copy" type="button" onClick={handleCopyError}>
-                Copy error
-              </button>
-            ) : null}
-            {copyStatus === 'copied' ? <span className="hint">copied</span> : null}
-            {copyStatus === 'failed' ? <span className="error">copy failed</span> : null}
-          </div>
-          <button className="refresh" type="button" onClick={handleRefresh} disabled={!canRefresh}>
-            {isRefreshing ? 'Refreshing...' : 'Refresh'}
-          </button>
-          {canRetryViews ? (
-            <button className="retry" type="button" onClick={retryViews}>
-              Retry views
-            </button>
-          ) : null}
-          {canRetryData ? (
-            <button className="retry" type="button" onClick={retryData}>
-              Retry data
-            </button>
-          ) : null}
-          <div className="param-group">
-            <label htmlFor="sheetIdInput">
-              Sheet
-              <input
-                id="sheetIdInput"
-                name="sheetIdInput"
-                value={sheetIdInput}
-                onChange={(event) => setSheetIdInput(event.target.value)}
-              />
-            </label>
-            {showViewIdInput ? (
-              <label htmlFor="viewIdInput">
-                View
-                <input
-                  id="viewIdInput"
-                  name="viewIdInput"
-                  value={viewIdInput}
-                  onChange={(event) => setViewIdInput(event.target.value)}
-                />
-              </label>
-            ) : null}
-            {showViewSelect ? (
-              <label htmlFor="viewSelect">
-                View List
-                <select
-                  id="viewSelect"
-                  name="viewSelect"
-                  value={viewId}
-                  onChange={handleViewSelect}
-                  disabled={!useBackend || viewsStatus === 'loading'}
-                >
-                  <option value="">Default view</option>
-                  {groupedViews.map((group) => (
-                    <optgroup key={group.type} label={group.label}>
-                      {group.views.map((view) => (
-                        <option key={view.id} value={view.id}>
-                          {view.name || view.id}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            {showViewSelect ? (
-              <label htmlFor="viewSearchInput">
-                Search
-                <input
-                  id="viewSearchInput"
-                  name="viewSearchInput"
-                  className="view-search"
-                  value={viewSearch}
-                  onChange={handleViewSearch}
-                  placeholder="name or id"
-                />
-              </label>
-            ) : null}
-            {showViewSelect ? (
-              <div className="view-filters">
-                {VIEW_TYPE_FILTER_OPTIONS.map((filter) => (
-                  <button
-                    key={filter.id}
-                    type="button"
-                    className={`filter ${viewTypeFilter === filter.id ? 'active' : ''}`}
-                    onClick={() => setViewTypeFilter(filter.id)}
-                    disabled={!useBackend}
-                  >
-                    {filter.label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <button
-              className="apply"
-              type="button"
-              onClick={applyParams}
-              disabled={!canApply}
-            >
-              Apply
-            </button>
-            <button className="reset" type="button" onClick={resetParams}>
-              Reset
-            </button>
-            <button className="reset" type="button" onClick={clearState}>
-              Clear State
-            </button>
-          </div>
-        </div>
+        <MetaControls
+          autoRefresh={autoRefresh}
+          autoRefreshLabel={autoRefreshLabel}
+          canApply={canApply}
+          canRefresh={canRefresh}
+          canRetryData={canRetryData}
+          canRetryViews={canRetryViews}
+          copyStatus={copyStatus}
+          dataErrorAt={dataErrorAt}
+          error={error}
+          groupedViews={groupedViews}
+          isRefreshing={isRefreshing}
+          lastErrorInfo={lastErrorInfo}
+          lastErrorLabel={lastErrorLabel}
+          lastRefreshAt={lastRefreshAt}
+          lastViewsAt={lastViewsAt}
+          onApply={applyParams}
+          onClearState={clearState}
+          onCopyError={handleCopyError}
+          onRefresh={handleRefresh}
+          onRefreshIntervalChange={handleIntervalChange}
+          onReset={resetParams}
+          onRetryData={retryData}
+          onRetryViews={retryViews}
+          onSetAutoRefresh={setAutoRefresh}
+          onSetSheetIdInput={setSheetIdInput}
+          onSetUseBackend={setUseBackend}
+          onSetViewIdInput={setViewIdInput}
+          onSetViewSearch={setViewSearch}
+          onSetViewTypeFilter={setViewTypeFilter}
+          onViewSelect={handleViewSelect}
+          refreshIntervalOptions={REFRESH_INTERVAL_OPTIONS}
+          refreshIntervalSec={refreshIntervalSec}
+          sheetIdInput={sheetIdInput}
+          showViewIdInput={showViewIdInput}
+          showViewSelect={showViewSelect}
+          status={status}
+          useBackend={useBackend}
+          viewId={viewId}
+          viewIdInput={viewIdInput}
+          viewsError={viewsError}
+          viewsErrorAt={viewsErrorAt}
+          viewsStatus={viewsStatus}
+          viewSearch={viewSearch}
+          viewTypeFilter={viewTypeFilter}
+          viewTypeFilterOptions={VIEW_TYPE_FILTER_OPTIONS}
+          viewTypeLabel={viewTypeLabel}
+        />
       </header>
       <div id={CONTAINER_ID} className="univer-container" />
     </div>
