@@ -34,6 +34,12 @@ scripts/ops/attendance-onprem-package-verify.sh \
 
 - [attendance-onprem-package-build-verification-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/attendance-onprem-package-build-verification-20260306.md)
 
+最近一次 GitHub Actions 构建记录（仓库已为 public）：
+
+- Run ID：`22746728368`
+- 证据目录：`output/playwright/ga/22746728368/attendance-onprem-package-22746728368-1/`
+- 验签结果：`PASS`（`attendance-onprem-package-verify.sh`）
+
 ## 1. 安装包最小目录
 
 解压后目录建议固定为 `/opt/metasheet`，至少包含：
