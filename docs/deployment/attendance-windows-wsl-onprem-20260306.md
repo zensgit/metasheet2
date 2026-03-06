@@ -11,6 +11,8 @@
 如果你只要“复制执行命令”，直接使用：
 
 - [attendance-windows-wsl-direct-commands-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-wsl-direct-commands-20260306.md)
+- 如果要“参数集中填写后整段执行”，使用：
+  [attendance-windows-wsl-customer-profiled-commands-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md)
 
 ## 1) Windows Server 开启 WSL2（PowerShell 管理员）
 
