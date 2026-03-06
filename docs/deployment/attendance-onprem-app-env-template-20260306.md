@@ -20,6 +20,19 @@ cp docker/app.env.attendance-onprem.template docker/app.env
 
 注意：模板中的敏感值默认是 `change-me`，用于强制拦截未替换配置。请全部替换后再部署。
 
+如果你希望使用“部署草案版（非敏感项已填好）”：
+
+```bash
+cd /opt/metasheet
+cp docker/app.env.attendance-onprem.ready.env docker/app.env
+```
+
+然后只替换这 3 项：
+
+1. `JWT_SECRET`
+2. `POSTGRES_PASSWORD`
+3. `DATABASE_URL` 里的数据库密码
+
 ## 2) 推荐模板（考勤专注模式）
 
 ```env

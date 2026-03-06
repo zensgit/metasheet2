@@ -25,6 +25,8 @@ cd /opt/metasheet
 cp docker/app.env.example docker/app.env
 # 或直接用已准备好的考勤生产模板：
 # cp docker/app.env.attendance-onprem.template docker/app.env
+# 或直接用“只需改3项”的部署草案：
+# cp docker/app.env.attendance-onprem.ready.env docker/app.env
 # 然后把其中所有 change-me 替换为真实值
 ```
 
