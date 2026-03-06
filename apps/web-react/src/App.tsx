@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { MetaControls } from './components/MetaControls'
 import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
@@ -7,21 +7,10 @@ import {
   copyLastErrorInfo,
   deriveMetaPageState,
   REFRESH_INTERVAL_OPTIONS,
-  type CopyStatus,
 } from './metaPageState'
-import {
-  clearStoredConfig,
-  readStoredBackend,
-  readStoredConfig,
-  readStoredRefresh,
-  readStoredViewFilters,
-  saveStoredBackend,
-  saveStoredConfig,
-  saveStoredRefresh,
-  saveStoredViewFilters,
-} from './metaStorage'
 import { useMetaBackendLifecycle } from './useMetaBackendLifecycle'
-import { VIEW_TYPE_FILTER_OPTIONS, type ViewTypeFilter } from './viewFilters'
+import { useMetaControlsState } from './useMetaControlsState'
+import { VIEW_TYPE_FILTER_OPTIONS } from './viewFilters'
 import {
   createUniverRuntime,
   disposeUniverRuntime,
@@ -36,27 +25,36 @@ const META_VIEW_ID = import.meta.env.VITE_META_VIEW_ID || ''
 
 export default function App() {
   const univerRuntimeRef = useRef<UniverRuntime | null>(null)
-  const [useBackend, setUseBackend] = useState(() => readStoredBackend())
-  const [copyStatus, setCopyStatus] = useState<CopyStatus>('idle')
-  const initialRefreshConfig = useMemo(() => readStoredRefresh(), [])
-  const [autoRefresh, setAutoRefresh] = useState(initialRefreshConfig?.autoRefresh ?? false)
-  const [refreshIntervalSec, setRefreshIntervalSec] = useState(initialRefreshConfig?.intervalSec ?? 10)
-  const initialViewFilters = useMemo(() => readStoredViewFilters(), [])
-  const [viewSearch, setViewSearch] = useState(initialViewFilters?.search ?? '')
-  const [viewTypeFilter, setViewTypeFilter] = useState<ViewTypeFilter>(
-    initialViewFilters?.type ?? 'all',
-  )
-  const initialConfig = useMemo(() => {
-    const stored = readStoredConfig()
-    return {
-      sheetId: stored?.sheetId ?? META_SHEET_ID,
-      viewId: stored?.viewId ?? META_VIEW_ID
-    }
-  }, [])
-  const [sheetIdInput, setSheetIdInput] = useState(initialConfig.sheetId)
-  const [viewIdInput, setViewIdInput] = useState(initialConfig.viewId)
-  const [sheetId, setSheetId] = useState(initialConfig.sheetId)
-  const [viewId, setViewId] = useState(initialConfig.viewId)
+  const {
+    applyParams,
+    canApply,
+    clearLocalState,
+    handleIntervalChange,
+    handleViewSelect,
+    resetParams,
+    setAutoRefresh,
+    setCopyStatus,
+    setSheetIdInput,
+    setUseBackend,
+    setViewIdInput,
+    setViewSearch,
+    setViewTypeFilter,
+    state: {
+      autoRefresh,
+      copyStatus,
+      refreshIntervalSec,
+      sheetId,
+      sheetIdInput,
+      useBackend,
+      viewId,
+      viewIdInput,
+      viewSearch,
+      viewTypeFilter,
+    },
+  } = useMetaControlsState({
+    defaultSheetId: META_SHEET_ID,
+    defaultViewId: META_VIEW_ID,
+  })
 
   const backendClient = useMemo(
     () => createMetaBackendClient({ baseUrl: META_API_BASE, sheetId, viewId }),
@@ -92,45 +90,9 @@ export default function App() {
     useBackend,
   })
 
-  const canApply = sheetIdInput.trim() !== sheetId || viewIdInput.trim() !== viewId
-  const applyParams = () => {
-    const nextSheetId = sheetIdInput.trim() || META_SHEET_ID
-    const nextViewId = viewIdInput.trim()
-    setSheetId(nextSheetId)
-    setViewId(nextViewId)
-    saveStoredConfig({ sheetId: nextSheetId, viewId: nextViewId })
-  }
-
-  const resetParams = () => {
-    const nextSheetId = META_SHEET_ID
-    const nextViewId = META_VIEW_ID
-    setSheetIdInput(nextSheetId)
-    setViewIdInput(nextViewId)
-    setSheetId(nextSheetId)
-    setViewId(nextViewId)
-    clearStoredConfig()
-  }
-
   const clearState = () => {
-    setViewSearch('')
-    setViewTypeFilter('all')
     clearBackendErrors()
-    setCopyStatus('idle')
-    setViewIdInput(META_VIEW_ID)
-    setViewId(META_VIEW_ID)
-    saveStoredConfig({ sheetId, viewId: META_VIEW_ID })
-  }
-
-  const handleViewSelect = (nextViewId: string) => {
-    setViewIdInput(nextViewId)
-    setViewId(nextViewId)
-    saveStoredConfig({ sheetId, viewId: nextViewId })
-  }
-
-  const handleIntervalChange = (nextValue: number) => {
-    if (Number.isFinite(nextValue)) {
-      setRefreshIntervalSec(nextValue)
-    }
+    clearLocalState()
   }
 
   const handleCopyError = async () => {
@@ -142,24 +104,6 @@ export default function App() {
     setCopyStatus(nextCopyStatus)
     window.setTimeout(() => setCopyStatus('idle'), 2000)
   }
-
-  useEffect(() => {
-    saveStoredRefresh({ autoRefresh, intervalSec: refreshIntervalSec })
-  }, [autoRefresh, refreshIntervalSec])
-
-  useEffect(() => {
-    saveStoredBackend(useBackend)
-  }, [useBackend])
-
-  useEffect(() => {
-    saveStoredViewFilters({ search: viewSearch, type: viewTypeFilter })
-  }, [viewSearch, viewTypeFilter])
-
-  useEffect(() => {
-    if (!useBackend) {
-      setCopyStatus('idle')
-    }
-  }, [useBackend])
 
   useEffect(() => {
     const container = document.getElementById(CONTAINER_ID)
