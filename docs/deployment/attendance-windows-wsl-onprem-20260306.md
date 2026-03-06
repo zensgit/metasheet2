@@ -8,6 +8,10 @@
 2. 允许启用 WSL2
 3. 需要本地化部署且不使用 Docker
 
+如果你只要“复制执行命令”，直接使用：
+
+- [attendance-windows-wsl-direct-commands-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-wsl-direct-commands-20260306.md)
+
 ## 1) Windows Server 开启 WSL2（PowerShell 管理员）
 
 ```powershell
