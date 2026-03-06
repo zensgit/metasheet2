@@ -64,6 +64,35 @@ Verification result:
 - `attendance-onprem-package-verify.sh` on the downloaded `.tgz`: `PASS`
 - Archive SHA256 matches `SHA256SUMS`: `PASS`
 
+## GitHub Actions Verification (Release + WSL Task Script)
+
+Execution date: `2026-03-06`
+
+Run metadata:
+
+- Workflow: `attendance-onprem-package-build.yml`
+- Run ID: `22751445059`
+- Result: `SUCCESS`
+- Release Tag: `v2.5.0-onprem-20260306-wsltask`
+- Release URL: `https://github.com/zensgit/metasheet2/releases/tag/v2.5.0-onprem-20260306-wsltask`
+
+Evidence (downloaded locally):
+
+- `output/playwright/ga/22751445059/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.tgz`
+- `output/playwright/ga/22751445059/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip`
+- `output/playwright/ga/22751445059/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.tgz.sha256`
+- `output/playwright/ga/22751445059/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip.sha256`
+- `output/playwright/ga/22751445059/SHA256SUMS`
+- `output/playwright/ga/22751445059/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.json`
+
+Verification result:
+
+- `attendance-onprem-package-verify.sh` on downloaded `.tgz`: `PASS`
+- `attendance-onprem-package-verify.sh` on downloaded `.zip`: `PASS`
+- `.zip` includes:
+  - `scripts/ops/attendance-wsl-portproxy-refresh.ps1`
+  - `scripts/ops/attendance-wsl-portproxy-task.ps1`
+
 ## Notes
 
 - Database instance creation is still external (`CREATE DATABASE` by DBA/installer).
