@@ -93,6 +93,41 @@ Verification result:
   - `scripts/ops/attendance-wsl-portproxy-refresh.ps1`
   - `scripts/ops/attendance-wsl-portproxy-task.ps1`
 
+## GitHub Actions Verification (Latest Current Release Audit)
+
+Execution date: `2026-03-06`
+
+Run metadata:
+
+- Workflow: `attendance-onprem-package-build.yml`
+- Run ID: `22752221246`
+- Result: `SUCCESS`
+- Release Tag: `v2.5.0-onprem-20260306-current`
+- Release URL: `https://github.com/zensgit/metasheet2/releases/tag/v2.5.0-onprem-20260306-current`
+
+Evidence (downloaded locally):
+
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/metasheet-attendance-onprem-v2.5.0-20260306-current.tgz`
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/metasheet-attendance-onprem-v2.5.0-20260306-current.zip`
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/SHA256SUMS`
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/tgz-manifest.txt`
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/zip-manifest.txt`
+- `output/playwright/release-audit/v2.5.0-onprem-20260306-current/audit-summary.txt`
+
+Verification result:
+
+- `attendance-onprem-package-verify.sh` on downloaded `.tgz`: `PASS`
+- `attendance-onprem-package-verify.sh` on downloaded `.zip`: `PASS`
+- `SHA256SUMS` digest check for `.tgz/.zip`: `PASS`
+- Key files confirmed in both archives:
+  - `apps/web/dist/index.html`
+  - `packages/core-backend/dist/src/db/migrate.js`
+  - `scripts/ops/attendance-onprem-deploy-easy.sh`
+  - `scripts/ops/attendance-wsl-portproxy-refresh.ps1`
+  - `scripts/ops/attendance-wsl-portproxy-task.ps1`
+  - `docs/deployment/attendance-windows-wsl-direct-commands-20260306.md`
+  - `docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md`
+
 ## Notes
 
 - Database instance creation is still external (`CREATE DATABASE` by DBA/installer).

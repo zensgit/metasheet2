@@ -4,14 +4,14 @@
 
 默认包名示例：
 
-- `metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip`
+- `metasheet-attendance-onprem-v2.5.0-20260306-current.zip`
 
 ## A. Windows 管理员 PowerShell（先执行）
 
 ```powershell
 # 0) 基本变量（按实际修改）
 $Distro = "Ubuntu-22.04"
-$PkgZip = "C:\deploy\metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip"
+$PkgZip = "C:\deploy\metasheet-attendance-onprem-v2.5.0-20260306-current.zip"
 $WorkDir = "C:\metasheet"
 
 # 1) 启用 WSL2（首次机器执行，可能要求重启）
@@ -70,7 +70,7 @@ sudo systemctl enable --now postgresql redis-server nginx
 sudo mkdir -p /opt/metasheet
 sudo chown -R "$USER":"$USER" /opt/metasheet
 cd /opt
-unzip -q /mnt/c/deploy/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip
+unzip -q /mnt/c/deploy/metasheet-attendance-onprem-v2.5.0-20260306-current.zip
 mv /opt/metasheet-attendance-onprem-* /opt/metasheet 2>/dev/null || true
 cd /opt/metasheet
 
