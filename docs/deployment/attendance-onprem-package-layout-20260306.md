@@ -59,6 +59,7 @@ metasheet/
     attendance-onprem-update.sh
   docker/app.env.example
   docker/app.env.attendance-onprem.template
+  docker/app.env.attendance-onprem.ready.env
   ops/nginx/attendance-onprem.conf.example
   ecosystem.config.cjs
   package.json
