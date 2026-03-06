@@ -19,6 +19,8 @@ sudo mkdir -p /opt/metasheet
 sudo chown -R "$USER":"$USER" /opt/metasheet
 # 把你们交付的安装包解压到 /opt/metasheet（示例）
 tar -xzf metasheet-attendance-onprem-<version>.tgz -C /opt
+# 如果拿到的是 Windows 友好的 zip 包：
+# unzip metasheet-attendance-onprem-<version>.zip -d /opt
 # 若解压后目录带版本号，重命名为 metasheet
 mv /opt/metasheet-attendance-onprem-* /opt/metasheet 2>/dev/null || true
 cd /opt/metasheet

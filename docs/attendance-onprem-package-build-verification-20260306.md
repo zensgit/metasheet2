@@ -23,6 +23,8 @@ bash -n scripts/ops/attendance-onprem-package-upgrade.sh
 PACKAGE_TAG=20260306-r1 scripts/ops/attendance-onprem-package-build.sh
 scripts/ops/attendance-onprem-package-verify.sh \
   output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.tgz
+scripts/ops/attendance-onprem-package-verify.sh \
+  output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.zip
 ```
 
 ## Result
@@ -34,7 +36,9 @@ scripts/ops/attendance-onprem-package-verify.sh \
 ## Evidence
 
 - `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.tgz`
+- `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.zip`
 - `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.tgz.sha256`
+- `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.zip.sha256`
 - `output/releases/attendance-onprem/SHA256SUMS`
 - `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.json`
 

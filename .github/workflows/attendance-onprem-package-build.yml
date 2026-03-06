@@ -7,9 +7,21 @@ on:
         description: 'Optional package tag suffix (default: run number)'
         required: false
         default: ''
+      publish_release:
+        description: 'Publish build outputs to GitHub Releases'
+        required: false
+        default: 'false'
+      release_tag:
+        description: 'Release tag (required when publish_release=true)'
+        required: false
+        default: ''
+      release_name:
+        description: 'Release display name (optional)'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-package:
@@ -44,9 +56,45 @@ jobs:
         run: |
           chmod +x scripts/ops/attendance-onprem-package-build.sh scripts/ops/attendance-onprem-package-verify.sh
           INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/attendance-onprem-package-build.sh
-          pkg="$(ls -1 output/releases/attendance-onprem/*.tgz | sort | tail -n 1)"
-          scripts/ops/attendance-onprem-package-verify.sh "$pkg"
-          echo "PACKAGE_FILE=$pkg" >> "$GITHUB_ENV"
+          pkg_tgz="$(ls -1 output/releases/attendance-onprem/*.tgz | sort | tail -n 1)"
+          pkg_zip="$(ls -1 output/releases/attendance-onprem/*.zip | sort | tail -n 1)"
+          pkg_meta="${pkg_tgz%.tgz}.json"
+          scripts/ops/attendance-onprem-package-verify.sh "$pkg_tgz"
+          scripts/ops/attendance-onprem-package-verify.sh "$pkg_zip"
+          echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
+          echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
+          echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required when publish_release=true" >&2
+            exit 1
+          fi
+
+          resolved_name="${RELEASE_NAME:-Attendance On-Prem Package ${RELEASE_TAG}}"
+          assets=(
+            "$PACKAGE_FILE"
+            "$PACKAGE_FILE_ZIP"
+            "${PACKAGE_FILE}.sha256"
+            "${PACKAGE_FILE_ZIP}.sha256"
+            "output/releases/attendance-onprem/SHA256SUMS"
+            "$PACKAGE_META_FILE"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$resolved_name" \
+              --notes "Automated attendance on-prem package build."
+          fi
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
@@ -54,6 +102,7 @@ jobs:
           name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             output/releases/attendance-onprem/*.tgz
+            output/releases/attendance-onprem/*.zip
             output/releases/attendance-onprem/*.sha256
             output/releases/attendance-onprem/SHA256SUMS
             output/releases/attendance-onprem/*.json
@@ -64,8 +113,12 @@ jobs:
           {
             echo "## Attendance On-Prem Package Build"
             echo ""
-            echo "- Package: \`${PACKAGE_FILE}\`"
+            echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
+            echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
             echo "- Artifact: \`attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
+            if [[ "${{ inputs.publish_release }}" == "true" ]]; then
+              echo "- Release tag: \`${{ inputs.release_tag }}\`"
+            fi
             echo ""
             echo "Download:"
             echo '```bash'

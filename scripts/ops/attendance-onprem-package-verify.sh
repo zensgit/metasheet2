@@ -41,7 +41,7 @@ function verify_sha() {
   fi
 }
 
-[[ -n "$PACKAGE_FILE" ]] || die "Usage: scripts/ops/attendance-onprem-package-verify.sh <package.tgz>"
+[[ -n "$PACKAGE_FILE" ]] || die "Usage: scripts/ops/attendance-onprem-package-verify.sh <package.tgz|package.zip>"
 [[ -f "$PACKAGE_FILE" ]] || die "Package not found: ${PACKAGE_FILE}"
 
 if [[ "$VERIFY_SHA" == "1" ]]; then
@@ -55,7 +55,6 @@ else
   mkdir -p "$EXTRACT_ROOT"
 fi
 
-tar -xzf "$PACKAGE_FILE" -C "$EXTRACT_ROOT"
 list_file="$(mktemp)"
 cleanup() {
   [[ -n "$list_file" ]] && rm -f "$list_file" || true
@@ -64,7 +63,26 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-tar -tzf "$PACKAGE_FILE" > "$list_file"
+
+case "$PACKAGE_FILE" in
+  *.tgz|*.tar.gz)
+    tar -xzf "$PACKAGE_FILE" -C "$EXTRACT_ROOT"
+    tar -tzf "$PACKAGE_FILE" > "$list_file"
+    ;;
+  *.zip)
+    command -v unzip >/dev/null 2>&1 || die "unzip is required to verify zip packages"
+    unzip -q "$PACKAGE_FILE" -d "$EXTRACT_ROOT"
+    if command -v zipinfo >/dev/null 2>&1; then
+      zipinfo -1 "$PACKAGE_FILE" > "$list_file"
+    else
+      find "$EXTRACT_ROOT" -mindepth 1 -maxdepth 3 -print | sed "s#^${EXTRACT_ROOT}/##" > "$list_file"
+    fi
+    ;;
+  *)
+    die "Unsupported package extension (expected .tgz/.tar.gz/.zip): ${PACKAGE_FILE}"
+    ;;
+esac
+
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 
@@ -74,6 +92,8 @@ required=(
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "docker/app.env.example"
+  "docker/app.env.attendance-onprem.template"
+  "docker/app.env.attendance-onprem.ready.env"
   "ops/nginx/attendance-onprem.conf.example"
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
 )

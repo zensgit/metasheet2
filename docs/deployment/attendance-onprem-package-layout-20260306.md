@@ -16,9 +16,20 @@ scripts/ops/attendance-onprem-package-build.sh
 gh workflow run attendance-onprem-package-build.yml -f package_tag=20260306-r1
 ```
 
+如果同时发布到 GitHub Releases（推荐给 Windows 客户直接下载 `.zip`）：
+
+```bash
+gh workflow run attendance-onprem-package-build.yml \
+  -f package_tag=20260306-r1 \
+  -f publish_release=true \
+  -f release_tag=v2.5.0-onprem-20260306-r1 \
+  -f release_name='Attendance On-Prem v2.5.0 (20260306-r1)'
+```
+
 产物目录：
 
 - `output/releases/attendance-onprem/*.tgz`
+- `output/releases/attendance-onprem/*.zip`
 - `output/releases/attendance-onprem/SHA256SUMS`
 - `output/releases/attendance-onprem/*.json`
 
@@ -28,6 +39,8 @@ gh workflow run attendance-onprem-package-build.yml -f package_tag=20260306-r1
 chmod +x scripts/ops/attendance-onprem-package-verify.sh
 scripts/ops/attendance-onprem-package-verify.sh \
   output/releases/attendance-onprem/<PACKAGE_NAME>.tgz
+scripts/ops/attendance-onprem-package-verify.sh \
+  output/releases/attendance-onprem/<PACKAGE_NAME>.zip
 ```
 
 最近一次本地构建/验包记录：
@@ -142,6 +155,7 @@ BUILD_WEB=1 BUILD_BACKEND=1 INSTALL_DEPS=1 scripts/ops/attendance-onprem-package
 每个版本一个包，命名示例：
 
 - `metasheet-attendance-onprem-v1.0.0.tgz`
+- `metasheet-attendance-onprem-v1.0.0.zip`
 
 发包附带：
 
