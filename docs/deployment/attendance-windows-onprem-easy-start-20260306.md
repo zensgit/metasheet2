@@ -129,3 +129,8 @@ scripts/ops/attendance-onprem-healthcheck.sh
 - [attendance-onprem-package-layout-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-onprem-package-layout-20260306.md)
 
 如需先在发布机生成 `.tgz` 安装包，再发客户现场部署，也用同一文档里的 `package-build` / `package-verify` 命令。
+
+上线当天执行建议配套文档：
+
+- [attendance-go-live-checklist-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-go-live-checklist-20260306.md)
+- [attendance-uat-signoff-template-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-uat-signoff-template-20260306.md)
