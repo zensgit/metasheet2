@@ -91,6 +91,7 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
+  "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "docker/app.env.example"
   "docker/app.env.attendance-onprem.template"
   "docker/app.env.attendance-onprem.ready.env"
