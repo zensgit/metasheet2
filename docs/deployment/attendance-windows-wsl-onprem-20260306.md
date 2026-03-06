@@ -148,6 +148,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-
 powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-refresh.ps1 -Distro Ubuntu-22.04 -WhatIfOnly
 ```
 
+建议配置“开机自动刷新”计划任务（PowerShell 管理员）：
+
+```powershell
+cd C:\metasheet
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-task.ps1 -Action Install -Distro Ubuntu-22.04
+```
+
+查看任务状态：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-task.ps1 -Action Status
+```
+
+手动触发一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-task.ps1 -Action RunNow
+```
+
+如需移除任务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-task.ps1 -Action Uninstall
+```
+
 先获取 WSL IP（PowerShell）：
 
 ```powershell
