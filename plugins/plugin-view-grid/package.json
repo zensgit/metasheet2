@@ -1,0 +1,25 @@
+{
+  "name": "@metasheet/plugin-view-grid",
+  "version": "1.0.0",
+  "description": "Grid view plugin for MetaSheet",
+  "main": "dist/runtime.js",
+  "scripts": {
+    "build": "vite build --config vite.config.mts && tsc -p tsconfig.runtime.json",
+    "dev": "vite build --config vite.config.mts --watch",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run --config vitest.config.mts",
+    "type-check": "tsc --noEmit --noCheck false"
+  },
+  "dependencies": {
+    "@metasheet/core-backend": "workspace:*",
+    "vue": "^3.5.21",
+    "x-data-spreadsheet": "^1.1.9"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@types/node": "^20.10.5",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.2",
+    "vitest": "^1.1.0"
+  }
+}

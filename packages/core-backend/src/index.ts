@@ -6,15 +6,15 @@
 
 import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';
 import type { Server as HttpServer } from 'http';
+import type { Injector } from '@wendellhu/redi';
 import express from 'express'
 import { createServer } from 'http'
 import cors from 'cors'
 import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
-import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
-import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
-import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
+import { IConfigService, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
+import type { PluginLoader, LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import type {
   CoreAPI,
@@ -237,7 +237,7 @@ export class MetaSheetServer {
                 return result.rows
               },
               rawQuery: async (queryConfig: unknown) => {
-                return client.query(queryConfig as any)
+                return client.query(queryConfig as Parameters<typeof client.query>[0])
               },
               __rawClient: client,
               commit: async () => {

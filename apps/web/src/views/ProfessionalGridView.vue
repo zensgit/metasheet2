@@ -127,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import Spreadsheet from 'x-data-spreadsheet'
 import * as XLSX from 'xlsx'
 import { saveAs } from 'file-saver'

@@ -6,7 +6,6 @@
 import type {
   BaseViewConfig,
   View,
-  ViewType,
   ViewState,
   ViewConfigResponse,
   ViewDataResponse,

@@ -10,8 +10,9 @@
 
 import type {
   PluginLifecycle,
-  PluginContext
-} from '@metasheet/core-backend'
+  PluginContext,
+  SocketInfo
+} from '@metasheet/core-backend/src/types/plugin'
 import type { Pool } from 'pg'
 
 // ============================================================
@@ -97,6 +98,25 @@ interface DateRange {
   end: Date
 }
 
+interface RecordsQueryResponse {
+  success?: boolean
+  data?: {
+    records?: Record<string, unknown>[]
+  }
+}
+
+interface RecordMutationResponse {
+  success?: boolean
+  data?: Record<string, unknown>
+}
+
+interface FieldsListResponse {
+  success?: boolean
+  data?: {
+    fields?: Array<{ type: string } & Record<string, unknown>>
+  }
+}
+
 // Database row type
 interface CalendarConfigRow {
   view_id: string
@@ -161,8 +181,8 @@ class CalendarViewConfigProvider implements ViewConfigProvider<CalendarConfig> {
   }
 
   async saveConfig(viewId: string, config: Partial<CalendarConfig>, pool: Pool): Promise<void> {
-    const fieldMapping = config.fieldMapping || {}
-    const displayOptions = config.displayOptions || {}
+    const fieldMapping: Partial<FieldMapping> = config.fieldMapping || {}
+    const displayOptions: Partial<CalendarDisplayOptions> = config.displayOptions || {}
     const colorRules = config.colorRules || []
 
     await pool.query(
@@ -196,7 +216,11 @@ class CalendarViewConfigProvider implements ViewConfigProvider<CalendarConfig> {
    * Transform raw API config to internal format
    */
   transformConfig(rawConfig: Record<string, unknown>): Partial<CalendarConfig> {
-    const fields = (rawConfig.fields || {}) as Partial<FieldMapping>
+    const fields = (rawConfig.fields || {}) as Partial<FieldMapping> & {
+      startDate?: string
+      endDate?: string
+      title?: string
+    }
 
     return {
       fieldMapping: {
@@ -441,7 +465,7 @@ export default class CalendarPlugin implements PluginLifecycle {
           end: new Date(end)
         }
 
-        const recordsResult = await this.context.api.events.request('spreadsheet:records:query', {
+        const recordsResult = await this.context.api.messaging.request('spreadsheet:records:query', {
           spreadsheetId,
           viewId,
           filters: [
@@ -457,13 +481,13 @@ export default class CalendarPlugin implements PluginLifecycle {
             }
           ],
           pageSize: 1000
-        })
+        }) as RecordsQueryResponse
 
         if (!recordsResult?.success) {
           throw new Error('Failed to fetch records')
         }
 
-        const events: CalendarEvent[] = recordsResult.data.records.map((record: Record<string, unknown>) => {
+        const events: CalendarEvent[] = (recordsResult.data?.records || []).map((record: Record<string, unknown>) => {
           return this.transformRecordToEvent(record, config)
         }).filter((event: CalendarEvent | null) => event !== null) as CalendarEvent[]
 
@@ -516,16 +540,16 @@ export default class CalendarPlugin implements PluginLifecycle {
           fields[config.fieldMapping.allDayField] = eventData.allDay
         }
 
-        const createResult = await this.context.api.events.request('spreadsheet:record:create', {
+        const createResult = await this.context.api.messaging.request('spreadsheet:record:create', {
           spreadsheetId,
           fields
-        })
+        }) as RecordMutationResponse
 
         if (!createResult?.success) {
           throw new Error('Failed to create record')
         }
 
-        const event = this.transformRecordToEvent(createResult.data, config)
+        const event = createResult.data ? this.transformRecordToEvent(createResult.data, config) : null
 
         this.context.api.websocket?.broadcast('calendar', {
           type: 'event_created',
@@ -576,17 +600,17 @@ export default class CalendarPlugin implements PluginLifecycle {
           fields[config.fieldMapping.allDayField] = updates.allDay
         }
 
-        const updateResult = await this.context.api.events.request('spreadsheet:record:update', {
+        const updateResult = await this.context.api.messaging.request('spreadsheet:record:update', {
           spreadsheetId,
           recordId,
           fields
-        })
+        }) as RecordMutationResponse
 
         if (!updateResult?.success) {
           throw new Error('Failed to update record')
         }
 
-        const event = this.transformRecordToEvent(updateResult.data, config)
+        const event = updateResult.data ? this.transformRecordToEvent(updateResult.data, config) : null
 
         this.context.api.websocket?.broadcast('calendar', {
           type: 'event_updated',
@@ -608,10 +632,10 @@ export default class CalendarPlugin implements PluginLifecycle {
       try {
         const { spreadsheetId, viewId, recordId } = req.params
 
-        const deleteResult = await this.context.api.events.request('spreadsheet:record:delete', {
+        const deleteResult = await this.context.api.messaging.request('spreadsheet:record:delete', {
           spreadsheetId,
           recordId
-        })
+        }) as { success?: boolean }
 
         if (!deleteResult?.success) {
           throw new Error('Failed to delete record')
@@ -637,15 +661,15 @@ export default class CalendarPlugin implements PluginLifecycle {
       try {
         const { spreadsheetId } = req.params
 
-        const fieldsResult = await this.context.api.events.request('spreadsheet:fields:list', {
+        const fieldsResult = await this.context.api.messaging.request('spreadsheet:fields:list', {
           spreadsheetId
-        })
+        }) as FieldsListResponse
 
         if (!fieldsResult?.success) {
           throw new Error('Failed to fetch fields')
         }
 
-        const dateFields = fieldsResult.data.fields.filter((field: { type: string }) =>
+        const dateFields = (fieldsResult.data?.fields || []).filter((field) =>
           ['date', 'datetime', 'createdTime', 'lastModifiedTime'].includes(field.type)
         )
 
@@ -758,56 +782,56 @@ export default class CalendarPlugin implements PluginLifecycle {
   }
 
   private registerPluginAPI(): void {
-    this.context.api.communication.expose('calendar:getConfig', async (params: { spreadsheetId: string; viewId: string }) => {
-      const configKey = `${params.spreadsheetId}:${params.viewId}`
-      return this.calendarConfigs.get(configKey)
-    })
+    this.context.communication.register('calendar', {
+      getConfig: async (params: { spreadsheetId: string; viewId: string }) => {
+        const configKey = `${params.spreadsheetId}:${params.viewId}`
+        return this.calendarConfigs.get(configKey)
+      },
+      getEvents: async (params: {
+        spreadsheetId: string
+        viewId: string
+        start: string
+        end: string
+      }) => {
+        const configKey = `${params.spreadsheetId}:${params.viewId}`
+        const config = this.calendarConfigs.get(configKey)
 
-    this.context.api.communication.expose('calendar:getEvents', async (params: {
-      spreadsheetId: string
-      viewId: string
-      start: string
-      end: string
-    }) => {
-      const configKey = `${params.spreadsheetId}:${params.viewId}`
-      const config = this.calendarConfigs.get(configKey)
+        if (!config?.fieldMapping.startDateField) {
+          return { events: [] }
+        }
 
-      if (!config?.fieldMapping.startDateField) {
-        return { events: [] }
-      }
+        const recordsResult = await this.context.api.messaging.request('spreadsheet:records:query', {
+          spreadsheetId: params.spreadsheetId,
+          viewId: params.viewId,
+          filters: [
+            {
+              fieldId: config.fieldMapping.startDateField,
+              operator: 'gte',
+              value: params.start
+            },
+            {
+              fieldId: config.fieldMapping.startDateField,
+              operator: 'lte',
+              value: params.end
+            }
+          ],
+          pageSize: 1000
+        }) as {
+          success?: boolean
+          data?: { records?: Record<string, unknown>[] }
+        }
 
-      const recordsResult = await this.context.api.events.request('spreadsheet:records:query', {
-        spreadsheetId: params.spreadsheetId,
-        viewId: params.viewId,
-        filters: [
-          {
-            fieldId: config.fieldMapping.startDateField,
-            operator: 'gte',
-            value: params.start
-          },
-          {
-            fieldId: config.fieldMapping.startDateField,
-            operator: 'lte',
-            value: params.end
-          }
-        ],
-        pageSize: 1000
-      })
+        if (!recordsResult?.success) {
+          return { events: [] }
+        }
 
-      if (!recordsResult?.success) {
-        return { events: [] }
-      }
+        const events = (recordsResult.data?.records || [])
+          .map((record: Record<string, unknown>) => this.transformRecordToEvent(record, config))
+          .filter((event: CalendarEvent | null) => event !== null)
 
-      const events = recordsResult.data.records
-        .map((record: Record<string, unknown>) => this.transformRecordToEvent(record, config))
-        .filter((event: CalendarEvent | null) => event !== null)
-
-      return { events }
-    })
-
-    // Expose the config provider for core views router
-    this.context.api.communication.expose('calendar:getConfigProvider', async () => {
-      return this.configProvider
+        return { events }
+      },
+      getConfigProvider: async () => this.configProvider
     })
 
     this.context.logger.debug('Calendar plugin API registered')
@@ -817,14 +841,22 @@ export default class CalendarPlugin implements PluginLifecycle {
     const ws = this.context.api.websocket
     if (!ws) return
 
-    ws.on('calendar:subscribe', (client, data: { spreadsheetId: string; viewId: string }) => {
-      ws.joinRoom(client, `calendar:${data.spreadsheetId}:${data.viewId}`)
-      this.context.logger.debug(`Client subscribed to calendar: ${data.spreadsheetId}:${data.viewId}`)
-    })
+    ws.onConnection((socket: SocketInfo) => {
+      const roomSocket = socket as SocketInfo & {
+        join(room: string): void
+        leave(room: string): void
+        on(event: string, handler: (data: { spreadsheetId: string; viewId: string }) => void): void
+      }
 
-    ws.on('calendar:unsubscribe', (client, data: { spreadsheetId: string; viewId: string }) => {
-      ws.leaveRoom(client, `calendar:${data.spreadsheetId}:${data.viewId}`)
-      this.context.logger.debug(`Client unsubscribed from calendar: ${data.spreadsheetId}:${data.viewId}`)
+      roomSocket.on('calendar:subscribe', (data) => {
+        roomSocket.join(`calendar:${data.spreadsheetId}:${data.viewId}`)
+        this.context.logger.debug(`Client subscribed to calendar: ${data.spreadsheetId}:${data.viewId}`)
+      })
+
+      roomSocket.on('calendar:unsubscribe', (data) => {
+        roomSocket.leave(`calendar:${data.spreadsheetId}:${data.viewId}`)
+        this.context.logger.debug(`Client unsubscribed from calendar: ${data.spreadsheetId}:${data.viewId}`)
+      })
     })
 
     this.context.logger.debug('Calendar WebSocket events registered')

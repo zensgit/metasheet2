@@ -46,6 +46,10 @@ function csvCell(value: unknown): string {
   return text
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
 function parseDateParam(raw: unknown): Date | null {
   const text = String(raw || '').trim()
   if (!text) return null
@@ -63,6 +67,23 @@ type AttendanceAuditFilterInput = {
   statusClass?: string
   from?: Date | null
   to?: Date | null
+}
+
+type AttendanceAuditExportRow = {
+  id?: unknown
+  actor_id?: unknown
+  actor_type?: unknown
+  action?: unknown
+  route?: unknown
+  status_code?: unknown
+  latency_ms?: unknown
+  resource_type?: unknown
+  resource_id?: unknown
+  request_id?: unknown
+  ip?: unknown
+  user_agent?: unknown
+  occurred_at?: unknown
+  meta?: unknown
 }
 
 function normalizeStatusClass(raw: unknown): string | null {
@@ -541,30 +562,31 @@ export function attendanceAdminRouter(): Router {
       ].join(',')
       const lines: string[] = [header]
 
-      for (const row of rows.rows) {
-        const meta = (row as any).meta ?? {}
-        const errorCode = meta?.error?.code ?? ''
-        const errorMessage = meta?.error?.message ?? ''
-        const occurredRaw = (row as any).occurred_at
+      for (const row of rows.rows as AttendanceAuditExportRow[]) {
+        const meta = isPlainObject(row.meta) ? row.meta : {}
+        const errorMeta = isPlainObject(meta.error) ? meta.error : {}
+        const errorCode = errorMeta.code ?? ''
+        const errorMessage = errorMeta.message ?? ''
+        const occurredRaw = row.occurred_at
         const occurredAt = occurredRaw instanceof Date
           ? occurredRaw.toISOString()
-          : occurredRaw
+          : typeof occurredRaw === 'string' || typeof occurredRaw === 'number'
             ? new Date(occurredRaw).toISOString()
             : ''
         lines.push([
           csvCell(occurredAt),
-          csvCell((row as any).id),
-          csvCell((row as any).actor_id),
-          csvCell((row as any).actor_type),
-          csvCell((row as any).action),
-          csvCell((row as any).route),
-          csvCell((row as any).status_code),
-          csvCell((row as any).latency_ms),
-          csvCell((row as any).resource_type),
-          csvCell((row as any).resource_id),
-          csvCell((row as any).request_id),
-          csvCell((row as any).ip),
-          csvCell((row as any).user_agent),
+          csvCell(row.id),
+          csvCell(row.actor_id),
+          csvCell(row.actor_type),
+          csvCell(row.action),
+          csvCell(row.route),
+          csvCell(row.status_code),
+          csvCell(row.latency_ms),
+          csvCell(row.resource_type),
+          csvCell(row.resource_id),
+          csvCell(row.request_id),
+          csvCell(row.ip),
+          csvCell(row.user_agent),
           csvCell(errorCode),
           csvCell(errorMessage),
           csvCell(meta),

@@ -21,10 +21,17 @@
   "permissions": {
     "database": {
       "read": [
-        "*"
+        "gantt_tasks",
+        "gantt_dependencies",
+        "gantt_resources",
+        "gantt_task_resources",
+        "views"
       ],
       "write": [
-        "*"
+        "gantt_tasks",
+        "gantt_dependencies",
+        "gantt_resources",
+        "gantt_task_resources"
       ]
     },
     "http": {

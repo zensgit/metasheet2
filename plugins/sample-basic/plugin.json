@@ -8,5 +8,6 @@
   "engine": { "metasheet": ">=2.0.0-0" },
   "main": "index.cjs",
   "capabilities": { "views": [], "workflows": [], "functions": [] },
-  "permissions": { "http": { "internal": true } }
+  "permissions": { "http": { "internal": true } },
+  "license": "MIT"
 }

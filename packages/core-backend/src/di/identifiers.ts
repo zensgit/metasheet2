@@ -1,9 +1,11 @@
 import { createIdentifier } from '@wendellhu/redi';
-import { ConfigValue } from '../services/ConfigService';
-import { CollectionDefinition } from '../types/collection';
-import { Repository } from '../core/database/Repository';
+import type { Server as HttpServer } from 'http';
+import type { Socket } from 'socket.io';
+import type { ConfigValue } from '../services/ConfigService';
+import type { CollectionDefinition } from '../types/collection';
+import type { Repository } from '../core/database/Repository';
 import type { PluginLoader } from '../core/plugin-loader';
-import type { CoreAPI } from '../types/plugin';
+import type { AiApi, AthenaApi, CoreAPI, DedupApi, FormulaAPI, PLMApi, VisionApi } from '../types/plugin';
 
 /**
  * Service Identifiers
@@ -14,7 +16,7 @@ import type { CoreAPI } from '../types/plugin';
 export const IConfigService = createIdentifier<IConfigService>('config-service');
 export const ILogger = createIdentifier<ILogger>('logger');
 export const IPluginLoader = createIdentifier<PluginLoader>('plugin-loader');
-export const IMessageBus = createIdentifier<any>('message-bus'); // 暂时使用 any
+export const IMessageBus = createIdentifier<unknown>('message-bus'); // 暂时使用 unknown
 export const ICollabService = createIdentifier<ICollabService>('collab-service');
 export const ICollectionManager = createIdentifier<ICollectionManager>('collection-manager');
 export const ICoreAPI = createIdentifier<CoreAPI>('core-api');
@@ -30,20 +32,20 @@ export interface IConfigService {
 }
 
 export interface ILogger {
-  info(message: string, ...args: any[]): void;
-  warn(message: string, ...args: any[]): void;
-  error(message: string, ...args: any[]): void;
-  debug(message: string, ...args: any[]): void;
+  info(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+  debug(message: string, ...args: unknown[]): void;
 }
 
 export interface ICollabService {
-  initialize(httpServer: any): void; // Using any for HttpServer to avoid direct dependency import in identifiers for now
+  initialize(httpServer: HttpServer): void;
   broadcast(event: string, data: unknown): void;
   broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;
   join(room: string, options?: { userId?: string; socketId?: string }): Promise<void>;
   leave(room: string, options?: { userId?: string; socketId?: string }): Promise<void>;
-  onConnection(handler: (socket: any) => void): void;
+  onConnection(handler: (socket: Socket) => void): void;
 }
 
 export interface ICollectionManager {
@@ -54,11 +56,11 @@ export interface ICollectionManager {
 }
  
 
-export const IPLMAdapter = createIdentifier<any>('plm-adapter');
-export const IAthenaAdapter = createIdentifier<any>('athena-adapter');
-export const IDedupCADAdapter = createIdentifier<any>('dedup-cad-adapter');
-export const ICADMLAdapter = createIdentifier<any>('cad-ml-adapter');
-export const IVisionAdapter = createIdentifier<any>('vision-adapter');
+export const IPLMAdapter = createIdentifier<PLMApi>('plm-adapter');
+export const IAthenaAdapter = createIdentifier<AthenaApi>('athena-adapter');
+export const IDedupCADAdapter = createIdentifier<DedupApi>('dedup-cad-adapter');
+export const ICADMLAdapter = createIdentifier<AiApi>('cad-ml-adapter');
+export const IVisionAdapter = createIdentifier<VisionApi>('vision-adapter');
 export const IFormulaService = createIdentifier<IFormulaService>('formula-service');
 export const IAccessControlService = createIdentifier<IAccessControlService>('access-control-service');
 export const IHistoryService = createIdentifier<IHistoryService>('history-service');
@@ -77,9 +79,13 @@ export interface CommentQueryOptions {
     offset?: number;
 }
 
+export interface CommentPayload {
+  [key: string]: unknown;
+}
+
 export interface ICommentService {
-    createComment(data: any): Promise<any>;
-    getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: any[]; total: number }>;
+    createComment(data: CommentPayload): Promise<CommentPayload>;
+    getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentPayload[]; total: number }>;
     resolveComment(commentId: string): Promise<void>;
 }
 
@@ -88,44 +94,40 @@ export interface IPresenceService {
 }
 
 export interface IDashboardService {
-    createDashboard(name: string, ownerId: string, description?: string): Promise<any>;
-    getDashboard(id: string): Promise<any | null>;
-    addWidget(dashboardId: string, widgetConfig: any): Promise<any>;
+    createDashboard(name: string, ownerId: string, description?: string): Promise<Record<string, unknown>>;
+    getDashboard(id: string): Promise<Record<string, unknown> | null>;
+    addWidget(dashboardId: string, widgetConfig: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 
 export interface IConditionalFormattingService {
-    addRule(spreadsheetId: string, rule: any): void;
-    getCellStyle(spreadsheetId: string, row: number, col: number, value: any): any;
+    addRule(spreadsheetId: string, rule: Record<string, unknown>): void;
+    getCellStyle(spreadsheetId: string, row: number, col: number, value: unknown): unknown;
 }
 
 export interface IAutomationService {
-    registerTrigger(trigger: any): void;
+    registerTrigger(trigger: Record<string, unknown>): void;
 }
 
 export interface IViewService {
-    getViewData(spreadsheetId: string, options: { filter?: any; sort?: any }): Promise<{ rows: any[]; total: number }>;
+    getViewData(spreadsheetId: string, options: { filter?: unknown; sort?: unknown }): Promise<{ rows: Record<string, unknown>[]; total: number }>;
 }
 
 export interface ISpreadsheetService {
-    updateCell(userId: string, role: string, spreadsheetId: string, recordId: string | number, fieldId: string, rawValue: any): Promise<{ success: boolean; value?: any; error?: string; computed?: any }>;
+    updateCell(userId: string, role: string, spreadsheetId: string, recordId: string | number, fieldId: string, rawValue: unknown): Promise<{ success: boolean; value?: unknown; error?: string; computed?: unknown }>;
 }
 
 export interface IHistoryService {
-  pushUndoRedo(item: any): void;
-  undo(unitId: string): any;
-  redo(unitId: string): any;
+  pushUndoRedo(item: unknown): void;
+  undo(unitId: string): unknown;
+  redo(unitId: string): unknown;
   getStatus(unitId: string): { undos: number; redos: number };
 }
 
 
 export interface IAccessControlService {
   can(role: string | string[], resource: string, action: string): boolean;
-  defineRole(options: any): void;
+  defineRole(options: Record<string, unknown>): void;
 }
 
 
-export interface IFormulaService {
-  calculate(functionName: string, ...args: any[]): any;
-  calculateFormula(expression: string, contextResolver?: (key: string) => any): any;
-  getAvailableFunctions(): string[];
-}
+export interface IFormulaService extends FormulaAPI {}

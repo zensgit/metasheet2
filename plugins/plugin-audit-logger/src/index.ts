@@ -1,4 +1,4 @@
-import type { PluginContext } from '@metasheet/core-backend'
+import type { PluginContext } from '@metasheet/core-backend/src/types/plugin'
 
 export interface AuditLogEntry {
   id: string
@@ -6,9 +6,17 @@ export interface AuditLogEntry {
   userId: string
   action: string
   resource: string
-  details: Record<string, any>
+  details: Record<string, unknown>
   ipAddress?: string
   userAgent?: string
+}
+
+interface AuditCommandArgs extends Record<string, unknown> {
+  format?: 'csv' | 'json'
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export interface AuditLoggerConfig {
@@ -133,7 +141,7 @@ export default {
           })
           res.json({ success: true, data: logs })
         } catch (error) {
-          res.status(500).json({ success: false, error: error.message })
+          res.status(500).json({ success: false, error: getErrorMessage(error) })
         }
       })
 
@@ -148,7 +156,7 @@ export default {
             res.status(404).json({ success: false, error: 'Log not found' })
           }
         } catch (error) {
-          res.status(500).json({ success: false, error: error.message })
+          res.status(500).json({ success: false, error: getErrorMessage(error) })
         }
       })
 
@@ -165,7 +173,7 @@ export default {
           // Emit export event
           context.core.events.emit('audit.log.exported', { format, timestamp: new Date() })
         } catch (error) {
-          res.status(500).json({ success: false, error: error.message })
+          res.status(500).json({ success: false, error: getErrorMessage(error) })
         }
       })
 
@@ -177,7 +185,7 @@ export default {
       context.core.events.emit('plugin:command:register', {
         id: 'audit.viewLogs',
         title: '查看审计日志',
-        handler: async (args: any) => {
+        handler: async (args: AuditCommandArgs) => {
           console.log('Viewing audit logs', args)
           const logs = await auditLogger.getLogs()
           return { success: true, data: logs }
@@ -187,9 +195,9 @@ export default {
       context.core.events.emit('plugin:command:register', {
         id: 'audit.exportLogs',
         title: '导出日志',
-        handler: async (args: any) => {
+        handler: async (args: AuditCommandArgs) => {
           console.log('Exporting audit logs', args)
-          const format = args.format || 'json'
+          const format = args.format === 'csv' ? 'csv' : 'json'
           const exportData = await auditLogger.exportLogs(format)
           return { success: true, data: exportData }
         }
@@ -198,7 +206,7 @@ export default {
       context.core.events.emit('plugin:command:register', {
         id: 'audit.clearOldLogs',
         title: '清理旧日志',
-        handler: async (args: any) => {
+        handler: async (args: AuditCommandArgs) => {
           console.log('Clearing old audit logs', args)
           await auditLogger.clearOldLogs()
           return { success: true, message: 'Old logs cleared successfully' }

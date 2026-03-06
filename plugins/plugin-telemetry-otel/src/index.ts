@@ -14,7 +14,21 @@ export interface PluginContext {
     warn: (msg: string) => void
     error: (msg: string) => void
   }
-  app?: any // Express app instance (if available)
+  app?: TelemetryHttpApp
+}
+
+interface TelemetryHttpResponse {
+  status(code: number): {
+    send(body: string): void
+  }
+  set(name: string, value: string): void
+  end(body: string): void
+}
+
+type TelemetryHttpHandler = (_request: unknown, response: TelemetryHttpResponse) => Promise<void> | void
+
+interface TelemetryHttpApp {
+  get(path: string, handler: TelemetryHttpHandler): void
 }
 
 export default class TelemetryOtelPlugin {
@@ -38,34 +52,34 @@ export default class TelemetryOtelPlugin {
 
       // Register /metrics endpoint if Express app is available
       if (context.app) {
-        context.app.get('/metrics', async (req: any, res: any) => {
+        context.app.get('/metrics', async (_request, response) => {
           if (!this.metrics) {
-            res.status(503).send('Metrics not initialized')
+            response.status(503).send('Metrics not initialized')
             return
           }
 
           try {
-            res.set('Content-Type', this.metrics.registry.contentType)
+            response.set('Content-Type', this.metrics.registry.contentType)
             const metricsData = await this.metrics.registry.metrics()
-            res.end(metricsData)
+            response.end(metricsData)
           } catch (error) {
-            res.status(500).send('Failed to collect metrics')
+            response.status(500).send('Failed to collect metrics')
           }
         })
 
         // Also expose an alias endpoint to avoid conflicts and for clarity
-        context.app.get('/metrics/otel', async (req: any, res: any) => {
+        context.app.get('/metrics/otel', async (_request, response) => {
           if (!this.metrics) {
-            res.status(503).send('Metrics not initialized')
+            response.status(503).send('Metrics not initialized')
             return
           }
 
           try {
-            res.set('Content-Type', this.metrics.registry.contentType)
+            response.set('Content-Type', this.metrics.registry.contentType)
             const metricsData = await this.metrics.registry.metrics()
-            res.end(metricsData)
+            response.end(metricsData)
           } catch (error) {
-            res.status(500).send('Failed to collect metrics')
+            response.status(500).send('Failed to collect metrics')
           }
         })
 

@@ -5,11 +5,23 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts"],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "import": "./client.js"
+    }
+  },
+  "files": ["index.js", "index.d.ts", "client.js", "client.d.ts"],
   "scripts": {
-    "build": "node ./scripts/build.mjs"
+    "build": "node ./scripts/build.mjs && tsc -p tsconfig.json",
+    "lint": "eslint \"client.ts\"",
+    "test": "vitest run --config vitest.config.mts",
+    "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "keywords": ["metasheet","sdk","openapi"],
   "license": "UNLICENSED"
 }
-

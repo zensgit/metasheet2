@@ -1,0 +1,40 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-gallery",
+  "version": "1.0.0",
+  "displayName": "画廊视图",
+  "description": "提供卡片式画廊视图，支持封面图、卡片模板、自定义布局和记录详情展示。",
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
+    "metasheet": ">=2.0.0",
+    "node": ">=18.0.0"
+  },
+  "main": "dist/index.js",
+  "capabilities": {
+    "views": [
+      "gallery"
+    ],
+    "workflows": [],
+    "functions": []
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "gallery",
+        "name": "画廊"
+      }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "websocket.broadcast",
+    "events.emit",
+    "events.listen"
+  ],
+  "license": "MIT"
+}

@@ -14,13 +14,17 @@ export function useAuth() {
   function setToken(token: string) {
     try {
       if (typeof localStorage !== 'undefined') localStorage.setItem('jwt', token)
-    } catch {}
+    } catch {
+      return
+    }
   }
 
   function clearToken() {
     try {
       if (typeof localStorage !== 'undefined') localStorage.removeItem('jwt')
-    } catch {}
+    } catch {
+      return
+    }
   }
 
   function buildAuthHeaders(): Record<string, string> {

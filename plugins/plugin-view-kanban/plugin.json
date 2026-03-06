@@ -19,5 +19,6 @@
     "http.addRoute",
     "websocket.broadcast",
     "events.emit"
-  ]
+  ],
+  "license": "MIT"
 }

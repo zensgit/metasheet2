@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite build --watch"
+    "dev": "vite build --watch",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
+    "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

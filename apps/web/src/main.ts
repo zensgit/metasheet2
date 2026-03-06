@@ -4,26 +4,30 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
 import App from './App.vue'
-import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
+import { useFeatureFlags } from './stores/featureFlags'
 
-// Import views
-import GridView from './views/GridView.vue'
-import KanbanView from './views/KanbanView.vue'
-import CalendarView from './views/CalendarView.vue'
-import GalleryView from './views/GalleryView.vue'
-import FormView from './views/FormView.vue'
-import PlmProductView from './views/PlmProductView.vue'
-import SpreadsheetsView from './views/SpreadsheetsView.vue'
-import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
-import PluginManagerView from './views/PluginManagerView.vue'
-import PluginViewHost from './views/PluginViewHost.vue'
-import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
-import HomeRedirect from './views/HomeRedirect.vue'
+const HomeRedirect = () => import('./views/HomeRedirect.vue')
+const LoginView = () => import('./views/LoginView.vue')
+const GridView = () => import('./views/GridView.vue')
+const KanbanView = () => import('./views/KanbanView.vue')
+const CalendarView = () => import('./views/CalendarView.vue')
+const GalleryView = () => import('./views/GalleryView.vue')
+const FormView = () => import('./views/FormView.vue')
+const PlmProductView = () => import('./views/PlmProductView.vue')
+const SpreadsheetsView = () => import('./views/SpreadsheetsView.vue')
+const SpreadsheetDetailView = () => import('./views/SpreadsheetDetailView.vue')
+const PluginManagerView = () => import('./views/PluginManagerView.vue')
+const PluginViewHost = () => import('./views/PluginViewHost.vue')
+const AttendanceExperienceView = () => import('./views/attendance/AttendanceExperienceView.vue')
 
 const routes: RouteRecordRaw[] = [
+  {
+    path: '/login',
+    name: 'login',
+    component: LoginView,
+    meta: { title: 'Login', hideNavbar: true }
+  },
   {
     path: '/',
     name: 'home',
@@ -103,6 +107,18 @@ const routes: RouteRecordRaw[] = [
   }
 ]
 
+function readAuthToken(): string {
+  if (typeof localStorage === 'undefined') return ''
+  return String(localStorage.getItem('auth_token') || '').trim()
+}
+
+function resolveSafeRedirect(raw: unknown): string {
+  if (typeof raw !== 'string') return '/'
+  if (!raw.startsWith('/')) return '/'
+  if (raw.startsWith('//')) return '/'
+  return raw
+}
+
 // Create router
 const router = createRouter({
   history: createWebHistory(),
@@ -118,10 +134,25 @@ router.beforeEach(async (to, from, next) => {
     document.title = 'MetaSheet'
   }
 
+  const isLoginRoute = to.path === '/login'
+  const hasToken = readAuthToken().length > 0
+
+  if (!hasToken && !isLoginRoute) {
+    return next({
+      path: '/login',
+      query: { redirect: to.fullPath },
+    })
+  }
+
+  if (hasToken && isLoginRoute) {
+    const redirect = resolveSafeRedirect(to.query.redirect)
+    return next(redirect)
+  }
+
+  if (isLoginRoute) return next()
+
   // Product capability guard + attendance focused mode restriction.
   try {
-    const mod = await import('./stores/featureFlags')
-    const { useFeatureFlags } = mod
     const flags = useFeatureFlags()
     await flags.loadProductFeatures()
 
@@ -157,7 +188,6 @@ router.beforeEach(async (to, from, next) => {
 // Create and mount app
 const app = createApp(App)
 
-app.use(ElementPlus)
 app.use(router)
 
 app.mount('#app')

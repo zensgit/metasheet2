@@ -1,4 +1,4 @@
-import type { PluginContext } from '@metasheet/core-backend'
+import type { PluginContext } from '../../../packages/core-backend/src/types/plugin'
 import IntelligentRestoreView from './IntelligentRestoreView.vue'
 import { IntelligentStorageService } from './IntelligentStorageService'
 import { CompressionService } from './CompressionService'
@@ -8,6 +8,8 @@ export interface IntelligentRestorePlugin {
   activate(context: PluginContext): void
   deactivate(): void
 }
+
+type PluginCommandArgs = Record<string, unknown>
 
 export default {
   activate(context: PluginContext) {
@@ -47,7 +49,7 @@ export default {
     context.core.events.emit('plugin:command:register', {
       id: 'restore.smart',
       title: '智能恢复',
-      handler: (args: any) => {
+      handler: (args: PluginCommandArgs) => {
         console.log('智能恢复命令执行', args)
       }
     })
@@ -55,7 +57,7 @@ export default {
     context.core.events.emit('plugin:command:register', {
       id: 'restore.column',
       title: '列恢复',
-      handler: (args: any) => {
+      handler: (args: PluginCommandArgs) => {
         console.log('列恢复命令执行', args)
       }
     })
@@ -63,7 +65,7 @@ export default {
     context.core.events.emit('plugin:command:register', {
       id: 'restore.snapshot',
       title: '快照恢复',
-      handler: (args: any) => {
+      handler: (args: PluginCommandArgs) => {
         console.log('快照恢复命令执行', args)
       }
     })

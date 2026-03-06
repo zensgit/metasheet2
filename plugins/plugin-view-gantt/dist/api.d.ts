@@ -1,80 +1,36 @@
 /**
  * Gantt API Handlers
  */
-import type { PluginContext } from '@metasheet/core-backend/src/types/plugin';
 import type { Request, Response } from 'express';
+import type { PluginContext } from '@metasheet/core-backend/src/types/plugin';
 import type GanttPlugin from './index';
+type AuthenticatedRequest = Request & {
+    user?: {
+        id?: string;
+    };
+};
 export declare class GanttAPIHandler {
-    private context;
-    private plugin;
+    private readonly context;
+    private readonly plugin;
     constructor(context: PluginContext, plugin: GanttPlugin);
-    /**
-     * Get gantt data for a view
-     */
-    getGanttData(req: Request, res: Response): Promise<void>;
-    /**
-     * Create a new task
-     */
-    createTask(req: Request, res: Response): Promise<void>;
-    /**
-     * Update a task
-     */
-    updateTask(req: Request, res: Response): Promise<void>;
-    /**
-     * Delete a task
-     */
-    deleteTask(req: Request, res: Response): Promise<void>;
-    /**
-     * Create a dependency
-     */
-    createDependency(req: Request, res: Response): Promise<void>;
-    /**
-     * Delete a dependency
-     */
-    deleteDependency(req: Request, res: Response): Promise<void>;
-    /**
-     * Calculate critical path
-     */
-    calculateCriticalPath(req: Request, res: Response): Promise<void>;
-    /**
-     * Get resources for a view
-     */
-    getResources(req: Request, res: Response): Promise<void>;
-    /**
-     * Create a resource
-     */
-    createResource(req: Request, res: Response): Promise<void>;
-    /**
-     * Update a resource
-     */
-    updateResource(req: Request, res: Response): Promise<void>;
-    /**
-     * Delete a resource
-     */
-    deleteResource(req: Request, res: Response): Promise<void>;
-    /**
-     * Assign resource to task
-     */
-    assignResource(req: Request, res: Response): Promise<void>;
-    /**
-     * Unassign resource from task
-     */
-    unassignResource(req: Request, res: Response): Promise<void>;
-    /**
-     * Export project data
-     */
-    exportProject(req: Request, res: Response): Promise<void>;
-    /**
-     * Check if user has permission to access view
-     */
+    getGanttData(req: AuthenticatedRequest, res: Response): Promise<void>;
+    createTask(req: AuthenticatedRequest, res: Response): Promise<void>;
+    updateTask(req: AuthenticatedRequest, res: Response): Promise<void>;
+    deleteTask(req: AuthenticatedRequest, res: Response): Promise<void>;
+    createDependency(req: AuthenticatedRequest, res: Response): Promise<void>;
+    deleteDependency(req: AuthenticatedRequest, res: Response): Promise<void>;
+    calculateCriticalPath(req: AuthenticatedRequest, res: Response): Promise<void>;
+    getResources(req: AuthenticatedRequest, res: Response): Promise<void>;
+    createResource(req: AuthenticatedRequest, res: Response): Promise<void>;
+    updateResource(req: AuthenticatedRequest, res: Response): Promise<void>;
+    deleteResource(req: AuthenticatedRequest, res: Response): Promise<void>;
+    assignResource(req: AuthenticatedRequest, res: Response): Promise<void>;
+    unassignResource(req: AuthenticatedRequest, res: Response): Promise<void>;
+    exportProject(req: AuthenticatedRequest, res: Response): Promise<void>;
     private checkViewPermission;
-    /**
-     * Check if creating a dependency would cause a circular reference
-     */
     private wouldCreateCircularDependency;
-    /**
-     * Convert camelCase to snake_case
-     */
+    private getUserId;
+    private toErrorMessage;
     private camelToSnake;
 }
-//# sourceMappingURL=api.d.ts.map
+export {};

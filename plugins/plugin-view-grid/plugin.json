@@ -1,0 +1,36 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-grid",
+  "version": "1.0.0",
+  "displayName": "网格视图",
+  "description": "提供增强型网格视图和公式计算能力，适合电子表格风格的数据编辑场景。",
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
+    "metasheet": ">=2.0.0",
+    "node": ">=18.0.0"
+  },
+  "main": "dist/runtime.js",
+  "capabilities": {
+    "views": [
+      "grid"
+    ],
+    "workflows": [],
+    "functions": []
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "grid",
+        "name": "网格",
+        "component": "GridView"
+      }
+    ]
+  },
+  "permissions": [
+    "events.emit"
+  ],
+  "license": "MIT"
+}

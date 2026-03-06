@@ -36,7 +36,7 @@
     "lint": "pnpm -r lint",
     "type-check": "pnpm -r type-check",
     "clean": "pnpm -r clean && rm -rf node_modules",
-    "validate:plugins": "npx tsx scripts/validate-plugin-manifests.ts",
+    "validate:plugins": "tsx scripts/validate-plugin-manifests.ts",
     "devtools:attach": "tsx scripts/attach-chrome-devtools.ts",
     "validate:all": "pnpm validate:plugins && pnpm lint && pnpm type-check",
     "staging:validate": "bash scripts/verify-sprint2-staging.sh $API_TOKEN $BASE_URL",
@@ -63,10 +63,10 @@
     "db:restore": "bash scripts/backup-restore.sh restore",
     "db:list-backups": "bash scripts/backup-restore.sh list",
     "db:clean-backups": "bash scripts/backup-restore.sh clean",
-    "pm2:start": "pm2 start ecosystem.config.js",
-    "pm2:start:prod": "pm2 start ecosystem.config.js --env production",
-    "pm2:stop": "pm2 stop ecosystem.config.js",
-    "pm2:restart": "pm2 restart ecosystem.config.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:start:prod": "pm2 start ecosystem.config.cjs --env production",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs",
     "pm2:logs": "pm2 logs"
   },
   "engines": {

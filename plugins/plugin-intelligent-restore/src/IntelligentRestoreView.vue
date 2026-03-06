@@ -115,14 +115,31 @@
 import { ref, reactive, onMounted } from 'vue'
 import type { HistoryData } from './IntelligentStorageService'
 
-const activeTab = ref('history')
+type RestoreTab = 'history' | 'snapshots' | 'analytics'
+
+interface SnapshotRecord {
+  id: string
+  name: string
+  timestamp: Date
+  size: number
+  compressionRatio: number
+}
+
+interface StorageStatsViewModel {
+  totalSize: number
+  savedSpace: number
+  recordCount: number
+  avgCompressionRatio: number
+}
+
+const activeTab = ref<RestoreTab>('history')
 const previewDialog = ref(false)
-const previewData = ref(null)
+const previewData = ref<HistoryData | SnapshotRecord | null>(null)
 
 const historyRecords = ref<HistoryData[]>([])
-const snapshotRecords = ref([])
+const snapshotRecords = ref<SnapshotRecord[]>([])
 
-const storageStats = reactive({
+const storageStats = reactive<StorageStatsViewModel>({
   totalSize: 0,
   savedSpace: 0,
   recordCount: 0,
@@ -206,11 +223,11 @@ function previewRecord(record: HistoryData) {
   previewDialog.value = true
 }
 
-function restoreSnapshot(snapshot: any) {
+function restoreSnapshot(snapshot: SnapshotRecord) {
   console.log('恢复快照:', snapshot)
 }
 
-function deleteSnapshot(snapshot: any) {
+function deleteSnapshot(snapshot: SnapshotRecord) {
   console.log('删除快照:', snapshot)
 }
 

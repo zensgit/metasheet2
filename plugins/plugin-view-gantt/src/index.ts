@@ -2,7 +2,7 @@
  * 甘特图视图插件
  */
 
-import type { PluginLifecycle, PluginContext } from '@metasheet/core-backend/src/types/plugin'
+import type { PluginLifecycle, PluginContext, SocketInfo } from '@metasheet/core-backend/src/types/plugin'
 import { GanttAPIHandler } from './api'
 import { GanttEventHandlers } from './handlers'
 
@@ -73,6 +73,27 @@ export interface GanttViewData {
     endDate: Date
     workingDays: number[]
     hoursPerDay: number
+  }
+}
+
+interface GanttSubscriptionEvent {
+  viewId: string
+}
+
+interface GanttTaskUpdateEvent extends GanttSubscriptionEvent {
+  taskId: string
+  updates: Partial<GanttTask>
+}
+
+type GanttSocket = SocketInfo & {
+  join(room: string): void
+  leave(room: string): void
+  on(event: 'gantt:subscribe', handler: (data: GanttSubscriptionEvent) => Promise<void> | void): void
+  on(event: 'gantt:unsubscribe', handler: (data: GanttSubscriptionEvent) => void): void
+  on(event: 'gantt:task:update', handler: (data: GanttTaskUpdateEvent) => Promise<void> | void): void
+  emit(event: string, payload: unknown): void
+  to(room: string): {
+    emit(event: string, payload: unknown): void
   }
 }
 
@@ -203,31 +224,34 @@ export default class GanttPlugin implements PluginLifecycle {
   private registerWebSocketEvents(): void {
     const { api } = this.context
 
-    api.websocket.onConnection((socket: any) => {
+    api.websocket.onConnection((socket: SocketInfo) => {
+      const roomSocket = socket as GanttSocket
+
       // Handle subscribe requests
-      socket.on('gantt:subscribe', async (data: any) => {
+      roomSocket.on('gantt:subscribe', async (data) => {
         const { viewId } = data
-        socket.join(`gantt:${viewId}`)
+        roomSocket.join(`gantt:${viewId}`)
 
         // Send initial data
         const ganttData = await this.getGanttData(viewId)
-        socket.emit('gantt:data', ganttData)
+        roomSocket.emit('gantt:data', ganttData)
       })
 
       // Handle unsubscribe
-      socket.on('gantt:unsubscribe', (data: any) => {
+      roomSocket.on('gantt:unsubscribe', (data) => {
         const { viewId } = data
-        socket.leave(`gantt:${viewId}`)
+        roomSocket.leave(`gantt:${viewId}`)
       })
 
       // Handle task updates via WebSocket
-      socket.on('gantt:task:update', async (data: any) => {
+      roomSocket.on('gantt:task:update', async (data) => {
         const { viewId, taskId, updates } = data
         try {
           await this.updateTask(viewId, taskId, updates)
-          socket.to(`gantt:${viewId}`).emit('gantt:task:updated', { taskId, updates })
+          roomSocket.to(`gantt:${viewId}`).emit('gantt:task:updated', { taskId, updates })
         } catch (error) {
-          socket.emit('gantt:error', { error: error.message })
+          const message = error instanceof Error ? error.message : String(error)
+          roomSocket.emit('gantt:error', { error: message })
         }
       })
     })
@@ -289,13 +313,13 @@ export default class GanttPlugin implements PluginLifecycle {
     const taskResources = await api.database.query(taskResourcesQuery, [viewId])
 
     // Calculate timeline
-    const timeline = this.calculateTimeline(tasks as GanttTask[])
+    const timeline = this.calculateTimeline(tasks as unknown as GanttTask[])
 
     return {
-      tasks: tasks as GanttTask[],
-      dependencies: dependencies as GanttDependency[],
-      resources: resources as GanttResource[],
-      taskResources: taskResources as GanttTaskResource[],
+      tasks: tasks as unknown as GanttTask[],
+      dependencies: dependencies as unknown as GanttDependency[],
+      resources: resources as unknown as GanttResource[],
+      taskResources: taskResources as unknown as GanttTaskResource[],
       timeline
     }
   }
@@ -362,7 +386,7 @@ export default class GanttPlugin implements PluginLifecycle {
     ]
 
     const result = await api.database.query(query, values)
-    const task = result[0] as GanttTask
+    const task = result[0] as unknown as GanttTask
 
     // Update cache
     await this.syncGanttData(viewId)
@@ -380,7 +404,7 @@ export default class GanttPlugin implements PluginLifecycle {
     const { api } = this.context
 
     const fields: string[] = []
-    const values: any[] = []
+    const values: unknown[] = []
     let index = 1
 
     // Build dynamic update query
@@ -449,7 +473,7 @@ export default class GanttPlugin implements PluginLifecycle {
     ]
 
     const result = await api.database.query(query, values)
-    const dependency = result[0] as GanttDependency
+    const dependency = result[0] as unknown as GanttDependency
 
     // Update cache
     await this.syncGanttData(viewId)
@@ -475,11 +499,6 @@ export default class GanttPlugin implements PluginLifecycle {
     // Find tasks with no dependencies (start tasks)
     const startTasks = tasks.filter(task =>
       !dependencies.some(dep => dep.targetTaskId === task.id)
-    )
-
-    // Find tasks with no dependents (end tasks)
-    const endTasks = tasks.filter(task =>
-      !dependencies.some(dep => dep.sourceTaskId === task.id)
     )
 
     // For simplicity, find the longest path

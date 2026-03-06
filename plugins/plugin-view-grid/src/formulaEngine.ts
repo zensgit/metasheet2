@@ -3,9 +3,27 @@
  * 支持基本的表格公式计算
  */
 
+export type CellValue = string | number | boolean | null
+export type FormulaValue = string | number | boolean
+
+export interface GridCell {
+  text?: string
+  value?: CellValue
+}
+
+export interface GridRow {
+  cells?: Record<number, GridCell | undefined>
+}
+
+export interface GridColumn {
+  id?: string
+  title?: string
+  field?: string
+}
+
 export interface FormulaContext {
-  data: any
-  columns: any[]
+  data: Record<number, GridRow | undefined>
+  columns: GridColumn[]
 }
 
 export class FormulaEngine {
@@ -18,7 +36,7 @@ export class FormulaEngine {
   /**
    * 计算公式
    */
-  calculate(formula: string, row: number, col: number): any {
+  calculate(formula: string, _row: number, _col: number): FormulaValue | '#ERROR!' {
     if (!formula.startsWith('=')) {
       return formula
     }
@@ -34,7 +52,7 @@ export class FormulaEngine {
       formula = this.replaceFunctions(formula)
 
       // 使用 Function 构造器安全计算
-      const fn = new Function('return ' + formula)
+      const fn = new Function('return ' + formula) as () => FormulaValue
       return fn()
     } catch (error) {
       console.error('Formula calculation error:', error)
@@ -55,7 +73,7 @@ export class FormulaEngine {
 
       // 获取单元格值
       const value = this.getCellValue(rowIndex, colIndex)
-      return isNaN(value) ? `"${value}"` : value
+      return this.toFormulaToken(value)
     })
   }
 
@@ -96,7 +114,9 @@ export class FormulaEngine {
    */
   private calculateSum(range: string): string {
     const values = this.getRangeValues(range)
-    const sum = values.reduce((acc, val) => acc + (parseFloat(val) || 0), 0)
+    const sum = values
+      .map(value => this.toNumber(value) ?? 0)
+      .reduce((acc, value) => acc + value, 0)
     return sum.toString()
   }
 
@@ -105,9 +125,13 @@ export class FormulaEngine {
    */
   private calculateAverage(range: string): string {
     const values = this.getRangeValues(range)
-    const numbers = values.filter(v => !isNaN(parseFloat(v)))
+    const numbers = values
+      .map(value => this.toNumber(value))
+      .filter((value): value is number => value !== null)
+
     if (numbers.length === 0) return '0'
-    const sum = numbers.reduce((acc, val) => acc + parseFloat(val), 0)
+
+    const sum = numbers.reduce((acc, value) => acc + value, 0)
     return (sum / numbers.length).toString()
   }
 
@@ -116,7 +140,10 @@ export class FormulaEngine {
    */
   private calculateCount(range: string): string {
     const values = this.getRangeValues(range)
-    const numbers = values.filter(v => !isNaN(parseFloat(v)))
+    const numbers = values
+      .map(value => this.toNumber(value))
+      .filter((value): value is number => value !== null)
+
     return numbers.length.toString()
   }
 
@@ -126,8 +153,8 @@ export class FormulaEngine {
   private calculateMax(range: string): string {
     const values = this.getRangeValues(range)
     const numbers = values
-      .filter(v => !isNaN(parseFloat(v)))
-      .map(v => parseFloat(v))
+      .map(value => this.toNumber(value))
+      .filter((value): value is number => value !== null)
 
     if (numbers.length === 0) return '0'
     return Math.max(...numbers).toString()
@@ -139,8 +166,8 @@ export class FormulaEngine {
   private calculateMin(range: string): string {
     const values = this.getRangeValues(range)
     const numbers = values
-      .filter(v => !isNaN(parseFloat(v)))
-      .map(v => parseFloat(v))
+      .map(value => this.toNumber(value))
+      .filter((value): value is number => value !== null)
 
     if (numbers.length === 0) return '0'
     return Math.min(...numbers).toString()
@@ -149,8 +176,8 @@ export class FormulaEngine {
   /**
    * 获取范围内的值
    */
-  private getRangeValues(range: string): any[] {
-    const values: any[] = []
+  private getRangeValues(range: string): FormulaValue[] {
+    const values: FormulaValue[] = []
 
     // 解析范围 (如 A1:B10)
     const rangePattern = /([A-Z]+)(\d+):([A-Z]+)(\d+)/
@@ -193,14 +220,14 @@ export class FormulaEngine {
   /**
    * 获取单元格值
    */
-  private getCellValue(row: number, col: number): any {
+  private getCellValue(row: number, col: number): FormulaValue {
     const rows = this.context.data
     if (!rows[row] || !rows[row].cells || !rows[row].cells[col]) {
       return 0
     }
 
     const cell = rows[row].cells[col]
-    if (cell.value !== undefined) {
+    if (cell.value !== undefined && cell.value !== null) {
       return cell.value
     }
 
@@ -214,6 +241,32 @@ export class FormulaEngine {
     // 尝试转换为数字
     const num = parseFloat(text)
     return isNaN(num) ? text : num
+  }
+
+  private toFormulaToken(value: FormulaValue): string {
+    if (typeof value === 'number') {
+      return value.toString()
+    }
+
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false'
+    }
+
+    const numericValue = parseFloat(value)
+    return Number.isNaN(numericValue) ? JSON.stringify(value) : numericValue.toString()
+  }
+
+  private toNumber(value: FormulaValue): number | null {
+    if (typeof value === 'number') {
+      return value
+    }
+
+    if (typeof value === 'boolean') {
+      return value ? 1 : 0
+    }
+
+    const numericValue = parseFloat(value)
+    return Number.isNaN(numericValue) ? null : numericValue
   }
 
   /**
@@ -230,12 +283,4 @@ export class FormulaEngine {
   /**
    * 索引转列字母
    */
-  private indexToColumn(index: number): string {
-    let col = ''
-    while (index >= 0) {
-      col = String.fromCharCode((index % 26) + 65) + col
-      index = Math.floor(index / 26) - 1
-    }
-    return col
-  }
 }

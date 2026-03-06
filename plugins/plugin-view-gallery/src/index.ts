@@ -10,8 +10,9 @@
 
 import type {
   PluginLifecycle,
-  PluginContext
-} from '@metasheet/core-backend'
+  PluginContext,
+  SocketInfo
+} from '@metasheet/core-backend/src/types/plugin'
 import type { Pool } from 'pg'
 
 // ============================================================
@@ -75,6 +76,19 @@ interface GalleryRecord {
   badge?: string
 }
 
+interface RecordsQueryResponse {
+  success?: boolean
+  data?: {
+    records?: Record<string, unknown>[]
+    total?: number
+  }
+}
+
+interface RecordGetResponse {
+  success?: boolean
+  data?: Record<string, unknown>
+}
+
 // Database row type
 interface GalleryConfigRow {
   view_id: string
@@ -135,8 +149,8 @@ class GalleryViewConfigProvider implements ViewConfigProvider<GalleryConfig> {
   }
 
   async saveConfig(viewId: string, config: Partial<GalleryConfig>, pool: Pool): Promise<void> {
-    const cardTemplate = config.cardTemplate || {}
-    const layoutOptions = config.layoutOptions || {}
+    const cardTemplate: Partial<CardTemplate> = config.cardTemplate || {}
+    const layoutOptions: Partial<LayoutOptions> = config.layoutOptions || {}
 
     // Convert columns to card_size for backward compatibility
     let cardSize: string = 'medium'
@@ -399,20 +413,20 @@ export default class GalleryPlugin implements PluginLifecycle {
         const config = this.galleryConfigs.get(configKey)
 
         // Get records from spreadsheet (via internal API or events)
-        const recordsResult = await this.context.api.events.request('spreadsheet:records:query', {
+        const recordsResult = await this.context.api.messaging.request('spreadsheet:records:query', {
           spreadsheetId,
           viewId,
           page: parseInt(page),
           pageSize: parseInt(pageSize),
           search
-        })
+        }) as RecordsQueryResponse
 
         if (!recordsResult?.success) {
           throw new Error('Failed to fetch records')
         }
 
         // Transform records for gallery view
-        const galleryRecords: GalleryRecord[] = recordsResult.data.records.map((record: Record<string, unknown>) => {
+        const galleryRecords: GalleryRecord[] = (recordsResult.data?.records || []).map((record: Record<string, unknown>) => {
           return this.transformRecordForGallery(record, config?.cardTemplate)
         })
 
@@ -420,7 +434,7 @@ export default class GalleryPlugin implements PluginLifecycle {
           success: true,
           data: {
             records: galleryRecords,
-            total: recordsResult.data.total,
+            total: recordsResult.data?.total ?? 0,
             page: parseInt(page),
             pageSize: parseInt(pageSize)
           }
@@ -439,17 +453,17 @@ export default class GalleryPlugin implements PluginLifecycle {
         const configKey = `${spreadsheetId}:${viewId}`
         const config = this.galleryConfigs.get(configKey)
 
-        const recordResult = await this.context.api.events.request('spreadsheet:record:get', {
+        const recordResult = await this.context.api.messaging.request('spreadsheet:record:get', {
           spreadsheetId,
           recordId
-        })
+        }) as RecordGetResponse
 
         if (!recordResult?.success) {
           res.status(404).json({ success: false, error: 'Record not found' })
           return
         }
 
-        const galleryRecord = this.transformRecordForGallery(recordResult.data, config?.cardTemplate)
+        const galleryRecord = this.transformRecordForGallery(recordResult.data || {}, config?.cardTemplate)
 
         res.json({ success: true, data: galleryRecord })
       } catch (error) {
@@ -474,7 +488,7 @@ export default class GalleryPlugin implements PluginLifecycle {
         const { url } = req.body as { url: string }
 
         // Update record with cover URL
-        await this.context.api.events.request('spreadsheet:record:update', {
+        await this.context.api.messaging.request('spreadsheet:record:update', {
           spreadsheetId,
           recordId,
           fields: {
@@ -592,52 +606,48 @@ export default class GalleryPlugin implements PluginLifecycle {
   }
 
   private registerPluginAPI(): void {
-    // Expose methods to other plugins via communication API
-    this.context.api.communication.expose('gallery:getConfig', async (params: { spreadsheetId: string; viewId: string }) => {
-      const configKey = `${params.spreadsheetId}:${params.viewId}`
-      return this.galleryConfigs.get(configKey)
-    })
+    this.context.communication.register('gallery', {
+      getConfig: async (params: { spreadsheetId: string; viewId: string }) => {
+        const configKey = `${params.spreadsheetId}:${params.viewId}`
+        return this.galleryConfigs.get(configKey)
+      },
+      updateConfig: async (params: {
+        spreadsheetId: string
+        viewId: string
+        config: Partial<GalleryConfig>
+      }) => {
+        const configKey = `${params.spreadsheetId}:${params.viewId}`
+        let config = this.galleryConfigs.get(configKey)
 
-    this.context.api.communication.expose('gallery:updateConfig', async (params: {
-      spreadsheetId: string
-      viewId: string
-      config: Partial<GalleryConfig>
-    }) => {
-      const configKey = `${params.spreadsheetId}:${params.viewId}`
-      let config = this.galleryConfigs.get(configKey)
-
-      if (!config) {
-        config = {
-          id: configKey,
-          spreadsheetId: params.spreadsheetId,
-          viewId: params.viewId,
-          cardTemplate: { ...DEFAULT_CARD_TEMPLATE },
-          displayOptions: { ...DEFAULT_DISPLAY_OPTIONS },
-          layoutOptions: { ...DEFAULT_LAYOUT_OPTIONS },
-          createdAt: new Date(),
-          updatedAt: new Date()
+        if (!config) {
+          config = {
+            id: configKey,
+            spreadsheetId: params.spreadsheetId,
+            viewId: params.viewId,
+            cardTemplate: { ...DEFAULT_CARD_TEMPLATE },
+            displayOptions: { ...DEFAULT_DISPLAY_OPTIONS },
+            layoutOptions: { ...DEFAULT_LAYOUT_OPTIONS },
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }
         }
-      }
 
-      if (params.config.cardTemplate) {
-        config.cardTemplate = { ...config.cardTemplate, ...params.config.cardTemplate }
-      }
-      if (params.config.displayOptions) {
-        config.displayOptions = { ...config.displayOptions, ...params.config.displayOptions }
-      }
-      if (params.config.layoutOptions) {
-        config.layoutOptions = { ...config.layoutOptions, ...params.config.layoutOptions }
-      }
-      config.updatedAt = new Date()
+        if (params.config.cardTemplate) {
+          config.cardTemplate = { ...config.cardTemplate, ...params.config.cardTemplate }
+        }
+        if (params.config.displayOptions) {
+          config.displayOptions = { ...config.displayOptions, ...params.config.displayOptions }
+        }
+        if (params.config.layoutOptions) {
+          config.layoutOptions = { ...config.layoutOptions, ...params.config.layoutOptions }
+        }
+        config.updatedAt = new Date()
 
-      this.galleryConfigs.set(configKey, config)
-      await this.saveConfigToDb(params.viewId, config).catch(() => {})
-      return config
-    })
-
-    // Expose the config provider for core views router
-    this.context.api.communication.expose('gallery:getConfigProvider', async () => {
-      return this.configProvider
+        this.galleryConfigs.set(configKey, config)
+        await this.saveConfigToDb(params.viewId, config).catch(() => {})
+        return config
+      },
+      getConfigProvider: async () => this.configProvider
     })
 
     this.context.logger.debug('Gallery plugin API registered')
@@ -647,14 +657,22 @@ export default class GalleryPlugin implements PluginLifecycle {
     const ws = this.context.api.websocket
     if (!ws) return
 
-    ws.on('gallery:subscribe', (client, data: { spreadsheetId: string; viewId: string }) => {
-      ws.joinRoom(client, `gallery:${data.spreadsheetId}:${data.viewId}`)
-      this.context.logger.debug(`Client subscribed to gallery: ${data.spreadsheetId}:${data.viewId}`)
-    })
+    ws.onConnection((socket: SocketInfo) => {
+      const roomSocket = socket as SocketInfo & {
+        join(room: string): void
+        leave(room: string): void
+        on(event: string, handler: (data: { spreadsheetId: string; viewId: string }) => void): void
+      }
 
-    ws.on('gallery:unsubscribe', (client, data: { spreadsheetId: string; viewId: string }) => {
-      ws.leaveRoom(client, `gallery:${data.spreadsheetId}:${data.viewId}`)
-      this.context.logger.debug(`Client unsubscribed from gallery: ${data.spreadsheetId}:${data.viewId}`)
+      roomSocket.on('gallery:subscribe', (data) => {
+        roomSocket.join(`gallery:${data.spreadsheetId}:${data.viewId}`)
+        this.context.logger.debug(`Client subscribed to gallery: ${data.spreadsheetId}:${data.viewId}`)
+      })
+
+      roomSocket.on('gallery:unsubscribe', (data) => {
+        roomSocket.leave(`gallery:${data.spreadsheetId}:${data.viewId}`)
+        this.context.logger.debug(`Client unsubscribed from gallery: ${data.spreadsheetId}:${data.viewId}`)
+      })
     })
 
     this.context.logger.debug('Gallery WebSocket events registered')

@@ -3735,15 +3735,6 @@ const bomFilteredItems = computed(() => {
   })
 })
 
-const bomFilteredLineIds = computed(() => {
-  const ids = new Set<string>()
-  for (const item of bomFilteredItems.value) {
-    const lineId = resolveBomLineId(item)
-    if (lineId) ids.add(lineId)
-  }
-  return ids
-})
-
 const bomSelectedItems = computed(() => {
   const selected = bomSelectedLineIds.value
   if (!selected.size) return []
@@ -6874,16 +6865,6 @@ function deleteDeepLinkPreset() {
   setDeepLinkMessage('已删除预设。')
 }
 
-function selectedPreset() {
-  return deepLinkPresets.value.find((entry) => entry.key === deepLinkPreset.value)
-}
-
-function startPresetRename() {
-  const preset = selectedPreset()
-  if (!preset || !preset.key.startsWith('custom:')) return
-  editingPresetLabel.value = preset.label
-}
-
 function applyPresetRename() {
   if (!deepLinkPreset.value.startsWith('custom:')) return
   const name = editingPresetLabel.value.trim()
@@ -6895,10 +6876,6 @@ function applyPresetRename() {
     preset.key === deepLinkPreset.value ? { ...preset, label: name } : preset
   )
   setDeepLinkMessage('已更新预设名称。')
-}
-
-function cancelPresetRename() {
-  editingPresetLabel.value = ''
 }
 
 function movePreset(direction: 'up' | 'down') {
@@ -8759,10 +8736,6 @@ function itemStatusClass(value?: string): string {
   if (['obsolete', 'rejected', 'inactive', 'invalid'].includes(normalized)) return 'status-rejected'
   if (['draft', 'inwork', 'pending', 'review', 'wip'].includes(normalized)) return 'status-pending'
   return 'status-neutral'
-}
-
-function getCompareFieldLabel(field: string): string {
-  return compareFieldLabelMap.value.get(field) || field
 }
 
 function normalizeCompareSeverity(value?: string): string {

@@ -3704,24 +3704,6 @@ interface AttendanceImportPreviewTask {
   message?: string | null
 }
 
-interface AttendanceReconcileResult {
-  summary?: Record<string, any>
-  warnings?: string[]
-}
-
-interface AttendanceRulePreviewItem {
-  userId: string
-  workDate: string
-  firstInAt?: string | null
-  lastOutAt?: string | null
-  workMinutes: number
-  lateMinutes: number
-  earlyLeaveMinutes: number
-  status: string
-  isWorkingDay?: boolean
-  source?: string
-}
-
 interface AttendanceShift {
   id: string
   orgId?: string
@@ -4029,8 +4011,6 @@ const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
 const importAsyncPolling = ref(false)
-const reconcileResult = ref<AttendanceReconcileResult | null>(null)
-const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
 function toNonNegativeNumber(value: unknown): number | null {
   const num = Number(value)
@@ -5001,37 +4981,6 @@ function buildChunkedImportPreviewPlan(payload: Record<string, any>): ImportPrev
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function resolveImportJobProcessedRows(job: AttendanceImportJob | null): number {
-  if (!job) return 0
-  const direct = Number(job.processedRows)
-  if (Number.isFinite(direct)) return Math.max(0, Math.floor(direct))
-  const fallback = Number(job.progress)
-  return Number.isFinite(fallback) ? Math.max(0, Math.floor(fallback)) : 0
-}
-
-function resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
-  if (!job) return 0
-  const direct = Number(job.failedRows)
-  if (Number.isFinite(direct)) return Math.max(0, Math.floor(direct))
-  if (job.status === 'failed') {
-    const total = Number(job.total)
-    const processed = resolveImportJobProcessedRows(job)
-    if (Number.isFinite(total)) return Math.max(0, Math.floor(total) - processed)
-  }
-  return 0
-}
-
-function formatImportElapsedMs(value: unknown): string {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric < 0) return '--'
-  if (numeric < 1000) return `${Math.round(numeric)} ms`
-  const seconds = numeric / 1000
-  if (seconds < 60) return `${seconds.toFixed(1)} s`
-  const minutes = Math.floor(seconds / 60)
-  const remainSeconds = Math.round(seconds % 60)
-  return `${minutes}m ${remainSeconds}s`
 }
 
 function syncImportModeToPayload() {
@@ -7536,7 +7485,7 @@ async function exportCsv() {
       throw new Error(message)
     }
     const disposition = response.headers.get('content-disposition')
-    const match = disposition?.match(/filename=\"?([^\";]+)\"?/)
+    const match = disposition?.match(/filename="?([^";]+)"?/)
     const filename = match?.[1] || 'attendance-export.csv'
     const blob = new Blob([text], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)

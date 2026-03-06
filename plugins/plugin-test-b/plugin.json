@@ -19,14 +19,6 @@
     "functions": []
   },
   "permissions": {
-    "database": {
-      "read": [
-        "*"
-      ],
-      "write": [
-        "*"
-      ]
-    },
     "http": {
       "internal": true
     },

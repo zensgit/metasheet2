@@ -8,28 +8,28 @@ function l() {
   };
 }
 function c() {
-  const r = new a(), e = new n({
+  const s = new a(), e = new n({
     name: "http_requests_total",
     help: "Total HTTP requests",
     labelNames: ["method", "path", "status"],
-    registers: [r]
-  }), s = new o({
+    registers: [s]
+  }), r = new o({
     name: "http_request_duration_seconds",
     help: "HTTP request duration in seconds",
     labelNames: ["method", "path"],
     buckets: [1e-3, 5e-3, 0.01, 0.05, 0.1, 0.5, 1, 5, 10],
-    registers: [r]
+    registers: [s]
   }), t = new n({
     name: "http_request_errors_total",
     help: "Total HTTP request errors",
     labelNames: ["method", "path", "errorType"],
-    registers: [r]
+    registers: [s]
   });
   return {
     httpRequestsTotal: e,
-    httpRequestDuration: s,
+    httpRequestDuration: r,
     httpRequestErrors: t,
-    registry: r
+    registry: s
   };
 }
 class m {
@@ -43,7 +43,7 @@ class m {
     }
     e.logger.info("Initializing OpenTelemetry plugin...");
     try {
-      this.metrics = c(), e.logger.info("✅ Metrics initialized"), e.app && (e.app.get("/metrics", async (s, t) => {
+      this.metrics = c(), e.logger.info("✅ Metrics initialized"), e.app && (e.app.get("/metrics", async (r, t) => {
         if (!this.metrics) {
           t.status(503).send("Metrics not initialized");
           return;
@@ -55,7 +55,7 @@ class m {
         } catch {
           t.status(500).send("Failed to collect metrics");
         }
-      }), e.app.get("/metrics/otel", async (s, t) => {
+      }), e.app.get("/metrics/otel", async (r, t) => {
         if (!this.metrics) {
           t.status(503).send("Metrics not initialized");
           return;
@@ -68,8 +68,8 @@ class m {
           t.status(500).send("Failed to collect metrics");
         }
       }), e.logger.info(`✅ Metrics endpoints registered: /metrics and /metrics/otel (port ${this.config.metricsPort})`)), this.enabled = !0, e.logger.info("🎉 OpenTelemetry plugin initialized successfully");
-    } catch (s) {
-      throw e.logger.error(`Failed to initialize OpenTelemetry: ${s}`), s;
+    } catch (r) {
+      throw e.logger.error(`Failed to initialize OpenTelemetry: ${r}`), r;
     }
   }
   async onUnload() {

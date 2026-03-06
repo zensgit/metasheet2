@@ -251,6 +251,8 @@ import {
 import BpmnModeler from 'bpmn-js/lib/Modeler'
 import 'bpmn-js/dist/assets/diagram-js.css'
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css'
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
 
 // Types
 interface PaletteItem {
@@ -536,9 +538,6 @@ function onDrop(event: DragEvent) {
   // Create element
   const elementFactory = modeler.get('elementFactory') as {
     createShape: (options: { type: string }) => BpmnElement
-  }
-  const create = modeler.get('create') as {
-    start: (event: DragEvent, shape: BpmnElement) => void
   }
 
   const shape = elementFactory.createShape({ type: draggedItem.value.type })

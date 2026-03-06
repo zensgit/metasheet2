@@ -693,11 +693,12 @@ function getEventsInRange(range: 'week' | 'month' | 'quarter'): CalendarEvent[] 
       start.setDate(1)
       end.setMonth(now.getMonth() + 1, 0)
       break
-    case 'quarter':
+    case 'quarter': {
       const quarter = Math.floor(now.getMonth() / 3)
       start.setMonth(quarter * 3, 1)
       end.setMonth(quarter * 3 + 3, 0)
       break
+    }
   }
 
   return events.value.filter(event => {

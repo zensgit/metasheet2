@@ -1,0 +1,40 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-view-calendar",
+  "version": "1.0.0",
+  "displayName": "日历视图",
+  "description": "提供月、周、日和列表模式的日历视图，支持事件管理、字段映射和实时更新。",
+  "author": {
+    "name": "MetaSheet Team",
+    "email": "plugins@metasheet.io"
+  },
+  "engine": {
+    "metasheet": ">=2.0.0",
+    "node": ">=18.0.0"
+  },
+  "main": "dist/index.js",
+  "capabilities": {
+    "views": [
+      "calendar"
+    ],
+    "workflows": [],
+    "functions": []
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "calendar",
+        "name": "日历"
+      }
+    ]
+  },
+  "permissions": [
+    "database.read",
+    "database.write",
+    "http.addRoute",
+    "websocket.broadcast",
+    "events.emit",
+    "events.listen"
+  ],
+  "license": "MIT"
+}

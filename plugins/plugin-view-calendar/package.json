@@ -1,0 +1,23 @@
+{
+  "name": "@metasheet/plugin-view-calendar",
+  "version": "1.0.0",
+  "description": "Calendar view plugin for MetaSheet",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run --passWithNoTests",
+    "type-check": "tsc --noEmit --noCheck false"
+  },
+  "dependencies": {
+    "@metasheet/core-backend": "workspace:*",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.8.3",
+    "vitest": "^1.1.0"
+  }
+}

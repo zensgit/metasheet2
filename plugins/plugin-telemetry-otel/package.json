@@ -7,8 +7,10 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
+    "lint": "eslint \"src/**/*.ts\"",
     "smoke:local": "node scripts/local-smoke.js",
-    "test": "npm run build && vitest"
+    "test": "pnpm run build && vitest run",
+    "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",

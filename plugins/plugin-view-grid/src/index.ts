@@ -1,4 +1,4 @@
-import type { PluginContext } from '@metasheet/core-backend'
+import type { PluginContext } from '@metasheet/core-backend/src/types/plugin'
 import GridView from './GridView.vue'
 import { FormulaEngine } from './formulaEngine'
 

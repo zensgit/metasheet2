@@ -7,7 +7,6 @@ export default defineConfig({
     pool: 'forks',
     include: ['src/cache/__tests__/**/*.test.ts'],
     isolate: true,
-    watch: false
-  }
+    watch: false,
+  },
 })
-

@@ -53,10 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { useAuth } from '../composables/useAuth'
-import { getApiBase } from '../utils/api'
+import { ref, onMounted } from 'vue'
 
 interface Card {
   id: string
@@ -76,16 +73,6 @@ const columns = ref<Column[]>([])
 const loading = ref(true)
 const error = ref('')
 const draggedCard = ref<{ card: Card; fromColumn: string } | null>(null)
-const etag = ref<string>('')
-const { buildAuthHeaders } = useAuth()
-
-function debounce<T extends (...args: any[]) => any>(fn: T, wait = 400) {
-  let t: number | undefined
-  return (...args: Parameters<T>) => {
-    if (t) window.clearTimeout(t)
-    t = window.setTimeout(() => fn(...args), wait)
-  }
-}
 
 // 获取看板数据
 async function fetchKanbanData() {

@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc -w",
-    "test": "vitest"
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run --passWithNoTests",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@metasheet/core-backend": "workspace:*",

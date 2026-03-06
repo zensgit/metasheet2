@@ -25,5 +25,6 @@
     "database.transaction",
     "http.addRoute",
     "events.emit"
-  ]
+  ],
+  "license": "MIT"
 }

@@ -5,11 +5,13 @@ export default defineConfig({
     environment: 'node',
     threads: false,
     include: ['tests/**/*.test.ts'],
-    deps: {
-      // Inline ESM deps so vite-node provides SSR helpers
-      inline: [/prom-client/, /@opentelemetry\/.*?/]
-    },
     isolate: true
+  },
+  server: {
+    deps: {
+      // Inline ESM deps so vite-node provides SSR helpers.
+      inline: [/prom-client/, /@opentelemetry\/.*?/]
+    }
   },
   ssr: {
     // Ensure these deps are processed by Vite SSR to avoid runtime helper gaps
@@ -19,4 +21,3 @@ export default defineConfig({
     target: 'es2020'
   }
 })
-
