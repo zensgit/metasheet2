@@ -38,6 +38,28 @@ scripts/ops/attendance-onprem-package-verify.sh \
 - `output/releases/attendance-onprem/SHA256SUMS`
 - `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260306-r1.json`
 
+## GitHub Actions Verification (Public Repo)
+
+Execution date: `2026-03-06`
+
+Run metadata:
+
+- Workflow: `attendance-onprem-package-build.yml`
+- Run ID: `22746728368`
+- Result: `SUCCESS`
+
+Evidence (downloaded locally):
+
+- `output/playwright/ga/22746728368/attendance-onprem-package-22746728368-1/metasheet-attendance-onprem-v2.5.0-run3.tgz`
+- `output/playwright/ga/22746728368/attendance-onprem-package-22746728368-1/metasheet-attendance-onprem-v2.5.0-run3.tgz.sha256`
+- `output/playwright/ga/22746728368/attendance-onprem-package-22746728368-1/SHA256SUMS`
+- `output/playwright/ga/22746728368/attendance-onprem-package-22746728368-1/metasheet-attendance-onprem-v2.5.0-run3.json`
+
+Verification result:
+
+- `attendance-onprem-package-verify.sh` on the downloaded `.tgz`: `PASS`
+- Archive SHA256 matches `SHA256SUMS`: `PASS`
+
 ## Notes
 
 - Database instance creation is still external (`CREATE DATABASE` by DBA/installer).
