@@ -31,6 +31,7 @@ import {
   bootstrapMetaBackendSession,
   createLocalMetaBackendState,
   refreshMetaBackendState,
+  type MetaBackendStateSnapshot,
 } from './metaBackendController'
 import { buildWorkbookFromMeta } from './metaWorkbook'
 import { createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
@@ -129,6 +130,19 @@ export default function App() {
     initialViewFilters?.type ?? 'all',
   )
   const refreshInFlightRef = useRef(false)
+  const backendStateRef = useRef<MetaBackendStateSnapshot>({
+    status: 'local',
+    error: null,
+    lastErrorInfo: null,
+    views: [],
+    viewsStatus: 'idle',
+    viewsError: null,
+    viewsErrorAt: null,
+    lastViewsAt: null,
+    lastRefreshAt: null,
+    dataErrorAt: null,
+    workbookData: WORKBOOK_DATA,
+  })
   const lastSheetIdRef = useRef<string | null>(null)
   const tokenBootstrappedRef = useRef(false)
   const [workbookData, setWorkbookData] = useState<IWorkbookData>(WORKBOOK_DATA)
@@ -227,6 +241,35 @@ export default function App() {
     saveStoredViewFilters({ search: viewSearch, type: viewTypeFilter })
   }, [viewSearch, viewTypeFilter])
 
+  useEffect(() => {
+    // Keep refresh logic stable so the bootstrap effect only reruns when backend params change.
+    backendStateRef.current = {
+      status,
+      error,
+      lastErrorInfo,
+      views,
+      viewsStatus,
+      viewsError,
+      viewsErrorAt,
+      lastViewsAt,
+      lastRefreshAt,
+      dataErrorAt,
+      workbookData,
+    }
+  }, [
+    dataErrorAt,
+    error,
+    lastErrorInfo,
+    lastRefreshAt,
+    lastViewsAt,
+    status,
+    views,
+    viewsError,
+    viewsErrorAt,
+    viewsStatus,
+    workbookData,
+  ])
+
   const refreshBackend = useCallback(
     async ({ refreshViews = true, quiet = false }: { refreshViews?: boolean; quiet?: boolean } = {}) => {
       if (!useBackend || refreshInFlightRef.current) return
@@ -243,19 +286,7 @@ export default function App() {
       try {
         const nextState = await refreshMetaBackendState({
           client: backendClient,
-          current: {
-            status,
-            error,
-            lastErrorInfo,
-            views,
-            viewsStatus,
-            viewsError,
-            viewsErrorAt,
-            lastViewsAt,
-            lastRefreshAt,
-            dataErrorAt,
-            workbookData,
-          },
+          current: backendStateRef.current,
           refreshViews,
           fallbackWorkbook: WORKBOOK_DATA,
           buildWorkbook: buildWorkbookFromMeta,
@@ -277,21 +308,7 @@ export default function App() {
         setIsRefreshing(false)
       }
     },
-    [
-      backendClient,
-      dataErrorAt,
-      error,
-      lastErrorInfo,
-      lastRefreshAt,
-      lastViewsAt,
-      status,
-      useBackend,
-      views,
-      viewsError,
-      viewsErrorAt,
-      viewsStatus,
-      workbookData,
-    ],
+    [backendClient, useBackend],
   )
 
   const handleRefresh = () => {
