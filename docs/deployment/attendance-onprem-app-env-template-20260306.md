@@ -11,6 +11,15 @@ cp docker/app.env.example docker/app.env
 
 将下面模板内容覆盖到 `docker/app.env`，再把 `<...>` 占位符替换为真实值。
 
+如果你希望直接用仓库内成品模板：
+
+```bash
+cd /opt/metasheet
+cp docker/app.env.attendance-onprem.template docker/app.env
+```
+
+注意：模板中的敏感值默认是 `change-me`，用于强制拦截未替换配置。请全部替换后再部署。
+
 ## 2) 推荐模板（考勤专注模式）
 
 ```env
