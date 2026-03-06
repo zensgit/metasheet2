@@ -6,7 +6,7 @@
 
 ```powershell
 $Distro = "Ubuntu-22.04"
-$PkgZip = "C:\deploy\metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip"
+$PkgZip = "C:\deploy\metasheet-attendance-onprem-v2.5.0-20260306-current.zip"
 $WorkDir = "C:\metasheet"
 $WindowsServerIp = "192.168.1.50"
 $AdminEmail = "admin@customer.local"
@@ -59,7 +59,7 @@ sudo systemctl enable --now postgresql redis-server nginx
 sudo mkdir -p /opt/metasheet
 sudo chown -R "$USER":"$USER" /opt/metasheet
 cd /opt
-unzip -q /mnt/c/deploy/metasheet-attendance-onprem-v2.5.0-20260306-wsltask.zip
+unzip -q /mnt/c/deploy/metasheet-attendance-onprem-v2.5.0-20260306-current.zip
 mv /opt/metasheet-attendance-onprem-* /opt/metasheet 2>/dev/null || true
 cd /opt/metasheet
 mkdir -p /opt/metasheet/storage/attendance-import
