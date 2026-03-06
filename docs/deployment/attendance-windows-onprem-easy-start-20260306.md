@@ -23,6 +23,9 @@ tar -xzf metasheet-attendance-onprem-<version>.tgz -C /opt
 mv /opt/metasheet-attendance-onprem-* /opt/metasheet 2>/dev/null || true
 cd /opt/metasheet
 cp docker/app.env.example docker/app.env
+# 或直接用已准备好的考勤生产模板：
+# cp docker/app.env.attendance-onprem.template docker/app.env
+# 然后把其中所有 change-me 替换为真实值
 ```
 
 编辑 `docker/app.env`，至少填这些值（必须改成你自己的）：
