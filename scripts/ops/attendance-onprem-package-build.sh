@@ -41,6 +41,7 @@ REQUIRED_PATHS=(
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
   "docs/deployment/attendance-onprem-package-layout-20260306.md"
   "docs/deployment/attendance-windows-onprem-no-docker-20260306.md"
+  "docs/deployment/attendance-windows-wsl-onprem-20260306.md"
   "docs/deployment/attendance-onprem-app-env-template-20260306.md"
   "docs/deployment/attendance-onprem-postdeploy-30min-verification-20260306.md"
 )
