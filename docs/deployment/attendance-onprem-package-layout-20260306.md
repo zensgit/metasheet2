@@ -164,3 +164,4 @@ BUILD_WEB=1 BUILD_BACKEND=1 INSTALL_DEPS=1 scripts/ops/attendance-onprem-package
 3. 版本变更说明（新增迁移、回滚风险点）
 4. 上线执行清单：`docs/deployment/attendance-go-live-checklist-20260306.md`
 5. UAT 签收模板：`docs/deployment/attendance-uat-signoff-template-20260306.md`
+6. Windows Server + WSL2 部署：`docs/deployment/attendance-windows-wsl-onprem-20260306.md`

@@ -96,6 +96,7 @@ required=(
   "docker/app.env.attendance-onprem.ready.env"
   "ops/nginx/attendance-onprem.conf.example"
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
+  "docs/deployment/attendance-windows-wsl-onprem-20260306.md"
 )
 
 for rel in "${required[@]}"; do

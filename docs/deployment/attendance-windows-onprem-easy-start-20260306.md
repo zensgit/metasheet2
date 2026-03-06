@@ -139,6 +139,10 @@ scripts/ops/attendance-onprem-healthcheck.sh
 
 - [attendance-windows-onprem-no-docker-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-onprem-no-docker-20260306.md)
 
+如需 Windows Server + WSL2 专项部署步骤（含端口转发）见：
+
+- [attendance-windows-wsl-onprem-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-wsl-onprem-20260306.md)
+
 如需“只发安装包、不拉代码”的规范与升级命令，见：
 
 - [attendance-onprem-package-layout-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-onprem-package-layout-20260306.md)

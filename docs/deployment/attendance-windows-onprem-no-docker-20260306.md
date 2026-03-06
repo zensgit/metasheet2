@@ -2,6 +2,10 @@
 
 This runbook targets customers who require local deployment and only provide Windows Server.
 
+If your target is Windows Server + WSL2 (without a separate Ubuntu VM), use:
+
+- [attendance-windows-wsl-onprem-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-wsl-onprem-20260306.md)
+
 If you want copy-paste quick deployment first, use:
 
 - [attendance-windows-onprem-easy-start-20260306.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-windows-onprem-easy-start-20260306.md)
