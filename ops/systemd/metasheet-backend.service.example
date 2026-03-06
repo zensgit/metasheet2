@@ -1,0 +1,23 @@
+[Unit]
+Description=MetaSheet Backend (Attendance)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=metasheet
+Group=metasheet
+WorkingDirectory=/opt/metasheet
+EnvironmentFile=/opt/metasheet/docker/app.env
+ExecStart=/usr/bin/node /opt/metasheet/packages/core-backend/dist/src/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/metasheet/storage/attendance-import /opt/metasheet/output
+
+[Install]
+WantedBy=multi-user.target

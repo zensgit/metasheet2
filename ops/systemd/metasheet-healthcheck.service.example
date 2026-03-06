@@ -1,0 +1,12 @@
+[Unit]
+Description=MetaSheet Attendance On-Prem Healthcheck
+After=network-online.target metasheet-backend.service nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=metasheet
+Group=metasheet
+WorkingDirectory=/opt/metasheet
+EnvironmentFile=/opt/metasheet/docker/app.env
+ExecStart=/opt/metasheet/scripts/ops/attendance-onprem-healthcheck.sh

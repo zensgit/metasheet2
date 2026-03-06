@@ -1,0 +1,74 @@
+name: Attendance On-Prem Package Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_tag:
+        description: 'Optional package tag suffix (default: run number)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build on-prem package
+        env:
+          PACKAGE_TAG: ${{ inputs.package_tag != '' && inputs.package_tag || format('run{0}', github.run_number) }}
+        run: |
+          chmod +x scripts/ops/attendance-onprem-package-build.sh scripts/ops/attendance-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/attendance-onprem-package-build.sh
+          pkg="$(ls -1 output/releases/attendance-onprem/*.tgz | sort | tail -n 1)"
+          scripts/ops/attendance-onprem-package-verify.sh "$pkg"
+          echo "PACKAGE_FILE=$pkg" >> "$GITHUB_ENV"
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            output/releases/attendance-onprem/*.tgz
+            output/releases/attendance-onprem/*.sha256
+            output/releases/attendance-onprem/SHA256SUMS
+            output/releases/attendance-onprem/*.json
+          retention-days: 14
+
+      - name: Step summary
+        run: |
+          {
+            echo "## Attendance On-Prem Package Build"
+            echo ""
+            echo "- Package: \`${PACKAGE_FILE}\`"
+            echo "- Artifact: \`attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
+            echo ""
+            echo "Download:"
+            echo '```bash'
+            echo "gh run download ${{ github.run_id }} -n attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }} -D output/playwright/ga/${{ github.run_id }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

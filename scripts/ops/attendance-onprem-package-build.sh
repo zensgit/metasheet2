@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/releases/attendance-onprem}"
+INSTALL_DEPS="${INSTALL_DEPS:-0}"
+BUILD_WEB="${BUILD_WEB:-0}"
+BUILD_BACKEND="${BUILD_BACKEND:-0}"
+PACKAGE_PREFIX="${PACKAGE_PREFIX:-metasheet-attendance-onprem}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)}"
+PACKAGE_TAG="${PACKAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
+PACKAGE_NAME="${PACKAGE_PREFIX}-v${PACKAGE_VERSION}-${PACKAGE_TAG}"
+BUILD_ROOT="${OUTPUT_DIR}/.build/${PACKAGE_NAME}"
+PACKAGE_ROOT="${BUILD_ROOT}/${PACKAGE_NAME}"
+ARCHIVE_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.tgz"
+CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
+
+REQUIRED_PATHS=(
+  "apps/web/dist/index.html"
+  "packages/core-backend/dist/src/db/migrate.js"
+  "scripts/ops/attendance-onprem-package-install.sh"
+  "scripts/ops/attendance-onprem-package-upgrade.sh"
+  "scripts/ops/attendance-onprem-deploy-easy.sh"
+  "scripts/ops/attendance-onprem-bootstrap.sh"
+  "scripts/ops/attendance-onprem-bootstrap-admin.sh"
+  "scripts/ops/attendance-onprem-env-check.sh"
+  "scripts/ops/attendance-onprem-healthcheck.sh"
+  "scripts/ops/attendance-onprem-update.sh"
+  "docker/app.env.example"
+  "ops/nginx/attendance-onprem.conf.example"
+  "ops/systemd/metasheet-backend.service.example"
+  "ops/systemd/metasheet-healthcheck.service.example"
+  "ops/systemd/metasheet-healthcheck.timer.example"
+  "ecosystem.config.cjs"
+  "package.json"
+  "pnpm-lock.yaml"
+  "pnpm-workspace.yaml"
+  "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
+  "docs/deployment/attendance-onprem-package-layout-20260306.md"
+  "docs/deployment/attendance-windows-onprem-no-docker-20260306.md"
+)
+
+function info() {
+  echo "[attendance-onprem-package-build] $*" >&2
+}
+
+function die() {
+  echo "[attendance-onprem-package-build] ERROR: $*" >&2
+  exit 1
+}
+
+function run() {
+  info "+ $*"
+  "$@"
+}
+
+function hash_line() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file"
+  else
+    die "Missing hash tool: sha256sum or shasum"
+  fi
+}
+
+function copy_path() {
+  local rel="$1"
+  local src="${ROOT_DIR}/${rel}"
+  local dst="${PACKAGE_ROOT}/${rel}"
+  [[ -e "$src" ]] || die "Missing path: ${rel}"
+  mkdir -p "$(dirname "$dst")"
+  if [[ -d "$src" ]]; then
+    cp -R "$src" "$dst"
+  else
+    cp "$src" "$dst"
+  fi
+}
+
+if [[ "$INSTALL_DEPS" == "1" ]]; then
+  run pnpm install --frozen-lockfile
+fi
+
+if [[ "$BUILD_WEB" == "1" ]]; then
+  run pnpm --filter @metasheet/web build
+fi
+
+if [[ "$BUILD_BACKEND" == "1" ]]; then
+  run pnpm --filter @metasheet/core-backend build
+fi
+
+for rel in "${REQUIRED_PATHS[@]}"; do
+  [[ -e "${ROOT_DIR}/${rel}" ]] || die "Required file missing before packaging: ${rel}"
+done
+
+run rm -rf "$BUILD_ROOT"
+run mkdir -p "$PACKAGE_ROOT"
+run mkdir -p "$OUTPUT_DIR"
+
+for rel in "${REQUIRED_PATHS[@]}"; do
+  copy_path "$rel"
+done
+
+cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
+MetaSheet Attendance On-Prem Package
+Version: ${PACKAGE_VERSION}
+Tag: ${PACKAGE_TAG}
+
+Install quickstart:
+  docs/deployment/attendance-windows-onprem-easy-start-20260306.md
+
+Package layout guide:
+  docs/deployment/attendance-onprem-package-layout-20260306.md
+EOF
+
+run tar -czf "$ARCHIVE_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
+hash_line "$ARCHIVE_PATH" > "${ARCHIVE_PATH}.sha256"
+
+checksum_tmp="$(mktemp)"
+trap 'rm -f "$checksum_tmp"' EXIT
+grep -v " ${PACKAGE_NAME}.tgz$" "$CHECKSUM_FILE" >"$checksum_tmp" 2>/dev/null || true
+hash_line "$ARCHIVE_PATH" | sed "s|  ${ARCHIVE_PATH}$|  ${PACKAGE_NAME}.tgz|" >> "$checksum_tmp"
+mv "$checksum_tmp" "$CHECKSUM_FILE"
+trap - EXIT
+
+cat > "${OUTPUT_DIR}/${PACKAGE_NAME}.json" <<EOF
+{
+  "name": "${PACKAGE_NAME}",
+  "version": "${PACKAGE_VERSION}",
+  "tag": "${PACKAGE_TAG}",
+  "archive": "$(basename "$ARCHIVE_PATH")",
+  "checksumFile": "$(basename "$CHECKSUM_FILE")",
+  "generatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+
+info "Package built:"
+info "  archive: ${ARCHIVE_PATH}"
+info "  checksum: ${ARCHIVE_PATH}.sha256"
+info "  index: ${CHECKSUM_FILE}"
