@@ -27,6 +27,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-env-check.sh"
   "scripts/ops/attendance-onprem-healthcheck.sh"
   "scripts/ops/attendance-onprem-update.sh"
+  "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "docker/app.env.example"
   "docker/app.env.attendance-onprem.template"
   "docker/app.env.attendance-onprem.ready.env"

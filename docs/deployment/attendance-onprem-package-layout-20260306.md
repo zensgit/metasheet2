@@ -70,6 +70,7 @@ metasheet/
     attendance-onprem-env-check.sh
     attendance-onprem-healthcheck.sh
     attendance-onprem-update.sh
+    attendance-wsl-portproxy-refresh.ps1
   docker/app.env.example
   docker/app.env.attendance-onprem.template
   docker/app.env.attendance-onprem.ready.env

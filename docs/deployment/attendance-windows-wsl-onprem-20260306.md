@@ -135,6 +135,19 @@ scripts/ops/attendance-onprem-deploy-easy.sh
 
 WSL2 默认是 NAT 网络，局域网客户端访问 Windows IP 时，需要把 Windows 80/443 转到 WSL。
 
+推荐使用仓库脚本（PowerShell 管理员）：
+
+```powershell
+cd C:\metasheet
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-refresh.ps1 -Distro Ubuntu-22.04
+```
+
+如果需要先预览命令，不实际执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ops\attendance-wsl-portproxy-refresh.ps1 -Distro Ubuntu-22.04 -WhatIfOnly
+```
+
 先获取 WSL IP（PowerShell）：
 
 ```powershell
