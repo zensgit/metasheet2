@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MetaSheet Attendance On-Prem Healthcheck every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=metasheet-healthcheck.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
