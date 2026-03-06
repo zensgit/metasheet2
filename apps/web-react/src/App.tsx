@@ -11,6 +11,13 @@ import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
 import { createMetaBackendClient, type ErrorScope, type LastErrorInfo } from './metaBackend'
 import {
+  clearLastErrorScope,
+  copyLastErrorInfo,
+  deriveMetaPageState,
+  REFRESH_INTERVAL_OPTIONS,
+  type CopyStatus,
+} from './metaPageState'
+import {
   clearStoredConfig,
   readStoredBackend,
   readStoredConfig,
@@ -21,14 +28,7 @@ import {
   saveStoredRefresh,
   saveStoredViewFilters,
 } from './metaStorage'
-import {
-  filterViews,
-  getViewTypeLabel,
-  groupViews,
-  VIEW_TYPE_FILTER_OPTIONS,
-  type ViewOption,
-  type ViewTypeFilter,
-} from './viewFilters'
+import { VIEW_TYPE_FILTER_OPTIONS, type ViewOption, type ViewTypeFilter } from './viewFilters'
 import {
   createUniverRuntime,
   disposeUniverRuntime,
@@ -47,7 +47,7 @@ export default function App() {
   const [status, setStatus] = useState<'local' | 'loading' | 'ready' | 'error'>('local')
   const [error, setError] = useState<string | null>(null)
   const [lastErrorInfo, setLastErrorInfo] = useState<LastErrorInfo | null>(null)
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [copyStatus, setCopyStatus] = useState<CopyStatus>('idle')
   const [views, setViews] = useState<ViewOption[]>([])
   const [viewsStatus, setViewsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [viewsError, setViewsError] = useState<string | null>(null)
@@ -151,18 +151,17 @@ export default function App() {
   }
 
   const handleCopyError = async () => {
-    if (!lastErrorInfo || typeof navigator === 'undefined') return
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(lastErrorInfo, null, 2))
-      setCopyStatus('copied')
-    } catch {
-      setCopyStatus('failed')
-    }
+    const nextCopyStatus = await copyLastErrorInfo(
+      lastErrorInfo,
+      typeof navigator === 'undefined' ? null : navigator.clipboard,
+    )
+    if (nextCopyStatus === 'idle') return
+    setCopyStatus(nextCopyStatus)
     window.setTimeout(() => setCopyStatus('idle'), 2000)
   }
 
   const clearLastErrorForScope = (scope: ErrorScope) => {
-    setLastErrorInfo((prev) => (prev?.scope === scope ? null : prev))
+    setLastErrorInfo((prev) => clearLastErrorScope(prev, scope))
   }
 
   useEffect(() => {
@@ -358,22 +357,45 @@ export default function App() {
     renderWorkbook(univerRuntimeRef.current, workbookData)
   }, [workbookData])
 
-  const canRefresh = useBackend && !isRefreshing
-  const showViewSelect = useBackend && views.length > 0
-  const showViewIdInput = !showViewSelect
-  const refreshIntervalOptions = [10, 30, 60]
-  const selectedView = views.find((view) => view.id === viewId) || null
-  const viewTypeLabel = selectedView?.type ? `type: ${getViewTypeLabel(selectedView.type)}` : ''
-  const canRetryViews = viewsStatus === 'error'
-  const canRetryData = status === 'error'
-  const autoRefreshLabel = autoRefresh ? (pageVisible ? 'auto: on' : 'auto: paused') : 'auto: off'
-  const lastErrorLabel = lastErrorInfo
-    ? `${lastErrorInfo.scope}${lastErrorInfo.status ? ` HTTP ${lastErrorInfo.status}` : ''}${
-      lastErrorInfo.url ? ` ${lastErrorInfo.url}` : ''
-    } @ ${lastErrorInfo.at}`
-    : ''
-  const filteredViews = useMemo(() => filterViews(views, viewSearch, viewTypeFilter), [viewSearch, viewTypeFilter, views])
-  const groupedViews = useMemo(() => groupViews(filteredViews), [filteredViews])
+  const {
+    autoRefreshLabel,
+    canRefresh,
+    canRetryData,
+    canRetryViews,
+    groupedViews,
+    lastErrorLabel,
+    showViewIdInput,
+    showViewSelect,
+    viewTypeLabel,
+  } = useMemo(
+    () =>
+      deriveMetaPageState({
+        autoRefresh,
+        isRefreshing,
+        lastErrorInfo,
+        pageVisible,
+        status,
+        useBackend,
+        viewId,
+        viewSearch,
+        views,
+        viewsStatus,
+        viewTypeFilter,
+      }),
+    [
+      autoRefresh,
+      isRefreshing,
+      lastErrorInfo,
+      pageVisible,
+      status,
+      useBackend,
+      viewId,
+      viewSearch,
+      views,
+      viewsStatus,
+      viewTypeFilter,
+    ],
+  )
 
   return (
     <div className="app">
@@ -405,7 +427,7 @@ export default function App() {
               onChange={handleIntervalChange}
               disabled={!useBackend}
             >
-              {refreshIntervalOptions.map((option) => (
+              {REFRESH_INTERVAL_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {option}s
                 </option>
