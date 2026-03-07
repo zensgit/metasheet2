@@ -20,7 +20,7 @@ async function getApproval(id: string, token: string): Promise<unknown> {
 }
 ```
 
-Tiny client with If-Match retry:
+Tiny client with token refresh and optional 409 retry:
 ```ts
 import { createClient } from '@metasheet/sdk/client'
 
@@ -31,6 +31,22 @@ const client = createClient({
 })
 const g = await client.request('GET', '/api/approvals/demo-1')
 const ok = await client.requestWithRetry('POST', '/api/approvals/demo-1/approve', { note: 'ok' }, g.etag)
+```
+
+Typed helpers for the approvals endpoints:
+```ts
+import { createApprovalsClient } from '@metasheet/sdk/client'
+
+const approvals = createApprovalsClient({
+  baseUrl: 'http://localhost:8910',
+  getToken: async () => 'YOUR_TOKEN',
+})
+
+const pending = await approvals.listPendingApprovals({ limit: 20, offset: 0 })
+const instance = await approvals.getApproval('demo-1')
+const history = await approvals.getApprovalHistory('demo-1')
+await approvals.approveApproval('demo-1', { comment: 'LGTM' })
+await approvals.rejectApproval('demo-2', { reason: 'Need changes', comment: 'missing fields' })
 ```
 
 Typed helpers for the Univer meta endpoints:

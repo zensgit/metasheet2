@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createClient, createMetaSheetClient } from '../client.ts'
+import { createApprovalsClient, createClient, createMetaSheetClient } from '../client.ts'
 
 function createResponse<T>(status: number, json: T, etag?: string, url?: string) {
   return {
@@ -188,6 +188,124 @@ describe('@metasheet/sdk client', () => {
     await expect(client.getUniverMetaView({ sheetId: 'sheet-1', viewId: 'view-1' })).resolves.toEqual({
       fields: [{ id: 'name', name: 'Name', type: 'string' }],
       rows: [{ id: 'row-1', data: { name: 'Alice' } }],
+    })
+  })
+
+  it('provides business helpers for the approvals endpoints', async () => {
+    const fetch = vi.fn()
+    fetch
+      .mockResolvedValueOnce(createResponse(200, {
+        id: 'approval/1',
+        status: 'pending',
+        version: 3,
+      }, undefined, 'https://api.example.com/api/approvals/approval%2F1'))
+      .mockResolvedValueOnce(createResponse(200, {
+        data: [{ id: 'approval-2', status: 'pending', version: 1 }],
+        total: 1,
+        limit: 10,
+        offset: 5,
+      }, undefined, 'https://api.example.com/api/approvals/pending?limit=10&offset=5'))
+      .mockResolvedValueOnce(createResponse(200, {
+        data: [{ action: 'approve', actor_id: 'u1', to_status: 'approved' }],
+        total: 1,
+      }, undefined, 'https://api.example.com/api/approvals/approval%2F1/history'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        id: 'approval/1',
+        status: 'approved',
+        version: 4,
+      }, undefined, 'https://api.example.com/api/approvals/approval%2F1/approve'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        id: 'approval/1',
+        status: 'rejected',
+        version: 5,
+      }, undefined, 'https://api.example.com/api/approvals/approval%2F1/reject'))
+
+    const client = createApprovalsClient({
+      baseUrl: 'https://api.example.com',
+      getToken: () => 'token-123',
+      fetch: fetch as typeof globalThis.fetch,
+    })
+
+    await expect(client.getApproval('approval/1')).resolves.toEqual({
+      id: 'approval/1',
+      status: 'pending',
+      version: 3,
+    })
+    await expect(client.listPendingApprovals({ limit: 10, offset: 5 })).resolves.toEqual({
+      data: [{ id: 'approval-2', status: 'pending', version: 1 }],
+      total: 1,
+      limit: 10,
+      offset: 5,
+    })
+    await expect(client.getApprovalHistory('approval/1')).resolves.toEqual({
+      data: [{ action: 'approve', actor_id: 'u1', to_status: 'approved' }],
+      total: 1,
+    })
+    await expect(client.approveApproval('approval/1', { comment: 'LGTM' })).resolves.toEqual({
+      success: true,
+      id: 'approval/1',
+      status: 'approved',
+      version: 4,
+    })
+    await expect(
+      client.rejectApproval('approval/1', { reason: 'Need changes', comment: 'missing fields' }),
+    ).resolves.toEqual({
+      success: true,
+      id: 'approval/1',
+      status: 'rejected',
+      version: 5,
+    })
+
+    expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.com/api/approvals/approval%2F1', {
+      method: 'GET',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: undefined,
+    })
+    expect(fetch).toHaveBeenNthCalledWith(2, 'https://api.example.com/api/approvals/pending?limit=10&offset=5', {
+      method: 'GET',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: undefined,
+    })
+    expect(fetch).toHaveBeenNthCalledWith(4, 'https://api.example.com/api/approvals/approval%2F1/approve', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: JSON.stringify({ comment: 'LGTM' }),
+    })
+    expect(fetch).toHaveBeenNthCalledWith(5, 'https://api.example.com/api/approvals/approval%2F1/reject', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: JSON.stringify({ reason: 'Need changes', comment: 'missing fields' }),
+    })
+  })
+
+  it('throws structured errors when approvals helpers receive an error payload', async () => {
+    const fetch = vi.fn(async () =>
+      createResponse(400, { error: 'Rejection reason is required' }, undefined, 'https://api.example.com/api/approvals/a-1/reject'),
+    )
+    const client = createApprovalsClient({
+      baseUrl: 'https://api.example.com',
+      getToken: () => 'token-123',
+      fetch: fetch as typeof globalThis.fetch,
+    })
+
+    await expect(client.rejectApproval('a-1', { reason: '' })).rejects.toMatchObject({
+      message: 'Rejection reason is required',
+      status: 400,
+      url: 'https://api.example.com/api/approvals/a-1/reject',
     })
   })
 })

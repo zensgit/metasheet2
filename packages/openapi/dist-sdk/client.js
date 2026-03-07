@@ -4,6 +4,9 @@ function createHttpError(message, status, url) {
     error.url = url;
     return error;
 }
+function encodePathSegment(value) {
+    return encodeURIComponent(value);
+}
 function toQueryString(params) {
     const search = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
@@ -13,6 +16,27 @@ function toQueryString(params) {
     });
     const query = search.toString();
     return query ? `?${query}` : '';
+}
+function getErrorMessage(payload, status) {
+    if (payload && typeof payload === 'object') {
+        const error = payload.error;
+        if (typeof error === 'string') {
+            return error;
+        }
+        if (error && typeof error === 'object' && typeof error.message === 'string') {
+            return error.message;
+        }
+        if (typeof payload.message === 'string') {
+            return payload.message;
+        }
+    }
+    return `HTTP ${status}`;
+}
+function unwrapResponse(response) {
+    if (response.status >= 400) {
+        throw createHttpError(getErrorMessage(response.json, response.status), response.status, response.url);
+    }
+    return response.json;
 }
 export function createClient(opts) {
     const f = opts.fetch ?? globalThis.fetch.bind(globalThis);
@@ -78,5 +102,51 @@ export function createMetaSheetClient(opts) {
         ...client,
         getUniverMetaView,
         listUniverMetaViews,
+    };
+}
+export function createApprovalsClient(opts) {
+    const client = createClient(opts);
+    async function getApproval(id) {
+        const response = await client.request('GET', `/api/approvals/${encodePathSegment(id)}`);
+        return unwrapResponse(response);
+    }
+    async function listPendingApprovals(params = {}) {
+        const response = await client.request('GET', `/api/approvals/pending${toQueryString({
+            limit: typeof params.limit === 'number' ? String(params.limit) : undefined,
+            offset: typeof params.offset === 'number' ? String(params.offset) : undefined,
+        })}`);
+        return unwrapResponse(response);
+    }
+    async function getApprovalHistory(id) {
+        const response = await client.request('GET', `/api/approvals/${encodePathSegment(id)}/history`);
+        return unwrapResponse(response);
+    }
+    async function approveApproval(id, payload = {}) {
+        const response = await client.request('POST', `/api/approvals/${encodePathSegment(id)}/approve`, payload);
+        const json = unwrapResponse(response);
+        if (json && typeof json === 'object' && ('success' in json || 'ok' in json)) {
+            if (json.success === false || json.ok === false) {
+                throw createHttpError(getErrorMessage(json, response.status), response.status, response.url);
+            }
+        }
+        return json;
+    }
+    async function rejectApproval(id, payload) {
+        const response = await client.request('POST', `/api/approvals/${encodePathSegment(id)}/reject`, payload);
+        const json = unwrapResponse(response);
+        if (json && typeof json === 'object' && ('success' in json || 'ok' in json)) {
+            if (json.success === false || json.ok === false) {
+                throw createHttpError(getErrorMessage(json, response.status), response.status, response.url);
+            }
+        }
+        return json;
+    }
+    return {
+        ...client,
+        approveApproval,
+        getApproval,
+        getApprovalHistory,
+        listPendingApprovals,
+        rejectApproval,
     };
 }
