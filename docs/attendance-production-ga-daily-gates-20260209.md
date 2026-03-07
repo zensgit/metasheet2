@@ -3997,3 +3997,32 @@ Key assertions:
   - `gateFlat.strict.conclusion=success`
   - `gateFlat.protection.runId=22798505815`
 - open `[Attendance ...]` issues: none.
+
+### Update (2026-03-07): Dashboard Strict Source Hardening (`cancelled` filtering)
+
+Scope:
+
+- fixed dashboard strict source selection to avoid false P0 failures caused by `cancelled` strict runs.
+
+Implementation:
+
+- file: `scripts/ops/attendance-daily-gate-report.mjs`
+  - new helper: `pickLatestCompletedRun(runList, { excludeConclusions })`
+  - strict gate selection now excludes `cancelled`, `neutral`, and `skipped` conclusions, then falls back to latest completed if no preferred run exists.
+- file: `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added selection regression tests for excluded/fallback/no-completed scenarios.
+
+Local verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `node --check scripts/ops/attendance-daily-gate-report.mjs` | PASS | local command output |
+| `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | local command output |
+| `GH_TOKEN=... node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-121208/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-121208/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- generated dashboard keeps strict gate on effective success source:
+  - `gateFlat.strict.runId=22798551601`
+  - `gateFlat.strict.conclusion=success`
+  - `overallStatus=pass`, `p0Status=pass`

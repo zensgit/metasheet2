@@ -15,6 +15,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { pathToFileURL } from 'url'
 
 const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
@@ -555,6 +556,25 @@ function formatRun(run) {
     updatedAt: run.updated_at || null,
     url: run.html_url || null,
   }
+}
+
+export function pickLatestCompletedRun(runList, options = {}) {
+  const list = Array.isArray(runList) ? runList : []
+  const excluded = new Set(
+    Array.isArray(options.excludeConclusions)
+      ? options.excludeConclusions
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean)
+      : [],
+  )
+
+  const completedRuns = list.filter((run) => run?.status === 'completed')
+  const preferred = completedRuns.find((run) => {
+    const conclusion = String(run?.conclusion || '').trim().toLowerCase()
+    return !excluded.has(conclusion)
+  })
+  if (preferred) return preferred
+  return completedRuns[0] ?? null
 }
 
 function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError }) {
@@ -1281,23 +1301,25 @@ async function run() {
   }
 
   const preflightLatestAny = preflightList[0] ?? null
-  const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
+  const preflightLatestCompleted = pickLatestCompletedRun(preflightList)
   const protectionLatestAny = protectionList[0] ?? null
-  const protectionLatestCompleted = protectionList.find((run) => run?.status === 'completed') ?? null
+  const protectionLatestCompleted = pickLatestCompletedRun(protectionList)
   const metricsLatestAny = metricsList[0] ?? null
-  const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
+  const metricsLatestCompleted = pickLatestCompletedRun(metricsList)
   const storageLatestAny = storageList[0] ?? null
-  const storageLatestCompleted = storageList.find((run) => run?.status === 'completed') ?? null
+  const storageLatestCompleted = pickLatestCompletedRun(storageList)
   const cleanupLatestAny = cleanupList[0] ?? null
-  const cleanupLatestCompleted = cleanupList.find((run) => run?.status === 'completed') ?? null
+  const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList)
   const strictLatestAny = strictList[0] ?? null
-  const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
+  const strictLatestCompleted = pickLatestCompletedRun(strictList, {
+    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+  })
   const perfLatestAny = perfList[0] ?? null
-  const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
+  const perfLatestCompleted = pickLatestCompletedRun(perfList)
   const longrunLatestAny = longrunList[0] ?? null
-  const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
+  const longrunLatestCompleted = pickLatestCompletedRun(longrunList)
   const contractLatestAny = contractList[0] ?? null
-  const contractLatestCompleted = contractList.find((run) => run?.status === 'completed') ?? null
+  const contractLatestCompleted = pickLatestCompletedRun(contractList)
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
@@ -1797,7 +1819,15 @@ async function run() {
   console.log(`REPORT_JSON=${jsonPath}`)
 }
 
-run().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error)
-  die(message)
-})
+const isDirectExecution = (() => {
+  const argvPath = process.argv[1]
+  if (!argvPath) return false
+  return import.meta.url === pathToFileURL(argvPath).href
+})()
+
+if (isDirectExecution) {
+  run().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    die(message)
+  })
+}
