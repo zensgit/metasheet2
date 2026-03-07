@@ -1315,9 +1315,13 @@ async function run() {
     excludeConclusions: ['cancelled', 'neutral', 'skipped'],
   })
   const perfLatestAny = perfList[0] ?? null
-  const perfLatestCompleted = pickLatestCompletedRun(perfList)
+  const perfLatestCompleted = pickLatestCompletedRun(perfList, {
+    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+  })
   const longrunLatestAny = longrunList[0] ?? null
-  const longrunLatestCompleted = pickLatestCompletedRun(longrunList)
+  const longrunLatestCompleted = pickLatestCompletedRun(longrunList, {
+    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+  })
   const contractLatestAny = contractList[0] ?? null
   const contractLatestCompleted = pickLatestCompletedRun(contractList)
 
