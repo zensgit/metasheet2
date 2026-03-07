@@ -4026,3 +4026,33 @@ Key assertions:
   - `gateFlat.strict.runId=22798551601`
   - `gateFlat.strict.conclusion=success`
   - `overallStatus=pass`, `p0Status=pass`
+
+### Update (2026-03-07): Mainline Gate Refresh + Longrun Upload Coverage Check
+
+Scope:
+
+- reran one full mainline gate chain via post-merge verifier.
+- ran one non-drill longrun perf workflow with `upload_csv=true` to confirm upload channel remains visible in trend artifacts.
+
+Execution:
+
+- command: `scripts/ops/attendance-post-merge-verify.sh`
+- output root: `output/playwright/attendance-post-merge-verify/20260307-213438`
+- longrun dispatch: `gh workflow run attendance-import-perf-longrun.yml --ref main -f upload_csv=true -f fail_on_regression=false`
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22800015001 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800015001/attendance-branch-policy-drift-prod-22800015001-1/policy.log`, `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800015001/attendance-branch-policy-drift-prod-22800015001-1/policy.json` |
+| Strict Gates | #22800020740 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800020740/attendance-strict-gates-prod-22800020740-1/20260307-133550-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800020740/attendance-strict-gates-prod-22800020740-1/20260307-133550-2/gate-api-smoke.log` |
+| Daily Dashboard | #22800087930 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800087930/attendance-daily-gate-dashboard-22800087930-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800087930/attendance-daily-gate-dashboard-22800087930-1/attendance-daily-gate-dashboard.md` |
+| Perf Longrun (non-drill, upload path) | #22800096592 | PASS | `output/playwright/ga/22800096592-r2/attendance-import-perf-longrun-rows10k-commit-22800096592-1/current/rows10k-commit/attendance-perf-mmgdf55d-9o08th/perf-summary.json`, `output/playwright/ga/22800096592-r2/attendance-import-perf-longrun-trend-22800096592-1/20260307-134209/attendance-import-perf-longrun-trend.md` |
+
+Key assertions:
+
+- gate chain remained green (`branch policy + strict + dashboard` all PASS).
+- longrun trend explicitly reports upload path:
+  - markdown table column `Upload` shows `YES` for `rows10k-commit`.
+  - trend json contains `uploadCsv: true`.
+- no open `[Attendance ...]` tracking issues after this run set.
