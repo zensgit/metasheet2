@@ -1,5 +1,9 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { MetaControls } from './components/MetaControls'
+import {
+  clearCopyStatusResetTimer,
+  replaceCopyStatusResetTimer,
+} from './copyStatusTimer'
 import { DEMO_WORKBOOK_DATA } from './demoWorkbook'
 import { buildWorkbookFromMeta } from './metaWorkbook'
 import { createMetaBackendClient } from './metaBackend'
@@ -20,6 +24,7 @@ const META_SHEET_ID = import.meta.env.VITE_META_SHEET_ID || 'univer_demo_meta'
 const META_VIEW_ID = import.meta.env.VITE_META_VIEW_ID || ''
 
 export default function App() {
+  const copyStatusTimerRef = useRef<number | null>(null)
   const {
     applyParams,
     canApply,
@@ -97,8 +102,27 @@ export default function App() {
     )
     if (nextCopyStatus === 'idle') return
     setCopyStatus(nextCopyStatus)
-    window.setTimeout(() => setCopyStatus('idle'), 2000)
+    copyStatusTimerRef.current = replaceCopyStatusResetTimer(
+      copyStatusTimerRef.current,
+      {
+        clear: (timerId) => window.clearTimeout(timerId),
+        schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      },
+      () => {
+        setCopyStatus('idle')
+        copyStatusTimerRef.current = null
+      },
+      2000,
+    )
   }
+
+  useEffect(() => {
+    return () => {
+      copyStatusTimerRef.current = clearCopyStatusResetTimer(copyStatusTimerRef.current, {
+        clear: (timerId) => window.clearTimeout(timerId),
+      })
+    }
+  }, [])
 
   const {
     autoRefreshLabel,
