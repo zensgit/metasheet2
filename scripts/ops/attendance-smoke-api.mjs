@@ -14,6 +14,10 @@ const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
+const groupRetryAttempts = Math.max(1, Number(process.env.GROUP_RETRY_ATTEMPTS || 8))
+const groupRetryDelayMs = Math.max(100, Number(process.env.GROUP_RETRY_DELAY_MS || 1000))
+const groupPageSize = Math.max(1, Number(process.env.GROUP_PAGE_SIZE || 200))
+const groupPageMax = Math.max(1, Number(process.env.GROUP_PAGE_MAX || 20))
 const importEngines = new Set(['standard', 'bulk'])
 
 function normalizeProductMode(value) {
@@ -217,6 +221,58 @@ function assertImportTelemetry(payload, label, options = {}) {
 
 function isRetriableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 504)
+}
+
+async function findGroupByNameWithRetry(groupName) {
+  async function findGroupByNameAcrossPages() {
+    for (let page = 1; page <= groupPageMax; page += 1) {
+      const groups = await apiFetch(`/attendance/groups?pageSize=${groupPageSize}&page=${page}`, { method: 'GET' })
+      assertOk(groups, 'GET /attendance/groups')
+      const groupItems = groups.body?.data?.items || []
+      const created = groupItems.find((g) => g && g.name === groupName)
+      if (created?.id) return created
+      if (!Array.isArray(groupItems) || groupItems.length < groupPageSize) break
+    }
+    return null
+  }
+
+  for (let attempt = 1; attempt <= groupRetryAttempts; attempt += 1) {
+    const created = await findGroupByNameAcrossPages()
+    if (created?.id) {
+      if (attempt > 1) log(`group resolved after retry: attempt=${attempt}`)
+      return created
+    }
+    if (attempt < groupRetryAttempts) {
+      await sleep(groupRetryDelayMs)
+    }
+  }
+  return null
+}
+
+async function verifyGroupMembershipWithRetry(groupId, userId) {
+  async function hasGroupMemberAcrossPages() {
+    for (let page = 1; page <= groupPageMax; page += 1) {
+      const members = await apiFetch(`/attendance/groups/${groupId}/members?pageSize=${groupPageSize}&page=${page}`, { method: 'GET' })
+      assertOk(members, 'GET /attendance/groups/:id/members')
+      const memberItems = members.body?.data?.items || []
+      const hasMember = memberItems.some((m) => m && (m.userId === userId || m.user_id === userId))
+      if (hasMember) return true
+      if (!Array.isArray(memberItems) || memberItems.length < groupPageSize) break
+    }
+    return false
+  }
+
+  for (let attempt = 1; attempt <= groupRetryAttempts; attempt += 1) {
+    const hasMember = await hasGroupMemberAcrossPages()
+    if (hasMember) {
+      if (attempt > 1) log(`group membership resolved after retry: attempt=${attempt}`)
+      return true
+    }
+    if (attempt < groupRetryAttempts) {
+      await sleep(groupRetryDelayMs)
+    }
+  }
+  return false
 }
 
 async function fetchWithRetry(url, init = {}, options = {}) {
@@ -710,16 +766,10 @@ async function run() {
   log(`batch items ok: rows=${batchItems.length}`)
 
   // 8) group exists + membership
-  const groups = await apiFetch('/attendance/groups?pageSize=200', { method: 'GET' })
-  assertOk(groups, 'GET /attendance/groups')
-  const groupItems = groups.body?.data?.items || []
-  const created = groupItems.find((g) => g && g.name === groupName)
+  const created = await findGroupByNameWithRetry(groupName)
   if (!created?.id) die('created group not found')
 
-  const members = await apiFetch(`/attendance/groups/${created.id}/members?pageSize=200`, { method: 'GET' })
-  assertOk(members, 'GET /attendance/groups/:id/members')
-  const memberItems = members.body?.data?.items || []
-  const hasMember = memberItems.some((m) => m && (m.userId === userId || m.user_id === userId))
+  const hasMember = await verifyGroupMembershipWithRetry(created.id, userId)
   if (!hasMember) die('importing user is not a member of created group')
   log('group + membership ok')
 
