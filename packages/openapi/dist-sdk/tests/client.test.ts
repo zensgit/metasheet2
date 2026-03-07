@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApprovalsClient, createClient, createMetaSheetClient } from '../client.ts'
+import { createApprovalsClient, createClient, createMetaSheetClient, createWorkflowClient } from '../client.ts'
 
 function createResponse<T>(status: number, json: T, etag?: string, url?: string) {
   return {
@@ -306,6 +306,227 @@ describe('@metasheet/sdk client', () => {
       message: 'Rejection reason is required',
       status: 400,
       url: 'https://api.example.com/api/approvals/a-1/reject',
+    })
+  })
+
+  it('provides business helpers for workflow listing and detail endpoints', async () => {
+    const fetch = vi.fn()
+    fetch
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: [{ id: 'def-1', key: 'leave/request', name: 'Leave Request', version: 3 }],
+      }, undefined, 'https://api.example.com/api/workflow/definitions?category=hr&latest=true'))
+      .mockResolvedValueOnce(createResponse(201, {
+        success: true,
+        data: { instanceId: 'inst-1', message: 'Process started successfully' },
+      }, undefined, 'https://api.example.com/api/workflow/start/leave%2Frequest'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: [{ id: 'inst-1', process_definition_key: 'leave/request', state: 'ACTIVE', variables: { days: 2 } }],
+      }, undefined, 'https://api.example.com/api/workflow/instances?state=ACTIVE&processKey=leave%2Frequest'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: {
+          id: 'inst-1',
+          process_definition_key: 'leave/request',
+          state: 'ACTIVE',
+          variables: { days: 2 },
+          activities: [{ id: 'act-1', type: 'startEvent' }],
+          variableList: [{ name: 'days', json_value: 2 }],
+        },
+      }, undefined, 'https://api.example.com/api/workflow/instances/inst-1'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: [{ id: 'task-1', process_instance_id: 'inst-1', state: 'READY', variables: { days: 2 } }],
+      }, undefined, 'https://api.example.com/api/workflow/tasks?candidateUser=u1&state=READY'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: [{ id: 'incident-1', state: 'OPEN', process_instance_id: 'inst-1' }],
+      }, undefined, 'https://api.example.com/api/workflow/incidents?processInstanceId=inst-1&state=OPEN'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        data: [{ id: 'audit-1', process_instance_id: 'inst-1', user_id: 'u1' }],
+      }, undefined, 'https://api.example.com/api/workflow/audit?processInstanceId=inst-1&userId=u1'))
+
+    const client = createWorkflowClient({
+      baseUrl: 'https://api.example.com',
+      getToken: () => 'token-123',
+      fetch: fetch as typeof globalThis.fetch,
+    })
+
+    await expect(client.listWorkflowDefinitions({ category: 'hr', latest: true })).resolves.toEqual([
+      { id: 'def-1', key: 'leave/request', name: 'Leave Request', version: 3 },
+    ])
+    await expect(client.startWorkflow('leave/request', { businessKey: 'biz-1', variables: { days: 2 } })).resolves.toEqual({
+      instanceId: 'inst-1',
+      message: 'Process started successfully',
+    })
+    await expect(client.listWorkflowInstances({ state: 'ACTIVE', processKey: 'leave/request' })).resolves.toEqual([
+      { id: 'inst-1', process_definition_key: 'leave/request', state: 'ACTIVE', variables: { days: 2 } },
+    ])
+    await expect(client.getWorkflowInstance('inst-1')).resolves.toEqual({
+      id: 'inst-1',
+      process_definition_key: 'leave/request',
+      state: 'ACTIVE',
+      variables: { days: 2 },
+      activities: [{ id: 'act-1', type: 'startEvent' }],
+      variableList: [{ name: 'days', json_value: 2 }],
+    })
+    await expect(client.listWorkflowTasks({ candidateUser: 'u1', state: 'READY' })).resolves.toEqual([
+      { id: 'task-1', process_instance_id: 'inst-1', state: 'READY', variables: { days: 2 } },
+    ])
+    await expect(client.listWorkflowIncidents({ processInstanceId: 'inst-1', state: 'OPEN' })).resolves.toEqual([
+      { id: 'incident-1', state: 'OPEN', process_instance_id: 'inst-1' },
+    ])
+    await expect(client.listWorkflowAuditLogs({ processInstanceId: 'inst-1', userId: 'u1' })).resolves.toEqual([
+      { id: 'audit-1', process_instance_id: 'inst-1', user_id: 'u1' },
+    ])
+
+    expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.com/api/workflow/definitions?category=hr&latest=true', {
+      method: 'GET',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: undefined,
+    })
+    expect(fetch).toHaveBeenNthCalledWith(2, 'https://api.example.com/api/workflow/start/leave%2Frequest', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: JSON.stringify({ businessKey: 'biz-1', variables: { days: 2 } }),
+    })
+    expect(fetch).toHaveBeenNthCalledWith(5, 'https://api.example.com/api/workflow/tasks?candidateUser=u1&state=READY', {
+      method: 'GET',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: undefined,
+    })
+  })
+
+  it('provides business helpers for workflow command endpoints', async () => {
+    const fetch = vi.fn()
+    fetch
+      .mockResolvedValueOnce(createResponse(201, {
+        success: true,
+        data: { definitionId: 'def-1', message: 'Process deployed successfully' },
+      }, undefined, 'https://api.example.com/api/workflow/deploy'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        message: 'Task claimed successfully',
+      }, undefined, 'https://api.example.com/api/workflow/tasks/task%2F1/claim'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        message: 'Task completed successfully',
+      }, undefined, 'https://api.example.com/api/workflow/tasks/task%2F1/complete'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        message: 'Message sent successfully',
+      }, undefined, 'https://api.example.com/api/workflow/message'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        message: 'Signal broadcast successfully',
+      }, undefined, 'https://api.example.com/api/workflow/signal'))
+      .mockResolvedValueOnce(createResponse(200, {
+        success: true,
+        message: 'Incident resolved successfully',
+      }, undefined, 'https://api.example.com/api/workflow/incidents/incident%2F1/resolve'))
+
+    const client = createWorkflowClient({
+      baseUrl: 'https://api.example.com',
+      getToken: () => 'token-123',
+      fetch: fetch as typeof globalThis.fetch,
+    })
+
+    await expect(client.deployWorkflowDefinition({
+      bpmnXml: '<xml />',
+      key: 'leave/request',
+      name: 'Leave Request',
+      category: 'hr',
+    })).resolves.toEqual({
+      definitionId: 'def-1',
+      message: 'Process deployed successfully',
+    })
+    await expect(client.claimWorkflowTask('task/1')).resolves.toEqual({
+      success: true,
+      message: 'Task claimed successfully',
+    })
+    await expect(client.completeWorkflowTask('task/1', {
+      variables: { approved: true },
+      formData: { note: 'ok' },
+    })).resolves.toEqual({
+      success: true,
+      message: 'Task completed successfully',
+    })
+    await expect(client.sendWorkflowMessage({
+      messageName: 'InvoiceReceived',
+      correlationKey: 'invoice-1',
+      variables: { amount: 12 },
+    })).resolves.toEqual({
+      success: true,
+      message: 'Message sent successfully',
+    })
+    await expect(client.broadcastWorkflowSignal({
+      signalName: 'NightlySync',
+      variables: { source: 'scheduler' },
+    })).resolves.toEqual({
+      success: true,
+      message: 'Signal broadcast successfully',
+    })
+    await expect(client.resolveWorkflowIncident('incident/1')).resolves.toEqual({
+      success: true,
+      message: 'Incident resolved successfully',
+    })
+
+    expect(fetch).toHaveBeenNthCalledWith(1, 'https://api.example.com/api/workflow/deploy', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: JSON.stringify({
+        bpmnXml: '<xml />',
+        key: 'leave/request',
+        name: 'Leave Request',
+        category: 'hr',
+      }),
+    })
+    expect(fetch).toHaveBeenNthCalledWith(3, 'https://api.example.com/api/workflow/tasks/task%2F1/complete', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: JSON.stringify({ variables: { approved: true }, formData: { note: 'ok' } }),
+    })
+    expect(fetch).toHaveBeenNthCalledWith(6, 'https://api.example.com/api/workflow/incidents/incident%2F1/resolve', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer token-123',
+      },
+      body: undefined,
+    })
+  })
+
+  it('throws structured errors when workflow helpers receive an error payload', async () => {
+    const fetch = vi.fn(async () =>
+      createResponse(404, { error: 'Process instance not found' }, undefined, 'https://api.example.com/api/workflow/instances/missing'),
+    )
+    const client = createWorkflowClient({
+      baseUrl: 'https://api.example.com',
+      getToken: () => 'token-123',
+      fetch: fetch as typeof globalThis.fetch,
+    })
+
+    await expect(client.getWorkflowInstance('missing')).rejects.toMatchObject({
+      message: 'Process instance not found',
+      status: 404,
+      url: 'https://api.example.com/api/workflow/instances/missing',
     })
   })
 })

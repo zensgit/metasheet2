@@ -115,6 +115,129 @@ export interface ApprovalActionResponse {
     success?: boolean;
     version?: number;
 }
+export interface WorkflowDefinition {
+    category?: string | null;
+    diagram_json?: unknown;
+    id: string;
+    key: string;
+    name: string;
+    tenant_id?: string | null;
+    version: number;
+    [key: string]: unknown;
+}
+export interface WorkflowDeployPayload {
+    bpmnXml: string;
+    category?: string;
+    description?: string;
+    key?: string;
+    name: string;
+}
+export interface WorkflowDeployResult {
+    definitionId: string;
+    message: string;
+}
+export interface WorkflowDefinitionsParams {
+    category?: string;
+    latest?: boolean;
+}
+export interface WorkflowStartPayload {
+    businessKey?: string;
+    variables?: Record<string, unknown>;
+}
+export interface WorkflowStartResult {
+    instanceId: string;
+    message: string;
+}
+export interface WorkflowInstancesParams {
+    businessKey?: string;
+    processKey?: string;
+    state?: 'ACTIVE' | 'COMPLETED' | 'SUSPENDED';
+}
+export interface WorkflowInstance {
+    business_key?: string;
+    id: string;
+    process_definition_key: string;
+    start_time?: string;
+    state: string;
+    tenant_id?: string | null;
+    variables?: Record<string, unknown>;
+    [key: string]: unknown;
+}
+export interface WorkflowInstanceVariable {
+    json_value?: unknown;
+    [key: string]: unknown;
+}
+export interface WorkflowInstanceDetail extends WorkflowInstance {
+    activities: Array<Record<string, unknown>>;
+    variableList: WorkflowInstanceVariable[];
+}
+export interface WorkflowTasksParams {
+    assignee?: string;
+    candidateGroup?: string;
+    candidateUser?: string;
+    processInstanceId?: string;
+    state?: string;
+}
+export interface WorkflowTask {
+    assignee?: string;
+    candidate_groups?: string[] | string;
+    candidate_users?: string[] | string;
+    created_at?: string;
+    form_data?: Record<string, unknown> | null;
+    id: string;
+    process_instance_id: string;
+    state: string;
+    variables?: Record<string, unknown>;
+    [key: string]: unknown;
+}
+export interface WorkflowTaskCompletePayload {
+    formData?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
+}
+export interface WorkflowMessagePayload {
+    correlationKey?: string;
+    messageName: string;
+    variables?: Record<string, unknown>;
+}
+export interface WorkflowSignalPayload {
+    signalName: string;
+    variables?: Record<string, unknown>;
+}
+export interface WorkflowIncidentsParams {
+    processInstanceId?: string;
+    state?: 'OPEN' | 'RESOLVED';
+}
+export interface WorkflowIncident {
+    created_at?: string;
+    id: string;
+    process_instance_id?: string;
+    resolved_at?: string | null;
+    resolved_by?: string | null;
+    state: string;
+    [key: string]: unknown;
+}
+export interface WorkflowAuditParams {
+    from?: string;
+    processInstanceId?: string;
+    taskId?: string;
+    to?: string;
+    userId?: string;
+}
+export interface WorkflowAuditLog {
+    id: string;
+    new_value?: unknown;
+    old_value?: unknown;
+    process_instance_id?: string;
+    task_id?: string;
+    timestamp?: string;
+    user_id?: string;
+    [key: string]: unknown;
+}
+export interface WorkflowMessageResponse {
+    error?: unknown;
+    message?: string;
+    success?: boolean;
+}
 export declare function createClient(opts: ClientOptions): {
     request: <T = unknown>(method: string, path: string, body?: unknown, ifMatch?: string) => Promise<RequestResult<T>>;
     requestWithRetry: <T = unknown>(method: string, path: string, body?: unknown, etag?: string, retries?: number) => Promise<RequestResult<T>>;
@@ -131,6 +254,23 @@ export declare function createApprovalsClient(opts: ClientOptions): {
     getApprovalHistory: (id: string) => Promise<ApprovalHistoryResponse>;
     listPendingApprovals: (params?: PendingApprovalsParams) => Promise<PendingApprovalsResponse>;
     rejectApproval: (id: string, payload: ApprovalRejectPayload) => Promise<ApprovalActionResponse>;
+    request: <T = unknown>(method: string, path: string, body?: unknown, ifMatch?: string) => Promise<RequestResult<T>>;
+    requestWithRetry: <T = unknown>(method: string, path: string, body?: unknown, etag?: string, retries?: number) => Promise<RequestResult<T>>;
+};
+export declare function createWorkflowClient(opts: ClientOptions): {
+    broadcastWorkflowSignal: (payload: WorkflowSignalPayload) => Promise<WorkflowMessageResponse>;
+    claimWorkflowTask: (taskId: string) => Promise<WorkflowMessageResponse>;
+    completeWorkflowTask: (taskId: string, payload?: WorkflowTaskCompletePayload) => Promise<WorkflowMessageResponse>;
+    deployWorkflowDefinition: (payload: WorkflowDeployPayload) => Promise<WorkflowDeployResult>;
+    getWorkflowInstance: (instanceId: string) => Promise<WorkflowInstanceDetail>;
+    listWorkflowAuditLogs: (params?: WorkflowAuditParams) => Promise<WorkflowAuditLog[]>;
+    listWorkflowDefinitions: (params?: WorkflowDefinitionsParams) => Promise<WorkflowDefinition[]>;
+    listWorkflowIncidents: (params?: WorkflowIncidentsParams) => Promise<WorkflowIncident[]>;
+    listWorkflowInstances: (params?: WorkflowInstancesParams) => Promise<WorkflowInstance[]>;
+    listWorkflowTasks: (params?: WorkflowTasksParams) => Promise<WorkflowTask[]>;
+    resolveWorkflowIncident: (incidentId: string) => Promise<WorkflowMessageResponse>;
+    sendWorkflowMessage: (payload: WorkflowMessagePayload) => Promise<WorkflowMessageResponse>;
+    startWorkflow: (key: string, payload?: WorkflowStartPayload) => Promise<WorkflowStartResult>;
     request: <T = unknown>(method: string, path: string, body?: unknown, ifMatch?: string) => Promise<RequestResult<T>>;
     requestWithRetry: <T = unknown>(method: string, path: string, body?: unknown, etag?: string, retries?: number) => Promise<RequestResult<T>>;
 };

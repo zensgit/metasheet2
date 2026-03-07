@@ -38,6 +38,20 @@ function unwrapResponse(response) {
     }
     return response.json;
 }
+function unwrapSuccessData(response) {
+    const json = unwrapResponse(response);
+    if (!json || typeof json !== 'object' || json.success === false || !('data' in json)) {
+        throw createHttpError(getErrorMessage(json, response.status), response.status, response.url);
+    }
+    return json.data;
+}
+function unwrapSuccessMessage(response) {
+    const json = unwrapResponse(response);
+    if (!json || typeof json !== 'object' || json.success === false) {
+        throw createHttpError(getErrorMessage(json, response.status), response.status, response.url);
+    }
+    return json;
+}
 export function createClient(opts) {
     const f = opts.fetch ?? globalThis.fetch.bind(globalThis);
     async function send(method, path, token, body, ifMatch) {
@@ -148,5 +162,98 @@ export function createApprovalsClient(opts) {
         getApprovalHistory,
         listPendingApprovals,
         rejectApproval,
+    };
+}
+export function createWorkflowClient(opts) {
+    const client = createClient(opts);
+    async function deployWorkflowDefinition(payload) {
+        const response = await client.request('POST', '/api/workflow/deploy', payload);
+        return unwrapSuccessData(response);
+    }
+    async function listWorkflowDefinitions(params = {}) {
+        const response = await client.request('GET', `/api/workflow/definitions${toQueryString({
+            category: params.category,
+            latest: typeof params.latest === 'boolean' ? String(params.latest) : undefined,
+        })}`);
+        return unwrapSuccessData(response);
+    }
+    async function startWorkflow(key, payload = {}) {
+        const response = await client.request('POST', `/api/workflow/start/${encodePathSegment(key)}`, payload);
+        return unwrapSuccessData(response);
+    }
+    async function listWorkflowInstances(params = {}) {
+        const response = await client.request('GET', `/api/workflow/instances${toQueryString({
+            businessKey: params.businessKey,
+            processKey: params.processKey,
+            state: params.state,
+        })}`);
+        return unwrapSuccessData(response);
+    }
+    async function getWorkflowInstance(instanceId) {
+        const response = await client.request('GET', `/api/workflow/instances/${encodePathSegment(instanceId)}`);
+        return unwrapSuccessData(response);
+    }
+    async function listWorkflowTasks(params = {}) {
+        const response = await client.request('GET', `/api/workflow/tasks${toQueryString({
+            assignee: params.assignee,
+            candidateGroup: params.candidateGroup,
+            candidateUser: params.candidateUser,
+            processInstanceId: params.processInstanceId,
+            state: params.state,
+        })}`);
+        return unwrapSuccessData(response);
+    }
+    async function claimWorkflowTask(taskId) {
+        const response = await client.request('POST', `/api/workflow/tasks/${encodePathSegment(taskId)}/claim`);
+        return unwrapSuccessMessage(response);
+    }
+    async function completeWorkflowTask(taskId, payload = {}) {
+        const response = await client.request('POST', `/api/workflow/tasks/${encodePathSegment(taskId)}/complete`, payload);
+        return unwrapSuccessMessage(response);
+    }
+    async function sendWorkflowMessage(payload) {
+        const response = await client.request('POST', '/api/workflow/message', payload);
+        return unwrapSuccessMessage(response);
+    }
+    async function broadcastWorkflowSignal(payload) {
+        const response = await client.request('POST', '/api/workflow/signal', payload);
+        return unwrapSuccessMessage(response);
+    }
+    async function listWorkflowIncidents(params = {}) {
+        const response = await client.request('GET', `/api/workflow/incidents${toQueryString({
+            processInstanceId: params.processInstanceId,
+            state: params.state,
+        })}`);
+        return unwrapSuccessData(response);
+    }
+    async function resolveWorkflowIncident(incidentId) {
+        const response = await client.request('POST', `/api/workflow/incidents/${encodePathSegment(incidentId)}/resolve`);
+        return unwrapSuccessMessage(response);
+    }
+    async function listWorkflowAuditLogs(params = {}) {
+        const response = await client.request('GET', `/api/workflow/audit${toQueryString({
+            from: params.from,
+            processInstanceId: params.processInstanceId,
+            taskId: params.taskId,
+            to: params.to,
+            userId: params.userId,
+        })}`);
+        return unwrapSuccessData(response);
+    }
+    return {
+        ...client,
+        broadcastWorkflowSignal,
+        claimWorkflowTask,
+        completeWorkflowTask,
+        deployWorkflowDefinition,
+        getWorkflowInstance,
+        listWorkflowAuditLogs,
+        listWorkflowDefinitions,
+        listWorkflowIncidents,
+        listWorkflowInstances,
+        listWorkflowTasks,
+        resolveWorkflowIncident,
+        sendWorkflowMessage,
+        startWorkflow,
     };
 }

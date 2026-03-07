@@ -49,6 +49,27 @@ await approvals.approveApproval('demo-1', { comment: 'LGTM' })
 await approvals.rejectApproval('demo-2', { reason: 'Need changes', comment: 'missing fields' })
 ```
 
+Typed helpers for workflow endpoints:
+```ts
+import { createWorkflowClient } from '@metasheet/sdk/client'
+
+const workflow = createWorkflowClient({
+  baseUrl: 'http://localhost:8910',
+  getToken: async () => 'YOUR_TOKEN',
+})
+
+const definitions = await workflow.listWorkflowDefinitions({ category: 'hr', latest: true })
+const started = await workflow.startWorkflow(definitions[0]!.key, {
+  businessKey: 'leave-2026-001',
+  variables: { days: 2 },
+})
+const tasks = await workflow.listWorkflowTasks({ candidateUser: 'u-1', state: 'READY' })
+await workflow.completeWorkflowTask(tasks[0]!.id, {
+  variables: { approved: true },
+  formData: { comment: 'LGTM' },
+})
+```
+
 Typed helpers for the Univer meta endpoints:
 ```ts
 import { createMetaSheetClient } from '@metasheet/sdk/client'

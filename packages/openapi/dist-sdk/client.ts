@@ -135,6 +135,156 @@ export interface ApprovalActionResponse {
   version?: number
 }
 
+type WorkflowSuccessEnvelope<T> = {
+  data: T
+  error?: unknown
+  message?: string
+  success?: boolean
+}
+
+export interface WorkflowDefinition {
+  category?: string | null
+  diagram_json?: unknown
+  id: string
+  key: string
+  name: string
+  tenant_id?: string | null
+  version: number
+  [key: string]: unknown
+}
+
+export interface WorkflowDeployPayload {
+  bpmnXml: string
+  category?: string
+  description?: string
+  key?: string
+  name: string
+}
+
+export interface WorkflowDeployResult {
+  definitionId: string
+  message: string
+}
+
+export interface WorkflowDefinitionsParams {
+  category?: string
+  latest?: boolean
+}
+
+export interface WorkflowStartPayload {
+  businessKey?: string
+  variables?: Record<string, unknown>
+}
+
+export interface WorkflowStartResult {
+  instanceId: string
+  message: string
+}
+
+export interface WorkflowInstancesParams {
+  businessKey?: string
+  processKey?: string
+  state?: 'ACTIVE' | 'COMPLETED' | 'SUSPENDED'
+}
+
+export interface WorkflowInstance {
+  business_key?: string
+  id: string
+  process_definition_key: string
+  start_time?: string
+  state: string
+  tenant_id?: string | null
+  variables?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export interface WorkflowInstanceVariable {
+  json_value?: unknown
+  [key: string]: unknown
+}
+
+export interface WorkflowInstanceDetail extends WorkflowInstance {
+  activities: Array<Record<string, unknown>>
+  variableList: WorkflowInstanceVariable[]
+}
+
+export interface WorkflowTasksParams {
+  assignee?: string
+  candidateGroup?: string
+  candidateUser?: string
+  processInstanceId?: string
+  state?: string
+}
+
+export interface WorkflowTask {
+  assignee?: string
+  candidate_groups?: string[] | string
+  candidate_users?: string[] | string
+  created_at?: string
+  form_data?: Record<string, unknown> | null
+  id: string
+  process_instance_id: string
+  state: string
+  variables?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export interface WorkflowTaskCompletePayload {
+  formData?: Record<string, unknown>
+  variables?: Record<string, unknown>
+}
+
+export interface WorkflowMessagePayload {
+  correlationKey?: string
+  messageName: string
+  variables?: Record<string, unknown>
+}
+
+export interface WorkflowSignalPayload {
+  signalName: string
+  variables?: Record<string, unknown>
+}
+
+export interface WorkflowIncidentsParams {
+  processInstanceId?: string
+  state?: 'OPEN' | 'RESOLVED'
+}
+
+export interface WorkflowIncident {
+  created_at?: string
+  id: string
+  process_instance_id?: string
+  resolved_at?: string | null
+  resolved_by?: string | null
+  state: string
+  [key: string]: unknown
+}
+
+export interface WorkflowAuditParams {
+  from?: string
+  processInstanceId?: string
+  taskId?: string
+  to?: string
+  userId?: string
+}
+
+export interface WorkflowAuditLog {
+  id: string
+  new_value?: unknown
+  old_value?: unknown
+  process_instance_id?: string
+  task_id?: string
+  timestamp?: string
+  user_id?: string
+  [key: string]: unknown
+}
+
+export interface WorkflowMessageResponse {
+  error?: unknown
+  message?: string
+  success?: boolean
+}
+
 function createHttpError(message: string, status?: number, url?: string) {
   const error = new Error(message) as HttpError
   error.status = status
@@ -182,6 +332,26 @@ function unwrapResponse<T>(response: RequestResult<T>) {
   }
 
   return response.json
+}
+
+function unwrapSuccessData<T>(response: RequestResult<WorkflowSuccessEnvelope<T>>) {
+  const json = unwrapResponse(response)
+
+  if (!json || typeof json !== 'object' || json.success === false || !('data' in json)) {
+    throw createHttpError(getErrorMessage(json, response.status), response.status, response.url)
+  }
+
+  return json.data
+}
+
+function unwrapSuccessMessage(response: RequestResult<WorkflowMessageResponse>) {
+  const json = unwrapResponse(response)
+
+  if (!json || typeof json !== 'object' || json.success === false) {
+    throw createHttpError(getErrorMessage(json, response.status), response.status, response.url)
+  }
+
+  return json
 }
 
 export function createClient(opts: ClientOptions) {
@@ -370,5 +540,173 @@ export function createApprovalsClient(opts: ClientOptions) {
     getApprovalHistory,
     listPendingApprovals,
     rejectApproval,
+  }
+}
+
+export function createWorkflowClient(opts: ClientOptions) {
+  const client = createClient(opts)
+
+  async function deployWorkflowDefinition(payload: WorkflowDeployPayload): Promise<WorkflowDeployResult> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowDeployResult>>(
+      'POST',
+      '/api/workflow/deploy',
+      payload,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function listWorkflowDefinitions(params: WorkflowDefinitionsParams = {}): Promise<WorkflowDefinition[]> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowDefinition[]>>(
+      'GET',
+      `/api/workflow/definitions${toQueryString({
+        category: params.category,
+        latest: typeof params.latest === 'boolean' ? String(params.latest) : undefined,
+      })}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function startWorkflow(key: string, payload: WorkflowStartPayload = {}): Promise<WorkflowStartResult> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowStartResult>>(
+      'POST',
+      `/api/workflow/start/${encodePathSegment(key)}`,
+      payload,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function listWorkflowInstances(params: WorkflowInstancesParams = {}): Promise<WorkflowInstance[]> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowInstance[]>>(
+      'GET',
+      `/api/workflow/instances${toQueryString({
+        businessKey: params.businessKey,
+        processKey: params.processKey,
+        state: params.state,
+      })}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function getWorkflowInstance(instanceId: string): Promise<WorkflowInstanceDetail> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowInstanceDetail>>(
+      'GET',
+      `/api/workflow/instances/${encodePathSegment(instanceId)}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function listWorkflowTasks(params: WorkflowTasksParams = {}): Promise<WorkflowTask[]> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowTask[]>>(
+      'GET',
+      `/api/workflow/tasks${toQueryString({
+        assignee: params.assignee,
+        candidateGroup: params.candidateGroup,
+        candidateUser: params.candidateUser,
+        processInstanceId: params.processInstanceId,
+        state: params.state,
+      })}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function claimWorkflowTask(taskId: string): Promise<WorkflowMessageResponse> {
+    const response = await client.request<WorkflowMessageResponse>(
+      'POST',
+      `/api/workflow/tasks/${encodePathSegment(taskId)}/claim`,
+    )
+
+    return unwrapSuccessMessage(response)
+  }
+
+  async function completeWorkflowTask(
+    taskId: string,
+    payload: WorkflowTaskCompletePayload = {},
+  ): Promise<WorkflowMessageResponse> {
+    const response = await client.request<WorkflowMessageResponse>(
+      'POST',
+      `/api/workflow/tasks/${encodePathSegment(taskId)}/complete`,
+      payload,
+    )
+
+    return unwrapSuccessMessage(response)
+  }
+
+  async function sendWorkflowMessage(payload: WorkflowMessagePayload): Promise<WorkflowMessageResponse> {
+    const response = await client.request<WorkflowMessageResponse>(
+      'POST',
+      '/api/workflow/message',
+      payload,
+    )
+
+    return unwrapSuccessMessage(response)
+  }
+
+  async function broadcastWorkflowSignal(payload: WorkflowSignalPayload): Promise<WorkflowMessageResponse> {
+    const response = await client.request<WorkflowMessageResponse>(
+      'POST',
+      '/api/workflow/signal',
+      payload,
+    )
+
+    return unwrapSuccessMessage(response)
+  }
+
+  async function listWorkflowIncidents(params: WorkflowIncidentsParams = {}): Promise<WorkflowIncident[]> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowIncident[]>>(
+      'GET',
+      `/api/workflow/incidents${toQueryString({
+        processInstanceId: params.processInstanceId,
+        state: params.state,
+      })}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  async function resolveWorkflowIncident(incidentId: string): Promise<WorkflowMessageResponse> {
+    const response = await client.request<WorkflowMessageResponse>(
+      'POST',
+      `/api/workflow/incidents/${encodePathSegment(incidentId)}/resolve`,
+    )
+
+    return unwrapSuccessMessage(response)
+  }
+
+  async function listWorkflowAuditLogs(params: WorkflowAuditParams = {}): Promise<WorkflowAuditLog[]> {
+    const response = await client.request<WorkflowSuccessEnvelope<WorkflowAuditLog[]>>(
+      'GET',
+      `/api/workflow/audit${toQueryString({
+        from: params.from,
+        processInstanceId: params.processInstanceId,
+        taskId: params.taskId,
+        to: params.to,
+        userId: params.userId,
+      })}`,
+    )
+
+    return unwrapSuccessData(response)
+  }
+
+  return {
+    ...client,
+    broadcastWorkflowSignal,
+    claimWorkflowTask,
+    completeWorkflowTask,
+    deployWorkflowDefinition,
+    getWorkflowInstance,
+    listWorkflowAuditLogs,
+    listWorkflowDefinitions,
+    listWorkflowIncidents,
+    listWorkflowInstances,
+    listWorkflowTasks,
+    resolveWorkflowIncident,
+    sendWorkflowMessage,
+    startWorkflow,
   }
 }
