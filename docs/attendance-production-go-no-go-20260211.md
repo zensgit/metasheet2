@@ -2662,6 +2662,38 @@ Decision:
 
 - **GO maintained** (false-alert surface reduced, no contract change).
 
+## Post-Go Hardening (2026-03-07): Dashboard Non-signal Conclusion Filter for All Gates
+
+Goal:
+
+- unify gate source selection so `cancelled/neutral/skipped` runs do not become primary signals for any gate.
+
+Change:
+
+- file: `scripts/ops/attendance-daily-gate-report.mjs`
+- introduced shared `nonSignalConclusions` and applied it to:
+  - Remote Preflight
+  - Branch Protection
+  - Host Metrics
+  - Storage Health
+  - Upload Cleanup
+  - Strict Gates
+  - Perf Baseline
+  - Perf Long Run
+  - Gate Contract Matrix
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `node --check scripts/ops/attendance-daily-gate-report.mjs` | PASS | local command |
+| `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | local command |
+| Dashboard report generation (`main`) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-143813/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-143813/attendance-daily-gate-dashboard.md` (`overallStatus=pass`, all gate conclusions `success`) |
+
+Decision:
+
+- **GO maintained** (run-source behavior is now consistent across all gates).
+
 ## Post-Go Hardening (2026-03-07): Perf Baseline Manual Default Profile
 
 Goal:

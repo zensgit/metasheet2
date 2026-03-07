@@ -30,6 +30,7 @@ const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
+const nonSignalConclusions = ['cancelled', 'neutral', 'skipped']
 const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-policy-drift-prod.yml').trim()
 const protectionArtifactPrefix = protectionWorkflow.includes('branch-policy-drift')
   ? 'attendance-branch-policy-drift-prod'
@@ -1301,29 +1302,41 @@ async function run() {
   }
 
   const preflightLatestAny = preflightList[0] ?? null
-  const preflightLatestCompleted = pickLatestCompletedRun(preflightList)
+  const preflightLatestCompleted = pickLatestCompletedRun(preflightList, {
+    excludeConclusions: nonSignalConclusions,
+  })
   const protectionLatestAny = protectionList[0] ?? null
-  const protectionLatestCompleted = pickLatestCompletedRun(protectionList)
+  const protectionLatestCompleted = pickLatestCompletedRun(protectionList, {
+    excludeConclusions: nonSignalConclusions,
+  })
   const metricsLatestAny = metricsList[0] ?? null
-  const metricsLatestCompleted = pickLatestCompletedRun(metricsList)
+  const metricsLatestCompleted = pickLatestCompletedRun(metricsList, {
+    excludeConclusions: nonSignalConclusions,
+  })
   const storageLatestAny = storageList[0] ?? null
-  const storageLatestCompleted = pickLatestCompletedRun(storageList)
+  const storageLatestCompleted = pickLatestCompletedRun(storageList, {
+    excludeConclusions: nonSignalConclusions,
+  })
   const cleanupLatestAny = cleanupList[0] ?? null
-  const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList)
+  const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList, {
+    excludeConclusions: nonSignalConclusions,
+  })
   const strictLatestAny = strictList[0] ?? null
   const strictLatestCompleted = pickLatestCompletedRun(strictList, {
-    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+    excludeConclusions: nonSignalConclusions,
   })
   const perfLatestAny = perfList[0] ?? null
   const perfLatestCompleted = pickLatestCompletedRun(perfList, {
-    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+    excludeConclusions: nonSignalConclusions,
   })
   const longrunLatestAny = longrunList[0] ?? null
   const longrunLatestCompleted = pickLatestCompletedRun(longrunList, {
-    excludeConclusions: ['cancelled', 'neutral', 'skipped'],
+    excludeConclusions: nonSignalConclusions,
   })
   const contractLatestAny = contractList[0] ?? null
-  const contractLatestCompleted = pickLatestCompletedRun(contractList)
+  const contractLatestCompleted = pickLatestCompletedRun(contractList, {
+    excludeConclusions: nonSignalConclusions,
+  })
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
