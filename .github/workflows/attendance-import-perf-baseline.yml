@@ -23,17 +23,17 @@ on:
         required: false
         default: 'http://142.171.239.56:8081/api'
       rows:
-        description: 'CSV rows to generate (default 20000)'
+        description: 'CSV rows to generate (default 10000)'
         required: false
-        default: '20000'
+        default: '10000'
       mode:
         description: 'preview or commit'
         required: false
         default: 'commit'
       commit_async:
-        description: 'Use /commit-async path (true/false)'
+        description: 'Use /commit-async path (true/false, default false for stable manual reruns)'
         required: false
-        default: 'true'
+        default: 'false'
       export_csv:
         description: 'Verify export csv latency (true/false)'
         required: false

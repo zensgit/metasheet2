@@ -4108,3 +4108,29 @@ Key assertions:
   - `commitAsync=false`
   - `uploadCsv=true`
 - dashboard remains `overallStatus=pass`, `p0Status=pass`.
+
+### Update (2026-03-07): Perf Baseline Manual Defaults Stabilized
+
+Scope:
+
+- improve operator ergonomics for manual reruns by aligning `workflow_dispatch` defaults with the stable baseline profile.
+
+Change:
+
+- file: `.github/workflows/attendance-import-perf-baseline.yml`
+- `workflow_dispatch` input defaults:
+  - `rows=10000`
+  - `commit_async=false`
+
+Validation run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch, no inputs) | #22800609887 | PASS | `output/playwright/ga/22800609887/attendance-import-perf-22800609887-1/perf.log`, `output/playwright/ga/22800609887/attendance-import-perf-22800609887-1/attendance-perf-mmgemol6-7cozp6/perf-summary.json` |
+
+Key assertions:
+
+- default manual execution now uses stable profile while preserving upload coverage:
+  - `rows=10000`
+  - `commitAsync=false`
+  - `uploadCsv=true`.

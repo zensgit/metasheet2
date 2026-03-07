@@ -2636,6 +2636,30 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Hardening (2026-03-07): Perf Baseline Manual Default Profile
+
+Goal:
+
+- make manual `workflow_dispatch` reruns stable by default (without requiring operators to remember custom inputs).
+
+Change:
+
+- file: `.github/workflows/attendance-import-perf-baseline.yml`
+- updated `workflow_dispatch` defaults:
+  - `rows`: `10000` (was `20000`)
+  - `commit_async`: `false` (was `true`)
+- upload/export coverage remains enabled by default.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch, no inputs) | #22800609887 | PASS | `output/playwright/ga/22800609887/attendance-import-perf-22800609887-1/perf.log`, `output/playwright/ga/22800609887/attendance-import-perf-22800609887-1/attendance-perf-mmgemol6-7cozp6/perf-summary.json` (`rows=10000`, `commitAsync=false`, `uploadCsv=true`) |
+
+Decision:
+
+- **GO maintained** (manual rerun ergonomics improved; no P0/P1 regression introduced).
+
 ## Post-Go Hardening (2026-03-07): Perf Baseline Schedule Stability Defaults
 
 Goal:
