@@ -26,6 +26,11 @@ const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC ===
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
 const uploadCsv = process.env.UPLOAD_CSV === 'true'
+const payloadSourceRaw = String(process.env.PAYLOAD_SOURCE || 'auto').trim().toLowerCase()
+const csvRowsLimitHintRaw = Number(process.env.CSV_ROWS_LIMIT_HINT || 20_000)
+const csvRowsLimitHint = Number.isFinite(csvRowsLimitHintRaw) && csvRowsLimitHintRaw > 0
+  ? Math.floor(csvRowsLimitHintRaw)
+  : 20_000
 const exportType = String(process.env.EXPORT_TYPE || 'anomalies')
 const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
@@ -432,6 +437,51 @@ function makeCsv({ startDate, userId, groupName, userPoolSize, workDateSpanDays 
   return lines.join('\n')
 }
 
+function makeRowsPayload({ startDate, userId, userPoolSize, workDateSpanDays }) {
+  const payloadRows = new Array(rows)
+  for (let i = 0; i < rows; i += 1) {
+    const userIndex = i % userPoolSize
+    const dayIndex = Math.floor(i / userPoolSize)
+    const boundedDayIndex = dayIndex % workDateSpanDays
+    const d = new Date(startDate)
+    d.setUTCDate(d.getUTCDate() - boundedDayIndex)
+    const workDate = toDateOnly(d)
+    const rowUserId = userPoolSize > 1
+      ? `${userId}-perf-${String(userIndex + 1).padStart(4, '0')}`
+      : String(userId)
+    payloadRows[i] = {
+      workDate,
+      userId: rowUserId,
+      fields: {
+        firstInAt: `${workDate}T09:00:00Z`,
+        lastOutAt: `${workDate}T18:00:00Z`,
+        status: 'normal',
+      },
+    }
+  }
+  return payloadRows
+}
+
+function resolvePayloadSource() {
+  if (payloadSourceRaw && payloadSourceRaw !== 'auto' && payloadSourceRaw !== 'csv' && payloadSourceRaw !== 'rows') {
+    die('PAYLOAD_SOURCE must be one of: auto|csv|rows')
+  }
+  if (payloadSourceRaw === 'rows') {
+    return { payloadSource: 'rows', effectiveUploadCsv: false, reason: 'forced_rows' }
+  }
+  if (payloadSourceRaw === 'csv') {
+    return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'forced_csv' }
+  }
+  if (rows > csvRowsLimitHint) {
+    return {
+      payloadSource: 'rows',
+      effectiveUploadCsv: false,
+      reason: `rows_exceeds_csv_limit_hint(${csvRowsLimitHint})`,
+    }
+  }
+  return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'auto_csv' }
+}
+
 async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
   const started = Date.now()
   let transientErrors = 0
@@ -561,8 +611,10 @@ async function run() {
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
   await refreshAuthToken()
+  const payloadPlan = resolvePayloadSource()
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
+  log(`payload_source=${payloadPlan.payloadSource} reason=${payloadPlan.reason} upload_csv_requested=${uploadCsv} upload_csv_effective=${payloadPlan.effectiveUploadCsv} csv_rows_limit_hint=${csvRowsLimitHint}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
     `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} recovery_attempts=${importJobRecoveryAttempts}`,
@@ -603,18 +655,30 @@ async function run() {
   const groupName = `Perf Group ${Date.now().toString(36)}`
   const syntheticShape = resolveSyntheticImportShape(rows)
   log(`synthetic_shape users=${syntheticShape.userPoolSize} work_date_span_days=${syntheticShape.workDateSpanDays}`)
-  const csvText = makeCsv({
-    startDate: new Date(),
-    userId,
-    groupName,
-    userPoolSize: syntheticShape.userPoolSize,
-    workDateSpanDays: syntheticShape.workDateSpanDays,
-  })
+  const startDate = new Date()
+  let csvText = ''
+  let rowsPayload = null
+  if (payloadPlan.payloadSource === 'rows') {
+    rowsPayload = makeRowsPayload({
+      startDate,
+      userId,
+      userPoolSize: syntheticShape.userPoolSize,
+      workDateSpanDays: syntheticShape.workDateSpanDays,
+    })
+  } else {
+    csvText = makeCsv({
+      startDate,
+      userId,
+      groupName,
+      userPoolSize: syntheticShape.userPoolSize,
+      workDateSpanDays: syntheticShape.workDateSpanDays,
+    })
+  }
 
-  const memAfterCsv = process.memoryUsage()
+  const memAfterPayload = process.memoryUsage()
 
   let csvFileId = ''
-  if (uploadCsv) {
+  if (payloadPlan.payloadSource === 'csv' && payloadPlan.effectiveUploadCsv) {
     const query = new URLSearchParams()
     if (orgId) query.set('orgId', orgId)
     query.set('filename', `attendance-perf-${rows}.csv`)
@@ -645,7 +709,9 @@ async function run() {
     userId,
     timezone: payloadExample.timezone || timezone,
     mappingProfileId: resolvedMappingProfileId,
-    ...(uploadCsv ? { csvFileId } : { csvText }),
+    ...(payloadPlan.payloadSource === 'rows'
+      ? { rows: rowsPayload }
+      : (payloadPlan.effectiveUploadCsv ? { csvFileId } : { csvText })),
     idempotencyKey: runId,
     __importEngine: requestedImportEngine,
     batchMeta: {
@@ -654,6 +720,9 @@ async function run() {
       requestedImportEngine,
       syntheticUserPoolSize: syntheticShape.userPoolSize,
       syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
+      payloadSource: payloadPlan.payloadSource,
+      uploadCsvRequested: uploadCsv,
+      uploadCsvEffective: payloadPlan.effectiveUploadCsv,
     },
     previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
     returnItems,
@@ -740,7 +809,10 @@ async function run() {
         progressPercent: null,
         throughputRowsPerSec: null,
       },
-      uploadCsv,
+      uploadCsv: payloadPlan.effectiveUploadCsv,
+      uploadCsvRequested: uploadCsv,
+      payloadSource: payloadPlan.payloadSource,
+      payloadSourceReason: payloadPlan.reason,
       previewMs: tPreview1 - tPreview0,
       commitMs: null,
       exportMs: null,
@@ -748,7 +820,7 @@ async function run() {
       rolledBack: false,
       memory: {
         before: memBefore,
-        afterCsv: memAfterCsv,
+        afterPayload: memAfterPayload,
       },
       outputDir: outDir,
     }
@@ -1027,7 +1099,10 @@ async function run() {
         recordsChunkSize: chunkRecordsSize,
       },
     },
-    uploadCsv,
+    uploadCsv: payloadPlan.effectiveUploadCsv,
+    uploadCsvRequested: uploadCsv,
+    payloadSource: payloadPlan.payloadSource,
+    payloadSourceReason: payloadPlan.reason,
     syntheticUserPoolSize: syntheticShape.userPoolSize,
     syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
     commitIdempotencyKey,
@@ -1040,7 +1115,7 @@ async function run() {
     rolledBack,
     memory: {
       before: memBefore,
-      afterCsv: memAfterCsv,
+      afterPayload: memAfterPayload,
     },
     outputDir: outDir,
     thresholds: {
