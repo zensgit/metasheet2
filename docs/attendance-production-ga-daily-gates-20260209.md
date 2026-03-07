@@ -4181,3 +4181,26 @@ Key assertions:
 - dashboard remains green and binds perf/longrun to effective runs:
   - `gateFlat.perf.runId=22800666933`
   - `gateFlat.longrun.runId=22800250399`.
+
+### Update (2026-03-07): Non-signal Conclusion Filter Applied to All Gates
+
+Scope:
+
+- extend `cancelled/neutral/skipped` filtering from strict/perf to all gate sources for consistent signal selection.
+
+Implementation:
+
+- file: `scripts/ops/attendance-daily-gate-report.mjs`
+- shared exclusion list now used by source selection of:
+  - preflight / protection / metrics / storage / cleanup / strict / perf / longrun / contract
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Source-selection unit tests | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
+| Dashboard report generation (main) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-143813/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-143813/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- report remained green with all gate conclusions at `success`.
