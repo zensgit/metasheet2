@@ -2669,6 +2669,30 @@ Decision:
 
 - **GO maintained** (P0 chain unaffected; baseline schedule reliability hardened).
 
+## Post-Go Verification (2026-03-07): Mainline Evidence After PR #361
+
+Scope:
+
+- validate mainline health immediately after merging PR #361 (perf baseline schedule stability hardening).
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (main, workflow_dispatch with stable profile) | #22800509724 | PASS | `output/playwright/ga/22800509724/attendance-import-perf-22800509724-1/perf.log`, `output/playwright/ga/22800509724/attendance-import-perf-22800509724-1/attendance-perf-mmgeebd9-5zp5q2/perf-summary.json` (`rows=10000`, `commitAsync=false`, `uploadCsv=true`) |
+| Attendance Branch Policy Drift (Prod) | #22800532808 | PASS | `output/playwright/attendance-post-merge-verify/20260307-220905/ga/22800532808/attendance-branch-policy-drift-prod-22800532808-1/policy.json` |
+| Attendance Daily Gate Dashboard | #22800540543 | PASS | `output/playwright/attendance-post-merge-verify/20260307-220905/ga/22800540543/attendance-daily-gate-dashboard-22800540543-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-220905/ga/22800540543/attendance-daily-gate-dashboard-22800540543-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- baseline execution is stable under the intended lightweight profile and keeps upload channel coverage on.
+- branch protection and dashboard remained green after the merge.
+- open `[Attendance ...]` issues: `[]`.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Longrun Upload Coverage
 
 Scope:
