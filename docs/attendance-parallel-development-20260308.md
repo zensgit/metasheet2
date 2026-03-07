@@ -1,0 +1,92 @@
+# Attendance Parallel Development Report (2026-03-08)
+
+## Summary
+This round completed parallel hardening across workflow contracts, backend async-import reliability, and verification automation.
+
+## Implemented Changes
+
+### 1) Workflow contract hardening
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - Added `workflow_dispatch.inputs.payload_source` (default `auto`)
+  - Added `workflow_dispatch.inputs.csv_rows_limit_hint` (default `20000`)
+  - Propagated both values into perf job env.
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - Added `workflow_dispatch.inputs.payload_source` (default `auto`)
+  - Propagated `PAYLOAD_SOURCE` and `CSV_ROWS_LIMIT_HINT` into scenario jobs.
+  - Scenario skip logic now enforces row caps only when payload mode is CSV.
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - Added dispatch args for `payload_source` and `csv_rows_limit_hint`.
+  - Extended perf contract checks to require `uploadCsvRequested` and `payloadSource`.
+
+- `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - Added parsing/reporting for:
+    - `uploadCsvRequested`
+    - `payloadSource`
+    - `payloadSourceReason`
+  - Markdown summary now includes Upload(requested/effective) + Payload columns.
+
+### 2) Backend reliability fix (root cause)
+- `plugins/plugin-attendance/index.cjs`
+  - Fixed `sanitizeImportJobPayload` commit path:
+    - previously dropped `rows` when `rows.length > 5000` unconditionally.
+    - now drops `rows/entries` only when `csvText` exists.
+  - Prevents `commit-async` job failures (`No rows to import`) in rows-only large payload mode.
+
+### 3) Regression guard test
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - Added test:
+    - `keeps large rows payload for commit-async jobs when csv payload is absent`
+  - Covers:
+    - `rows=5001` rows-only payload
+    - `commit-async` creation
+    - idempotent retry without `commitToken`
+    - job polling completion
+    - rollback success
+
+### 4) Frontend verification enhancement
+- `scripts/verify-attendance-full-flow.mjs`
+  - Added `ASSERT_ADMIN_RULE_SAVE` (default true).
+  - Added `assertAdminRuleSaveCycle()` to ensure rule-save UI does not stay stuck in `Saving...`.
+
+## Validation Executed
+
+### Local checks
+1. Integration test
+```bash
+pnpm --filter @metasheet/core-backend run test:integration:attendance
+```
+Result: PASS (`16/16`)
+
+2. Syntax checks
+```bash
+node --check scripts/verify-attendance-full-flow.mjs
+node --check scripts/ops/attendance-import-perf.mjs
+node --check scripts/ops/attendance-import-perf-trend-report.mjs
+node --check plugins/plugin-attendance/index.cjs
+```
+Result: PASS
+
+### Existing GA evidence (before this fix deployment)
+- Perf baseline PASS:
+  - workflow run: `22803281301`
+- Longrun failure captured (used for RCA):
+  - workflow run: `22803281293`
+  - artifact path:
+    - `output/playwright/ga/22803281293/attendance-import-perf-longrun-rows100k-commit-22803281293-1/current/rows100k-commit/perf.log`
+
+## Pending Gate Close (after merge/deploy)
+To close this stage on production environment, rerun:
+```bash
+gh workflow run attendance-import-perf-longrun.yml -f payload_source=auto -f upload_csv=true
+```
+Expected:
+- `rows100k-commit` scenario no longer fails with `No rows to import`.
+- trend artifact includes payload fields and shows upload/payload columns.
+
+## Evidence Paths
+- Branch workspace: `/private/tmp/metasheet2-parallel-20260308`
+- GA artifacts root (downloaded):
+  - `output/playwright/ga/22803281293/...`
+  - `output/playwright/ga/22803281301/...`

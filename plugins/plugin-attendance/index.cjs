@@ -5815,8 +5815,10 @@ module.exports = {
 		        return next
 		      }
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
-	      if (Array.isArray(next.rows) && next.rows.length > 5000) delete next.rows
-	      if (Array.isArray(next.entries) && next.entries.length > 20000) delete next.entries
+	      // Keep rows/entries when they are the only payload source (no csvText/csvFileId),
+	      // otherwise commit-async workers can fail with "No rows to import".
+	      if (Array.isArray(next.rows) && next.rows.length > 5000 && typeof next.csvText === 'string' && next.csvText.length > 0) delete next.rows
+	      if (Array.isArray(next.entries) && next.entries.length > 20000 && typeof next.csvText === 'string' && next.csvText.length > 0) delete next.entries
 	      return next
 	    }
 
