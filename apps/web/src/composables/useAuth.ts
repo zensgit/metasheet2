@@ -14,13 +14,17 @@ export function useAuth() {
   function setToken(token: string) {
     try {
       if (typeof localStorage !== 'undefined') localStorage.setItem('jwt', token)
-    } catch {}
+    } catch (err) {
+      console.warn('[auth] failed to persist token in localStorage', err)
+    }
   }
 
   function clearToken() {
     try {
       if (typeof localStorage !== 'undefined') localStorage.removeItem('jwt')
-    } catch {}
+    } catch (err) {
+      console.warn('[auth] failed to clear token from localStorage', err)
+    }
   }
 
   function buildAuthHeaders(): Record<string, string> {
