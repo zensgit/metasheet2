@@ -12,9 +12,9 @@ This record closes the production readiness loop for Attendance after enabling:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict gates twice (async strict) | [#21894374032](https://github.com/zensgit/metasheet2/actions/runs/21894374032) | PASS | `output/playwright/ga/21894374032/20260211-055556-1/`, `output/playwright/ga/21894374032/20260211-055556-2/` |
-| Perf baseline (10k, async+export+rollback, thresholds enabled) | [#21894377908](https://github.com/zensgit/metasheet2/actions/runs/21894377908) | PASS | `output/playwright/ga/21894377908/attendance-perf-mlhm8esx-abitlr/perf-summary.json` |
-| Build + deploy (with migration step) | [#21894316469](https://github.com/zensgit/metasheet2/actions/runs/21894316469) | PASS | GitHub Actions run logs |
+| Strict gates twice (async strict) | #21894374032 | PASS | `output/playwright/ga/21894374032/20260211-055556-1/`, `output/playwright/ga/21894374032/20260211-055556-2/` |
+| Perf baseline (10k, async+export+rollback, thresholds enabled) | #21894377908 | PASS | `output/playwright/ga/21894377908/attendance-perf-mlhm8esx-abitlr/perf-summary.json` |
+| Build + deploy (with migration step) | #21894316469 | PASS | GitHub Actions run logs |
 
 Perf summary (`#21894377908`):
 
@@ -29,9 +29,9 @@ Perf summary (`#21894377908`):
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf baseline (10k, tightened thresholds) | [#21912709345](https://github.com/zensgit/metasheet2/actions/runs/21912709345) | PASS | `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json` |
-| Strict gates twice (async strict) | [#21912806317](https://github.com/zensgit/metasheet2/actions/runs/21912806317) | PASS | `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`, `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/` |
-| Daily dashboard | [#21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) | PASS | `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md` |
+| Perf baseline (10k, tightened thresholds) | #21912709345 | PASS | `output/playwright/ga/21912709345/attendance-import-perf-21912709345-1/attendance-perf-mli82mht-ximhdx/perf-summary.json` |
+| Strict gates twice (async strict) | #21912806317 | PASS | `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-1/`, `output/playwright/ga/21912806317/attendance-strict-gates-prod-21912806317-1/20260211-160958-2/` |
+| Daily dashboard | #21912958814 | PASS | `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md` |
 
 Perf summary (`#21912709345`):
 
@@ -51,16 +51,16 @@ Thresholds in effect:
 
 Remediation included in this re-validation:
 
-- PR [#144](https://github.com/zensgit/metasheet2/pull/144): tolerate transient `429/5xx` on async import job polling to avoid false perf gate failures from brief upstream `502`.
+- PR #144: tolerate transient `429/5xx` on async import job polling to avoid false perf gate failures from brief upstream `502`.
 
 ## Incident and Fix Trace
 
 Initial failures before closure:
 
-- [#21894139054](https://github.com/zensgit/metasheet2/actions/runs/21894139054): strict gate failed (`/attendance-admin/audit-logs/export.csv` missing).
-- [#21894142162](https://github.com/zensgit/metasheet2/actions/runs/21894142162): perf gate failed (`/attendance/import/commit-async` missing).
-- [#21894255303](https://github.com/zensgit/metasheet2/actions/runs/21894255303): strict gate failed (`occurred_at` column missing).
-- [#21894258310](https://github.com/zensgit/metasheet2/actions/runs/21894258310): perf gate failed (`DB_NOT_READY`).
+- #21894139054: strict gate failed (`/attendance-admin/audit-logs/export.csv` missing).
+- #21894142162: perf gate failed (`/attendance/import/commit-async` missing).
+- #21894255303: strict gate failed (`occurred_at` column missing).
+- #21894258310: perf gate failed (`DB_NOT_READY`).
 
 Root cause:
 
@@ -68,7 +68,7 @@ Root cause:
 
 Remediation shipped:
 
-- PR [#137](https://github.com/zensgit/metasheet2/pull/137)
+- PR #137
 - Commit: `24b97562`
 - Change: `.github/workflows/docker-build.yml` deploy step now executes:
   - `docker compose ... exec -T backend node packages/core-backend/dist/src/db/migrate.js`
@@ -96,23 +96,23 @@ Rationale:
   - `.github/workflows/attendance-gate-issue-notify.yml`
   - Routes `[Attendance Gate]` issue events to Slack/DingTalk webhooks when configured.
 - Workflow validation:
-  - [Attendance Daily Gate Dashboard #21900762111](https://github.com/zensgit/metasheet2/actions/runs/21900762111) (`SUCCESS`)
+  - Attendance Daily Gate Dashboard #21900762111 (`SUCCESS`)
   - Evidence:
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.md`
     - `output/playwright/ga/21900762111/attendance-daily-gate-dashboard.json`
 - Latest recovery validation:
-  - [Attendance Daily Gate Dashboard #21912958814](https://github.com/zensgit/metasheet2/actions/runs/21912958814) (`SUCCESS`)
+  - Attendance Daily Gate Dashboard #21912958814 (`SUCCESS`)
   - Evidence:
     - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.md`
     - `output/playwright/ga/21912958814/attendance-daily-gate-dashboard-21912958814-1/attendance-daily-gate-dashboard.json`
 - Failure drill validation:
-  - [Attendance Daily Gate Dashboard #21912261134](https://github.com/zensgit/metasheet2/actions/runs/21912261134) (`FAILURE`, expected)
+  - Attendance Daily Gate Dashboard #21912261134 (`FAILURE`, expected)
   - Escalation issue created:
-    - [#141](https://github.com/zensgit/metasheet2/issues/141)
+    - #141
   - Evidence:
     - `output/playwright/ga/21912261134/attendance-daily-gate-dashboard.md`
 - Issue channel sync validation:
-  - [Attendance Gate Issue Notify #21912549709](https://github.com/zensgit/metasheet2/actions/runs/21912549709) (`SUCCESS`)
+  - Attendance Gate Issue Notify #21912549709 (`SUCCESS`)
   - Behavior:
     - sends notifications when Slack/DingTalk webhook secrets are configured;
     - with no webhook configured, exits success with warning summary.
@@ -123,63 +123,63 @@ This record does not change the `GO` decision above; it captures a production re
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Build + deploy (csv upload channel) | [#21948146767](https://github.com/zensgit/metasheet2/actions/runs/21948146767) | PASS | GitHub Actions run logs |
-| Strict gates twice (async strict) | [#21948274924](https://github.com/zensgit/metasheet2/actions/runs/21948274924) | PASS | `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`, `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/` |
-| Strict gates twice (post rate-limit mapping) | [#21949081591](https://github.com/zensgit/metasheet2/actions/runs/21949081591) | PASS | `output/playwright/ga/21949081591/20260212-134540-1/`, `output/playwright/ga/21949081591/20260212-134540-2/` |
-| Perf baseline (500k, async+export+rollback, upload_csv=true) | [#21948416024](https://github.com/zensgit/metasheet2/actions/runs/21948416024) | PASS | `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json` |
-| Build + deploy (persist upload volume + nginx override) | [#21950252123](https://github.com/zensgit/metasheet2/actions/runs/21950252123) | PASS | GitHub Actions run logs |
-| Strict gates twice (post nginx/volume sync) | [#21950374010](https://github.com/zensgit/metasheet2/actions/runs/21950374010) | PASS | `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-1/`, `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-2/` |
-| Perf baseline (10k, async+export+rollback, upload_csv=true) | [#21950373978](https://github.com/zensgit/metasheet2/actions/runs/21950373978) | PASS | `output/playwright/ga/21950373978/attendance-import-perf-21950373978-1/attendance-perf-mljjrtew-l8qyjh/perf-summary.json` |
-| Build + deploy (upload observability metrics) | [#21951397169](https://github.com/zensgit/metasheet2/actions/runs/21951397169) | PASS | GitHub Actions run logs |
-| Strict gates twice (post upload observability) | [#21951515179](https://github.com/zensgit/metasheet2/actions/runs/21951515179) | PASS | `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-1/`, `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-2/` |
-| Perf baseline (10k, async+export+rollback, upload_csv=true, post upload observability) | [#21951515791](https://github.com/zensgit/metasheet2/actions/runs/21951515791) | PASS | `output/playwright/ga/21951515791/attendance-import-perf-21951515791-1/attendance-perf-mljkutd4-b9wc2g/perf-summary.json` |
-| Strict gates twice (require_import_upload=true) | [#21954800143](https://github.com/zensgit/metasheet2/actions/runs/21954800143) | PASS | `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-1/`, `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-2/` |
-| Perf baseline (10k, async+export+rollback, upload_csv=true default) | [#21954799983](https://github.com/zensgit/metasheet2/actions/runs/21954799983) | PASS | `output/playwright/ga/21954799983/attendance-import-perf-21954799983-1/attendance-perf-mljo09wu-x27iq5/perf-summary.json` |
-| Strict gates twice (post prod preflight fix) | [#21956369650](https://github.com/zensgit/metasheet2/actions/runs/21956369650) | PASS | `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-1/`, `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-2/` |
-| Deploy (with remote preflight) | [#21956719862](https://github.com/zensgit/metasheet2/actions/runs/21956719862) | PASS | GitHub Actions run logs |
-| Strict gates twice (post deploy remote preflight) | [#21956821613](https://github.com/zensgit/metasheet2/actions/runs/21956821613) | PASS | `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-1/`, `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-2/` |
-| Perf baseline (10k, upload_csv=true default, post deploy remote preflight) | [#21956821796](https://github.com/zensgit/metasheet2/actions/runs/21956821796) | PASS | `output/playwright/ga/21956821796/attendance-import-perf-21956821796-1/attendance-perf-mljq1ur9-cg0wyh/perf-summary.json` |
-| Deploy (preflight step summary + deploy.log artifact) | [#21958027752](https://github.com/zensgit/metasheet2/actions/runs/21958027752) | PASS | `output/playwright/ga/21958027752/deploy.log` |
-| Deploy (workflow_dispatch re-verify preflight summary + artifacts) | [#21972069433](https://github.com/zensgit/metasheet2/actions/runs/21972069433) | PASS | `output/playwright/ga/21972069433/deploy.log` |
-| Deploy (failure drill: require-token misconfig, expected FAIL) | [#21973689456](https://github.com/zensgit/metasheet2/actions/runs/21973689456) | FAIL (expected) | `output/playwright/ga/21973689456/deploy.log` |
-| Deploy (post-drill restore, expected PASS) | [#21973784431](https://github.com/zensgit/metasheet2/actions/runs/21973784431) | PASS | `output/playwright/ga/21973784431/deploy.log` |
-| Deploy (step summary: artifact download + mismatch hint) | [#21973932069](https://github.com/zensgit/metasheet2/actions/runs/21973932069) | PASS | `output/playwright/ga/21973932069/deploy.log` |
-| Deploy (step summary: remote stages migrate/smoke) | [#21974371801](https://github.com/zensgit/metasheet2/actions/runs/21974371801) | PASS | `output/playwright/ga/21974371801/deploy.log` |
-| Deploy (drill: intentional migrate failure, expected FAIL) | [#21974887993](https://github.com/zensgit/metasheet2/actions/runs/21974887993) | FAIL (expected) | `output/playwright/ga/21974887993/deploy.log` |
-| Deploy (drill: intentional smoke failure, expected FAIL) | [#21975944250](https://github.com/zensgit/metasheet2/actions/runs/21975944250) | FAIL (expected) | `output/playwright/ga/21975944250/deploy.log` |
-| Deploy (step summary archived to artifact) | [#21976281725](https://github.com/zensgit/metasheet2/actions/runs/21976281725) | PASS | `output/playwright/ga/21976281725/step-summary.md`, `output/playwright/ga/21976281725/deploy.log` |
-| Deploy (drill stage recorded + step summary artifact) | [#21976355633](https://github.com/zensgit/metasheet2/actions/runs/21976355633) | FAIL (expected) | `output/playwright/ga/21976355633/step-summary.md`, `output/playwright/ga/21976355633/deploy.log` |
-| Deploy (deploy drill + deploy output tail) | [#21976588135](https://github.com/zensgit/metasheet2/actions/runs/21976588135) | FAIL (expected) | `output/playwright/ga/21976588135/step-summary.md`, `output/playwright/ga/21976588135/deploy.log` |
-| Deploy (step summary: exit code meaning + stage reasons) | [#21976718210](https://github.com/zensgit/metasheet2/actions/runs/21976718210) | PASS | `output/playwright/ga/21976718210/step-summary.md`, `output/playwright/ga/21976718210/deploy.log` |
-| Deploy (drill: deploy stage exit code meaning + stage reasons) | [#21976791431](https://github.com/zensgit/metasheet2/actions/runs/21976791431) | FAIL (expected) | `output/playwright/ga/21976791431/step-summary.md`, `output/playwright/ga/21976791431/deploy.log` |
-| Deploy (failure drill: preflight END marker present, expected FAIL) | [#21974005618](https://github.com/zensgit/metasheet2/actions/runs/21974005618) | FAIL (expected) | `output/playwright/ga/21974005618/deploy.log` |
-| Deploy (post-drill restore, expected PASS) | [#21974057204](https://github.com/zensgit/metasheet2/actions/runs/21974057204) | PASS | `output/playwright/ga/21974057204/deploy.log` |
-| Deploy (workflow_dispatch re-verify: smoke PASS requires SMOKE END marker) | [#21977059789](https://github.com/zensgit/metasheet2/actions/runs/21977059789) | PASS | `output/playwright/ga/21977059789/step-summary.md`, `output/playwright/ga/21977059789/deploy.log` |
-| Deploy (drill: smoke stage, expected FAIL; validates Smoke FAIL detection + artifacts) | [#21977247241](https://github.com/zensgit/metasheet2/actions/runs/21977247241) | FAIL (expected) | `output/playwright/ga/21977247241/step-summary.md`, `output/playwright/ga/21977247241/deploy.log` |
-| Remote Preflight (Prod) | [#21984121413](https://github.com/zensgit/metasheet2/actions/runs/21984121413) | PASS | `output/playwright/ga/21984121413/step-summary.md`, `output/playwright/ga/21984121413/preflight.log` |
-| Remote Preflight drill (expected FAIL) | [#21984026399](https://github.com/zensgit/metasheet2/actions/runs/21984026399) | FAIL (expected) | `output/playwright/ga/21984026399/step-summary.md`, `output/playwright/ga/21984026399/preflight.log` |
-| Remote Preflight drill (tagged `[DRILL]`, expected FAIL) | [#21984401016](https://github.com/zensgit/metasheet2/actions/runs/21984401016) | FAIL (expected) | `output/playwright/ga/21984401016/step-summary.md`, `output/playwright/ga/21984401016/preflight.log` |
-| Remote Preflight (step summary includes host sync output) | [#21984647956](https://github.com/zensgit/metasheet2/actions/runs/21984647956) | PASS | `output/playwright/ga/21984647956/step-summary.md`, `output/playwright/ga/21984647956/preflight.log` |
-| Remote Preflight drill (host sync output included, expected FAIL) | [#21984677244](https://github.com/zensgit/metasheet2/actions/runs/21984677244) | FAIL (expected) | `output/playwright/ga/21984677244/step-summary.md`, `output/playwright/ga/21984677244/preflight.log` |
-| Remote Preflight drill (issue escalation, safe title override) | [#21985036421](https://github.com/zensgit/metasheet2/actions/runs/21985036421) | FAIL (expected) | `output/playwright/ga/21985036421/step-summary.md`, `output/playwright/ga/21985036421/preflight.log`, Issue: [#151](https://github.com/zensgit/metasheet2/issues/151) |
-| Remote Preflight (post issue escalation change, non-drill) | [#21985494906](https://github.com/zensgit/metasheet2/actions/runs/21985494906) | PASS | `output/playwright/ga/21985494906/step-summary.md`, `output/playwright/ga/21985494906/preflight.log` |
-| Remote Preflight drill (preflight status robust to stdout/stderr ordering) | [#21985669802](https://github.com/zensgit/metasheet2/actions/runs/21985669802) | FAIL (expected) | `output/playwright/ga/21985669802/step-summary.md`, `output/playwright/ga/21985669802/preflight.log` |
-| Daily Gate Dashboard (includes Remote Preflight gate) | [#21984145075](https://github.com/zensgit/metasheet2/actions/runs/21984145075) | PASS | `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard (drill-induced FAIL, expected) | [#21984060098](https://github.com/zensgit/metasheet2/actions/runs/21984060098) | FAIL (expected) | `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard (ignores preflight `[DRILL]` runs) | [#21984436363](https://github.com/zensgit/metasheet2/actions/runs/21984436363) | PASS | `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard (post host-sync summary update; still ignores drill) | [#21984702152](https://github.com/zensgit/metasheet2/actions/runs/21984702152) | PASS | `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard (post remote preflight refresh) | [#21985530489](https://github.com/zensgit/metasheet2/actions/runs/21985530489) | PASS | `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.json` |
-| Strict gates drill (tagged `[DRILL]`, no-op, expected PASS) | [#21989332414](https://github.com/zensgit/metasheet2/actions/runs/21989332414) | PASS | `output/playwright/ga/21989332414/drill/drill.txt` |
-| Perf baseline drill (tagged `[DRILL]`, no-op, expected PASS) | [#21989337598](https://github.com/zensgit/metasheet2/actions/runs/21989337598) | PASS | `output/playwright/ga/21989337598/drill/drill.txt` |
-| Daily Gate Dashboard (ignores strict/perf `[DRILL]` runs) | [#21989379486](https://github.com/zensgit/metasheet2/actions/runs/21989379486) | PASS | `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.json` |
-| Strict gates drill (issue escalation, tagged `[DRILL]`, expected FAIL) | [#21990301616](https://github.com/zensgit/metasheet2/actions/runs/21990301616) | FAIL (expected) | `output/playwright/ga/21990301616/drill/drill.txt`, Issue: [#153](https://github.com/zensgit/metasheet2/issues/153) |
-| Daily Gate Dashboard (ignores strict drill failure, still PASS) | [#21990398576](https://github.com/zensgit/metasheet2/actions/runs/21990398576) | PASS | `output/playwright/ga/21990398576/attendance-daily-gate-dashboard-21990398576-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990398576/attendance-daily-gate-dashboard-21990398576-1/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard drill (P0 escalation via branch override, expected FAIL) | [#21989604327](https://github.com/zensgit/metasheet2/actions/runs/21989604327) | FAIL (expected) | `output/playwright/ga/21989604327/attendance-daily-gate-dashboard-21989604327-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989604327/attendance-daily-gate-dashboard-21989604327-1/attendance-daily-gate-dashboard.json`, Issue: [#152](https://github.com/zensgit/metasheet2/issues/152) |
-| Daily Gate Dashboard drill recovery (auto-close P0 issue, expected PASS) | [#21989640273](https://github.com/zensgit/metasheet2/actions/runs/21989640273) | PASS | `output/playwright/ga/21989640273/attendance-daily-gate-dashboard-21989640273-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989640273/attendance-daily-gate-dashboard-21989640273-1/attendance-daily-gate-dashboard.json`, Issue: [#152](https://github.com/zensgit/metasheet2/issues/152) |
-| Remote Metrics (Prod) | [#21990031274](https://github.com/zensgit/metasheet2/actions/runs/21990031274) | PASS | `output/playwright/ga/21990031274/step-summary.md`, `output/playwright/ga/21990031274/metrics.log` |
-| Remote Metrics drill (tagged `[DRILL]`, expected FAIL) | [#21990759459](https://github.com/zensgit/metasheet2/actions/runs/21990759459) | FAIL (expected) | `output/playwright/ga/21990759459/step-summary.md`, `output/playwright/ga/21990759459/metrics.log` |
-| Daily Gate Dashboard (includes Host Metrics gate) | [#21990068558](https://github.com/zensgit/metasheet2/actions/runs/21990068558) | PASS | `output/playwright/ga/21990068558/attendance-daily-gate-dashboard-21990068558-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990068558/attendance-daily-gate-dashboard-21990068558-1/attendance-daily-gate-dashboard.json` |
-| Daily Gate Dashboard (ignores metrics `[DRILL]` runs) | [#21990924895](https://github.com/zensgit/metasheet2/actions/runs/21990924895) | PASS | `output/playwright/ga/21990924895/attendance-daily-gate-dashboard-21990924895-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990924895/attendance-daily-gate-dashboard-21990924895-1/attendance-daily-gate-dashboard.json` |
+| Build + deploy (csv upload channel) | #21948146767 | PASS | GitHub Actions run logs |
+| Strict gates twice (async strict) | #21948274924 | PASS | `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-1/`, `output/playwright/ga/21948274924/attendance-strict-gates-prod-21948274924-1/20260212-132140-2/` |
+| Strict gates twice (post rate-limit mapping) | #21949081591 | PASS | `output/playwright/ga/21949081591/20260212-134540-1/`, `output/playwright/ga/21949081591/20260212-134540-2/` |
+| Perf baseline (500k, async+export+rollback, upload_csv=true) | #21948416024 | PASS | `output/playwright/ga/21948416024/attendance-perf-mljhqv6r-wx77vt/perf-summary.json` |
+| Build + deploy (persist upload volume + nginx override) | #21950252123 | PASS | GitHub Actions run logs |
+| Strict gates twice (post nginx/volume sync) | #21950374010 | PASS | `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-1/`, `output/playwright/ga/21950374010/attendance-strict-gates-prod-21950374010-1/20260212-142241-2/` |
+| Perf baseline (10k, async+export+rollback, upload_csv=true) | #21950373978 | PASS | `output/playwright/ga/21950373978/attendance-import-perf-21950373978-1/attendance-perf-mljjrtew-l8qyjh/perf-summary.json` |
+| Build + deploy (upload observability metrics) | #21951397169 | PASS | GitHub Actions run logs |
+| Strict gates twice (post upload observability) | #21951515179 | PASS | `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-1/`, `output/playwright/ga/21951515179/attendance-strict-gates-prod-21951515179-1/20260212-145254-2/` |
+| Perf baseline (10k, async+export+rollback, upload_csv=true, post upload observability) | #21951515791 | PASS | `output/playwright/ga/21951515791/attendance-import-perf-21951515791-1/attendance-perf-mljkutd4-b9wc2g/perf-summary.json` |
+| Strict gates twice (require_import_upload=true) | #21954800143 | PASS | `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-1/`, `output/playwright/ga/21954800143/attendance-strict-gates-prod-21954800143-1/20260212-162123-2/` |
+| Perf baseline (10k, async+export+rollback, upload_csv=true default) | #21954799983 | PASS | `output/playwright/ga/21954799983/attendance-import-perf-21954799983-1/attendance-perf-mljo09wu-x27iq5/perf-summary.json` |
+| Strict gates twice (post prod preflight fix) | #21956369650 | PASS | `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-1/`, `output/playwright/ga/21956369650/attendance-strict-gates-prod-21956369650-1/20260212-170455-2/` |
+| Deploy (with remote preflight) | #21956719862 | PASS | GitHub Actions run logs |
+| Strict gates twice (post deploy remote preflight) | #21956821613 | PASS | `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-1/`, `output/playwright/ga/21956821613/attendance-strict-gates-prod-21956821613-1/20260212-171848-2/` |
+| Perf baseline (10k, upload_csv=true default, post deploy remote preflight) | #21956821796 | PASS | `output/playwright/ga/21956821796/attendance-import-perf-21956821796-1/attendance-perf-mljq1ur9-cg0wyh/perf-summary.json` |
+| Deploy (preflight step summary + deploy.log artifact) | #21958027752 | PASS | `output/playwright/ga/21958027752/deploy.log` |
+| Deploy (workflow_dispatch re-verify preflight summary + artifacts) | #21972069433 | PASS | `output/playwright/ga/21972069433/deploy.log` |
+| Deploy (failure drill: require-token misconfig, expected FAIL) | #21973689456 | FAIL (expected) | `output/playwright/ga/21973689456/deploy.log` |
+| Deploy (post-drill restore, expected PASS) | #21973784431 | PASS | `output/playwright/ga/21973784431/deploy.log` |
+| Deploy (step summary: artifact download + mismatch hint) | #21973932069 | PASS | `output/playwright/ga/21973932069/deploy.log` |
+| Deploy (step summary: remote stages migrate/smoke) | #21974371801 | PASS | `output/playwright/ga/21974371801/deploy.log` |
+| Deploy (drill: intentional migrate failure, expected FAIL) | #21974887993 | FAIL (expected) | `output/playwright/ga/21974887993/deploy.log` |
+| Deploy (drill: intentional smoke failure, expected FAIL) | #21975944250 | FAIL (expected) | `output/playwright/ga/21975944250/deploy.log` |
+| Deploy (step summary archived to artifact) | #21976281725 | PASS | `output/playwright/ga/21976281725/step-summary.md`, `output/playwright/ga/21976281725/deploy.log` |
+| Deploy (drill stage recorded + step summary artifact) | #21976355633 | FAIL (expected) | `output/playwright/ga/21976355633/step-summary.md`, `output/playwright/ga/21976355633/deploy.log` |
+| Deploy (deploy drill + deploy output tail) | #21976588135 | FAIL (expected) | `output/playwright/ga/21976588135/step-summary.md`, `output/playwright/ga/21976588135/deploy.log` |
+| Deploy (step summary: exit code meaning + stage reasons) | #21976718210 | PASS | `output/playwright/ga/21976718210/step-summary.md`, `output/playwright/ga/21976718210/deploy.log` |
+| Deploy (drill: deploy stage exit code meaning + stage reasons) | #21976791431 | FAIL (expected) | `output/playwright/ga/21976791431/step-summary.md`, `output/playwright/ga/21976791431/deploy.log` |
+| Deploy (failure drill: preflight END marker present, expected FAIL) | #21974005618 | FAIL (expected) | `output/playwright/ga/21974005618/deploy.log` |
+| Deploy (post-drill restore, expected PASS) | #21974057204 | PASS | `output/playwright/ga/21974057204/deploy.log` |
+| Deploy (workflow_dispatch re-verify: smoke PASS requires SMOKE END marker) | #21977059789 | PASS | `output/playwright/ga/21977059789/step-summary.md`, `output/playwright/ga/21977059789/deploy.log` |
+| Deploy (drill: smoke stage, expected FAIL; validates Smoke FAIL detection + artifacts) | #21977247241 | FAIL (expected) | `output/playwright/ga/21977247241/step-summary.md`, `output/playwright/ga/21977247241/deploy.log` |
+| Remote Preflight (Prod) | #21984121413 | PASS | `output/playwright/ga/21984121413/step-summary.md`, `output/playwright/ga/21984121413/preflight.log` |
+| Remote Preflight drill (expected FAIL) | #21984026399 | FAIL (expected) | `output/playwright/ga/21984026399/step-summary.md`, `output/playwright/ga/21984026399/preflight.log` |
+| Remote Preflight drill (tagged `[DRILL]`, expected FAIL) | #21984401016 | FAIL (expected) | `output/playwright/ga/21984401016/step-summary.md`, `output/playwright/ga/21984401016/preflight.log` |
+| Remote Preflight (step summary includes host sync output) | #21984647956 | PASS | `output/playwright/ga/21984647956/step-summary.md`, `output/playwright/ga/21984647956/preflight.log` |
+| Remote Preflight drill (host sync output included, expected FAIL) | #21984677244 | FAIL (expected) | `output/playwright/ga/21984677244/step-summary.md`, `output/playwright/ga/21984677244/preflight.log` |
+| Remote Preflight drill (issue escalation, safe title override) | #21985036421 | FAIL (expected) | `output/playwright/ga/21985036421/step-summary.md`, `output/playwright/ga/21985036421/preflight.log`, Issue: #151 |
+| Remote Preflight (post issue escalation change, non-drill) | #21985494906 | PASS | `output/playwright/ga/21985494906/step-summary.md`, `output/playwright/ga/21985494906/preflight.log` |
+| Remote Preflight drill (preflight status robust to stdout/stderr ordering) | #21985669802 | FAIL (expected) | `output/playwright/ga/21985669802/step-summary.md`, `output/playwright/ga/21985669802/preflight.log` |
+| Daily Gate Dashboard (includes Remote Preflight gate) | #21984145075 | PASS | `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984145075/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (drill-induced FAIL, expected) | #21984060098 | FAIL (expected) | `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984060098/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (ignores preflight `[DRILL]` runs) | #21984436363 | PASS | `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984436363/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (post host-sync summary update; still ignores drill) | #21984702152 | PASS | `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21984702152/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (post remote preflight refresh) | #21985530489 | PASS | `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21985530489/attendance-daily-gate-dashboard.json` |
+| Strict gates drill (tagged `[DRILL]`, no-op, expected PASS) | #21989332414 | PASS | `output/playwright/ga/21989332414/drill/drill.txt` |
+| Perf baseline drill (tagged `[DRILL]`, no-op, expected PASS) | #21989337598 | PASS | `output/playwright/ga/21989337598/drill/drill.txt` |
+| Daily Gate Dashboard (ignores strict/perf `[DRILL]` runs) | #21989379486 | PASS | `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989379486/attendance-daily-gate-dashboard-21989379486-1/attendance-daily-gate-dashboard.json` |
+| Strict gates drill (issue escalation, tagged `[DRILL]`, expected FAIL) | #21990301616 | FAIL (expected) | `output/playwright/ga/21990301616/drill/drill.txt`, Issue: #153 |
+| Daily Gate Dashboard (ignores strict drill failure, still PASS) | #21990398576 | PASS | `output/playwright/ga/21990398576/attendance-daily-gate-dashboard-21990398576-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990398576/attendance-daily-gate-dashboard-21990398576-1/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard drill (P0 escalation via branch override, expected FAIL) | #21989604327 | FAIL (expected) | `output/playwright/ga/21989604327/attendance-daily-gate-dashboard-21989604327-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989604327/attendance-daily-gate-dashboard-21989604327-1/attendance-daily-gate-dashboard.json`, Issue: #152 |
+| Daily Gate Dashboard drill recovery (auto-close P0 issue, expected PASS) | #21989640273 | PASS | `output/playwright/ga/21989640273/attendance-daily-gate-dashboard-21989640273-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21989640273/attendance-daily-gate-dashboard-21989640273-1/attendance-daily-gate-dashboard.json`, Issue: #152 |
+| Remote Metrics (Prod) | #21990031274 | PASS | `output/playwright/ga/21990031274/step-summary.md`, `output/playwright/ga/21990031274/metrics.log` |
+| Remote Metrics drill (tagged `[DRILL]`, expected FAIL) | #21990759459 | FAIL (expected) | `output/playwright/ga/21990759459/step-summary.md`, `output/playwright/ga/21990759459/metrics.log` |
+| Daily Gate Dashboard (includes Host Metrics gate) | #21990068558 | PASS | `output/playwright/ga/21990068558/attendance-daily-gate-dashboard-21990068558-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990068558/attendance-daily-gate-dashboard-21990068558-1/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (ignores metrics `[DRILL]` runs) | #21990924895 | PASS | `output/playwright/ga/21990924895/attendance-daily-gate-dashboard-21990924895-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21990924895/attendance-daily-gate-dashboard-21990924895-1/attendance-daily-gate-dashboard.json` |
 
 Perf summary (`#21948416024`):
 
@@ -206,10 +206,10 @@ Notes:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf baseline drill (P1 issue open, expected FAIL) | [#21992375357](https://github.com/zensgit/metasheet2/actions/runs/21992375357) | FAIL (expected) | `output/playwright/ga/21992375357/drill/drill.txt`, Issue: [#154](https://github.com/zensgit/metasheet2/issues/154) |
-| Perf baseline drill recovery (P1 issue auto-close) | [#21992449283](https://github.com/zensgit/metasheet2/actions/runs/21992449283) | PASS | `output/playwright/ga/21992449283/drill/drill.txt`, Issue: [#154](https://github.com/zensgit/metasheet2/issues/154) |
-| Remote Metrics drill (P1 issue open, expected FAIL) | [#21992814049](https://github.com/zensgit/metasheet2/actions/runs/21992814049) | FAIL (expected) | `output/playwright/ga/21992814049/step-summary.md`, `output/playwright/ga/21992814049/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
-| Remote Metrics recovery (P1 issue auto-close) | [#21992862639](https://github.com/zensgit/metasheet2/actions/runs/21992862639) | PASS | `output/playwright/ga/21992862639/step-summary.md`, `output/playwright/ga/21992862639/metrics.log`, Issue: [#155](https://github.com/zensgit/metasheet2/issues/155) |
+| Perf baseline drill (P1 issue open, expected FAIL) | #21992375357 | FAIL (expected) | `output/playwright/ga/21992375357/drill/drill.txt`, Issue: #154 |
+| Perf baseline drill recovery (P1 issue auto-close) | #21992449283 | PASS | `output/playwright/ga/21992449283/drill/drill.txt`, Issue: #154 |
+| Remote Metrics drill (P1 issue open, expected FAIL) | #21992814049 | FAIL (expected) | `output/playwright/ga/21992814049/step-summary.md`, `output/playwright/ga/21992814049/metrics.log`, Issue: #155 |
+| Remote Metrics recovery (P1 issue auto-close) | #21992862639 | PASS | `output/playwright/ga/21992862639/step-summary.md`, `output/playwright/ga/21992862639/metrics.log`, Issue: #155 |
 
 ## Post-Go Validation (2026-02-13): Longrun Upload Coverage + P1 Issue Tracking
 
@@ -220,12 +220,12 @@ This record validates:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf longrun drill (P1 issue open, expected FAIL) | [#21995454486](https://github.com/zensgit/metasheet2/actions/runs/21995454486) | FAIL (expected) | `output/playwright/ga/21995454486/attendance-import-perf-longrun-drill-21995454486-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
-| Perf longrun drill recovery (P1 issue auto-close) | [#21995499250](https://github.com/zensgit/metasheet2/actions/runs/21995499250) | PASS | `output/playwright/ga/21995499250/attendance-import-perf-longrun-drill-21995499250-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
-| Perf longrun (upload_csv=true default) | [#21995544569](https://github.com/zensgit/metasheet2/actions/runs/21995544569) | PASS | `output/playwright/ga/21995544569/attendance-import-perf-longrun-trend-21995544569-1/20260213-170505/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/21995544569/attendance-import-perf-longrun-rows10k-commit-21995544569-1/current/rows10k-commit/attendance-perf-mll50tvt-haeu4u/perf-summary.json` |
-| Perf longrun (default P1 issue open on failure, expected FAIL) | [#21995762546](https://github.com/zensgit/metasheet2/actions/runs/21995762546) | FAIL (expected) | No artifacts (early failure); Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
-| Perf longrun recovery (default P1 issue auto-close) | [#21995802821](https://github.com/zensgit/metasheet2/actions/runs/21995802821) | PASS | `output/playwright/ga/21995802821/attendance-import-perf-longrun-trend-21995802821-1/20260213-171327/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
-| Daily Gate Dashboard (includes Perf Long Run gate) | [#21996392027](https://github.com/zensgit/metasheet2/actions/runs/21996392027) | PASS | `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.json` |
+| Perf longrun drill (P1 issue open, expected FAIL) | #21995454486 | FAIL (expected) | `output/playwright/ga/21995454486/attendance-import-perf-longrun-drill-21995454486-1/drill.txt`, Issue: #156 |
+| Perf longrun drill recovery (P1 issue auto-close) | #21995499250 | PASS | `output/playwright/ga/21995499250/attendance-import-perf-longrun-drill-21995499250-1/drill.txt`, Issue: #156 |
+| Perf longrun (upload_csv=true default) | #21995544569 | PASS | `output/playwright/ga/21995544569/attendance-import-perf-longrun-trend-21995544569-1/20260213-170505/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/21995544569/attendance-import-perf-longrun-rows10k-commit-21995544569-1/current/rows10k-commit/attendance-perf-mll50tvt-haeu4u/perf-summary.json` |
+| Perf longrun (default P1 issue open on failure, expected FAIL) | #21995762546 | FAIL (expected) | No artifacts (early failure); Issue: #157 |
+| Perf longrun recovery (default P1 issue auto-close) | #21995802821 | PASS | `output/playwright/ga/21995802821/attendance-import-perf-longrun-trend-21995802821-1/20260213-171327/attendance-import-perf-longrun-trend.md`, Issue: #157 |
+| Daily Gate Dashboard (includes Perf Long Run gate) | #21996392027 | PASS | `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21996392027/attendance-daily-gate-dashboard.json` |
 
 ## Post-Go Validation (2026-02-13): Remote Storage Health Gate
 
@@ -237,10 +237,10 @@ This record validates:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Storage Health (Prod) | [#21998389402](https://github.com/zensgit/metasheet2/actions/runs/21998389402) | PASS | `output/playwright/ga/21998389402/storage.log`, `output/playwright/ga/21998389402/step-summary.md` |
-| Remote Storage Health drill (P1 issue open, expected FAIL) | [#21998434122](https://github.com/zensgit/metasheet2/actions/runs/21998434122) | FAIL (expected) | `output/playwright/ga/21998434122/storage.log`, `output/playwright/ga/21998434122/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
-| Remote Storage Health drill recovery (P1 issue auto-close) | [#21998473905](https://github.com/zensgit/metasheet2/actions/runs/21998473905) | PASS | `output/playwright/ga/21998473905/storage.log`, `output/playwright/ga/21998473905/step-summary.md`, Issue: [#158](https://github.com/zensgit/metasheet2/issues/158) |
-| Daily Gate Dashboard (includes Storage Health gate) | [#21998506794](https://github.com/zensgit/metasheet2/actions/runs/21998506794) | PASS | `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.json` |
+| Remote Storage Health (Prod) | #21998389402 | PASS | `output/playwright/ga/21998389402/storage.log`, `output/playwright/ga/21998389402/step-summary.md` |
+| Remote Storage Health drill (P1 issue open, expected FAIL) | #21998434122 | FAIL (expected) | `output/playwright/ga/21998434122/storage.log`, `output/playwright/ga/21998434122/step-summary.md`, Issue: #158 |
+| Remote Storage Health drill recovery (P1 issue auto-close) | #21998473905 | PASS | `output/playwright/ga/21998473905/storage.log`, `output/playwright/ga/21998473905/step-summary.md`, Issue: #158 |
+| Daily Gate Dashboard (includes Storage Health gate) | #21998506794 | PASS | `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.md`, `output/playwright/ga/21998506794/attendance-daily-gate-dashboard.json` |
 
 ## Post-Go Validation (2026-02-14): Storage Default P1 Issue + Upload Cleanup Runbook
 
@@ -252,12 +252,12 @@ This record validates:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Storage Health (forced fail, default P1 issue open) | [#22010149843](https://github.com/zensgit/metasheet2/actions/runs/22010149843) | FAIL (expected) | `output/playwright/ga/22010149843/storage.log`, `output/playwright/ga/22010149843/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
-| Storage Health recovery (default P1 issue auto-close) | [#22010164550](https://github.com/zensgit/metasheet2/actions/runs/22010164550) | PASS | `output/playwright/ga/22010164550/storage.log`, `output/playwright/ga/22010164550/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
-| Remote Upload Cleanup (dry-run) | [#22010215217](https://github.com/zensgit/metasheet2/actions/runs/22010215217) | PASS | `output/playwright/ga/22010215217/cleanup.log`, `output/playwright/ga/22010215217/step-summary.md` |
-| Remote Upload Cleanup (dry-run, safety limits inputs) | [#22010499353](https://github.com/zensgit/metasheet2/actions/runs/22010499353) | PASS | `output/playwright/ga/22010499353/cleanup.log`, `output/playwright/ga/22010499353/step-summary.md` |
-| Daily Gate Dashboard (includes Upload Cleanup gate) | [#22010519536](https://github.com/zensgit/metasheet2/actions/runs/22010519536) | PASS | `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.json` |
-| Remote Upload Cleanup drill (P2 issue open, expected FAIL) | [#22011899798](https://github.com/zensgit/metasheet2/actions/runs/22011899798) | FAIL (expected) | `output/playwright/ga/22011899798/cleanup.log`, `output/playwright/ga/22011899798/step-summary.md`, Issue: [#160](https://github.com/zensgit/metasheet2/issues/160) |
+| Storage Health (forced fail, default P1 issue open) | #22010149843 | FAIL (expected) | `output/playwright/ga/22010149843/storage.log`, `output/playwright/ga/22010149843/step-summary.md`, Issue: #159 |
+| Storage Health recovery (default P1 issue auto-close) | #22010164550 | PASS | `output/playwright/ga/22010164550/storage.log`, `output/playwright/ga/22010164550/step-summary.md`, Issue: #159 |
+| Remote Upload Cleanup (dry-run) | #22010215217 | PASS | `output/playwright/ga/22010215217/cleanup.log`, `output/playwright/ga/22010215217/step-summary.md` |
+| Remote Upload Cleanup (dry-run, safety limits inputs) | #22010499353 | PASS | `output/playwright/ga/22010499353/cleanup.log`, `output/playwright/ga/22010499353/step-summary.md` |
+| Daily Gate Dashboard (includes Upload Cleanup gate) | #22010519536 | PASS | `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22010519536/attendance-daily-gate-dashboard.json` |
+| Remote Upload Cleanup drill (P2 issue open, expected FAIL) | #22011899798 | FAIL (expected) | `output/playwright/ga/22011899798/cleanup.log`, `output/playwright/ga/22011899798/step-summary.md`, Issue: #160 |
 
 ## Post-Go Validation (2026-02-21): Gate Stabilization Recovery
 
@@ -265,31 +265,31 @@ This record captures the final stabilization after transient `502/ECONNREFUSED/f
 
 ### Code changes merged
 
-- [#217](https://github.com/zensgit/metasheet2/pull/217): harden `/auth/me` retry in full-flow verification and reduce longrun rollback cleanup flake.
-- [#218](https://github.com/zensgit/metasheet2/pull/218): add transient network retries for smoke/provision/perf/production-flow scripts.
-- [#220](https://github.com/zensgit/metasheet2/pull/220): stabilize perf import mutation retries with fresh `commitToken` per attempt, and baseline rollback threshold default alignment.
-- [#221](https://github.com/zensgit/metasheet2/pull/221): keep async import job polling alive across transient network failures.
+- #217: harden `/auth/me` retry in full-flow verification and reduce longrun rollback cleanup flake.
+- #218: add transient network retries for smoke/provision/perf/production-flow scripts.
+- #220: stabilize perf import mutation retries with fresh `commitToken` per attempt, and baseline rollback threshold default alignment.
+- #221: keep async import job polling alive across transient network failures.
 
 ### Final verification snapshot
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict gates twice | [#22257658383](https://github.com/zensgit/metasheet2/actions/runs/22257658383) | PASS | `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-1/gate-summary.json`, `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-2/gate-summary.json` |
-| Perf baseline (100k, upload_csv=true, commit_async=false) | [#22257793629](https://github.com/zensgit/metasheet2/actions/runs/22257793629) | PASS | `output/playwright/ga/22257793629/attendance-import-perf-22257793629-1/attendance-perf-mlwd8aeo-7mygl2/perf-summary.json` |
-| Perf long run (upload path default) | [#22257658595](https://github.com/zensgit/metasheet2/actions/runs/22257658595) | PASS | `output/playwright/ga/22257658595/attendance-import-perf-longrun-rows10k-commit-22257658595-1/current/rows10k-commit/attendance-perf-mlwcvds0-3ttvdu/perf-summary.json` |
-| Daily gate dashboard | [#22257840707](https://github.com/zensgit/metasheet2/actions/runs/22257840707) | PASS | `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.json` |
+| Strict gates twice | #22257658383 | PASS | `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-1/gate-summary.json`, `output/playwright/ga/22257658383/attendance-strict-gates-prod-22257658383-1/20260221-133025-2/gate-summary.json` |
+| Perf baseline (100k, upload_csv=true, commit_async=false) | #22257793629 | PASS | `output/playwright/ga/22257793629/attendance-import-perf-22257793629-1/attendance-perf-mlwd8aeo-7mygl2/perf-summary.json` |
+| Perf long run (upload path default) | #22257658595 | PASS | `output/playwright/ga/22257658595/attendance-import-perf-longrun-rows10k-commit-22257658595-1/current/rows10k-commit/attendance-perf-mlwcvds0-3ttvdu/perf-summary.json` |
+| Daily gate dashboard | #22257840707 | PASS | `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22257840707/attendance-daily-gate-dashboard-22257840707-1/attendance-daily-gate-dashboard.json` |
 
 ### Final decision
 
 - **GO (maintained)**: no open P0/P1 blocker in the latest gate snapshot, and dashboard overall status is PASS.
-| Remote Upload Cleanup drill recovery (P2 issue auto-close) | [#22011916523](https://github.com/zensgit/metasheet2/actions/runs/22011916523) | PASS | `output/playwright/ga/22011916523/cleanup.log`, `output/playwright/ga/22011916523/step-summary.md`, Issue: [#160](https://github.com/zensgit/metasheet2/issues/160) |
-| Daily Gate Dashboard (Upload Cleanup latest run, ignores `[DRILL]`) | [#22011935825](https://github.com/zensgit/metasheet2/actions/runs/22011935825) | PASS | `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.json` |
-| Remote Upload Cleanup (forced fail, default P2 issue open) | [#22013431489](https://github.com/zensgit/metasheet2/actions/runs/22013431489) | FAIL (expected) | `output/playwright/ga/22013431489/cleanup.log`, `output/playwright/ga/22013431489/step-summary.md`, Issue: [#161](https://github.com/zensgit/metasheet2/issues/161) |
-| Remote Upload Cleanup recovery (default P2 issue auto-close) | [#22013441581](https://github.com/zensgit/metasheet2/actions/runs/22013441581) | PASS | `output/playwright/ga/22013441581/cleanup.log`, `output/playwright/ga/22013441581/step-summary.md`, Issue: [#161](https://github.com/zensgit/metasheet2/issues/161) |
-| Daily Gate Dashboard (Upload Cleanup latest run, default P2 recovery) | [#22013466240](https://github.com/zensgit/metasheet2/actions/runs/22013466240) | PASS | `output/playwright/ga/22013466240/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22013466240/attendance-daily-gate-dashboard.json` |
-| Remote Upload Cleanup (input validation classified, safe title override) | [#22013779376](https://github.com/zensgit/metasheet2/actions/runs/22013779376) | FAIL (expected) | `output/playwright/ga/22013779376/cleanup.log`, `output/playwright/ga/22013779376/step-summary.md`, Issue: [#162](https://github.com/zensgit/metasheet2/issues/162) |
-| Remote Upload Cleanup (skip_host_sync=true, recovery closes issue) | [#22013804879](https://github.com/zensgit/metasheet2/actions/runs/22013804879) | PASS | `output/playwright/ga/22013804879/cleanup.log`, `output/playwright/ga/22013804879/step-summary.md`, Issue: [#162](https://github.com/zensgit/metasheet2/issues/162) |
-| Daily Gate Dashboard (Upload Cleanup latest run after skip_host_sync recovery) | [#22013819495](https://github.com/zensgit/metasheet2/actions/runs/22013819495) | PASS | `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.json` |
+| Remote Upload Cleanup drill recovery (P2 issue auto-close) | #22011916523 | PASS | `output/playwright/ga/22011916523/cleanup.log`, `output/playwright/ga/22011916523/step-summary.md`, Issue: #160 |
+| Daily Gate Dashboard (Upload Cleanup latest run, ignores `[DRILL]`) | #22011935825 | PASS | `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22011935825/attendance-daily-gate-dashboard.json` |
+| Remote Upload Cleanup (forced fail, default P2 issue open) | #22013431489 | FAIL (expected) | `output/playwright/ga/22013431489/cleanup.log`, `output/playwright/ga/22013431489/step-summary.md`, Issue: #161 |
+| Remote Upload Cleanup recovery (default P2 issue auto-close) | #22013441581 | PASS | `output/playwright/ga/22013441581/cleanup.log`, `output/playwright/ga/22013441581/step-summary.md`, Issue: #161 |
+| Daily Gate Dashboard (Upload Cleanup latest run, default P2 recovery) | #22013466240 | PASS | `output/playwright/ga/22013466240/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22013466240/attendance-daily-gate-dashboard.json` |
+| Remote Upload Cleanup (input validation classified, safe title override) | #22013779376 | FAIL (expected) | `output/playwright/ga/22013779376/cleanup.log`, `output/playwright/ga/22013779376/step-summary.md`, Issue: #162 |
+| Remote Upload Cleanup (skip_host_sync=true, recovery closes issue) | #22013804879 | PASS | `output/playwright/ga/22013804879/cleanup.log`, `output/playwright/ga/22013804879/step-summary.md`, Issue: #162 |
+| Daily Gate Dashboard (Upload Cleanup latest run after skip_host_sync recovery) | #22013819495 | PASS | `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22013819495/attendance-daily-gate-dashboard.json` |
 
 ## Post-Go Validation (2026-02-14): Debug Runs Do Not Touch Default Issues
 
@@ -307,11 +307,11 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Storage Health (debug, expected FAIL; issue unchanged) | [#22014157084](https://github.com/zensgit/metasheet2/actions/runs/22014157084) | FAIL (expected) | `output/playwright/ga/22014157084/storage.log`, `output/playwright/ga/22014157084/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
-| Storage Health (non-debug; failure updates default issue) | [#22014225635](https://github.com/zensgit/metasheet2/actions/runs/22014225635) | FAIL | `output/playwright/ga/22014225635/storage.log`, `output/playwright/ga/22014225635/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
-| Remote Metrics (debug) | [#22014173363](https://github.com/zensgit/metasheet2/actions/runs/22014173363) | PASS | `output/playwright/ga/22014173363/metrics.log`, `output/playwright/ga/22014173363/step-summary.md` |
-| Remote Upload Cleanup (debug, dry-run) | [#22014183752](https://github.com/zensgit/metasheet2/actions/runs/22014183752) | PASS | `output/playwright/ga/22014183752/cleanup.log`, `output/playwright/ga/22014183752/step-summary.md` |
-| Daily Gate Dashboard (ignores `[DEBUG]` runs) | [#22014246043](https://github.com/zensgit/metasheet2/actions/runs/22014246043) | FAIL (expected) | `output/playwright/ga/22014246043/attendance-daily-gate-dashboard-22014246043-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014246043/attendance-daily-gate-dashboard-22014246043-1/attendance-daily-gate-dashboard.json` |
+| Storage Health (debug, expected FAIL; issue unchanged) | #22014157084 | FAIL (expected) | `output/playwright/ga/22014157084/storage.log`, `output/playwright/ga/22014157084/step-summary.md`, Issue: #159 |
+| Storage Health (non-debug; failure updates default issue) | #22014225635 | FAIL | `output/playwright/ga/22014225635/storage.log`, `output/playwright/ga/22014225635/step-summary.md`, Issue: #159 |
+| Remote Metrics (debug) | #22014173363 | PASS | `output/playwright/ga/22014173363/metrics.log`, `output/playwright/ga/22014173363/step-summary.md` |
+| Remote Upload Cleanup (debug, dry-run) | #22014183752 | PASS | `output/playwright/ga/22014183752/cleanup.log`, `output/playwright/ga/22014183752/step-summary.md` |
+| Daily Gate Dashboard (ignores `[DEBUG]` runs) | #22014246043 | FAIL (expected) | `output/playwright/ga/22014246043/attendance-daily-gate-dashboard-22014246043-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014246043/attendance-daily-gate-dashboard-22014246043-1/attendance-daily-gate-dashboard.json` |
 
 Issue immutability check for #159 (before vs after `#22014157084`):
 
@@ -333,12 +333,12 @@ This record validates:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Docker GC (prune attempt; first run disconnected) | [#22014349249](https://github.com/zensgit/metasheet2/actions/runs/22014349249) | FAIL | `output/playwright/ga/22014349249/docker-gc.log`, `output/playwright/ga/22014349249/step-summary.md` |
-| Remote Docker GC (prune already running; shows reclaimed disk) | [#22014433107](https://github.com/zensgit/metasheet2/actions/runs/22014433107) | FAIL | `output/playwright/ga/22014433107/docker-gc.log`, `output/playwright/ga/22014433107/step-summary.md` |
-| Remote Docker GC (prune=true, PASS) | [#22015221785](https://github.com/zensgit/metasheet2/actions/runs/22015221785) | PASS | `output/playwright/ga/22015221785/docker-gc.log`, `output/playwright/ga/22015221785/step-summary.md` |
-| Storage Health recovery (auto-close default issue) | [#22014448225](https://github.com/zensgit/metasheet2/actions/runs/22014448225) | PASS | `output/playwright/ga/22014448225/storage.log`, `output/playwright/ga/22014448225/step-summary.md`, Issue: [#159](https://github.com/zensgit/metasheet2/issues/159) |
-| Storage Health (post docker GC) | [#22015238312](https://github.com/zensgit/metasheet2/actions/runs/22015238312) | PASS | `output/playwright/ga/22015238312/storage.log`, `output/playwright/ga/22015238312/step-summary.md` |
-| Daily Gate Dashboard (post recovery) | [#22014457079](https://github.com/zensgit/metasheet2/actions/runs/22014457079) | PASS | `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.json` |
+| Remote Docker GC (prune attempt; first run disconnected) | #22014349249 | FAIL | `output/playwright/ga/22014349249/docker-gc.log`, `output/playwright/ga/22014349249/step-summary.md` |
+| Remote Docker GC (prune already running; shows reclaimed disk) | #22014433107 | FAIL | `output/playwright/ga/22014433107/docker-gc.log`, `output/playwright/ga/22014433107/step-summary.md` |
+| Remote Docker GC (prune=true, PASS) | #22015221785 | PASS | `output/playwright/ga/22015221785/docker-gc.log`, `output/playwright/ga/22015221785/step-summary.md` |
+| Storage Health recovery (auto-close default issue) | #22014448225 | PASS | `output/playwright/ga/22014448225/storage.log`, `output/playwright/ga/22014448225/step-summary.md`, Issue: #159 |
+| Storage Health (post docker GC) | #22015238312 | PASS | `output/playwright/ga/22015238312/storage.log`, `output/playwright/ga/22015238312/step-summary.md` |
+| Daily Gate Dashboard (post recovery) | #22014457079 | PASS | `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22014457079/attendance-daily-gate-dashboard-22014457079-1/attendance-daily-gate-dashboard.json` |
 
 Evidence highlights:
 
@@ -362,8 +362,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Storage Health (computed metrics OK) | [#22018028547](https://github.com/zensgit/metasheet2/actions/runs/22018028547) | PASS | `output/playwright/ga/22018028547/storage.log`, `output/playwright/ga/22018028547/step-summary.md` |
-| Daily Gate Dashboard (picks up latest Storage Health run) | [#22018238598](https://github.com/zensgit/metasheet2/actions/runs/22018238598) | PASS | `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.json` |
+| Remote Storage Health (computed metrics OK) | #22018028547 | PASS | `output/playwright/ga/22018028547/storage.log`, `output/playwright/ga/22018028547/step-summary.md` |
+| Daily Gate Dashboard (picks up latest Storage Health run) | #22018238598 | PASS | `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22018238598/attendance-daily-gate-dashboard-22018238598-1/attendance-daily-gate-dashboard.json` |
 
 ## Post-Go Validation (2026-02-14): Perf Baseline Artifacts Include perf.log
 
@@ -380,7 +380,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf baseline (10k, upload_csv=true, perf.log captured) | [#22018316457](https://github.com/zensgit/metasheet2/actions/runs/22018316457) | PASS | `output/playwright/ga/22018316457/perf.log`, `output/playwright/ga/22018316457/attendance-perf-*/perf-summary.json` |
+| Perf baseline (10k, upload_csv=true, perf.log captured) | #22018316457 | PASS | `output/playwright/ga/22018316457/perf.log`, `output/playwright/ga/22018316457/attendance-perf-*/perf-summary.json` |
 
 ## Post-Go Validation (2026-02-14): Perf Long Run Artifacts Include perf.log
 
@@ -397,7 +397,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf longrun (upload_csv=true, perf.log captured) | [#22020987167](https://github.com/zensgit/metasheet2/actions/runs/22020987167) | PASS | `output/playwright/ga/22020987167/**/perf.log`, `output/playwright/ga/22020987167/**/perf-summary.json`, `output/playwright/ga/22020987167/**/attendance-import-perf-longrun-trend.md` |
+| Perf longrun (upload_csv=true, perf.log captured) | #22020987167 | PASS | `output/playwright/ga/22020987167/**/perf.log`, `output/playwright/ga/22020987167/**/perf-summary.json`, `output/playwright/ga/22020987167/**/attendance-import-perf-longrun-trend.md` |
 
 ## Post-Go Validation (2026-02-14): Remote Metrics Gate Adds Reason + Missing Metrics
 
@@ -417,9 +417,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Metrics (reason visible) | [#22021069004](https://github.com/zensgit/metasheet2/actions/runs/22021069004) | PASS | `output/playwright/ga/22021069004/step-summary.md`, `output/playwright/ga/22021069004/metrics.log` |
-| Remote Metrics drill (fetch failure classification, expected FAIL; safe issue title) | [#22021555071](https://github.com/zensgit/metasheet2/actions/runs/22021555071) | FAIL (expected) | `output/playwright/ga/22021555071/step-summary.md`, `output/playwright/ga/22021555071/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
-| Remote Metrics drill recovery (issue auto-close) | [#22021568702](https://github.com/zensgit/metasheet2/actions/runs/22021568702) | PASS | `output/playwright/ga/22021568702/step-summary.md`, `output/playwright/ga/22021568702/metrics.log`, Issue: [#163](https://github.com/zensgit/metasheet2/issues/163) |
+| Remote Metrics (reason visible) | #22021069004 | PASS | `output/playwright/ga/22021069004/step-summary.md`, `output/playwright/ga/22021069004/metrics.log` |
+| Remote Metrics drill (fetch failure classification, expected FAIL; safe issue title) | #22021555071 | FAIL (expected) | `output/playwright/ga/22021555071/step-summary.md`, `output/playwright/ga/22021555071/metrics.log`, Issue: #163 |
+| Remote Metrics drill recovery (issue auto-close) | #22021568702 | PASS | `output/playwright/ga/22021568702/step-summary.md`, `output/playwright/ga/22021568702/metrics.log`, Issue: #163 |
 
 ## Post-Go Validation (2026-02-15): Daily Gate Dashboard Remediation Hints
 
@@ -438,7 +438,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Gate Dashboard (remediation hints + quick rerun commands) | [#22036640772](https://github.com/zensgit/metasheet2/actions/runs/22036640772) | PASS | `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (remediation hints + quick rerun commands) | #22036640772 | PASS | `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036640772/attendance-daily-gate-dashboard-22036640772-1/attendance-daily-gate-dashboard.json` |
 
 ## Post-Go Validation (2026-02-15): Daily Gate Dashboard Failure Enrichment (Reason Parsing)
 
@@ -459,12 +459,12 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason visible) | [#22036997527](https://github.com/zensgit/metasheet2/actions/runs/22036997527) | FAIL (expected) | `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22036997527/gate-meta/metrics/meta.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; storage reason visible) | [#22037190866](https://github.com/zensgit/metasheet2/actions/runs/22037190866) | FAIL (expected) | `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/gate-meta/storage/meta.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; preflight+cleanup reason visible) | [#22037367389](https://github.com/zensgit/metasheet2/actions/runs/22037367389) | FAIL (expected) | `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/gate-meta/preflight/meta.json`, `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/gate-meta/cleanup/meta.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; perf+longrun summaries visible) | [#22037515667](https://github.com/zensgit/metasheet2/actions/runs/22037515667) | FAIL (expected) | `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/perf/meta.json`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/longrun/meta.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates failure details visible) | [#22037671365](https://github.com/zensgit/metasheet2/actions/runs/22037671365) | FAIL (expected) | `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/gate-meta/strict/meta.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates reason codes visible) | [#22037869488](https://github.com/zensgit/metasheet2/actions/runs/22037869488) | FAIL (expected) | `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/gate-meta/strict/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason visible) | #22036997527 | FAIL (expected) | `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22036997527/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22036997527/gate-meta/metrics/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; storage reason visible) | #22037190866 | FAIL (expected) | `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22037190866/attendance-daily-gate-dashboard-22037190866-1/gate-meta/storage/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; preflight+cleanup reason visible) | #22037367389 | FAIL (expected) | `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/gate-meta/preflight/meta.json`, `output/playwright/ga/22037367389/attendance-daily-gate-dashboard-22037367389-1/gate-meta/cleanup/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; perf+longrun summaries visible) | #22037515667 | FAIL (expected) | `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/perf/meta.json`, `output/playwright/ga/22037515667/attendance-daily-gate-dashboard-22037515667-1/gate-meta/longrun/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates failure details visible) | #22037671365 | FAIL (expected) | `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037671365/attendance-daily-gate-dashboard-22037671365-1/gate-meta/strict/meta.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; strict gates reason codes visible) | #22037869488 | FAIL (expected) | `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22037869488/attendance-daily-gate-dashboard-22037869488-1/gate-meta/strict/meta.json` |
 
 ## Post-Go Validation (2026-02-15): Remote Preflight Debug skip_host_sync
 
@@ -482,8 +482,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Preflight (debug + drill, safe issue title) | [#22037980657](https://github.com/zensgit/metasheet2/actions/runs/22037980657) | FAIL (expected) | `output/playwright/ga/22037980657/attendance-remote-preflight-prod-22037980657-1/step-summary.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
-| Daily Gate Dashboard (recovery, closes drill issue) | [#22038001045](https://github.com/zensgit/metasheet2/actions/runs/22038001045) | PASS | `output/playwright/ga/22038001045/attendance-daily-gate-dashboard-22038001045-1/attendance-daily-gate-dashboard.md`, Issue: [#168](https://github.com/zensgit/metasheet2/issues/168) |
+| Remote Preflight (debug + drill, safe issue title) | #22037980657 | FAIL (expected) | `output/playwright/ga/22037980657/attendance-remote-preflight-prod-22037980657-1/step-summary.md`, Issue: #168 |
+| Daily Gate Dashboard (recovery, closes drill issue) | #22038001045 | PASS | `output/playwright/ga/22038001045/attendance-daily-gate-dashboard-22038001045-1/attendance-daily-gate-dashboard.md`, Issue: #168 |
 
 ## Post-Go Validation (2026-02-15): Strict Gates apiSmoke Audit Export Reason Coverage
 
@@ -501,9 +501,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; apiSmoke reason simulated) | [#22038312244](https://github.com/zensgit/metasheet2/actions/runs/22038312244) | FAIL (expected) | `output/playwright/ga/22038312244/drill/gate-summary.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038333334](https://github.com/zensgit/metasheet2/actions/runs/22038333334) | FAIL (expected) | `output/playwright/ga/22038333334/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038333334/gate-meta/strict/meta.json`, Issue: [#169](https://github.com/zensgit/metasheet2/issues/169) |
-| Daily Gate Dashboard (recovery; closes drill issue) | [#22038356301](https://github.com/zensgit/metasheet2/actions/runs/22038356301) | PASS | `output/playwright/ga/22038356301/attendance-daily-gate-dashboard.md`, Issue: [#169](https://github.com/zensgit/metasheet2/issues/169) |
+| Strict Gates drill (expected FAIL; apiSmoke reason simulated) | #22038312244 | FAIL (expected) | `output/playwright/ga/22038312244/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | #22038333334 | FAIL (expected) | `output/playwright/ga/22038333334/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038333334/gate-meta/strict/meta.json`, Issue: #169 |
+| Daily Gate Dashboard (recovery; closes drill issue) | #22038356301 | PASS | `output/playwright/ga/22038356301/attendance-daily-gate-dashboard.md`, Issue: #169 |
 
 Local replay (historical strict gate apiSmoke logs):
 
@@ -533,9 +533,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; apiSmoke reason simulated) | [#22038559204](https://github.com/zensgit/metasheet2/actions/runs/22038559204) | FAIL (expected) | `output/playwright/ga/22038559204/drill/gate-summary.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038573057](https://github.com/zensgit/metasheet2/actions/runs/22038573057) | FAIL (expected) | `output/playwright/ga/22038573057/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038573057/gate-meta/strict/meta.json`, Issue: [#170](https://github.com/zensgit/metasheet2/issues/170) |
-| Daily Gate Dashboard (recovery; closes drill issue) | [#22038586374](https://github.com/zensgit/metasheet2/actions/runs/22038586374) | PASS | `output/playwright/ga/22038586374/attendance-daily-gate-dashboard.md`, Issue: [#170](https://github.com/zensgit/metasheet2/issues/170) |
+| Strict Gates drill (expected FAIL; apiSmoke reason simulated) | #22038559204 | FAIL (expected) | `output/playwright/ga/22038559204/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | #22038573057 | FAIL (expected) | `output/playwright/ga/22038573057/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038573057/gate-meta/strict/meta.json`, Issue: #170 |
+| Daily Gate Dashboard (recovery; closes drill issue) | #22038586374 | PASS | `output/playwright/ga/22038586374/attendance-daily-gate-dashboard.md`, Issue: #170 |
 
 ## Post-Go Validation (2026-02-15): Strict Gates Provisioning Reason Coverage
 
@@ -553,9 +553,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; provisioning reason simulated) | [#22038675256](https://github.com/zensgit/metasheet2/actions/runs/22038675256) | FAIL (expected) | `output/playwright/ga/22038675256/drill/gate-summary.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038687016](https://github.com/zensgit/metasheet2/actions/runs/22038687016) | FAIL (expected) | `output/playwright/ga/22038687016/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038687016/gate-meta/strict/meta.json`, Issue: [#171](https://github.com/zensgit/metasheet2/issues/171) |
-| Daily Gate Dashboard (recovery; closes drill issue) | [#22038701760](https://github.com/zensgit/metasheet2/actions/runs/22038701760) | PASS | `output/playwright/ga/22038701760/attendance-daily-gate-dashboard.md`, Issue: [#171](https://github.com/zensgit/metasheet2/issues/171) |
+| Strict Gates drill (expected FAIL; provisioning reason simulated) | #22038675256 | FAIL (expected) | `output/playwright/ga/22038675256/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | #22038687016 | FAIL (expected) | `output/playwright/ga/22038687016/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038687016/gate-meta/strict/meta.json`, Issue: #171 |
+| Daily Gate Dashboard (recovery; closes drill issue) | #22038701760 | PASS | `output/playwright/ga/22038701760/attendance-daily-gate-dashboard.md`, Issue: #171 |
 
 ## Post-Go Validation (2026-02-15): Strict Gates Playwright Reason Coverage
 
@@ -574,12 +574,12 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; playwrightDesktop reason simulated) | [#22038724666](https://github.com/zensgit/metasheet2/actions/runs/22038724666) | FAIL (expected) | `output/playwright/ga/22038724666/drill/gate-summary.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | [#22038735962](https://github.com/zensgit/metasheet2/actions/runs/22038735962) | FAIL (expected) | `output/playwright/ga/22038735962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038735962/gate-meta/strict/meta.json`, Issue: [#172](https://github.com/zensgit/metasheet2/issues/172) |
-| Daily Gate Dashboard (recovery; closes drill issue) | [#22038750877](https://github.com/zensgit/metasheet2/actions/runs/22038750877) | PASS | `output/playwright/ga/22038750877/attendance-daily-gate-dashboard.md`, Issue: [#172](https://github.com/zensgit/metasheet2/issues/172) |
-| Strict Gates drill (expected FAIL; playwrightDesktop auth failure simulated) | [#22038819581](https://github.com/zensgit/metasheet2/actions/runs/22038819581) | FAIL (expected) | `output/playwright/ga/22038819581/drill/gate-summary.json` |
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; auth remediation hint visible) | [#22038829941](https://github.com/zensgit/metasheet2/actions/runs/22038829941) | FAIL (expected) | `output/playwright/ga/22038829941/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038829941/gate-meta/strict/meta.json`, Issue: [#173](https://github.com/zensgit/metasheet2/issues/173) |
-| Daily Gate Dashboard (recovery; closes drill issue) | [#22038845477](https://github.com/zensgit/metasheet2/actions/runs/22038845477) | PASS | `output/playwright/ga/22038845477/attendance-daily-gate-dashboard.md`, Issue: [#173](https://github.com/zensgit/metasheet2/issues/173) |
+| Strict Gates drill (expected FAIL; playwrightDesktop reason simulated) | #22038724666 | FAIL (expected) | `output/playwright/ga/22038724666/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; reason + remediation hint visible) | #22038735962 | FAIL (expected) | `output/playwright/ga/22038735962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038735962/gate-meta/strict/meta.json`, Issue: #172 |
+| Daily Gate Dashboard (recovery; closes drill issue) | #22038750877 | PASS | `output/playwright/ga/22038750877/attendance-daily-gate-dashboard.md`, Issue: #172 |
+| Strict Gates drill (expected FAIL; playwrightDesktop auth failure simulated) | #22038819581 | FAIL (expected) | `output/playwright/ga/22038819581/drill/gate-summary.json` |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; auth remediation hint visible) | #22038829941 | FAIL (expected) | `output/playwright/ga/22038829941/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22038829941/gate-meta/strict/meta.json`, Issue: #173 |
+| Daily Gate Dashboard (recovery; closes drill issue) | #22038845477 | PASS | `output/playwright/ga/22038845477/attendance-daily-gate-dashboard.md`, Issue: #173 |
 
 ## Post-Go Validation (2026-02-15): Manual Strict Gates + Daily Dashboard PASS
 
@@ -592,8 +592,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (manual, non-drill) | [#22038886570](https://github.com/zensgit/metasheet2/actions/runs/22038886570) | PASS | `output/playwright/ga/22038886570/20260215-161416-1/gate-summary.json`, `output/playwright/ga/22038886570/20260215-161416-2/gate-summary.json` |
-| Daily Gate Dashboard (manual, non-drill) | [#22038947184](https://github.com/zensgit/metasheet2/actions/runs/22038947184) | PASS | `output/playwright/ga/22038947184/attendance-daily-gate-dashboard.md` |
+| Strict Gates (manual, non-drill) | #22038886570 | PASS | `output/playwright/ga/22038886570/20260215-161416-1/gate-summary.json`, `output/playwright/ga/22038886570/20260215-161416-2/gate-summary.json` |
+| Daily Gate Dashboard (manual, non-drill) | #22038947184 | PASS | `output/playwright/ga/22038947184/attendance-daily-gate-dashboard.md` |
 
 ## Post-Go Validation (2026-02-15): Strict Gates Fast Alert Includes Gate Summary
 
@@ -612,11 +612,11 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; fast alert issue includes gate summary block) | [#22039515349](https://github.com/zensgit/metasheet2/actions/runs/22039515349) | FAIL (expected) | `output/playwright/ga/22039515349/drill/gate-summary.json`, Issue: [#174](https://github.com/zensgit/metasheet2/issues/174) |
-| Strict Gates (manual, non-drill; post-fix) | [#22039600337](https://github.com/zensgit/metasheet2/actions/runs/22039600337) | PASS | `output/playwright/ga/22039600337/20260215-170508-1/gate-summary.json`, `output/playwright/ga/22039600337/20260215-170508-2/gate-summary.json` |
-| Daily Gate Dashboard (manual, non-drill; ignores strict `[DRILL]` runs) | [#22039675025](https://github.com/zensgit/metasheet2/actions/runs/22039675025) | PASS | `output/playwright/ga/22039675025/attendance-daily-gate-dashboard.md` |
-| Strict Gates drill rerun (expected FAIL; fast alert adds comment when issue already open) | [#22046721909](https://github.com/zensgit/metasheet2/actions/runs/22046721909) | FAIL (expected) | `output/playwright/ga/22046721909/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |
-| Strict Gates drill rerun (expected FAIL; verify comment path) | [#22046734857](https://github.com/zensgit/metasheet2/actions/runs/22046734857) | FAIL (expected) | `output/playwright/ga/22046734857/drill/gate-summary.json`, Issue: [#175](https://github.com/zensgit/metasheet2/issues/175) |
+| Strict Gates drill (expected FAIL; fast alert issue includes gate summary block) | #22039515349 | FAIL (expected) | `output/playwright/ga/22039515349/drill/gate-summary.json`, Issue: #174 |
+| Strict Gates (manual, non-drill; post-fix) | #22039600337 | PASS | `output/playwright/ga/22039600337/20260215-170508-1/gate-summary.json`, `output/playwright/ga/22039600337/20260215-170508-2/gate-summary.json` |
+| Daily Gate Dashboard (manual, non-drill; ignores strict `[DRILL]` runs) | #22039675025 | PASS | `output/playwright/ga/22039675025/attendance-daily-gate-dashboard.md` |
+| Strict Gates drill rerun (expected FAIL; fast alert adds comment when issue already open) | #22046721909 | FAIL (expected) | `output/playwright/ga/22046721909/drill/gate-summary.json`, Issue: #175 |
+| Strict Gates drill rerun (expected FAIL; verify comment path) | #22046734857 | FAIL (expected) | `output/playwright/ga/22046734857/drill/gate-summary.json`, Issue: #175 |
 
 ## Post-Go Validation (2026-02-16): Daily Dashboard Embeds Escalation Issue Link
 
@@ -633,8 +633,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; report includes issue link) | [#22046861202](https://github.com/zensgit/metasheet2/actions/runs/22046861202) | FAIL (expected) | `output/playwright/ga/22046861202/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
-| Daily Gate Dashboard recovery (expected PASS; report shows none open; issue closed) | [#22046878200](https://github.com/zensgit/metasheet2/actions/runs/22046878200) | PASS | `output/playwright/ga/22046878200/attendance-daily-gate-dashboard.md`, Issue: [#176](https://github.com/zensgit/metasheet2/issues/176) |
+| Daily Gate Dashboard (include_drill_runs=true; expected FAIL; report includes issue link) | #22046861202 | FAIL (expected) | `output/playwright/ga/22046861202/attendance-daily-gate-dashboard.md`, Issue: #176 |
+| Daily Gate Dashboard recovery (expected PASS; report shows none open; issue closed) | #22046878200 | PASS | `output/playwright/ga/22046878200/attendance-daily-gate-dashboard.md`, Issue: #176 |
 
 ## Post-Go Validation (2026-02-16): Daily Dashboard Lists Open P1 Tracking Issues
 
@@ -651,10 +651,10 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Long Run drill (P1 issue open, expected FAIL) | [#22047000256](https://github.com/zensgit/metasheet2/actions/runs/22047000256) | FAIL (expected) | `output/playwright/ga/22047000256/drill/drill.txt`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
-| Daily Gate Dashboard (expected PASS; shows open P1 tracking issue) | [#22047013470](https://github.com/zensgit/metasheet2/actions/runs/22047013470) | PASS | `output/playwright/ga/22047013470/attendance-daily-gate-dashboard.md`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
-| Perf Long Run drill recovery (P1 issue auto-close) | [#22047026564](https://github.com/zensgit/metasheet2/actions/runs/22047026564) | PASS | `output/playwright/ga/22047026564/drill/drill.txt`, Issue: [#177](https://github.com/zensgit/metasheet2/issues/177) |
-| Daily Gate Dashboard (expected PASS; no open P1 tracking issues) | [#22047038178](https://github.com/zensgit/metasheet2/actions/runs/22047038178) | PASS | `output/playwright/ga/22047038178/attendance-daily-gate-dashboard.md` |
+| Perf Long Run drill (P1 issue open, expected FAIL) | #22047000256 | FAIL (expected) | `output/playwright/ga/22047000256/drill/drill.txt`, Issue: #177 |
+| Daily Gate Dashboard (expected PASS; shows open P1 tracking issue) | #22047013470 | PASS | `output/playwright/ga/22047013470/attendance-daily-gate-dashboard.md`, Issue: #177 |
+| Perf Long Run drill recovery (P1 issue auto-close) | #22047026564 | PASS | `output/playwright/ga/22047026564/drill/drill.txt`, Issue: #177 |
+| Daily Gate Dashboard (expected PASS; no open P1 tracking issues) | #22047038178 | PASS | `output/playwright/ga/22047038178/attendance-daily-gate-dashboard.md` |
 
 ## Post-Go Validation (2026-02-16): Daily Dashboard Reasons + Artifact Download Commands
 
@@ -671,8 +671,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; reasons + download commands visible; issue link visible) | [#22047507241](https://github.com/zensgit/metasheet2/actions/runs/22047507241) | FAIL (expected) | `output/playwright/ga/22047507241/attendance-daily-gate-dashboard.md`, Issue: [#178](https://github.com/zensgit/metasheet2/issues/178) |
-| Daily Gate Dashboard recovery (expected PASS; issue closed) | [#22047524824](https://github.com/zensgit/metasheet2/actions/runs/22047524824) | PASS | `output/playwright/ga/22047524824/attendance-daily-gate-dashboard.md`, Issue: [#178](https://github.com/zensgit/metasheet2/issues/178) |
+| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; reasons + download commands visible; issue link visible) | #22047507241 | FAIL (expected) | `output/playwright/ga/22047507241/attendance-daily-gate-dashboard.md`, Issue: #178 |
+| Daily Gate Dashboard recovery (expected PASS; issue closed) | #22047524824 | PASS | `output/playwright/ga/22047524824/attendance-daily-gate-dashboard.md`, Issue: #178 |
 
 ## Post-Go Validation (2026-02-16): Strict Fast Alert Comment De-Dupe (Rerun Attempts)
 
@@ -688,9 +688,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; issue created with body) | [#22047540386](https://github.com/zensgit/metasheet2/actions/runs/22047540386) | FAIL (expected) | `output/playwright/ga/22047540386/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
-| Strict Gates drill rerun (expected FAIL; issue already open; adds 1 comment) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
-| Strict Gates drill rerun attempt=2 (expected FAIL; duplicate comment skipped) | [#22047554624](https://github.com/zensgit/metasheet2/actions/runs/22047554624) | FAIL (expected) | `output/playwright/ga/22047554624/attempt2/drill/gate-summary.json`, Issue: [#179](https://github.com/zensgit/metasheet2/issues/179) |
+| Strict Gates drill (expected FAIL; issue created with body) | #22047540386 | FAIL (expected) | `output/playwright/ga/22047540386/drill/gate-summary.json`, Issue: #179 |
+| Strict Gates drill rerun (expected FAIL; issue already open; adds 1 comment) | #22047554624 | FAIL (expected) | `output/playwright/ga/22047554624/drill/gate-summary.json`, Issue: #179 |
+| Strict Gates drill rerun attempt=2 (expected FAIL; duplicate comment skipped) | #22047554624 | FAIL (expected) | `output/playwright/ga/22047554624/attempt2/drill/gate-summary.json`, Issue: #179 |
 
 ## Post-Go Validation (2026-02-16): Dashboard `gateFlat` + Strict Artifacts Cmd In Escalation Section
 
@@ -707,8 +707,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; strict artifacts cmd visible; gateFlat visible) | [#22047781872](https://github.com/zensgit/metasheet2/actions/runs/22047781872) | FAIL (expected) | `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.json`, Issue: [#180](https://github.com/zensgit/metasheet2/issues/180) |
-| Daily Gate Dashboard recovery (expected PASS; issue closed) | [#22047797730](https://github.com/zensgit/metasheet2/actions/runs/22047797730) | PASS | `output/playwright/ga/22047797730/attendance-daily-gate-dashboard.md`, Issue: [#180](https://github.com/zensgit/metasheet2/issues/180) |
+| Daily Gate Dashboard drill (include_drill_runs=true; expected FAIL; strict artifacts cmd visible; gateFlat visible) | #22047781872 | FAIL (expected) | `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22047781872/attendance-daily-gate-dashboard.json`, Issue: #180 |
+| Daily Gate Dashboard recovery (expected PASS; issue closed) | #22047797730 | PASS | `output/playwright/ga/22047797730/attendance-daily-gate-dashboard.md`, Issue: #180 |
 
 ## Post-Go Validation (2026-02-16): Strict Fast Alert Title Split + Auto-Close On Recovery
 
@@ -725,8 +725,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates drill (expected FAIL; opens fast alert issue) | [#22047808837](https://github.com/zensgit/metasheet2/actions/runs/22047808837) | FAIL (expected) | `output/playwright/ga/22047808837/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |
-| Strict Gates drill recovery (expected PASS; auto-close issue) | [#22047821432](https://github.com/zensgit/metasheet2/actions/runs/22047821432) | PASS | `output/playwright/ga/22047821432/drill/gate-summary.json`, Issue: [#181](https://github.com/zensgit/metasheet2/issues/181) |
+| Strict Gates drill (expected FAIL; opens fast alert issue) | #22047808837 | FAIL (expected) | `output/playwright/ga/22047808837/drill/gate-summary.json`, Issue: #181 |
+| Strict Gates drill recovery (expected PASS; auto-close issue) | #22047821432 | PASS | `output/playwright/ga/22047821432/drill/gate-summary.json`, Issue: #181 |
 
 ## Post-Go Validation (2026-02-16): Dashboard RunId De-dup + Strict-only P0 Suppression
 
@@ -744,14 +744,14 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill baseline | [#22050219004](https://github.com/zensgit/metasheet2/actions/runs/22050219004) | PASS | `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.json` |
-| Strict drill fail (strict-only source) | [#22050232447](https://github.com/zensgit/metasheet2/actions/runs/22050232447) | FAIL (expected) | `output/playwright/ga/22050232447/attendance-strict-gates-prod-22050232447-1/drill/gate-summary.json`, Issue: [#182](https://github.com/zensgit/metasheet2/issues/182) |
-| Daily Dashboard include-drill (strict-only; suppression path) | [#22050242111](https://github.com/zensgit/metasheet2/actions/runs/22050242111) | FAIL (expected) | `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.md` (Escalation section: `Issue: suppressed ...`), `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`) |
-| Preflight drill fail (force non strict-only P0) | [#22050258287](https://github.com/zensgit/metasheet2/actions/runs/22050258287) | FAIL (expected) | `output/playwright/ga/22050258287/attendance-remote-preflight-prod-22050258287-1/preflight.log` |
-| Daily Dashboard fail run (issue created once) | [#22050266002](https://github.com/zensgit/metasheet2/actions/runs/22050266002) | FAIL (expected) | `output/playwright/ga/22050266002/attendance-daily-gate-dashboard.md`, Issue: [#183](https://github.com/zensgit/metasheet2/issues/183) |
-| Daily Dashboard rerun attempt=2 (same runId; duplicate skipped) | [#22050266002](https://github.com/zensgit/metasheet2/actions/runs/22050266002) | FAIL (expected) | `output/playwright/ga/22050266002-attempt2/attendance-daily-gate-dashboard.md` (Escalation section: `(skipped_duplicate)`), `gh issue view 183 --json comments` => empty list |
-| Strict drill recovery (close strict drill issue) | [#22050296690](https://github.com/zensgit/metasheet2/actions/runs/22050296690) | PASS | `output/playwright/ga/22050296690/attendance-strict-gates-prod-22050296690-1/drill/gate-summary.json`, Issue: [#182](https://github.com/zensgit/metasheet2/issues/182) closed |
-| Daily Dashboard recovery (close dashboard drill issue) | [#22050308198](https://github.com/zensgit/metasheet2/actions/runs/22050308198) | PASS | `output/playwright/ga/22050308198/attendance-daily-gate-dashboard.md`, Issue: [#183](https://github.com/zensgit/metasheet2/issues/183) closed |
+| Daily Dashboard non-drill baseline | #22050219004 | PASS | `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22050219004/attendance-daily-gate-dashboard.json` |
+| Strict drill fail (strict-only source) | #22050232447 | FAIL (expected) | `output/playwright/ga/22050232447/attendance-strict-gates-prod-22050232447-1/drill/gate-summary.json`, Issue: #182 |
+| Daily Dashboard include-drill (strict-only; suppression path) | #22050242111 | FAIL (expected) | `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.md` (Escalation section: `Issue: suppressed ...`), `output/playwright/ga/22050242111/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`) |
+| Preflight drill fail (force non strict-only P0) | #22050258287 | FAIL (expected) | `output/playwright/ga/22050258287/attendance-remote-preflight-prod-22050258287-1/preflight.log` |
+| Daily Dashboard fail run (issue created once) | #22050266002 | FAIL (expected) | `output/playwright/ga/22050266002/attendance-daily-gate-dashboard.md`, Issue: #183 |
+| Daily Dashboard rerun attempt=2 (same runId; duplicate skipped) | #22050266002 | FAIL (expected) | `output/playwright/ga/22050266002-attempt2/attendance-daily-gate-dashboard.md` (Escalation section: `(skipped_duplicate)`), `gh issue view 183 --json comments` => empty list |
+| Strict drill recovery (close strict drill issue) | #22050296690 | PASS | `output/playwright/ga/22050296690/attendance-strict-gates-prod-22050296690-1/drill/gate-summary.json`, Issue: #182 closed |
+| Daily Dashboard recovery (close dashboard drill issue) | #22050308198 | PASS | `output/playwright/ga/22050308198/attendance-daily-gate-dashboard.md`, Issue: #183 closed |
 
 ## Post-Go Validation (2026-02-16): Final Non-Drill PASS After Dashboard Hardening
 
@@ -768,8 +768,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (manual, non-drill; strict chain full pass) | [#22060140322](https://github.com/zensgit/metasheet2/actions/runs/22060140322) | PASS | `output/playwright/ga/22060140322/20260216-110306-1/gate-summary.json`, `output/playwright/ga/22060140322/20260216-110306-2/gate-summary.json` |
-| Daily Gate Dashboard (manual, non-drill; final pass) | [#22060251897](https://github.com/zensgit/metasheet2/actions/runs/22060251897) | PASS | `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`, `p0Status=pass`, `overallStatus=pass`) |
+| Strict Gates (manual, non-drill; strict chain full pass) | #22060140322 | PASS | `output/playwright/ga/22060140322/20260216-110306-1/gate-summary.json`, `output/playwright/ga/22060140322/20260216-110306-2/gate-summary.json` |
+| Daily Gate Dashboard (manual, non-drill; final pass) | #22060251897 | PASS | `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22060251897/attendance-daily-gate-dashboard.json` (`gateFlat.schemaVersion=2`, `p0Status=pass`, `overallStatus=pass`) |
 
 ## Post-Go Validation (2026-02-16): Dashboard `escalationIssue` JSON Contract
 
@@ -786,11 +786,11 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (contract PASS path) | [#22067085381](https://github.com/zensgit/metasheet2/actions/runs/22067085381) | PASS | `output/playwright/ga/22067085381/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=none_or_closed`) |
-| Strict drill fail (source for strict-only P0) | [#22067119138](https://github.com/zensgit/metasheet2/actions/runs/22067119138) | FAIL (expected) | `output/playwright/ga/22067119138/attendance-strict-gates-prod-22067119138-1/drill/gate-summary.json`, Issue: [#184](https://github.com/zensgit/metasheet2/issues/184) |
-| Preflight recovery (ensure strict-only condition) | [#22067169136](https://github.com/zensgit/metasheet2/actions/runs/22067169136) | PASS | `output/playwright/ga/22067169136/attendance-remote-preflight-prod-22067169136-1/step-summary.md` |
-| Daily Dashboard include-drill strict-only suppression | [#22067185239](https://github.com/zensgit/metasheet2/actions/runs/22067185239) | FAIL (expected) | `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_strict_only`, `action=suppressed_strict_only_closed`), `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.md`, Issue: [#185](https://github.com/zensgit/metasheet2/issues/185) closed |
-| Strict drill recovery (cleanup close) | [#22067219193](https://github.com/zensgit/metasheet2/actions/runs/22067219193) | PASS | `output/playwright/ga/22067219193/attendance-strict-gates-prod-22067219193-1/drill/gate-summary.json`, Issue: [#184](https://github.com/zensgit/metasheet2/issues/184) closed |
+| Daily Dashboard non-drill (contract PASS path) | #22067085381 | PASS | `output/playwright/ga/22067085381/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=none_or_closed`) |
+| Strict drill fail (source for strict-only P0) | #22067119138 | FAIL (expected) | `output/playwright/ga/22067119138/attendance-strict-gates-prod-22067119138-1/drill/gate-summary.json`, Issue: #184 |
+| Preflight recovery (ensure strict-only condition) | #22067169136 | PASS | `output/playwright/ga/22067169136/attendance-remote-preflight-prod-22067169136-1/step-summary.md` |
+| Daily Dashboard include-drill strict-only suppression | #22067185239 | FAIL (expected) | `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_strict_only`, `action=suppressed_strict_only_closed`), `output/playwright/ga/22067185239/attendance-daily-gate-dashboard.md`, Issue: #185 closed |
+| Strict drill recovery (cleanup close) | #22067219193 | PASS | `output/playwright/ga/22067219193/attendance-strict-gates-prod-22067219193-1/drill/gate-summary.json`, Issue: #184 closed |
 
 ## Post-Go Validation (2026-02-17): Dashboard JSON Contract Is Enforced By Workflow Step
 
@@ -807,7 +807,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (contract validation step enabled) | [#22085141111](https://github.com/zensgit/metasheet2/actions/runs/22085141111) | PASS | `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.md` (`gateFlat.schemaVersion=2`, `escalationIssue.mode=none_or_closed`, `escalationIssue.p0Status=p0Status=pass`) |
+| Daily Dashboard non-drill (contract validation step enabled) | #22085141111 | PASS | `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22085141111/attendance-daily-gate-dashboard.md` (`gateFlat.schemaVersion=2`, `escalationIssue.mode=none_or_closed`, `escalationIssue.p0Status=p0Status=pass`) |
 
 ## Post-Go Validation (2026-02-17): Strict `gate-summary.json` Contract Is Enforced
 
@@ -825,9 +825,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict drill fail (expected), validator passes | [#22086891675](https://github.com/zensgit/metasheet2/actions/runs/22086891675) | FAIL (expected) | `output/playwright/ga/22086891675/attendance-strict-gates-prod-22086891675-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
-| Strict non-drill (validator in strict job) | [#22086903531](https://github.com/zensgit/metasheet2/actions/runs/22086903531) | PASS | `output/playwright/ga/22086903531/20260217-052052-1/gate-summary.json`, `output/playwright/ga/22086903531/20260217-052052-2/gate-summary.json` (`Validate gate-summary contract (strict)` step success) |
-| Strict drill recovery (close drill issue) | [#22086993681](https://github.com/zensgit/metasheet2/actions/runs/22086993681) | PASS | Issue [#186](https://github.com/zensgit/metasheet2/issues/186) closed |
+| Strict drill fail (expected), validator passes | #22086891675 | FAIL (expected) | `output/playwright/ga/22086891675/attendance-strict-gates-prod-22086891675-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
+| Strict non-drill (validator in strict job) | #22086903531 | PASS | `output/playwright/ga/22086903531/20260217-052052-1/gate-summary.json`, `output/playwright/ga/22086903531/20260217-052052-2/gate-summary.json` (`Validate gate-summary contract (strict)` step success) |
+| Strict drill recovery (close drill issue) | #22086993681 | PASS | Issue #186 closed |
 
 ## Post-Go Validation (2026-02-17): Dashboard Requires Strict Summary Evidence For PASS
 
@@ -844,7 +844,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (strict summary evidence present) | [#22097651139](https://github.com/zensgit/metasheet2/actions/runs/22097651139) | PASS | `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gates.strict.completed.id=22086903531`, `p0Status=pass`) |
+| Daily Dashboard non-drill (strict summary evidence present) | #22097651139 | PASS | `output/playwright/ga/22097651139/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gates.strict.completed.id=22086903531`, `p0Status=pass`) |
 
 ## Post-Go Validation (2026-02-17): Dashboard JSON Contract Enforces `strict success => summaryPresent`
 
@@ -861,7 +861,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (strict summary contract check active) | [#22097790153](https://github.com/zensgit/metasheet2/actions/runs/22097790153) | PASS | `output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22097790153/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`) |
+| Daily Dashboard non-drill (strict summary contract check active) | #22097790153 | PASS | `output/playwright/ga/22097790153/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22097790153/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`) |
 
 ## Post-Go Validation (2026-02-17): Dashboard Contract Checks Moved To Reusable Script
 
@@ -879,7 +879,7 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (script-based JSON contract validation) | [#22098000346](https://github.com/zensgit/metasheet2/actions/runs/22098000346) | PASS | `output/playwright/ga/22098000346/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22098000346/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`, `escalationIssue.mode=none_or_closed`) |
+| Daily Dashboard non-drill (script-based JSON contract validation) | #22098000346 | PASS | `output/playwright/ga/22098000346/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22098000346/gate-meta/strict/meta.json` (`gates.strict.completed.conclusion=success`, `gateFlat.strict.summaryPresent=true`, `escalationIssue.mode=none_or_closed`) |
 
 ## Post-Go Validation (2026-02-17): Strict Summary `schemaVersion` + `summaryValid` Enforced
 
@@ -897,10 +897,10 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict drill fail (expected), validator checks `schemaVersion>=1` | [#22098220215](https://github.com/zensgit/metasheet2/actions/runs/22098220215) | FAIL (expected) | `output/playwright/ga/22098220215/attendance-strict-gates-prod-22098220215-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
-| Strict non-drill (validator checks schema on real artifacts) | [#22098241004](https://github.com/zensgit/metasheet2/actions/runs/22098241004) | PASS | `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-1/gate-summary.json`, `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-2/gate-summary.json` (`schemaVersion=1`, `Validate gate-summary contract (strict)` step success) |
-| Daily Dashboard non-drill (strict summary validity contract) | [#22098385887](https://github.com/zensgit/metasheet2/actions/runs/22098385887) | PASS | `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gateFlat.strict.summaryValid=true`, `gateFlat.strict.summarySchemaVersion=1`) |
-| Strict drill recovery (close strict drill issue) | [#22098421982](https://github.com/zensgit/metasheet2/actions/runs/22098421982) | PASS | `output/playwright/ga/22098421982/attendance-strict-gates-prod-22098421982-1/drill/gate-summary.json`, Issue: [#187](https://github.com/zensgit/metasheet2/issues/187) closed |
+| Strict drill fail (expected), validator checks `schemaVersion>=1` | #22098220215 | FAIL (expected) | `output/playwright/ga/22098220215/attendance-strict-gates-prod-22098220215-1/drill/gate-summary.json` (`Validate gate-summary contract (drill)` step success) |
+| Strict non-drill (validator checks schema on real artifacts) | #22098241004 | PASS | `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-1/gate-summary.json`, `output/playwright/ga/22098241004/attendance-strict-gates-prod-22098241004-1/20260217-122132-2/gate-summary.json` (`schemaVersion=1`, `Validate gate-summary contract (strict)` step success) |
+| Daily Dashboard non-drill (strict summary validity contract) | #22098385887 | PASS | `output/playwright/ga/22098385887/attendance-daily-gate-dashboard-22098385887-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.summaryPresent=true`, `gateFlat.strict.summaryValid=true`, `gateFlat.strict.summarySchemaVersion=1`) |
+| Strict drill recovery (close strict drill issue) | #22098421982 | PASS | `output/playwright/ga/22098421982/attendance-strict-gates-prod-22098421982-1/drill/gate-summary.json`, Issue: #187 closed |
 
 ## Post-Go Validation (2026-02-17): Invalid Summary Drill + JSON Schema CI + Nightly Contract Matrix
 
@@ -923,12 +923,12 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict drill invalid summary (expected FAIL) | [#22099065860](https://github.com/zensgit/metasheet2/actions/runs/22099065860) | FAIL (expected) | `output/playwright/ga/22099065860/attendance-strict-gates-prod-22099065860-1/drill/gate-summary.json` (`gates.apiSmoke=BROKEN`) |
-| Daily Dashboard include-drill (expected FAIL; detects `STRICT_SUMMARY_INVALID`) | [#22099097589](https://github.com/zensgit/metasheet2/actions/runs/22099097589) | FAIL (expected) | `output/playwright/ga/22099097589/attendance-daily-gate-dashboard-22099097589-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.reasonCode=STRICT_SUMMARY_INVALID`, `summaryValid=false`) |
-| Strict drill recovery (close drill issue) | [#22099142413](https://github.com/zensgit/metasheet2/actions/runs/22099142413) | PASS | Issue [#188](https://github.com/zensgit/metasheet2/issues/188) closed |
-| Gate Contract Matrix (nightly/PR regression) | [#22099303110](https://github.com/zensgit/metasheet2/actions/runs/22099303110) | PASS | `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.invalid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.invalid.json` |
-| Strict non-drill (real path; schema validation step enabled) | [#22099435815](https://github.com/zensgit/metasheet2/actions/runs/22099435815) | PASS | `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-1/gate-summary.json`, `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-2/gate-summary.json` (`Validate gate-summary JSON schema (strict)=success`) |
-| Daily Dashboard non-drill baseline (post-recovery) | [#22099580597](https://github.com/zensgit/metasheet2/actions/runs/22099580597) | PASS | `output/playwright/ga/22099580597/attendance-daily-gate-dashboard-22099580597-1/attendance-daily-gate-dashboard.json` (`summaryPresent=true`, `summaryValid=true`, `summarySchemaVersion=1`) |
+| Strict drill invalid summary (expected FAIL) | #22099065860 | FAIL (expected) | `output/playwright/ga/22099065860/attendance-strict-gates-prod-22099065860-1/drill/gate-summary.json` (`gates.apiSmoke=BROKEN`) |
+| Daily Dashboard include-drill (expected FAIL; detects `STRICT_SUMMARY_INVALID`) | #22099097589 | FAIL (expected) | `output/playwright/ga/22099097589/attendance-daily-gate-dashboard-22099097589-1/attendance-daily-gate-dashboard.json` (`gateFlat.strict.reasonCode=STRICT_SUMMARY_INVALID`, `summaryValid=false`) |
+| Strict drill recovery (close drill issue) | #22099142413 | PASS | Issue #188 closed |
+| Gate Contract Matrix (nightly/PR regression) | #22099303110 | PASS | `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-strict-22099303110-1/strict/gate-summary.invalid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.valid.json`, `output/playwright/ga/22099303110/attendance-gate-contract-matrix-dashboard-22099303110-1/dashboard.invalid.json` |
+| Strict non-drill (real path; schema validation step enabled) | #22099435815 | PASS | `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-1/gate-summary.json`, `output/playwright/ga/22099435815/attendance-strict-gates-prod-22099435815-1/20260217-130103-2/gate-summary.json` (`Validate gate-summary JSON schema (strict)=success`) |
+| Daily Dashboard non-drill baseline (post-recovery) | #22099580597 | PASS | `output/playwright/ga/22099580597/attendance-daily-gate-dashboard-22099580597-1/attendance-daily-gate-dashboard.json` (`summaryPresent=true`, `summaryValid=true`, `summarySchemaVersion=1`) |
 
 Branch protection note:
 
@@ -952,8 +952,8 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard non-drill (includes contract matrix gate) | [#22137921321](https://github.com/zensgit/metasheet2/actions/runs/22137921321) | PASS | `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.json` (`gates.contract` present, `gateFlat.contract.status=PASS`) |
-| Referenced Contract Matrix run (latest non-drill completed) | [#22127576975](https://github.com/zensgit/metasheet2/actions/runs/22127576975) | PASS | `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`, `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json` |
+| Daily Dashboard non-drill (includes contract matrix gate) | #22137921321 | PASS | `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22137921321/attendance-daily-gate-dashboard-22137921321-1/attendance-daily-gate-dashboard.json` (`gates.contract` present, `gateFlat.contract.status=PASS`) |
+| Referenced Contract Matrix run (latest non-drill completed) | #22127576975 | PASS | `output/playwright/ga/22127576975/attendance-gate-contract-matrix-strict-22127576975-1/strict/gate-summary.valid.json`, `output/playwright/ga/22127576975/attendance-gate-contract-matrix-dashboard-22127576975-1/dashboard.valid.json` |
 
 ## Post-Go Validation (2026-02-18): Branch Protection Drift Gate + Dashboard Integration
 
@@ -971,9 +971,9 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Protection (Prod) non-drill | [#22141450936](https://github.com/zensgit/metasheet2/actions/runs/22141450936) | FAIL | `output/playwright/ga/22141450936/step-summary.md`, `output/playwright/ga/22141450936/protection.log` (`reason=API_FORBIDDEN`) |
-| P1 tracking issue (branch protection drift) | [#190](https://github.com/zensgit/metasheet2/issues/190) | OPEN | `[Attendance P1] Branch protection drift alert` (opened/updated by run `#22141450936`) |
-| Daily Dashboard (includes Branch Protection gate) | [#22141481582](https://github.com/zensgit/metasheet2/actions/runs/22141481582) | FAIL (expected, P1 unresolved) | `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22141481582/gate-meta/protection/meta.json` (`P0 Status=PASS`, `gateFlat.protection.reasonCode=API_FORBIDDEN`) |
+| Branch Protection (Prod) non-drill | #22141450936 | FAIL | `output/playwright/ga/22141450936/step-summary.md`, `output/playwright/ga/22141450936/protection.log` (`reason=API_FORBIDDEN`) |
+| P1 tracking issue (branch protection drift) | #190 | OPEN | `[Attendance P1] Branch protection drift alert` (opened/updated by run `#22141450936`) |
+| Daily Dashboard (includes Branch Protection gate) | #22141481582 | FAIL (expected, P1 unresolved) | `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22141481582/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22141481582/gate-meta/protection/meta.json` (`P0 Status=PASS`, `gateFlat.protection.reasonCode=API_FORBIDDEN`) |
 
 Current blocker:
 
@@ -998,10 +998,10 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Protection (state check, expected FAIL before apply) | [#22142204955](https://github.com/zensgit/metasheet2/actions/runs/22142204955) | FAIL (expected) | `output/playwright/ga/22142204955/step-summary.md`, `output/playwright/ga/22142204955/protection.log` (`reason=BRANCH_NOT_PROTECTED`) |
-| Branch Protection recovery (after apply) | [#22142247652](https://github.com/zensgit/metasheet2/actions/runs/22142247652) | PASS | `output/playwright/ga/22142247652/step-summary.md`, `output/playwright/ga/22142247652/protection.log` (`strict_current=true`, required checks present) |
-| Daily Dashboard (includes Branch Protection, post recovery) | [#22142280338](https://github.com/zensgit/metasheet2/actions/runs/22142280338) | PASS | `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
-| P1 issue closure | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Auto-closed by Branch Protection workflow recovery path |
+| Branch Protection (state check, expected FAIL before apply) | #22142204955 | FAIL (expected) | `output/playwright/ga/22142204955/step-summary.md`, `output/playwright/ga/22142204955/protection.log` (`reason=BRANCH_NOT_PROTECTED`) |
+| Branch Protection recovery (after apply) | #22142247652 | PASS | `output/playwright/ga/22142247652/step-summary.md`, `output/playwright/ga/22142247652/protection.log` (`strict_current=true`, required checks present) |
+| Daily Dashboard (includes Branch Protection, post recovery) | #22142280338 | PASS | `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22142280338/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| P1 issue closure | #190 | CLOSED | Auto-closed by Branch Protection workflow recovery path |
 
 ## Post-Go Validation (2026-02-19): Enforce Admins Anti-Bypass Baseline
 
@@ -1021,10 +1021,10 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Protection (require_enforce_admins=true; expected FAIL before apply) | [#22168334875](https://github.com/zensgit/metasheet2/actions/runs/22168334875) | FAIL (expected) | `output/playwright/ga/22168334875/step-summary.md`, `output/playwright/ga/22168334875/protection.log` (`reason=ENFORCE_ADMINS_DISABLED`) |
-| Branch Protection recovery (after anti-bypass apply) | [#22168353987](https://github.com/zensgit/metasheet2/actions/runs/22168353987) | PASS | `output/playwright/ga/22168353987/step-summary.md`, `output/playwright/ga/22168353987/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
-| Daily Dashboard post-hardening | [#22168373962](https://github.com/zensgit/metasheet2/actions/runs/22168373962) | PASS | `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
-| P1 branch-protection issue | [#190](https://github.com/zensgit/metasheet2/issues/190) | CLOSED | Remains closed after recovery |
+| Branch Protection (require_enforce_admins=true; expected FAIL before apply) | #22168334875 | FAIL (expected) | `output/playwright/ga/22168334875/step-summary.md`, `output/playwright/ga/22168334875/protection.log` (`reason=ENFORCE_ADMINS_DISABLED`) |
+| Branch Protection recovery (after anti-bypass apply) | #22168353987 | PASS | `output/playwright/ga/22168353987/step-summary.md`, `output/playwright/ga/22168353987/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
+| Daily Dashboard post-hardening | #22168373962 | PASS | `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168373962/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| P1 branch-protection issue | #190 | CLOSED | Remains closed after recovery |
 
 ## Post-Go Validation (2026-02-19): Protected Main PR Required-Check Compatibility
 
@@ -1043,10 +1043,10 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Contract Matrix on PR (required checks contexts present) | [#22168460857](https://github.com/zensgit/metasheet2/actions/runs/22168460857) | PASS | `output/playwright/ga/22168460857/attendance-gate-contract-matrix-strict-22168460857-1/strict/gate-summary.valid.json`, `output/playwright/ga/22168460857/attendance-gate-contract-matrix-dashboard-22168460857-1/dashboard.valid.json` |
-| Branch Protection post-merge re-verify | [#22168482721](https://github.com/zensgit/metasheet2/actions/runs/22168482721) | PASS | `output/playwright/ga/22168482721/step-summary.md`, `output/playwright/ga/22168482721/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
-| Daily Dashboard post-merge re-verify | [#22168496046](https://github.com/zensgit/metasheet2/actions/runs/22168496046) | PASS | `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
-| Protected-main PR | [#191](https://github.com/zensgit/metasheet2/pull/191) | MERGED | Required checks satisfied under protected main policy |
+| Contract Matrix on PR (required checks contexts present) | #22168460857 | PASS | `output/playwright/ga/22168460857/attendance-gate-contract-matrix-strict-22168460857-1/strict/gate-summary.valid.json`, `output/playwright/ga/22168460857/attendance-gate-contract-matrix-dashboard-22168460857-1/dashboard.valid.json` |
+| Branch Protection post-merge re-verify | #22168482721 | PASS | `output/playwright/ga/22168482721/step-summary.md`, `output/playwright/ga/22168482721/protection.log` (`strict_current=true`, `enforce_admins_current=true`) |
+| Daily Dashboard post-merge re-verify | #22168496046 | PASS | `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22168496046/attendance-daily-gate-dashboard.json` (`Overall=PASS`, Branch Protection row PASS) |
+| Protected-main PR | #191 | MERGED | Required checks satisfied under protected main policy |
 
 ## Post-Go Validation (2026-02-19): Branch Policy Drift Gate + Protection Review Mapping
 
@@ -1058,15 +1058,15 @@ This record validates:
 
 Implementation:
 
-- PR: [#193](https://github.com/zensgit/metasheet2/pull/193)
+- PR: #193
 - Commit: `932223f3`
 
 Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (Prod) non-drill | [#22183957768](https://github.com/zensgit/metasheet2/actions/runs/22183957768) | PASS | `output/playwright/ga/22183957768/step-summary.md`, `output/playwright/ga/22183957768/policy.log`, `output/playwright/ga/22183957768/policy.json` |
-| Daily Dashboard (uses policy-drift workflow source) | [#22183988363](https://github.com/zensgit/metasheet2/actions/runs/22183988363) | PASS | `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/gate-meta/protection/meta.json` (`gateFlat.protection.requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+| Branch Policy Drift (Prod) non-drill | #22183957768 | PASS | `output/playwright/ga/22183957768/step-summary.md`, `output/playwright/ga/22183957768/policy.log`, `output/playwright/ga/22183957768/policy.json` |
+| Daily Dashboard (uses policy-drift workflow source) | #22183988363 | PASS | `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22183988363/attendance-daily-gate-dashboard-22183988363-1/gate-meta/protection/meta.json` (`gateFlat.protection.requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
 | Local script negative check (`REQUIRE_PR_REVIEWS=true`) | N/A | FAIL (expected) | `attendance-check-branch-protection` returns `reason=PR_REVIEWS_NOT_ENABLED` (classification verified) |
 
 ## Post-Go Validation (2026-02-19): Branch Policy Drift Drill + Recovery + Dashboard Re-Verify
@@ -1079,9 +1079,9 @@ This record validates:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift drill (expected FAIL, issue open) | [#22184382068](https://github.com/zensgit/metasheet2/actions/runs/22184382068) | FAIL (expected) | `output/playwright/ga/22184382068/step-summary.md`, `output/playwright/ga/22184382068/policy.log`, `output/playwright/ga/22184382068/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
-| Branch Policy Drift recovery (issue auto-close) | [#22184421397](https://github.com/zensgit/metasheet2/actions/runs/22184421397) | PASS | `output/playwright/ga/22184421397/step-summary.md`, `output/playwright/ga/22184421397/policy.log`, `output/playwright/ga/22184421397/policy.json`, Issue: [#195](https://github.com/zensgit/metasheet2/issues/195) |
-| Daily Dashboard post-drill re-verify | [#22184452525](https://github.com/zensgit/metasheet2/actions/runs/22184452525) | PASS | `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json` (`gateFlat.protection.runId=22184421397`, `requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+| Branch Policy Drift drill (expected FAIL, issue open) | #22184382068 | FAIL (expected) | `output/playwright/ga/22184382068/step-summary.md`, `output/playwright/ga/22184382068/policy.log`, `output/playwright/ga/22184382068/policy.json`, Issue: #195 |
+| Branch Policy Drift recovery (issue auto-close) | #22184421397 | PASS | `output/playwright/ga/22184421397/step-summary.md`, `output/playwright/ga/22184421397/policy.log`, `output/playwright/ga/22184421397/policy.json`, Issue: #195 |
+| Daily Dashboard post-drill re-verify | #22184452525 | PASS | `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22184452525/attendance-daily-gate-dashboard-22184452525-1/gate-meta/protection/meta.json` (`gateFlat.protection.runId=22184421397`, `requirePrReviews=false`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
 
 ## Post-Go Validation (2026-02-19): Branch Review Policy Upgrade (`pr_reviews=true`) + Drill Recovery
 
@@ -1094,9 +1094,9 @@ This record validates:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Branch protection policy apply (`require_pr_reviews=true`, `min=1`, `code_owner=false`) | N/A | PASS | Verified via `gh api repos/zensgit/metasheet2/branches/main/protection`: `pr_reviews=true`, `approving_count=1`, `code_owner=false` |
-| Branch Policy Drift drill (expected FAIL, issue open) | [#22184974691](https://github.com/zensgit/metasheet2/actions/runs/22184974691) | FAIL (expected) | `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/step-summary.md`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.log`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.json`, Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
-| Branch Policy Drift recovery (explicit review-policy inputs) | [#22185012785](https://github.com/zensgit/metasheet2/actions/runs/22185012785) | PASS | `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/step-summary.md`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.log`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.json` (`requirePrReviews=true`, `minApprovingReviewCount=1`, `requireCodeOwnerReviews=false`), Issue: [#197](https://github.com/zensgit/metasheet2/issues/197) |
-| Daily Dashboard post-recovery re-verify | [#22185048468](https://github.com/zensgit/metasheet2/actions/runs/22185048468) | PASS | `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.json` (`gateFlat.protection.runId=22185012785`, `requirePrReviews=true`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
+| Branch Policy Drift drill (expected FAIL, issue open) | #22184974691 | FAIL (expected) | `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/step-summary.md`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.log`, `output/playwright/ga/22184974691/attendance-branch-policy-drift-prod-22184974691-1/policy.json`, Issue: #197 |
+| Branch Policy Drift recovery (explicit review-policy inputs) | #22185012785 | PASS | `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/step-summary.md`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.log`, `output/playwright/ga/22185012785/attendance-branch-policy-drift-prod-22185012785-1/policy.json` (`requirePrReviews=true`, `minApprovingReviewCount=1`, `requireCodeOwnerReviews=false`), Issue: #197 |
+| Daily Dashboard post-recovery re-verify | #22185048468 | PASS | `output/playwright/ga/22185048468/attendance-daily-gate-dashboard-22185048468-1/attendance-daily-gate-dashboard.json` (`gateFlat.protection.runId=22185012785`, `requirePrReviews=true`, `minApprovingReviews=1`, `requireCodeOwnerReviews=false`) |
 
 ## Post-Go Validation (2026-02-19): C-Line Web UX Hardening + Regression Assertions
 
@@ -1131,17 +1131,17 @@ Pre-deploy note:
 This record validates:
 
 - Parallel development PRs were merged in sequence:
-  - [#198](https://github.com/zensgit/metasheet2/pull/198)
-  - [#199](https://github.com/zensgit/metasheet2/pull/199)
-  - [#200](https://github.com/zensgit/metasheet2/pull/200)
+  - #198
+  - #199
+  - #200
 - Branch protection remains strict on checks/admins and is currently operated in single-maintainer fallback mode (`require_pr_reviews=false`) to keep release flow unblocked.
 - Policy drill/recovery and daily dashboard remain green with explicit evidence.
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift drill (single-maintainer fallback, expected FAIL) | [#22188008265](https://github.com/zensgit/metasheet2/actions/runs/22188008265) | FAIL (expected) | `output/playwright/ga/22188008265/step-summary.md`, `output/playwright/ga/22188008265/policy.log`, `output/playwright/ga/22188008265/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) |
-| Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22188054160](https://github.com/zensgit/metasheet2/actions/runs/22188054160) | PASS | `output/playwright/ga/22188054160/step-summary.md`, `output/playwright/ga/22188054160/policy.log`, `output/playwright/ga/22188054160/policy.json`, Issue: [#201](https://github.com/zensgit/metasheet2/issues/201) (`CLOSED`) |
-| Daily Dashboard post-merge re-verify | [#22188099087](https://github.com/zensgit/metasheet2/actions/runs/22188099087) | PASS | `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22188099087/gate-meta/protection/meta.json` (`runId=22188054160`, `requirePrReviews=false`) |
+| Branch Policy Drift drill (single-maintainer fallback, expected FAIL) | #22188008265 | FAIL (expected) | `output/playwright/ga/22188008265/step-summary.md`, `output/playwright/ga/22188008265/policy.log`, `output/playwright/ga/22188008265/policy.json`, Issue: #201 |
+| Branch Policy Drift recovery (`require_pr_reviews=false`) | #22188054160 | PASS | `output/playwright/ga/22188054160/step-summary.md`, `output/playwright/ga/22188054160/policy.log`, `output/playwright/ga/22188054160/policy.json`, Issue: #201 (`CLOSED`) |
+| Daily Dashboard post-merge re-verify | #22188099087 | PASS | `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22188099087/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22188099087/gate-meta/protection/meta.json` (`runId=22188054160`, `requirePrReviews=false`) |
 
 ## Post-Go Validation (2026-02-20): Next-Stage Script Hardening (Perf + Full-Flow + Dashboard Meta)
 
@@ -1200,12 +1200,12 @@ Validation evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Perf baseline (100k, upload_csv=true) | [#22209313715](https://github.com/zensgit/metasheet2/actions/runs/22209313715) | PASS | `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/attendance-perf-mluam641-we0pa2/perf-summary.json`, `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/perf.log` |
-| Perf longrun (includes 500k preview, upload_csv=true) | [#22209380938](https://github.com/zensgit/metasheet2/actions/runs/22209380938) | PASS | `output/playwright/ga/22209380938/attendance-import-perf-longrun-rows500k-preview-22209380938-1/current/rows500k-preview/attendance-perf-mluaqf7z-vu4lo6/perf-summary.json`, `output/playwright/ga/22209380938/attendance-import-perf-longrun-trend-22209380938-1/20260220-025510/attendance-import-perf-longrun-trend.md` |
-| Build + deploy (frontend/backend) | [#22209420172](https://github.com/zensgit/metasheet2/actions/runs/22209420172) | PASS | `output/playwright/ga/22209420172/deploy-logs-22209420172-1/deploy.log`, `output/playwright/ga/22209420172/deploy-logs-22209420172-1/step-summary.md` |
-| Strict gates non-drill (desktop+mobile full-flow) | [#22209492697](https://github.com/zensgit/metasheet2/actions/runs/22209492697) | PASS | `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-1/gate-summary.json`, `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-2/gate-summary.json` |
-| Gate Contract Matrix (perf/longrun contract fixtures) | [#22209625568](https://github.com/zensgit/metasheet2/actions/runs/22209625568) | PASS | `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.valid.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.perf.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.longrun.json` |
-| Daily Dashboard (new perf/longrun contract checks active) | [#22209648198](https://github.com/zensgit/metasheet2/actions/runs/22209648198) | PASS | `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/perf/meta.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/longrun/meta.json` |
+| Perf baseline (100k, upload_csv=true) | #22209313715 | PASS | `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/attendance-perf-mluam641-we0pa2/perf-summary.json`, `output/playwright/ga/22209313715/attendance-import-perf-22209313715-1/perf.log` |
+| Perf longrun (includes 500k preview, upload_csv=true) | #22209380938 | PASS | `output/playwright/ga/22209380938/attendance-import-perf-longrun-rows500k-preview-22209380938-1/current/rows500k-preview/attendance-perf-mluaqf7z-vu4lo6/perf-summary.json`, `output/playwright/ga/22209380938/attendance-import-perf-longrun-trend-22209380938-1/20260220-025510/attendance-import-perf-longrun-trend.md` |
+| Build + deploy (frontend/backend) | #22209420172 | PASS | `output/playwright/ga/22209420172/deploy-logs-22209420172-1/deploy.log`, `output/playwright/ga/22209420172/deploy-logs-22209420172-1/step-summary.md` |
+| Strict gates non-drill (desktop+mobile full-flow) | #22209492697 | PASS | `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-1/gate-summary.json`, `output/playwright/ga/22209492697/attendance-strict-gates-prod-22209492697-1/20260220-030102-2/gate-summary.json` |
+| Gate Contract Matrix (perf/longrun contract fixtures) | #22209625568 | PASS | `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.valid.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.perf.json`, `output/playwright/ga/22209625568/attendance-gate-contract-matrix-dashboard-22209625568-1/dashboard.invalid.longrun.json` |
+| Daily Dashboard (new perf/longrun contract checks active) | #22209648198 | PASS | `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/perf/meta.json`, `output/playwright/ga/22209648198/attendance-daily-gate-dashboard-22209648198-1/gate-meta/longrun/meta.json` |
 
 Confirmed fields from `#22209648198`:
 
@@ -1222,7 +1222,7 @@ Confirmed fields from `#22209648198`:
 
 This record validates:
 
-- PR [#204](https://github.com/zensgit/metasheet2/pull/204) was merged to `main` (merge commit: `6132b554`).
+- PR #204 was merged to `main` (merge commit: `6132b554`).
 - Daily dashboard was re-run on `main` and reached a final `PASS`.
 - Intermediate dashboard failures were triaged and recovered through the active protection source workflow.
 
@@ -1248,11 +1248,11 @@ Validation evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Daily Dashboard (first re-run after merge) | [#22225250295](https://github.com/zensgit/metasheet2/actions/runs/22225250295) | FAIL (expected during recovery) | `output/playwright/ga/22225250295/attendance-daily-gate-dashboard-22225250295-1/attendance-daily-gate-dashboard.json` (`findings: Branch Protection / PR_REVIEWS_NOT_ENABLED`) |
-| Branch Protection (new workflow, non-source check, explicit fallback) | [#22225351875](https://github.com/zensgit/metasheet2/actions/runs/22225351875) | PASS | `output/playwright/ga/22225351875/attendance-branch-protection-prod-22225351875-1/step-summary.md` |
-| Daily Dashboard (second re-run, still reading old policy-drift source) | [#22225385423](https://github.com/zensgit/metasheet2/actions/runs/22225385423) | FAIL (expected during recovery) | `output/playwright/ga/22225385423/attendance-daily-gate-dashboard-22225385423-1/attendance-daily-gate-dashboard.json` (`protection.runId=22211954919`) |
-| Branch Policy Drift recovery (dashboard source workflow) | [#22225453528](https://github.com/zensgit/metasheet2/actions/runs/22225453528) | PASS | `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/step-summary.md`, `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/policy.json` |
-| Daily Dashboard final re-run (post-recovery) | [#22225484921](https://github.com/zensgit/metasheet2/actions/runs/22225484921) | PASS | `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/gate-meta/protection/meta.json` |
+| Daily Dashboard (first re-run after merge) | #22225250295 | FAIL (expected during recovery) | `output/playwright/ga/22225250295/attendance-daily-gate-dashboard-22225250295-1/attendance-daily-gate-dashboard.json` (`findings: Branch Protection / PR_REVIEWS_NOT_ENABLED`) |
+| Branch Protection (new workflow, non-source check, explicit fallback) | #22225351875 | PASS | `output/playwright/ga/22225351875/attendance-branch-protection-prod-22225351875-1/step-summary.md` |
+| Daily Dashboard (second re-run, still reading old policy-drift source) | #22225385423 | FAIL (expected during recovery) | `output/playwright/ga/22225385423/attendance-daily-gate-dashboard-22225385423-1/attendance-daily-gate-dashboard.json` (`protection.runId=22211954919`) |
+| Branch Policy Drift recovery (dashboard source workflow) | #22225453528 | PASS | `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/step-summary.md`, `output/playwright/ga/22225453528/attendance-branch-policy-drift-prod-22225453528-1/policy.json` |
+| Daily Dashboard final re-run (post-recovery) | #22225484921 | PASS | `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22225484921/attendance-daily-gate-dashboard-22225484921-1/gate-meta/protection/meta.json` |
 
 Final state (from `#22225484921`):
 
@@ -1267,7 +1267,7 @@ Final state (from `#22225484921`):
 
 This record validates:
 
-- PR [#207](https://github.com/zensgit/metasheet2/pull/207) merged to `main` (merge commit: `dafdb604`).
+- PR #207 merged to `main` (merge commit: `dafdb604`).
 - Branch policy workflows now default to `require_pr_reviews=false` for the current single-maintainer fallback mode.
 - Drill tagging is normalized to `[DRILL]` for `drill_fail=true`, and dashboard selects the latest non-drill protection run.
 
@@ -1275,9 +1275,9 @@ Validation evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift drill (expected FAIL) | [#22226847016](https://github.com/zensgit/metasheet2/actions/runs/22226847016) | FAIL (expected) | `output/playwright/ga/22226847016/step-summary.md`, `output/playwright/ga/22226847016/policy.log`, `output/playwright/ga/22226847016/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) |
-| Branch Policy Drift recovery (`require_pr_reviews=false`) | [#22226864599](https://github.com/zensgit/metasheet2/actions/runs/22226864599) | PASS | `output/playwright/ga/22226864599/step-summary.md`, `output/playwright/ga/22226864599/policy.log`, `output/playwright/ga/22226864599/policy.json`, Issue: [#208](https://github.com/zensgit/metasheet2/issues/208) (`CLOSED`) |
-| Daily Dashboard (uses latest non-drill protection run) | [#22226886691](https://github.com/zensgit/metasheet2/actions/runs/22226886691) | PASS | `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22226886691/gate-meta/protection/meta.json` |
+| Branch Policy Drift drill (expected FAIL) | #22226847016 | FAIL (expected) | `output/playwright/ga/22226847016/step-summary.md`, `output/playwright/ga/22226847016/policy.log`, `output/playwright/ga/22226847016/policy.json`, Issue: #208 |
+| Branch Policy Drift recovery (`require_pr_reviews=false`) | #22226864599 | PASS | `output/playwright/ga/22226864599/step-summary.md`, `output/playwright/ga/22226864599/policy.log`, `output/playwright/ga/22226864599/policy.json`, Issue: #208 (`CLOSED`) |
+| Daily Dashboard (uses latest non-drill protection run) | #22226886691 | PASS | `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22226886691/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22226886691/gate-meta/protection/meta.json` |
 
 Confirmed in `attendance-daily-gate-dashboard.json` (`#22226886691`):
 
@@ -1359,19 +1359,19 @@ Key runs:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict gates (branch, recovery enabled) | [#22249548985](https://github.com/zensgit/metasheet2/actions/runs/22249548985) | PASS | `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-1/gate-summary.json`, `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-2/gate-summary.json` |
-| Strict gates (branch, stability re-run) | [#22249647567](https://github.com/zensgit/metasheet2/actions/runs/22249647567) | PASS | `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-1/gate-summary.json`, `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-2/gate-summary.json` |
-| Perf baseline 100k (`upload_csv=true`) | [#22249647556](https://github.com/zensgit/metasheet2/actions/runs/22249647556) | PASS | `output/playwright/ga/22249647556/attendance-import-perf-22249647556-1/attendance-perf-mlvruyei-thwrf9/perf-summary.json` |
-| Perf longrun pre-fix (rollback transient error) | [#22249647566](https://github.com/zensgit/metasheet2/actions/runs/22249647566) | FAIL (expected during fix) | `output/playwright/ga/22249647566/attendance-import-perf-longrun-rows10k-commit-22249647566-1/current/rows10k-commit/perf.log` |
-| Perf longrun post-fix (`upload_csv=true`) | [#22249759637](https://github.com/zensgit/metasheet2/actions/runs/22249759637) | PASS | `output/playwright/ga/22249759637/attendance-import-perf-longrun-rows10k-commit-22249759637-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22249759637/attendance-import-perf-longrun-trend-22249759637-1/20260221-035016/attendance-import-perf-longrun-trend.md` |
-| Branch policy drift | [#22249647577](https://github.com/zensgit/metasheet2/actions/runs/22249647577) | PASS | `output/playwright/ga/22249647577/attendance-branch-policy-drift-prod-22249647577-1/policy.json` |
-| Strict gates (main, replace cancelled latest) | [#22249826030](https://github.com/zensgit/metasheet2/actions/runs/22249826030) | PASS | `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-1/gate-summary.json`, `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-2/gate-summary.json` |
-| Daily dashboard (`branch=main`, final) | [#22249881772](https://github.com/zensgit/metasheet2/actions/runs/22249881772) | PASS | `output/playwright/ga/22249881772/attendance-daily-gate-dashboard-22249881772-1/attendance-daily-gate-dashboard.json` |
+| Strict gates (branch, recovery enabled) | #22249548985 | PASS | `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-1/gate-summary.json`, `output/playwright/ga/22249548985/attendance-strict-gates-prod-22249548985-1/20260221-033438-2/gate-summary.json` |
+| Strict gates (branch, stability re-run) | #22249647567 | PASS | `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-1/gate-summary.json`, `output/playwright/ga/22249647567/attendance-strict-gates-prod-22249647567-1/20260221-034238-2/gate-summary.json` |
+| Perf baseline 100k (`upload_csv=true`) | #22249647556 | PASS | `output/playwright/ga/22249647556/attendance-import-perf-22249647556-1/attendance-perf-mlvruyei-thwrf9/perf-summary.json` |
+| Perf longrun pre-fix (rollback transient error) | #22249647566 | FAIL (expected during fix) | `output/playwright/ga/22249647566/attendance-import-perf-longrun-rows10k-commit-22249647566-1/current/rows10k-commit/perf.log` |
+| Perf longrun post-fix (`upload_csv=true`) | #22249759637 | PASS | `output/playwright/ga/22249759637/attendance-import-perf-longrun-rows10k-commit-22249759637-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22249759637/attendance-import-perf-longrun-trend-22249759637-1/20260221-035016/attendance-import-perf-longrun-trend.md` |
+| Branch policy drift | #22249647577 | PASS | `output/playwright/ga/22249647577/attendance-branch-policy-drift-prod-22249647577-1/policy.json` |
+| Strict gates (main, replace cancelled latest) | #22249826030 | PASS | `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-1/gate-summary.json`, `output/playwright/ga/22249826030/attendance-strict-gates-prod-22249826030-1/20260221-035505-2/gate-summary.json` |
+| Daily dashboard (`branch=main`, final) | #22249881772 | PASS | `output/playwright/ga/22249881772/attendance-daily-gate-dashboard-22249881772-1/attendance-daily-gate-dashboard.json` |
 
 Issue lifecycle:
 
-- `[Attendance P1] Perf longrun alert` issue [#157](https://github.com/zensgit/metasheet2/issues/157): now `CLOSED` (auto-closed by longrun recovery run).
-- Non-production branch dashboard false alarm issue [#211](https://github.com/zensgit/metasheet2/issues/211): manually closed with explanation.
+- `[Attendance P1] Perf longrun alert` issue #157: now `CLOSED` (auto-closed by longrun recovery run).
+- Non-production branch dashboard false alarm issue #211: manually closed with explanation.
 - Current open `[Attendance Gate]/[Attendance P0]/[Attendance P1]/[Attendance P2]`: none.
 
 Go/No-Go snapshot:
@@ -1388,7 +1388,7 @@ Decision: `GO` (no open P0/P1 attendance tracking issues; all required gates gre
 
 This record validates:
 
-- PR [#224](https://github.com/zensgit/metasheet2/pull/224) merged to `main` (`fb1f5f2e`).
+- PR #224 merged to `main` (`fb1f5f2e`).
 - Branch policy is enforced at the requested level:
   - `require_pr_reviews=true`
   - `min_approving_review_count=1`
@@ -1399,13 +1399,13 @@ Evidence:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift drill (`drill_fail=true`) | [#22267999575](https://github.com/zensgit/metasheet2/actions/runs/22267999575) | FAIL (expected) | `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/step-summary.md`, `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/policy.log`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) opened |
-| Branch Policy Drift recovery (`drill_fail=false`) | [#22268010766](https://github.com/zensgit/metasheet2/actions/runs/22268010766) | PASS | `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/step-summary.md`, `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/policy.json`, issue [#225](https://github.com/zensgit/metasheet2/issues/225) closed |
-| Branch Protection parity check | [#22268146870](https://github.com/zensgit/metasheet2/actions/runs/22268146870) | PASS | `output/playwright/ga/22268146870/attendance-branch-protection-prod-22268146870-1/step-summary.md` (`Require PR reviews=true`, `Min approving reviews=1`) |
-| Strict Gates (Prod, twice) | [#22268021574](https://github.com/zensgit/metasheet2/actions/runs/22268021574) | PASS | `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-1/gate-api-smoke.log`, `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-2/gate-api-smoke.log` |
-| Perf Baseline (`upload_csv=true`) | [#22268076603](https://github.com/zensgit/metasheet2/actions/runs/22268076603) | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
-| Perf Long Run (`upload_csv=true`) | [#22268111924](https://github.com/zensgit/metasheet2/actions/runs/22268111924) | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows500k-preview-22268111924-1/current-flat/rows500000-preview.json` |
-| Daily Dashboard (main final) | [#22268136099](https://github.com/zensgit/metasheet2/actions/runs/22268136099) | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.protection.requirePrReviews=true`) |
+| Branch Policy Drift drill (`drill_fail=true`) | #22267999575 | FAIL (expected) | `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/step-summary.md`, `output/playwright/ga/22267999575/attendance-branch-policy-drift-prod-22267999575-1/policy.log`, issue #225 opened |
+| Branch Policy Drift recovery (`drill_fail=false`) | #22268010766 | PASS | `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/step-summary.md`, `output/playwright/ga/22268010766/attendance-branch-policy-drift-prod-22268010766-1/policy.json`, issue #225 closed |
+| Branch Protection parity check | #22268146870 | PASS | `output/playwright/ga/22268146870/attendance-branch-protection-prod-22268146870-1/step-summary.md` (`Require PR reviews=true`, `Min approving reviews=1`) |
+| Strict Gates (Prod, twice) | #22268021574 | PASS | `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-1/gate-api-smoke.log`, `output/playwright/ga/22268021574/attendance-strict-gates-prod-22268021574-1/20260222-012647-2/gate-api-smoke.log` |
+| Perf Baseline (`upload_csv=true`) | #22268076603 | PASS | `output/playwright/ga/22268076603/attendance-import-perf-22268076603-1/attendance-perf-mlx2lyp8-at17vk/perf-summary.json` |
+| Perf Long Run (`upload_csv=true`) | #22268111924 | PASS | `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows10k-commit-22268111924-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22268111924/attendance-import-perf-longrun-rows500k-preview-22268111924-1/current-flat/rows500000-preview.json` |
+| Daily Dashboard (main final) | #22268136099 | PASS | `output/playwright/ga/22268136099/attendance-daily-gate-dashboard-22268136099-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.protection.requirePrReviews=true`) |
 
 Production decision:
 
@@ -1454,7 +1454,7 @@ Evidence:
 
 | Check | Run / Command | Status | Evidence |
 |---|---|---|---|
-| Plugin System Tests rerun (PR #227) | [#22307437402](https://github.com/zensgit/metasheet2/actions/runs/22307437402) | PASS | `test (18.x)=pass`, `test (20.x)=pass`, `coverage=pass` |
+| Plugin System Tests rerun (PR #227) | #22307437402 | PASS | `test (18.x)=pass`, `test (20.x)=pass`, `coverage=pass` |
 | Targeted sharding e2e suite | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS (`17 passed`) | local command output |
 | Attendance integration regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` | PASS (`14 passed`) | local command output |
 | Web regression build | `pnpm --filter @metasheet/web build` | PASS | local command output |
@@ -1481,8 +1481,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main baseline) | [#22307832865](https://github.com/zensgit/metasheet2/actions/runs/22307832865) | PASS | `output/playwright/ga/22307832865/policy.json`, `output/playwright/ga/22307832865/policy.log`, `output/playwright/ga/22307832865/step-summary.md` |
-| Daily Gate Dashboard (main) | [#22307851285](https://github.com/zensgit/metasheet2/actions/runs/22307851285) | PASS | `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.md` |
+| Branch Policy Drift (main baseline) | #22307832865 | PASS | `output/playwright/ga/22307832865/policy.json`, `output/playwright/ga/22307832865/policy.log`, `output/playwright/ga/22307832865/step-summary.md` |
+| Daily Gate Dashboard (main) | #22307851285 | PASS | `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22307851285/attendance-daily-gate-dashboard.md` |
 
 Observed dashboard highlights (`#22307851285`):
 
@@ -1510,9 +1510,9 @@ Verification evidence:
 
 | Check | Run / Command | Status | Evidence |
 |---|---|---|---|
-| Longrun drill on feature branch | [#22308569094](https://github.com/zensgit/metasheet2/actions/runs/22308569094) | PASS | `output/playwright/ga/22308569094/attendance-import-perf-longrun-drill-22308569094-1/drill.txt` |
-| Longrun full run on feature branch (new scenario executed) | [#22308598232](https://github.com/zensgit/metasheet2/actions/runs/22308598232) | PASS | `output/playwright/ga/22308598232/attendance-import-perf-longrun-rows100k-commit-22308598232-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308598232/attendance-import-perf-longrun-trend-22308598232-1/20260223-134338/attendance-import-perf-longrun-trend.json` |
-| Longrun full rerun after threshold decouple | [#22308829077](https://github.com/zensgit/metasheet2/actions/runs/22308829077) | PASS | `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json` |
+| Longrun drill on feature branch | #22308569094 | PASS | `output/playwright/ga/22308569094/attendance-import-perf-longrun-drill-22308569094-1/drill.txt` |
+| Longrun full run on feature branch (new scenario executed) | #22308598232 | PASS | `output/playwright/ga/22308598232/attendance-import-perf-longrun-rows100k-commit-22308598232-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308598232/attendance-import-perf-longrun-trend-22308598232-1/20260223-134338/attendance-import-perf-longrun-trend.json` |
+| Longrun full rerun after threshold decouple | #22308829077 | PASS | `output/playwright/ga/22308829077/attendance-import-perf-longrun-rows100k-commit-22308829077-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22308829077/attendance-import-perf-longrun-trend-22308829077-1/20260223-135014/attendance-import-perf-longrun-trend.json` |
 | Trend report fixture validation | `CURRENT_ROOT=... HISTORY_ROOT=... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/attendance-next-phase/20260223-longrun-commit-coverage/trend-report/20260223-133942/attendance-import-perf-longrun-trend.json` |
 
 Observed `rows100k-commit` sample:
@@ -1547,8 +1547,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22309204427](https://github.com/zensgit/metasheet2/actions/runs/22309204427) | PASS | `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.json`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.log`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22309250542](https://github.com/zensgit/metasheet2/actions/runs/22309250542) | PASS | `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22309204427 | PASS | `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.json`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/policy.log`, `output/playwright/ga/22309204427/attendance-branch-policy-drift-prod-22309204427-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22309250542 | PASS | `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22309250542/attendance-daily-gate-dashboard-22309250542-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22309250542`):
 
@@ -1579,8 +1579,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22309503350](https://github.com/zensgit/metasheet2/actions/runs/22309503350) | PASS | `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/policy.json`, `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/policy.log`, `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22309519851](https://github.com/zensgit/metasheet2/actions/runs/22309519851) | PASS | `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22309503350 | PASS | `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/policy.json`, `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/policy.log`, `output/playwright/ga/22309503350/attendance-branch-policy-drift-prod-22309503350-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22309519851 | PASS | `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22309519851/attendance-daily-gate-dashboard-22309519851-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22309519851`):
 
@@ -1629,7 +1629,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#258](https://github.com/zensgit/metasheet2/pull/258) (merge commit `9de1897164419bedfbae22fc3c49fc756e3a70e5`).
+1. Merged PR #258 (merge commit `9de1897164419bedfbae22fc3c49fc756e3a70e5`).
 2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
 3. Re-ran `Attendance Strict Gates (Prod)` with strict flags and import-job-recovery assertion enabled.
 4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after strict completion.
@@ -1638,9 +1638,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22388823674](https://github.com/zensgit/metasheet2/actions/runs/22388823674) | PASS | `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.json`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.log`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/step-summary.md` |
-| Strict Gates (main, strict twice + recovery assertion) | [#22388862040](https://github.com/zensgit/metasheet2/actions/runs/22388862040) | PASS | `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-2/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-api-smoke.log`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-playwright-full-flow-desktop.log` |
-| Daily Gate Dashboard (main, post-strict rerun) | [#22389039654](https://github.com/zensgit/metasheet2/actions/runs/22389039654) | PASS | `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22388823674 | PASS | `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.json`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/policy.log`, `output/playwright/ga/22388823674/attendance-branch-policy-drift-prod-22388823674-1/step-summary.md` |
+| Strict Gates (main, strict twice + recovery assertion) | #22388862040 | PASS | `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-2/gate-summary.json`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-api-smoke.log`, `output/playwright/ga/22388862040/attendance-strict-gates-prod-22388862040-1/20260225-083726-1/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post-strict rerun) | #22389039654 | PASS | `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22389039654/attendance-daily-gate-dashboard-22389039654-1/gate-meta/protection/meta.json` |
 
 Observed highlights:
 
@@ -1667,12 +1667,12 @@ Decision:
 
 Goal:
 
-- Confirm `main` remains green after merging PR [#261](https://github.com/zensgit/metasheet2/pull/261), which hardens Playwright full-flow by asserting the records table structure:
+- Confirm `main` remains green after merging PR #261, which hardens Playwright full-flow by asserting the records table structure:
   - `.attendance__table-wrapper table.attendance__table--records`
 
 Execution:
 
-1. Merged PR [#261](https://github.com/zensgit/metasheet2/pull/261) (merge commit `553176679587542aa817e47a6d5a6a8d3c375159`).
+1. Merged PR #261 (merge commit `553176679587542aa817e47a6d5a6a8d3c375159`).
 2. Re-ran strict gates (`require_import_job_recovery=true`) on `main`.
 3. Re-ran daily dashboard (`lookback_hours=48`) after strict completion.
 
@@ -1680,8 +1680,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, strict twice + recovery assertion + latest full-flow script) | [#22389307883](https://github.com/zensgit/metasheet2/actions/runs/22389307883) | PASS | `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-2/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-api-smoke.log`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-playwright-full-flow-desktop.log` |
-| Daily Gate Dashboard (main, post-strict rerun) | [#22389475748](https://github.com/zensgit/metasheet2/actions/runs/22389475748) | PASS | `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (main, strict twice + recovery assertion + latest full-flow script) | #22389307883 | PASS | `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-2/gate-summary.json`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-api-smoke.log`, `output/playwright/ga/22389307883/attendance-strict-gates-prod-22389307883-1/20260225-085047-1/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post-strict rerun) | #22389475748 | PASS | `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22389475748/attendance-daily-gate-dashboard-22389475748-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -1714,8 +1714,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, `require_import_job_recovery=true`) | [#22377460693](https://github.com/zensgit/metasheet2/actions/runs/22377460693) | PASS | `output/playwright/ga/22377460693/20260225-011038-1/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-2/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22377460693/20260225-011038-2/gate-playwright-full-flow-desktop.log` |
-| Daily Gate Dashboard (main, `lookback_hours=48`) | [#22377585632](https://github.com/zensgit/metasheet2/actions/runs/22377585632) | PASS | `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22377585632/gate-meta/protection/meta.json`, `output/playwright/ga/22377585632/gate-meta/strict/meta.json` |
+| Strict Gates (main, `require_import_job_recovery=true`) | #22377460693 | PASS | `output/playwright/ga/22377460693/20260225-011038-1/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-2/gate-summary.json`, `output/playwright/ga/22377460693/20260225-011038-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22377460693/20260225-011038-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, `lookback_hours=48`) | #22377585632 | PASS | `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22377585632/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22377585632/gate-meta/protection/meta.json`, `output/playwright/ga/22377585632/gate-meta/strict/meta.json` |
 
 Observed highlights:
 
@@ -1749,9 +1749,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Baseline (main, `rows=100000`, `upload_csv=true`) | [#22379746084](https://github.com/zensgit/metasheet2/actions/runs/22379746084) | PASS | `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/attendance-perf-mm1ff61s-0s7zkg/perf-summary.json`, `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/perf.log` |
-| Perf Longrun (main, pre-fix) | [#22379746105](https://github.com/zensgit/metasheet2/actions/runs/22379746105) | FAIL | `output/playwright/ga/22379746105/attendance-import-perf-longrun-rows100k-commit-22379746105-1/current/rows100k-commit/perf.log` |
-| Perf Longrun (branch, post-fix) | [#22379841144](https://github.com/zensgit/metasheet2/actions/runs/22379841144) | PASS | `output/playwright/ga/22379841144/attendance-import-perf-longrun-rows100k-commit-22379841144-1/current/rows100k-commit/attendance-perf-mm1fkklt-wwkr0l/perf-summary.json`, `output/playwright/ga/22379841144/attendance-import-perf-longrun-trend-22379841144-1/20260225-024555/attendance-import-perf-longrun-trend.md` |
+| Perf Baseline (main, `rows=100000`, `upload_csv=true`) | #22379746084 | PASS | `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/attendance-perf-mm1ff61s-0s7zkg/perf-summary.json`, `output/playwright/ga/22379746084/attendance-import-perf-22379746084-1/perf.log` |
+| Perf Longrun (main, pre-fix) | #22379746105 | FAIL | `output/playwright/ga/22379746105/attendance-import-perf-longrun-rows100k-commit-22379746105-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, post-fix) | #22379841144 | PASS | `output/playwright/ga/22379841144/attendance-import-perf-longrun-rows100k-commit-22379841144-1/current/rows100k-commit/attendance-perf-mm1fkklt-wwkr0l/perf-summary.json`, `output/playwright/ga/22379841144/attendance-import-perf-longrun-trend-22379841144-1/20260225-024555/attendance-import-perf-longrun-trend.md` |
 
 Observed highlights:
 
@@ -1773,7 +1773,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#251](https://github.com/zensgit/metasheet2/pull/251).
+1. Merged PR #251.
 2. Triggered longrun on `main` with:
    - `upload_csv=true`
    - `include_rows500k_preview=false`
@@ -1783,8 +1783,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (main, post-fix) | [#22379991376](https://github.com/zensgit/metasheet2/actions/runs/22379991376) | PASS | `output/playwright/ga/22379991376/attendance-import-perf-longrun-rows100k-commit-22379991376-1/current/rows100k-commit/attendance-perf-mm1ft1ow-750vwt/perf-summary.json`, `output/playwright/ga/22379991376/attendance-import-perf-longrun-trend-22379991376-1/20260225-025251/attendance-import-perf-longrun-trend.md` |
-| Daily Gate Dashboard (main, post-fix longrun source) | [#22380066284](https://github.com/zensgit/metasheet2/actions/runs/22380066284) | PASS | `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22380066284/gate-meta/longrun/meta.json` |
+| Perf Longrun (main, post-fix) | #22379991376 | PASS | `output/playwright/ga/22379991376/attendance-import-perf-longrun-rows100k-commit-22379991376-1/current/rows100k-commit/attendance-perf-mm1ft1ow-750vwt/perf-summary.json`, `output/playwright/ga/22379991376/attendance-import-perf-longrun-trend-22379991376-1/20260225-025251/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post-fix longrun source) | #22380066284 | PASS | `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22380066284/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22380066284/gate-meta/longrun/meta.json` |
 
 Observed highlights:
 
@@ -1817,7 +1817,7 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (branch, retry-hardened) | [#22382867831](https://github.com/zensgit/metasheet2/actions/runs/22382867831) | PASS | `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/attendance-perf-mm1kaxmo-3wtmjn/perf-summary.json`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-trend-22382867831-1/20260225-045842/attendance-import-perf-longrun-trend.md` |
+| Perf Longrun (branch, retry-hardened) | #22382867831 | PASS | `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/attendance-perf-mm1kaxmo-3wtmjn/perf-summary.json`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-rows100k-commit-22382867831-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22382867831/attendance-import-perf-longrun-trend-22382867831-1/20260225-045842/attendance-import-perf-longrun-trend.md` |
 
 Observed highlights:
 
@@ -1850,8 +1850,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, pre-fix) | [#22383641081](https://github.com/zensgit/metasheet2/actions/runs/22383641081) | FAIL | `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-summary.json`, `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-playwright-full-flow-desktop.log` |
-| Strict Gates (branch, post-fix) | [#22383745777](https://github.com/zensgit/metasheet2/actions/runs/22383745777) | PASS | `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (main, pre-fix) | #22383641081 | FAIL | `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-summary.json`, `output/playwright/ga/22383641081/attendance-strict-gates-prod-22383641081-1/20260225-053007-1/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (branch, post-fix) | #22383745777 | PASS | `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-summary.json`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22383745777/attendance-strict-gates-prod-22383745777-1/20260225-053411-2/gate-playwright-full-flow-desktop.log` |
 
 Observed highlights:
 
@@ -1876,7 +1876,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#255](https://github.com/zensgit/metasheet2/pull/255).
+1. Merged PR #255.
 2. Triggered `Attendance Branch Policy Drift (Prod)` on `main` to re-verify branch policy enforcement.
 3. Triggered `Attendance Daily Gate Dashboard` (`lookback_hours=48`) on `main` to confirm tracking issue state and gate linking.
 
@@ -1884,8 +1884,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, post-PR #255) | [#22383360093](https://github.com/zensgit/metasheet2/actions/runs/22383360093) | PASS | `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.json`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.log`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-PR #255) | [#22383370628](https://github.com/zensgit/metasheet2/actions/runs/22383370628) | PASS | `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, post-PR #255) | #22383360093 | PASS | `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.json`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/policy.log`, `output/playwright/ga/22383360093/attendance-branch-policy-drift-prod-22383360093-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-PR #255) | #22383370628 | PASS | `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383370628/attendance-daily-gate-dashboard-22383370628-1/gate-meta/protection/meta.json` |
 
 Observed highlights:
 
@@ -1912,17 +1912,17 @@ Goal:
 
 Execution:
 
-1. Merged PR [#254](https://github.com/zensgit/metasheet2/pull/254), which extends issue matching in branch-policy drift workflow to include legacy title variants.
+1. Merged PR #254, which extends issue matching in branch-policy drift workflow to include legacy title variants.
 2. Triggered branch policy drift on `main` (PASS expected).
-3. Verified legacy issue [#190](https://github.com/zensgit/metasheet2/issues/190) auto-closed.
+3. Verified legacy issue #190 auto-closed.
 4. Triggered dashboard refresh on `main` and verified no open tracking issues.
 
 Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, post-PR #254) | [#22383209034](https://github.com/zensgit/metasheet2/actions/runs/22383209034) | PASS | `output/playwright/ga/22383209034/policy.json`, `output/playwright/ga/22383209034/policy.log`, `output/playwright/ga/22383209034/step-summary.md` |
-| Daily Gate Dashboard (main, post-recovery) | [#22383228278](https://github.com/zensgit/metasheet2/actions/runs/22383228278) | PASS | `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383228278/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, post-PR #254) | #22383209034 | PASS | `output/playwright/ga/22383209034/policy.json`, `output/playwright/ga/22383209034/policy.log`, `output/playwright/ga/22383209034/step-summary.md` |
+| Daily Gate Dashboard (main, post-recovery) | #22383228278 | PASS | `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22383228278/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22383228278/gate-meta/protection/meta.json` |
 
 Observed highlights:
 
@@ -1954,9 +1954,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (default recovery gate off) | [#22356838096](https://github.com/zensgit/metasheet2/actions/runs/22356838096) | PASS | `output/playwright/ga/22356838096/20260224-151021-1/gate-summary.json`, `output/playwright/ga/22356838096/20260224-151021-2/gate-summary.json` |
-| Strict Gates (`require_import_job_recovery=true`) | [#22357338954](https://github.com/zensgit/metasheet2/actions/runs/22357338954) | PASS | `output/playwright/ga/22357338954/20260224-152238-1/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-2/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22357338954/20260224-152238-2/gate-playwright-full-flow-desktop.log` |
-| Strict Gates rerun (same params, runner-level install stall) | [#22357011088](https://github.com/zensgit/metasheet2/actions/runs/22357011088) | CANCELED | GitHub run timeline; canceled before gate execution due runner stall in browser install step |
+| Strict Gates (default recovery gate off) | #22356838096 | PASS | `output/playwright/ga/22356838096/20260224-151021-1/gate-summary.json`, `output/playwright/ga/22356838096/20260224-151021-2/gate-summary.json` |
+| Strict Gates (`require_import_job_recovery=true`) | #22357338954 | PASS | `output/playwright/ga/22357338954/20260224-152238-1/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-2/gate-summary.json`, `output/playwright/ga/22357338954/20260224-152238-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22357338954/20260224-152238-2/gate-playwright-full-flow-desktop.log` |
+| Strict Gates rerun (same params, runner-level install stall) | #22357011088 | CANCELED | GitHub run timeline; canceled before gate execution due runner stall in browser install step |
 
 Observed highlights:
 
@@ -2003,7 +2003,7 @@ Verification:
 | Frontend build/type check | `pnpm --filter @metasheet/web build` | PASS | local |
 | Trend report fixture (500k present) | `CURRENT_ROOT=output/playwright/ga/22334158061 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check/20260224-112744/attendance-import-perf-longrun-trend.md` |
 | Trend report fixture (500k absent) | `CURRENT_ROOT=output/playwright/ga/22020987167 ... node scripts/ops/attendance-import-perf-trend-report.mjs` | PASS | `output/playwright/tmp-longrun-trend-check-no500k/20260224-112810/attendance-import-perf-longrun-trend.md` |
-| Perf longrun (branch non-drill, `include_rows500k_preview=false`) | [#22348884993](https://github.com/zensgit/metasheet2/actions/runs/22348884993) | PASS | `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows10k-commit-22348884993-1/current/rows10k-commit/attendance-perf-mm0iw9ja-i5kabx/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows100k-commit-22348884993-1/current/rows100k-commit/attendance-perf-mm0iwbrg-xg1csh/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-trend-22348884993-1/20260224-113137/attendance-import-perf-longrun-trend.md` |
+| Perf longrun (branch non-drill, `include_rows500k_preview=false`) | #22348884993 | PASS | `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows10k-commit-22348884993-1/current/rows10k-commit/attendance-perf-mm0iw9ja-i5kabx/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-rows100k-commit-22348884993-1/current/rows100k-commit/attendance-perf-mm0iwbrg-xg1csh/perf-summary.json`, `output/playwright/ga/22348884993/attendance-import-perf-longrun-trend-22348884993-1/20260224-113137/attendance-import-perf-longrun-trend.md` |
 
 Observed:
 
@@ -2028,7 +2028,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#248](https://github.com/zensgit/metasheet2/pull/248) (merge commit `836eab8909db08179da82c76da5d57f7b2620631`).
+1. Merged PR #248 (merge commit `836eab8909db08179da82c76da5d57f7b2620631`).
 2. Re-applied branch protection baseline:
    - `require_pr_reviews=true`
    - `min_approving_review_count=1`
@@ -2042,9 +2042,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22349165386](https://github.com/zensgit/metasheet2/actions/runs/22349165386) | PASS | `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.json`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.log`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/step-summary.md` |
-| Daily Gate Dashboard (main) | [#22349165388](https://github.com/zensgit/metasheet2/actions/runs/22349165388) | PASS | `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/gate-meta/protection/meta.json` |
-| Perf Longrun (main, non-drill, `include_rows500k_preview=false`) | [#22349165365](https://github.com/zensgit/metasheet2/actions/runs/22349165365) | PASS | `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows10k-commit-22349165365-1/current/rows10k-commit/attendance-perf-mm0j7mga-2w4bgf/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows100k-commit-22349165365-1/current/rows100k-commit/attendance-perf-mm0j7m66-x339ka/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-trend-22349165365-1/20260224-114015/attendance-import-perf-longrun-trend.md` |
+| Branch Policy Drift (main, non-drill) | #22349165386 | PASS | `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.json`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/policy.log`, `output/playwright/ga/22349165386/attendance-branch-policy-drift-prod-22349165386-1/step-summary.md` |
+| Daily Gate Dashboard (main) | #22349165388 | PASS | `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22349165388/attendance-daily-gate-dashboard-22349165388-1/gate-meta/protection/meta.json` |
+| Perf Longrun (main, non-drill, `include_rows500k_preview=false`) | #22349165365 | PASS | `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows10k-commit-22349165365-1/current/rows10k-commit/attendance-perf-mm0j7mga-2w4bgf/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-rows100k-commit-22349165365-1/current/rows100k-commit/attendance-perf-mm0j7m66-x339ka/perf-summary.json`, `output/playwright/ga/22349165365/attendance-import-perf-longrun-trend-22349165365-1/20260224-114015/attendance-import-perf-longrun-trend.md` |
 
 Observed:
 
@@ -2071,7 +2071,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#246](https://github.com/zensgit/metasheet2/pull/246).
+1. Merged PR #246.
 2. Restored branch protection baseline:
    - `require_pr_reviews=true`
    - `min_approving_review_count=1`
@@ -2085,9 +2085,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22346290813](https://github.com/zensgit/metasheet2/actions/runs/22346290813) | PASS | `output/playwright/ga/22346290813/policy.json`, `output/playwright/ga/22346290813/policy.log`, `output/playwright/ga/22346290813/step-summary.md` |
-| Daily Gate Dashboard (`lookback_hours=48`) | [#22346315048](https://github.com/zensgit/metasheet2/actions/runs/22346315048) | PASS | `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22346315048/gate-meta/protection/meta.json` |
-| Strict Gates (main, twice, non-drill) | [#22346357457](https://github.com/zensgit/metasheet2/actions/runs/22346357457) | PASS | `output/playwright/ga/22346357457/20260224-101623-1/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-2/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-1/gate-api-smoke.log`, `output/playwright/ga/22346357457/20260224-101623-2/gate-api-smoke.log` |
+| Branch Policy Drift (main, non-drill) | #22346290813 | PASS | `output/playwright/ga/22346290813/policy.json`, `output/playwright/ga/22346290813/policy.log`, `output/playwright/ga/22346290813/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`) | #22346315048 | PASS | `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22346315048/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22346315048/gate-meta/protection/meta.json` |
+| Strict Gates (main, twice, non-drill) | #22346357457 | PASS | `output/playwright/ga/22346357457/20260224-101623-1/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-2/gate-summary.json`, `output/playwright/ga/22346357457/20260224-101623-1/gate-api-smoke.log`, `output/playwright/ga/22346357457/20260224-101623-2/gate-api-smoke.log` |
 
 Observed highlights:
 
@@ -2131,7 +2131,7 @@ Verification:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (branch `codex/attendance-branch-policy-review-fix`) | [#22346158689](https://github.com/zensgit/metasheet2/actions/runs/22346158689) | PASS | `output/playwright/ga/22346158689/policy.json`, `output/playwright/ga/22346158689/policy.log`, `output/playwright/ga/22346158689/step-summary.md` |
+| Branch Policy Drift (branch `codex/attendance-branch-policy-review-fix`) | #22346158689 | PASS | `output/playwright/ga/22346158689/policy.json`, `output/playwright/ga/22346158689/policy.log`, `output/playwright/ga/22346158689/step-summary.md` |
 
 Observed policy fields (`policy.json`):
 
@@ -2177,7 +2177,7 @@ Verification:
 
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (branch `codex/attendance-strict-telemetry-gate`, twice, non-drill) | [#22343985697](https://github.com/zensgit/metasheet2/actions/runs/22343985697) | PASS | `output/playwright/ga/22343985697/20260224-090846-1/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-2/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-1/gate-summary.json`, `output/playwright/ga/22343985697/20260224-090846-2/gate-summary.json` |
+| Strict Gates (branch `codex/attendance-strict-telemetry-gate`, twice, non-drill) | #22343985697 | PASS | `output/playwright/ga/22343985697/20260224-090846-1/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-2/gate-api-smoke.log`, `output/playwright/ga/22343985697/20260224-090846-1/gate-summary.json`, `output/playwright/ga/22343985697/20260224-090846-2/gate-summary.json` |
 
 Evidence highlights (both iterations):
 
@@ -2198,7 +2198,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#243](https://github.com/zensgit/metasheet2/pull/243) (`71345bd5d6cef107ba3f17d28d584531077ee9d9`).
+1. Merged PR #243 (`71345bd5d6cef107ba3f17d28d584531077ee9d9`).
 2. Restored branch protection review baseline:
    - `require_pr_reviews=true`
    - `min_approving_review_count=1`
@@ -2212,9 +2212,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22339850697](https://github.com/zensgit/metasheet2/actions/runs/22339850697) | PASS | `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/policy.json`, `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/step-summary.md` |
-| Daily Gate Dashboard (`lookback_hours=48`) | [#22339849959](https://github.com/zensgit/metasheet2/actions/runs/22339849959) | PASS | `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.md` |
-| Strict Gates (twice, non-drill) | [#22339849230](https://github.com/zensgit/metasheet2/actions/runs/22339849230) | PASS | `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-playwright-full-flow-desktop.log` |
+| Branch Policy Drift (main, non-drill) | #22339850697 | PASS | `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/policy.json`, `output/playwright/ga/22339850697/attendance-branch-policy-drift-prod-22339850697-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`) | #22339849959 | PASS | `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22339849959/attendance-daily-gate-dashboard-22339849959-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (twice, non-drill) | #22339849230 | PASS | `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-summary.json`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-1/gate-playwright-full-flow-desktop.log`, `output/playwright/ga/22339849230/attendance-strict-gates-prod-22339849230-1/*-2/gate-playwright-full-flow-desktop.log` |
 
 Observed highlights:
 
@@ -2250,9 +2250,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (twice, non-drill) | [#22337802322](https://github.com/zensgit/metasheet2/actions/runs/22337802322) | PASS | `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-api-smoke.log`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-api-smoke.log` |
-| Branch Policy Drift (main, non-drill) | [#22337759756](https://github.com/zensgit/metasheet2/actions/runs/22337759756) | PASS | `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.json`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.log`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/step-summary.md` |
-| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337780063](https://github.com/zensgit/metasheet2/actions/runs/22337780063) | PASS | `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/gate-meta/protection/meta.json` |
+| Strict Gates (twice, non-drill) | #22337802322 | PASS | `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-summary.json`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-1/gate-api-smoke.log`, `output/playwright/ga/22337802322/attendance-strict-gates-prod-22337802322-1/20260224-052221-2/gate-api-smoke.log` |
+| Branch Policy Drift (main, non-drill) | #22337759756 | PASS | `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.json`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/policy.log`, `output/playwright/ga/22337759756/attendance-branch-policy-drift-prod-22337759756-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | #22337780063 | PASS | `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337780063/attendance-daily-gate-dashboard-22337780063-1/gate-meta/protection/meta.json` |
 
 Observed highlights:
 
@@ -2278,7 +2278,7 @@ Decision:
 
 Goal:
 
-- Confirm branch protection review requirements are fully restored after merging docs PR [#240](https://github.com/zensgit/metasheet2/pull/240) (`0871a20d04c38e9026149f9399deb71dd9bb4bc4`) and that dashboard consumes the latest non-drill policy run.
+- Confirm branch protection review requirements are fully restored after merging docs PR #240 (`0871a20d04c38e9026149f9399deb71dd9bb4bc4`) and that dashboard consumes the latest non-drill policy run.
 
 Execution:
 
@@ -2293,8 +2293,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22337671524](https://github.com/zensgit/metasheet2/actions/runs/22337671524) | PASS | `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.json`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.log`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/step-summary.md` |
-| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337693734](https://github.com/zensgit/metasheet2/actions/runs/22337693734) | PASS | `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22337671524 | PASS | `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.json`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/policy.log`, `output/playwright/ga/22337671524/attendance-branch-policy-drift-prod-22337671524-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | #22337693734 | PASS | `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337693734/attendance-daily-gate-dashboard-22337693734-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22337693734`):
 
@@ -2314,11 +2314,11 @@ Decision:
 
 Goal:
 
-- Confirm `main` remains green after merging PR [#239](https://github.com/zensgit/metasheet2/pull/239) (`29bae2eca09c74cf9085f0e88642b7f016287177`), which tightened dashboard contract parsing/validation for upsert strategy metadata.
+- Confirm `main` remains green after merging PR #239 (`29bae2eca09c74cf9085f0e88642b7f016287177`), which tightened dashboard contract parsing/validation for upsert strategy metadata.
 
 Execution:
 
-1. Merged PR [#239](https://github.com/zensgit/metasheet2/pull/239).
+1. Merged PR #239.
 2. Ran `Attendance Gate Contract Matrix` on `main` to validate the new `dashboard.invalid.upsert.json` negative case.
 3. Re-ran `Attendance Branch Policy Drift (Prod)` after restoring `require_pr_reviews=true` and `min_approving_review_count=1`.
 4. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and confirmed it references the latest non-drill protection run.
@@ -2327,9 +2327,9 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Gate Contract Matrix (main) | [#22337517816](https://github.com/zensgit/metasheet2/actions/runs/22337517816) | PASS | `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.valid.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.invalid.upsert.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-strict-22337517816-1/strict/gate-summary.valid.json` |
-| Branch Policy Drift (main, non-drill) | [#22337554892](https://github.com/zensgit/metasheet2/actions/runs/22337554892) | PASS | `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.json`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.log`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/step-summary.md` |
-| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | [#22337567788](https://github.com/zensgit/metasheet2/actions/runs/22337567788) | PASS | `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/gate-meta/protection/meta.json` |
+| Gate Contract Matrix (main) | #22337517816 | PASS | `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.valid.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-dashboard-22337517816-1/dashboard.invalid.upsert.json`, `output/playwright/ga/22337517816/attendance-gate-contract-matrix-strict-22337517816-1/strict/gate-summary.valid.json` |
+| Branch Policy Drift (main, non-drill) | #22337554892 | PASS | `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.json`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/policy.log`, `output/playwright/ga/22337554892/attendance-branch-policy-drift-prod-22337554892-1/step-summary.md` |
+| Daily Gate Dashboard (`lookback_hours=48`, post-policy rerun) | #22337567788 | PASS | `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22337567788/attendance-daily-gate-dashboard-22337567788-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22337567788`):
 
@@ -2361,8 +2361,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22334103172](https://github.com/zensgit/metasheet2/actions/runs/22334103172) | PASS | `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.json`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.log`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22334126100](https://github.com/zensgit/metasheet2/actions/runs/22334126100) | PASS | `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22334103172 | PASS | `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.json`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/policy.log`, `output/playwright/ga/22334103172/attendance-branch-policy-drift-prod-22334103172-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22334126100 | PASS | `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334126100/attendance-daily-gate-dashboard-22334126100-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22334126100`):
 
@@ -2395,7 +2395,7 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (non-drill) | [#22334158061](https://github.com/zensgit/metasheet2/actions/runs/22334158061) | PASS | `output/playwright/ga/22334158061/attendance-import-perf-longrun-rows100k-commit-22334158061-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.json` |
+| Perf Longrun (non-drill) | #22334158061 | PASS | `output/playwright/ga/22334158061/attendance-import-perf-longrun-rows100k-commit-22334158061-1/current-flat/rows100000-commit.json`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22334158061/attendance-import-perf-longrun-trend-22334158061-1/20260224-023722/attendance-import-perf-longrun-trend.json` |
 
 Decision:
 
@@ -2436,7 +2436,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#236](https://github.com/zensgit/metasheet2/pull/236) (merge commit `753ce0bb4506232603f31e85aea29935b1b0a902`).
+1. Merged PR #236 (merge commit `753ce0bb4506232603f31e85aea29935b1b0a902`).
 2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
 3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) after policy completion to bind latest protection run.
 
@@ -2444,8 +2444,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22333998882](https://github.com/zensgit/metasheet2/actions/runs/22333998882) | PASS | `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.json`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.log`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22334028181](https://github.com/zensgit/metasheet2/actions/runs/22334028181) | PASS | `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22333998882 | PASS | `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.json`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/policy.log`, `output/playwright/ga/22333998882/attendance-branch-policy-drift-prod-22333998882-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22334028181 | PASS | `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22334028181/attendance-daily-gate-dashboard-22334028181-1/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22334028181`):
 
@@ -2503,7 +2503,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#233](https://github.com/zensgit/metasheet2/pull/233) (merge commit `e734fb73f3785c499f8d37ac4baacb8518306e1f`).
+1. Merged PR #233 (merge commit `e734fb73f3785c499f8d37ac4baacb8518306e1f`).
 2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
 3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and verified `gateFlat.protection` source binding.
 
@@ -2511,8 +2511,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22313040979](https://github.com/zensgit/metasheet2/actions/runs/22313040979) | PASS | `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/policy.json`, `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/policy.log`, `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22313086337](https://github.com/zensgit/metasheet2/actions/runs/22313086337) | PASS | `output/playwright/ga/22313086337/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22313086337/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22313086337/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22313040979 | PASS | `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/policy.json`, `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/policy.log`, `output/playwright/ga/22313040979/attendance-branch-policy-drift-prod-22313040979-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22313086337 | PASS | `output/playwright/ga/22313086337/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22313086337/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22313086337/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22313086337`):
 
@@ -2571,7 +2571,7 @@ Goal:
 
 Execution:
 
-1. Merged PR [#231](https://github.com/zensgit/metasheet2/pull/231) (merge commit `684607961b137436051f429fe5abfba056f80cb2`).
+1. Merged PR #231 (merge commit `684607961b137436051f429fe5abfba056f80cb2`).
 2. Re-ran `Attendance Branch Policy Drift (Prod)` on `main`.
 3. Re-ran `Attendance Daily Gate Dashboard` (`lookback_hours=48`) and verified `gateFlat.protection` binds to the latest non-drill policy run.
 
@@ -2579,8 +2579,8 @@ Evidence:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Branch Policy Drift (main, non-drill) | [#22310774604](https://github.com/zensgit/metasheet2/actions/runs/22310774604) | PASS | `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.json`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.log`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/step-summary.md` |
-| Daily Gate Dashboard (main, post-policy rerun) | [#22310807657](https://github.com/zensgit/metasheet2/actions/runs/22310807657) | PASS | `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22310807657/gate-meta/protection/meta.json` |
+| Branch Policy Drift (main, non-drill) | #22310774604 | PASS | `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.json`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/policy.log`, `output/playwright/ga/22310774604/attendance-branch-policy-drift-prod-22310774604-1/step-summary.md` |
+| Daily Gate Dashboard (main, post-policy rerun) | #22310807657 | PASS | `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22310807657/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22310807657/gate-meta/protection/meta.json` |
 
 Observed dashboard highlights (`#22310807657`):
 
@@ -2603,22 +2603,22 @@ Goal:
 
 Code changes merged:
 
-- [#263](https://github.com/zensgit/metasheet2/pull/263)
+- #263
   - Optional longrun scenario `rows500k-commit` (`include_rows500k_commit`, default `false`).
   - Strict-gate wiring `require_admin_settings_save` -> `REQUIRE_ADMIN_SETTINGS_SAVE`.
   - `verify-attendance-production-flow.mjs`: exact `Refresh` selector to avoid `Retry refresh` collision.
   - New helper script `scripts/ops/attendance-run-workflow-dispatch.sh` (`--ref` support).
-- [#264](https://github.com/zensgit/metasheet2/pull/264)
+- #264
   - `verify-attendance-full-flow.mjs`: retry/backoff for recovery-stage `/auth/me` lookup (`resolveRecoveryUserId`) to tolerate transient `ECONNREFUSED/5xx/429`.
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (branch validation before merge) | [#22392236394](https://github.com/zensgit/metasheet2/actions/runs/22392236394) | PASS | `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-1/gate-summary.json`, `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-2/gate-summary.json` |
-| Strict Gates (main, pre-#264 transient failure) | [#22392542122](https://github.com/zensgit/metasheet2/actions/runs/22392542122) | FAIL | `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-summary.json`, `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-playwright-full-flow-desktop.log` |
-| Strict Gates (main, post-#264 recovery) | [#22392726626](https://github.com/zensgit/metasheet2/actions/runs/22392726626) | PASS | `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-api-smoke.log`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-playwright-full-flow-desktop.log` |
-| Daily Gate Dashboard (main, post strict recovery) | [#22392917876](https://github.com/zensgit/metasheet2/actions/runs/22392917876) | PASS | `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (branch validation before merge) | #22392236394 | PASS | `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-1/gate-summary.json`, `output/playwright/ga/22392236394/attendance-strict-gates-prod-22392236394-1/20260225-101338-2/gate-summary.json` |
+| Strict Gates (main, pre-#264 transient failure) | #22392542122 | FAIL | `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-summary.json`, `output/playwright/ga/22392542122/attendance-strict-gates-prod-22392542122-1/20260225-102216-1/gate-playwright-full-flow-desktop.log` |
+| Strict Gates (main, post-#264 recovery) | #22392726626 | PASS | `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-summary.json`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-1/gate-api-smoke.log`, `output/playwright/ga/22392726626/attendance-strict-gates-prod-22392726626-1/20260225-102738-2/gate-playwright-full-flow-desktop.log` |
+| Daily Gate Dashboard (main, post strict recovery) | #22392917876 | PASS | `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22392917876/attendance-daily-gate-dashboard-22392917876-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -2635,6 +2635,173 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Source Regression Baseline
+
+Goal:
+
+- Re-validate production gate health on `main` after recent large source updates.
+- Confirm branch protection policy remains enforced (`pr_reviews=true`, `min_approving_review_count=1`, `enforce_admins=true`).
+- Rebuild a fresh local regression baseline for attendance backend integration and web auth/unit tests.
+
+Verification runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (main) | #22794632558 | PASS | `output/playwright/ga/22794632558/attendance-strict-gates-prod-22794632558-1/20260307-072232-1/gate-summary.json`, `output/playwright/ga/22794632558/attendance-strict-gates-prod-22794632558-1/20260307-072232-2/gate-summary.json`, `output/playwright/ga/22794632558/attendance-strict-gates-prod-22794632558-1/20260307-072232-2/gate-api-smoke.log` |
+| Attendance Branch Policy Drift (main, review-policy assert) | #22796412819 | PASS | `output/playwright/ga/22796412819/attendance-branch-policy-drift-prod-22796412819-1/policy.json`, `output/playwright/ga/22796412819/attendance-branch-policy-drift-prod-22796412819-1/step-summary.md` |
+| Attendance Remote Preflight (Prod) | #22796432695 | PASS | `output/playwright/ga/22796432695/preflight.log`, `output/playwright/ga/22796432695/step-summary.md` |
+| Attendance Remote Storage Health (Prod) | #22796432712 | PASS | `output/playwright/ga/22796432712/storage.log`, `output/playwright/ga/22796432712/step-summary.md` |
+| Attendance Daily Gate Dashboard (main, lookback=48h) | #22796444289 | PASS | `output/playwright/ga/22796444289/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22796444289/attendance-daily-gate-dashboard.md`, `output/playwright/ga/22796444289/gate-meta/protection/meta.json` |
+
+Local baseline:
+
+| Check | Command | Status |
+|---|---|---|
+| Attendance backend integration | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.mts run tests/integration/attendance-plugin.test.ts` | PASS (15/15) |
+| Web unit/auth regression | `pnpm --filter @metasheet/web exec vitest run --watch=false` | PASS (28/28) |
+| Branch policy local assertion (enforce-admins + 1 review) | `REQUIRE_ENFORCE_ADMINS=true REQUIRE_STRICT=true REQUIRE_PR_REVIEWS=true MIN_APPROVING_REVIEW_COUNT=1 REQUIRE_CODE_OWNER_REVIEWS=false bash scripts/ops/attendance-check-branch-protection.sh` | PASS |
+
+Observed highlights:
+
+- Strict gate summary iteration `-2` reports all production gates `PASS`:
+  - `apiSmoke=PASS`
+  - `provisioning=PASS`
+  - `playwrightProd=PASS`
+  - `playwrightDesktop=PASS`
+  - `playwrightMobile=PASS`
+- Strict api smoke log contains the required upload/idempotency/export signals:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `SMOKE PASS`
+- Daily dashboard output confirms current health:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `openTrackingIssues=[]`
+  - `gateFlat.preflight.runId=22796432695`
+  - `gateFlat.storage.runId=22796432712`
+  - `gateFlat.protection.runId=22796412819`
+  - `gateFlat.strict.runId=22794632558`
+
+Decision:
+
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Longrun Row-Cap Gate Alignment
+
+Goal:
+
+- Eliminate longrun false-failures caused by production CSV guardrail (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) while preserving upload-path coverage for in-cap scenarios.
+
+Incident snapshot:
+
+- `Attendance Import Perf Long Run` on `main` (`#22791032114`) failed with:
+  - `HTTP 400 CSV_TOO_LARGE`
+  - message: `CSV exceeds max rows (20000)`
+  - affected scenarios: `rows50k-preview`, `rows100k-preview`, `rows100k-commit`, `rows500k-preview`
+- This was a gate/profile mismatch, not a backend crash.
+
+Change applied:
+
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - new input: `max_csv_rows` (default `20000`)
+  - new `Evaluate scenario gate` step
+  - scenarios are auto-skipped when `rows > max_csv_rows`, with explicit skip reason in job summary
+  - in-cap scenarios continue running normally (default: `rows10k-commit`).
+
+Validation runs:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Longrun (main, pre-fix reference) | #22791032114 | FAIL | `output/playwright/ga/22791032114/attendance-import-perf-longrun-rows100k-preview-22791032114-1/current/rows100k-preview/perf.log`, `output/playwright/ga/22791032114/attendance-import-perf-longrun-trend-22791032114-1/20260307-032631/attendance-import-perf-longrun-trend.md` |
+| Perf Longrun (branch, post-fix, `max_csv_rows=20000`) | #22791311493 | PASS | `output/playwright/ga/22791311493/attendance-import-perf-longrun-rows10k-commit-22791311493-1/current-flat/rows10000-commit.json`, `output/playwright/ga/22791311493/attendance-import-perf-longrun-trend-22791311493-1/20260307-034409/attendance-import-perf-longrun-trend.md` |
+
+Branch / commit:
+
+- Branch: `codex/attendance-longrun-row-cap-gate`
+- Commit: `c71b8e49cc323302ebe1906af743f281b80157e5`
+
+Decision:
+
+- **GO maintained** for production default gate profile (`max_csv_rows=20000`).
+- Next merge-step: rerun longrun and daily dashboard on `main` after merging this patch.
+
+## Post-Go Verification (2026-03-05): Attendance-Only New-Server Guard
+
+Goal:
+
+- Ensure new server deploys can enforce attendance-only shell (`PRODUCT_MODE=attendance`) and fail fast when misconfigured.
+
+Code changes:
+
+- `scripts/ops/attendance-preflight.sh`
+  - Added `ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE=1` guard.
+  - When enabled, preflight fails unless `PRODUCT_MODE=attendance` (or `attendance-focused` compatibility mode).
+- `scripts/ops/deploy-attendance-prod.sh`
+  - Deploy now runs preflight with attendance-mode guard enabled by default (`REQUIRE_ATTENDANCE_ONLY=1`).
+- `docker/app.env.example`
+  - Clarified that `PRODUCT_MODE=attendance` hides non-attendance navigation modules.
+
+Local verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Preflight with `PRODUCT_MODE=platform` and attendance-only requirement | FAIL (expected) | `output/playwright/local-attendance-mode-preflight-20260305/preflight-platform.log` |
+| Preflight with `PRODUCT_MODE=attendance` and attendance-only requirement | PASS | `output/playwright/local-attendance-mode-preflight-20260305/preflight-attendance.log` |
+| Validation summary | PASS | `output/playwright/local-attendance-mode-preflight-20260305/summary.txt` |
+
+Decision:
+
+- **GO maintained**. Attendance-only deploy behavior is now enforced at deploy-preflight time.
+
+## Post-Go Verification (2026-03-06): On-Prem No-Docker Delivery Lane (Windows Server Compatible)
+
+Goal:
+
+- provide a standardized on-prem lane for customers that require local deployment (no Docker runtime) while preserving attendance-only shell defaults and future update capability.
+
+Change scope:
+
+- Added PM2 runtime manifest:
+  - `ecosystem.config.cjs`
+- Added no-Docker ops scripts:
+  - `scripts/ops/attendance-onprem-env-check.sh`
+  - `scripts/ops/attendance-onprem-bootstrap.sh`
+  - `scripts/ops/attendance-onprem-update.sh`
+  - `scripts/ops/attendance-onprem-healthcheck.sh`
+  - `scripts/ops/attendance-onprem-bootstrap-admin.sh`
+- Added systemd templates:
+  - `ops/systemd/metasheet-backend.service.example`
+  - `ops/systemd/metasheet-healthcheck.service.example`
+  - `ops/systemd/metasheet-healthcheck.timer.example`
+- Added nginx template for native deployment:
+  - `ops/nginx/attendance-onprem.conf.example`
+- Added no-Docker runbook:
+  - `docs/deployment/attendance-windows-onprem-no-docker-20260306.md`
+- Added optional deployment marker in env template:
+  - `docker/app.env.example` -> `DEPLOYMENT_MODEL=onprem`
+
+Local verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Shell syntax (`onprem-env-check/bootstrap/update` + deploy scripts) | PASS | local command: `bash -n scripts/ops/attendance-onprem-env-check.sh && bash -n scripts/ops/attendance-onprem-bootstrap.sh && bash -n scripts/ops/attendance-onprem-update.sh && bash -n scripts/ops/deploy-attendance-prod.sh && bash -n scripts/ops/attendance-preflight.sh` |
+| Package script + PM2 config integrity | PASS | local command: `node -e \"const fs=require('fs'); JSON.parse(fs.readFileSync('package.json','utf8'))\"` |
+| On-prem env check (`PRODUCT_MODE=attendance`, strict mode) | PASS | `output/playwright/local-onprem-env-check-20260306/check-attendance.log` |
+| On-prem env check (`PRODUCT_MODE=platform`, strict mode) | FAIL (expected) | `output/playwright/local-onprem-env-check-20260306/check-platform.log` |
+| On-prem env check (`PRODUCT_MODE=platform`, open mode) | PASS | `output/playwright/local-onprem-env-check-20260306/check-platform-open.log` |
+| On-prem env check summary | PASS | `output/playwright/local-onprem-env-check-20260306/summary.txt` |
+| On-prem bootstrap/update dry-run (no install/build/migrate/restart) | PASS | `output/playwright/local-onprem-bootstrap-dryrun-20260306/bootstrap.log`, `output/playwright/local-onprem-bootstrap-dryrun-20260306/update.log`, `output/playwright/local-onprem-bootstrap-dryrun-20260306/summary.txt` |
+| On-prem one-click healthcheck (mock endpoints, expected PASS) | PASS | `output/playwright/local-onprem-healthcheck-20260306/healthcheck-pass.log` |
+| On-prem healthcheck mode-mismatch guard (expected FAIL) | FAIL (expected) | `output/playwright/local-onprem-healthcheck-20260306/healthcheck-fail-mode-mismatch.log` |
+| On-prem healthcheck summary | PASS | `output/playwright/local-onprem-healthcheck-20260306/summary.txt` |
+| On-prem admin bootstrap script syntax | PASS | local command: `bash -n scripts/ops/attendance-onprem-bootstrap-admin.sh` |
+| On-prem admin bootstrap fail-fast (missing params, expected FAIL) | FAIL (expected) | `output/playwright/local-onprem-admin-bootstrap-20260306/missing-params.log`, `output/playwright/local-onprem-admin-bootstrap-20260306/summary.txt` |
+
+Decision:
+
+- **GO maintained**. On-prem no-Docker delivery lane is ready for customer local deployment and patch updates.
 
 ## Post-Go Verification (2026-03-05): zh Runtime Error Copy Fallback Hardening (PR #331)
 
@@ -2657,12 +2824,12 @@ Verification:
 |---|---|---|---|
 | Web build | local (2026-03-05) | PASS | command: `pnpm --filter @metasheet/web build` |
 | zh copy contract | local (2026-03-05) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
-| zh locale smoke (prod auth recovery) | [#22695413918](https://github.com/zensgit/metasheet2/actions/runs/22695413918) | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
+| zh locale smoke (prod auth recovery) | #22695413918 | PASS | `output/playwright/ga/22695413918/attendance-zh-locale-calendar.png` |
 | Runtime fallback check (local web + prod API) | local Playwright (2026-03-05) | PASS | `output/playwright/attendance-locale-zh-smoke-local/attendance-zh-runtime-anomalies-error-localized.png` (`statusText=加载异常失败`, `hasEnglish=false`) |
 
 Notes:
 
-- PR [#331](https://github.com/zensgit/metasheet2/pull/331) checks are green.
+- PR #331 checks are green.
 - merge is currently blocked by branch policy (`REVIEW_REQUIRED`, at least one approving review from another write user).
 - no secret/token is committed to repo docs.
 
@@ -2695,20 +2862,20 @@ Goal:
 
 Context:
 
-- Drift detector run [#22655883421](https://github.com/zensgit/metasheet2/actions/runs/22655883421) failed as expected:
+- Drift detector run #22655883421 failed as expected:
   - `ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in docker/app.env`.
-- Remediation workflow introduced in PR [#329](https://github.com/zensgit/metasheet2/pull/329):
+- Remediation workflow introduced in PR #329:
   - `.github/workflows/attendance-remote-env-reconcile-prod.yml`
 
 Verification:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Preflight (drift detection) | [#22655883421](https://github.com/zensgit/metasheet2/actions/runs/22655883421) | FAIL (expected) | `output/playwright/ga/22655883421/preflight.log`, `output/playwright/ga/22655883421/step-summary.md` |
-| Remote Env Reconcile (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) | [#22656041689](https://github.com/zensgit/metasheet2/actions/runs/22656041689) | PASS | `output/playwright/ga/22656041689/reconcile.log`, `output/playwright/ga/22656041689/step-summary.md` |
-| Remote Preflight (post-fix) | [#22656062644](https://github.com/zensgit/metasheet2/actions/runs/22656062644) | PASS | `output/playwright/ga/22656062644/preflight.log`, `output/playwright/ga/22656062644/step-summary.md` |
-| Strict Gates (post-fix revalidation) | [#22656062651](https://github.com/zensgit/metasheet2/actions/runs/22656062651) | PASS | `output/playwright/ga/22656062651/20260304-051221-1/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-api-smoke.log` |
-| Daily Gate Dashboard (post-fix snapshot) | [#22656162339](https://github.com/zensgit/metasheet2/actions/runs/22656162339) | PASS | `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.md` |
+| Remote Preflight (drift detection) | #22655883421 | FAIL (expected) | `output/playwright/ga/22655883421/preflight.log`, `output/playwright/ga/22655883421/step-summary.md` |
+| Remote Env Reconcile (`ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`) | #22656041689 | PASS | `output/playwright/ga/22656041689/reconcile.log`, `output/playwright/ga/22656041689/step-summary.md` |
+| Remote Preflight (post-fix) | #22656062644 | PASS | `output/playwright/ga/22656062644/preflight.log`, `output/playwright/ga/22656062644/step-summary.md` |
+| Strict Gates (post-fix revalidation) | #22656062651 | PASS | `output/playwright/ga/22656062651/20260304-051221-1/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-summary.json`, `output/playwright/ga/22656062651/20260304-051221-2/gate-api-smoke.log` |
+| Daily Gate Dashboard (post-fix snapshot) | #22656162339 | PASS | `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22656162339/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -2739,7 +2906,7 @@ Verification:
 | preflight with safe cap (`20000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-pass.log` |
 | preflight with oversized cap (`100000`) | local (2026-03-04) | FAIL (expected) | `output/playwright/local/20260304-preflight-row-cap/preflight-fail.log`, `output/playwright/local/20260304-preflight-row-cap/preflight-fail.rc` |
 | preflight with temporary override (`ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS=120000`) | local (2026-03-04) | PASS | `output/playwright/local/20260304-preflight-row-cap/preflight-override-pass.log` |
-| perf baseline (main, default rows after PR #327) | [#22655694180](https://github.com/zensgit/metasheet2/actions/runs/22655694180) | PASS | `output/playwright/ga/22655694180/attendance-perf-mmbkcie0-7r2922/perf-summary.json`, `output/playwright/ga/22655694180/perf.log` (`rows=20000`, `uploadCsv=true`, `regressions=[]`) |
+| perf baseline (main, default rows after PR #327) | #22655694180 | PASS | `output/playwright/ga/22655694180/attendance-perf-mmbkcie0-7r2922/perf-summary.json`, `output/playwright/ga/22655694180/perf.log` (`rows=20000`, `uploadCsv=true`, `regressions=[]`) |
 
 Decision:
 
@@ -2756,7 +2923,7 @@ Goal:
 
 Code changes merged:
 
-- [#324](https://github.com/zensgit/metasheet2/pull/324)
+- #324
   - Split `Attendance Import Perf Baseline` concurrency group by trigger source (`schedule` vs `workflow_dispatch`).
   - Preserve `cancel-in-progress: true` within each trigger source.
 
@@ -2764,11 +2931,11 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, upload/idempotency/export covered) | [#22653324504](https://github.com/zensgit/metasheet2/actions/runs/22653324504) | PASS | `output/playwright/ga/22653324504/20260304-031111-1/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-api-smoke.log` |
-| Perf Baseline (100k, async poll path) | [#22653075003](https://github.com/zensgit/metasheet2/actions/runs/22653075003) | CANCELLED | `output/playwright/ga/22653075003/perf.log` |
-| Perf Baseline (100k, sync commit) | [#22654163663](https://github.com/zensgit/metasheet2/actions/runs/22654163663) | FAIL (`HTTP 502`) | `output/playwright/ga/22654163663/perf.log` |
-| Perf Baseline Recovery (10k, sync commit, upload path) | [#22654274646](https://github.com/zensgit/metasheet2/actions/runs/22654274646) | PASS | `output/playwright/ga/22654274646/attendance-perf-mmbi4gd9-30hf5h/perf-summary.json`, `output/playwright/ga/22654274646/perf.log` |
-| Daily Gate Dashboard (post-recovery) | [#22654315534](https://github.com/zensgit/metasheet2/actions/runs/22654315534) | PASS | `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.md` |
+| Strict Gates (main, upload/idempotency/export covered) | #22653324504 | PASS | `output/playwright/ga/22653324504/20260304-031111-1/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-summary.json`, `output/playwright/ga/22653324504/20260304-031111-2/gate-api-smoke.log` |
+| Perf Baseline (100k, async poll path) | #22653075003 | CANCELLED | `output/playwright/ga/22653075003/perf.log` |
+| Perf Baseline (100k, sync commit) | #22654163663 | FAIL (`HTTP 502`) | `output/playwright/ga/22654163663/perf.log` |
+| Perf Baseline Recovery (10k, sync commit, upload path) | #22654274646 | PASS | `output/playwright/ga/22654274646/attendance-perf-mmbi4gd9-30hf5h/perf-summary.json`, `output/playwright/ga/22654274646/perf.log` |
+| Daily Gate Dashboard (post-recovery) | #22654315534 | PASS | `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22654315534/attendance-daily-gate-dashboard.md` |
 
 Observed:
 
@@ -2789,7 +2956,7 @@ Goal:
 
 Code changes merged:
 
-- [#322](https://github.com/zensgit/metasheet2/pull/322)
+- #322
   - Localized user-access search/load/grant/revoke runtime messages.
   - Localized batch provisioning preview/assign/revoke status and errors.
   - Localized audit summary/load/export statuses and fallback errors.
@@ -2798,8 +2965,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| PR checks (`contracts strict/dashboard`, `test 18/20`, `coverage`, `e2e`, `pr-validate`) | [#322 checks](https://github.com/zensgit/metasheet2/pull/322/checks) | PASS | GitHub checks list on PR |
-| Daily Gate Dashboard (main, post-merge) | [#22609282963](https://github.com/zensgit/metasheet2/actions/runs/22609282963) | PASS | `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.md` |
+| PR checks (`contracts strict/dashboard`, `test 18/20`, `coverage`, `e2e`, `pr-validate`) | #322 checks | PASS | GitHub checks list on PR |
+| Daily Gate Dashboard (main, post-merge) | #22609282963 | PASS | `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22609282963/attendance-daily-gate-dashboard-22609282963-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -2840,7 +3007,7 @@ Mainline gate refresh:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Attendance Daily Gate Dashboard (main, post-merge) | [#22607986793](https://github.com/zensgit/metasheet2/actions/runs/22607986793) | PASS | `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.md` |
+| Attendance Daily Gate Dashboard (main, post-merge) | #22607986793 | PASS | `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22607986793/attendance-daily-gate-dashboard-22607986793-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -2850,15 +3017,15 @@ Decision:
 
 Merged:
 
-- PR [#317](https://github.com/zensgit/metasheet2/pull/317)
+- PR #317
   - commit: `ce84edfa7b0d63cc48a0e29abd74dd3bcc0cf1f9`
 
 Verification:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Attendance Locale zh Smoke (main, post-merge) | [#22585014328](https://github.com/zensgit/metasheet2/actions/runs/22585014328) | FAIL (env credential) | `output/playwright/ga/22585014328/attendance-locale-zh-smoke-prod-22585014328-1/auth-error.txt` |
-| Attendance Daily Gate Dashboard (main, post-merge) | [#22585014372](https://github.com/zensgit/metasheet2/actions/runs/22585014372) | PASS | `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.md` |
+| Attendance Locale zh Smoke (main, post-merge) | #22585014328 | FAIL (env credential) | `output/playwright/ga/22585014328/attendance-locale-zh-smoke-prod-22585014328-1/auth-error.txt` |
+| Attendance Daily Gate Dashboard (main, post-merge) | #22585014372 | PASS | `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22585014372/attendance-daily-gate-dashboard-22585014372-1/attendance-daily-gate-dashboard.md` |
 
 Observed:
 
@@ -2939,7 +3106,7 @@ Goal:
 
 Merged:
 
-- PR [#313](https://github.com/zensgit/metasheet2/pull/313)
+- PR #313
   - `apps/web/src/views/AttendanceView.vue`:
     - localized Rule Sets / Rule Template Library
     - localized Attendance Groups / Group Members
@@ -2953,10 +3120,10 @@ Verification:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| PR checks (`contracts`, `coverage`, `e2e`, `test`) | [#313](https://github.com/zensgit/metasheet2/pull/313) | PASS | PR checks panel |
-| Contract Matrix (main, post-merge) | [#22583854414](https://github.com/zensgit/metasheet2/actions/runs/22583854414) | PASS | `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-strict-22583854414-1/strict/gate-summary.json`, `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-dashboard-22583854414-1/dashboard.valid.json` |
-| Daily Gate Dashboard (main, post-merge) | [#22583881098](https://github.com/zensgit/metasheet2/actions/runs/22583881098) | PASS | `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.md` |
-| Branch zh smoke (manual, token health probe) | [#22583727656](https://github.com/zensgit/metasheet2/actions/runs/22583727656) | FAIL (non-code, secret stale) | `output/playwright/ga/22583727656-zh-admin-zh3/attendance-locale-zh-smoke-prod-22583727656-1/auth-error.txt` |
+| PR checks (`contracts`, `coverage`, `e2e`, `test`) | #313 | PASS | PR checks panel |
+| Contract Matrix (main, post-merge) | #22583854414 | PASS | `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-strict-22583854414-1/strict/gate-summary.json`, `output/playwright/ga/22583854414-contract-main-post313/attendance-gate-contract-matrix-dashboard-22583854414-1/dashboard.valid.json` |
+| Daily Gate Dashboard (main, post-merge) | #22583881098 | PASS | `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22583881098-dashboard-main-post313/attendance-daily-gate-dashboard-22583881098-1/attendance-daily-gate-dashboard.md` |
+| Branch zh smoke (manual, token health probe) | #22583727656 | FAIL (non-code, secret stale) | `output/playwright/ga/22583727656-zh-admin-zh3/attendance-locale-zh-smoke-prod-22583727656-1/auth-error.txt` |
 
 Decision:
 
@@ -2970,7 +3137,7 @@ Goal:
 
 Merged:
 
-- PR [#315](https://github.com/zensgit/metasheet2/pull/315)
+- PR #315
   - localized:
     - Payroll Templates
     - Payroll Cycles
@@ -2981,9 +3148,9 @@ Verification:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| PR checks (`contracts`, `coverage`, `e2e`, `test`) | [#315](https://github.com/zensgit/metasheet2/pull/315) | PASS | PR checks panel |
-| Contract Matrix (main, post-merge) | [#22584291557](https://github.com/zensgit/metasheet2/actions/runs/22584291557) | PASS | `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-strict-22584291557-1/strict/gate-summary.json`, `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-dashboard-22584291557-1/dashboard.valid.json` |
-| Daily Gate Dashboard (main, post-merge) | [#22584318268](https://github.com/zensgit/metasheet2/actions/runs/22584318268) | PASS | `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.md` |
+| PR checks (`contracts`, `coverage`, `e2e`, `test`) | #315 | PASS | PR checks panel |
+| Contract Matrix (main, post-merge) | #22584291557 | PASS | `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-strict-22584291557-1/strict/gate-summary.json`, `output/playwright/ga/22584291557-contract-main-post315/attendance-gate-contract-matrix-dashboard-22584291557-1/dashboard.valid.json` |
+| Daily Gate Dashboard (main, post-merge) | #22584318268 | PASS | `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22584318268-dashboard-main-post315/attendance-daily-gate-dashboard-22584318268-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -3007,8 +3174,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| zh smoke (branch, before refresh-window alignment) | [#22580243338](https://github.com/zensgit/metasheet2/actions/runs/22580243338) | FAIL (expected during hardening) | `output/playwright/ga/22580243338-zh-branch/attendance-locale-zh-smoke-prod-22580243338-1/attendance-zh-locale-calendar-fail.png` |
-| zh smoke (branch, after fix) | [#22580353759](https://github.com/zensgit/metasheet2/actions/runs/22580353759) | PASS | `output/playwright/ga/22580353759-zh-branch/attendance-locale-zh-smoke-prod-22580353759-1/attendance-zh-locale-calendar.png` |
+| zh smoke (branch, before refresh-window alignment) | #22580243338 | FAIL (expected during hardening) | `output/playwright/ga/22580243338-zh-branch/attendance-locale-zh-smoke-prod-22580243338-1/attendance-zh-locale-calendar-fail.png` |
+| zh smoke (branch, after fix) | #22580353759 | PASS | `output/playwright/ga/22580353759-zh-branch/attendance-locale-zh-smoke-prod-22580353759-1/attendance-zh-locale-calendar.png` |
 
 Observed:
 
@@ -3030,15 +3197,15 @@ Goal:
 
 Merged:
 
-- PR [#309](https://github.com/zensgit/metasheet2/pull/309)
+- PR #309
   - localized records title, reload/export buttons, empty state, and table headers via `tr()` mapping.
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Attendance Locale zh Smoke (main, post-merge) | [#22580807870](https://github.com/zensgit/metasheet2/actions/runs/22580807870) | PASS | `output/playwright/ga/22580807870-zh-main-post309/attendance-locale-zh-smoke-prod-22580807870-1/attendance-zh-locale-calendar.png` |
-| Attendance Daily Gate Dashboard (main, post-merge) | [#22580875100](https://github.com/zensgit/metasheet2/actions/runs/22580875100) | PASS | `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.md` |
+| Attendance Locale zh Smoke (main, post-merge) | #22580807870 | PASS | `output/playwright/ga/22580807870-zh-main-post309/attendance-locale-zh-smoke-prod-22580807870-1/attendance-zh-locale-calendar.png` |
+| Attendance Daily Gate Dashboard (main, post-merge) | #22580875100 | PASS | `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22580875100-dashboard-main-post309/attendance-daily-gate-dashboard-22580875100-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -3052,7 +3219,7 @@ Goal:
 
 Merged:
 
-- PR [#311](https://github.com/zensgit/metasheet2/pull/311)
+- PR #311
   - localized:
     - User Access
     - Batch Provisioning
@@ -3062,8 +3229,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Attendance Locale zh Smoke (main, post-merge) | [#22582909173](https://github.com/zensgit/metasheet2/actions/runs/22582909173) | PASS | `output/playwright/ga/22582909173-zh-main-post311-r2/attendance-locale-zh-smoke-prod-22582909173-1/attendance-zh-locale-calendar.png` |
-| Attendance Daily Gate Dashboard (main, post-merge) | [#22582916109](https://github.com/zensgit/metasheet2/actions/runs/22582916109) | PASS | `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.md` |
+| Attendance Locale zh Smoke (main, post-merge) | #22582909173 | PASS | `output/playwright/ga/22582909173-zh-main-post311-r2/attendance-locale-zh-smoke-prod-22582909173-1/attendance-zh-locale-calendar.png` |
+| Attendance Daily Gate Dashboard (main, post-merge) | #22582916109 | PASS | `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22582916109-dashboard-main-post311-r2/attendance-daily-gate-dashboard-22582916109-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
@@ -3077,7 +3244,7 @@ Goal:
 
 Code changes (branch):
 
-- PR: [#307](https://github.com/zensgit/metasheet2/pull/307)
+- PR: #307
 - Branch: `codex/attendance-longrun-poll-recovery`
 - Script updates:
   - recover async commit timeout by replaying `commit-async` with the same `idempotencyKey` (no `commitToken`)
@@ -3089,9 +3256,9 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun drill (issue open path) | [#22550229839](https://github.com/zensgit/metasheet2/actions/runs/22550229839) | FAIL (expected) | `output/playwright/ga/22550229839/attendance-import-perf-longrun-drill-22550229839-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
-| Perf Longrun drill recovery (issue close path) | [#22550248100](https://github.com/zensgit/metasheet2/actions/runs/22550248100) | PASS | `output/playwright/ga/22550248100/attendance-import-perf-longrun-drill-22550248100-1/drill.txt`, Issue: [#156](https://github.com/zensgit/metasheet2/issues/156) |
-| Perf Longrun non-drill (upload path, post-fix) | [#22555028596](https://github.com/zensgit/metasheet2/actions/runs/22555028596) | FAIL (P1) | `output/playwright/ga/22555028596/attendance-import-perf-longrun-rows100k-commit-22555028596-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22555028596/attendance-import-perf-longrun-trend-22555028596-1/20260302-002955/attendance-import-perf-longrun-trend.md`, Issue: [#157](https://github.com/zensgit/metasheet2/issues/157) |
+| Perf Longrun drill (issue open path) | #22550229839 | FAIL (expected) | `output/playwright/ga/22550229839/attendance-import-perf-longrun-drill-22550229839-1/drill.txt`, Issue: #156 |
+| Perf Longrun drill recovery (issue close path) | #22550248100 | PASS | `output/playwright/ga/22550248100/attendance-import-perf-longrun-drill-22550248100-1/drill.txt`, Issue: #156 |
+| Perf Longrun non-drill (upload path, post-fix) | #22555028596 | FAIL (P1) | `output/playwright/ga/22555028596/attendance-import-perf-longrun-rows100k-commit-22555028596-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22555028596/attendance-import-perf-longrun-trend-22555028596-1/20260302-002955/attendance-import-perf-longrun-trend.md`, Issue: #157 |
 
 Observed highlights:
 
@@ -3101,7 +3268,7 @@ Observed highlights:
   - `Failed: async commit job timed out`
   - Trend bucket: `ASYNC_JOB_TIMEOUT` (`rows100k-commit`)
 - P1 tracker state:
-  - [#157](https://github.com/zensgit/metasheet2/issues/157) is `OPEN`
+  - #157 is `OPEN`
 
 Decision:
 
@@ -3130,13 +3297,13 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (branch, pre-stabilization baseline) | [#22560727084](https://github.com/zensgit/metasheet2/actions/runs/22560727084) | FAIL (P1) | `output/playwright/ga/22560727084/attendance-import-perf-longrun-rows100k-commit-22560727084-1/current/rows100k-commit/perf.log` |
-| Perf Longrun (branch, timeout-window validation) | [#22564985202](https://github.com/zensgit/metasheet2/actions/runs/22564985202) | FAIL (P1) | `output/playwright/ga/22564985202/attendance-import-perf-longrun-rows500k-commit-22564985202-1/current/rows500k-commit/perf.log` |
-| Perf Longrun (branch, stabilized daily defaults) | [#22568764021](https://github.com/zensgit/metasheet2/actions/runs/22568764021) | PASS | `output/playwright/ga/22568764021/attendance-import-perf-longrun-trend-22568764021-1/20260302-090449/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22568764021/attendance-import-perf-longrun-rows10k-commit-22568764021-1/current/rows10k-commit/attendance-perf-mm8yaxai-6vuj6j/perf-summary.json` |
+| Perf Longrun (branch, pre-stabilization baseline) | #22560727084 | FAIL (P1) | `output/playwright/ga/22560727084/attendance-import-perf-longrun-rows100k-commit-22560727084-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (branch, timeout-window validation) | #22564985202 | FAIL (P1) | `output/playwright/ga/22564985202/attendance-import-perf-longrun-rows500k-commit-22564985202-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch, stabilized daily defaults) | #22568764021 | PASS | `output/playwright/ga/22568764021/attendance-import-perf-longrun-trend-22568764021-1/20260302-090449/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22568764021/attendance-import-perf-longrun-rows10k-commit-22568764021-1/current/rows10k-commit/attendance-perf-mm8yaxai-6vuj6j/perf-summary.json` |
 
 Issue tracking result:
 
-- [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` -> `CLOSED` (updated at `2026-03-02T09:04:56Z`).
+- #157 `[Attendance P1] Perf longrun alert` -> `CLOSED` (updated at `2026-03-02T09:04:56Z`).
 
 Decision:
 
@@ -3184,20 +3351,20 @@ Goal:
 
 Code changes merged:
 
-- [#300](https://github.com/zensgit/metasheet2/pull/300)
+- #300
   - Added `.github/workflows/attendance-locale-zh-smoke-prod.yml`.
-- [#301](https://github.com/zensgit/metasheet2/pull/301)
+- #301
   - Added token validation + login fallback (`ATTENDANCE_ADMIN_EMAIL`/`ATTENDANCE_ADMIN_PASSWORD`).
-- [#302](https://github.com/zensgit/metasheet2/pull/302)
+- #302
   - Guaranteed artifact output on auth failure (`auth-error.txt`).
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| zh Smoke workflow initial run | [#22540304225](https://github.com/zensgit/metasheet2/actions/runs/22540304225) | FAIL | Invalid JWT detected during holiday API check |
-| zh Smoke workflow with auth fallback | [#22540373968](https://github.com/zensgit/metasheet2/actions/runs/22540373968) | FAIL | Explicit auth remediation message |
-| zh Smoke workflow with auth-failure artifact | [#22540422680](https://github.com/zensgit/metasheet2/actions/runs/22540422680) | FAIL (expected until secret rotation) | `output/playwright/ga/22540422680/auth-error.txt` |
+| zh Smoke workflow initial run | #22540304225 | FAIL | Invalid JWT detected during holiday API check |
+| zh Smoke workflow with auth fallback | #22540373968 | FAIL | Explicit auth remediation message |
+| zh Smoke workflow with auth-failure artifact | #22540422680 | FAIL (expected until secret rotation) | `output/playwright/ga/22540422680/auth-error.txt` |
 
 Decision:
 
@@ -3226,7 +3393,7 @@ Follow-up verification:
 
 Final recovery:
 - GA workflow rerun after merging PR `#305`:
-  - Run: [#22546819896](https://github.com/zensgit/metasheet2/actions/runs/22546819896)
+  - Run: #22546819896
   - Status: PASS
   - Evidence: `output/playwright/ga/22546819896/attendance-zh-locale-calendar.png`
 
@@ -3234,34 +3401,34 @@ Final recovery:
 
 Merged changes:
 
-- [#288](https://github.com/zensgit/metasheet2/pull/288): Admin Center zh localization + locale smoke script.
-- [#289](https://github.com/zensgit/metasheet2/pull/289): daily dashboard JSON contract parser fix.
-- [#290](https://github.com/zensgit/metasheet2/pull/290): Perf Baseline default `commit_async=true`.
-- [#291](https://github.com/zensgit/metasheet2/pull/291): Perf Baseline timeout/poll budget tuning for async path.
-- [#292](https://github.com/zensgit/metasheet2/pull/292): Daily Dashboard workflow fails on P0 only (keeps P1 visible/non-paging).
+- #288: Admin Center zh localization + locale smoke script.
+- #289: daily dashboard JSON contract parser fix.
+- #290: Perf Baseline default `commit_async=true`.
+- #291: Perf Baseline timeout/poll budget tuning for async path.
+- #292: Daily Dashboard workflow fails on P0 only (keeps P1 visible/non-paging).
 
 Validation matrix:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (post `#292`) | [#22537677656](https://github.com/zensgit/metasheet2/actions/runs/22537677656) | PASS | `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-1/gate-summary.json`, `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-2/gate-summary.json` |
-| Daily Dashboard (post `#292`) | [#22537661629](https://github.com/zensgit/metasheet2/actions/runs/22537661629) | PASS | `output/playwright/ga/22537661629-r2/attendance-daily-gate-dashboard-22537661629-1/attendance-daily-gate-dashboard.json` |
-| Perf Baseline (100k async) | [#22536896331](https://github.com/zensgit/metasheet2/actions/runs/22536896331) | FAIL (P1) | `output/playwright/ga/22536896331-r2/attendance-import-perf-22536896331-1/perf.log` |
-| Perf Longrun | [#22536868864](https://github.com/zensgit/metasheet2/actions/runs/22536868864) | FAIL (P1) | `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows100k-commit-22536868864-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows500k-commit-22536868864-1/current/rows500k-commit/perf.log` |
+| Strict Gates (post `#292`) | #22537677656 | PASS | `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-1/gate-summary.json`, `output/playwright/ga/22537677656-r2/attendance-strict-gates-prod-22537677656-1/20260301-062929-2/gate-summary.json` |
+| Daily Dashboard (post `#292`) | #22537661629 | PASS | `output/playwright/ga/22537661629-r2/attendance-daily-gate-dashboard-22537661629-1/attendance-daily-gate-dashboard.json` |
+| Perf Baseline (100k async) | #22536896331 | FAIL (P1) | `output/playwright/ga/22536896331-r2/attendance-import-perf-22536896331-1/perf.log` |
+| Perf Longrun | #22536868864 | FAIL (P1) | `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows100k-commit-22536868864-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22536868864-r2/attendance-import-perf-longrun-rows500k-commit-22536868864-1/current/rows500k-commit/perf.log` |
 
 Assessment:
 
 - P0 gates remain green (`strict=PASS`, dashboard workflow now correctly keyed on `report_p0_status`).
 - P1 performance reliability remains open (upstream 502/timeouts on large import commit paths).
-- Active tracker: [#157](https://github.com/zensgit/metasheet2/issues/157) (`[Attendance P1] Perf longrun alert`).
-- Baseline tracker [#213](https://github.com/zensgit/metasheet2/issues/213) is currently CLOSED.
+- Active tracker: #157 (`[Attendance P1] Perf longrun alert`).
+- Baseline tracker #213 is currently CLOSED.
 
 ### Follow-up (2026-03-01, post-`#295`)
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (post async/tuning update) | [#22537963463](https://github.com/zensgit/metasheet2/actions/runs/22537963463) | FAIL (P1) | `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows100k-commit-22537963463-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows500k-commit-22537963463-1/current/rows500k-commit/perf.log` |
-| Daily Dashboard | [#22539228593](https://github.com/zensgit/metasheet2/actions/runs/22539228593) | PASS | `output/playwright/ga/22539228593-r2/attendance-daily-gate-dashboard-22539228593-1/attendance-daily-gate-dashboard.json` |
+| Perf Longrun (post async/tuning update) | #22537963463 | FAIL (P1) | `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows100k-commit-22537963463-1/current/rows100k-commit/perf.log`, `output/playwright/ga/22537963463-r2/attendance-import-perf-longrun-rows500k-commit-22537963463-1/current/rows500k-commit/perf.log` |
+| Daily Dashboard | #22539228593 | PASS | `output/playwright/ga/22539228593-r2/attendance-daily-gate-dashboard-22539228593-1/attendance-daily-gate-dashboard.json` |
 
 Conclusion remains:
 - **GO for P0 production chain** (strict + dashboard P0 healthy).
@@ -3271,7 +3438,7 @@ Conclusion remains:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (`include_rows500k_*=false`) | [#22539314446](https://github.com/zensgit/metasheet2/actions/runs/22539314446) | FAIL (P1) | `output/playwright/ga/22539314446-r2/attendance-import-perf-longrun-rows100k-commit-22539314446-1/current/rows100k-commit/perf.log` |
+| Perf Longrun (`include_rows500k_*=false`) | #22539314446 | FAIL (P1) | `output/playwright/ga/22539314446-r2/attendance-import-perf-longrun-rows100k-commit-22539314446-1/current/rows100k-commit/perf.log` |
 
 Result:
 - Poll interval tuning alone did not recover `rows100k-commit`; failure mode remains async-job timeout under transient upstream errors.
@@ -3282,15 +3449,15 @@ Result:
 Goal:
 
 - Confirm production readiness remains stable after merging:
-  - PR [#285](https://github.com/zensgit/metasheet2/pull/285) (`zh-CN` language toggle + core attendance UI localization),
-  - PR [#286](https://github.com/zensgit/metasheet2/pull/286) (attendance calendar lunar label + holiday name badge).
+  - PR #285 (`zh-CN` language toggle + core attendance UI localization),
+  - PR #286 (attendance calendar lunar label + holiday name badge).
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, post localization/calendar merge) | [#22522123651](https://github.com/zensgit/metasheet2/actions/runs/22522123651) | PASS | `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-1/gate-summary.json`, `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-2/gate-summary.json` |
-| Daily Gate Dashboard (main, post localization/calendar merge) | [#22522181481](https://github.com/zensgit/metasheet2/actions/runs/22522181481) | PASS | `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (main, post localization/calendar merge) | #22522123651 | PASS | `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-1/gate-summary.json`, `output/playwright/ga/22522123651/attendance-strict-gates-prod-22522123651-1/20260228-135817-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post localization/calendar merge) | #22522181481 | PASS | `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22522181481/attendance-daily-gate-dashboard-22522181481-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3331,7 +3498,7 @@ Verification:
 | Backend integration tests (`attendance-plugin.test.ts`) | local | PASS | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts --reporter=dot` |
 | Backend build | local | PASS | `pnpm --filter @metasheet/core-backend build` |
 | Web build | local | PASS | `pnpm --filter @metasheet/web build` |
-| Perf Long Run (branch `codex/attendance-parallel-123-20260228`, non-drill, `upload_csv=true`) | [#22520350142](https://github.com/zensgit/metasheet2/actions/runs/22520350142) | PASS | `output/playwright/ga/22520350142/attendance-import-perf-longrun-rows500k-commit-22520350142-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.json` |
+| Perf Long Run (branch `codex/attendance-parallel-123-20260228`, non-drill, `upload_csv=true`) | #22520350142 | PASS | `output/playwright/ga/22520350142/attendance-import-perf-longrun-rows500k-commit-22520350142-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.md`, `output/playwright/ga/22520350142/attendance-import-perf-longrun-trend-22520350142-1/20260228-121326/attendance-import-perf-longrun-trend.json` |
 
 Observed highlights:
 
@@ -3360,7 +3527,7 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (branch `codex/attendance-longrun-default-500k-commit`, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | [#22516549887](https://github.com/zensgit/metasheet2/actions/runs/22516549887) | PASS | `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current/rows500k-commit/attendance-perf-mm60v6yg-52v83n/perf-summary.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-trend-22516549887-1/20260228-080055/attendance-import-perf-longrun-trend.md` |
+| Perf Longrun (branch `codex/attendance-longrun-default-500k-commit`, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | #22516549887 | PASS | `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current/rows500k-commit/attendance-perf-mm60v6yg-52v83n/perf-summary.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-rows500k-commit-22516549887-1/current-flat/rows500000-commit.json`, `output/playwright/ga/22516549887/attendance-import-perf-longrun-trend-22516549887-1/20260228-080055/attendance-import-perf-longrun-trend.md` |
 
 Observed highlights:
 
@@ -3397,8 +3564,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (main, non-drill, post-#281; includes `rows500k-commit`) | [#22516773937](https://github.com/zensgit/metasheet2/actions/runs/22516773937) | FAIL (expected before fix) | `output/playwright/ga/22516773937/attendance-import-perf-longrun-rows500k-commit-22516773937-1/current/rows500k-commit/perf.log` |
-| Perf Longrun (branch `codex/attendance-longrun-500k-poll-timeout`, non-drill, same profile) | [#22517307128](https://github.com/zensgit/metasheet2/actions/runs/22517307128) | PASS | `output/playwright/ga/22517307128/attendance-import-perf-longrun-rows500k-commit-22517307128-1/current/rows500k-commit/attendance-perf-mm62nb2h-ss8bf3/perf-summary.json`, `output/playwright/ga/22517307128/attendance-import-perf-longrun-trend-22517307128-1/20260228-085054/attendance-import-perf-longrun-trend.md` |
+| Perf Longrun (main, non-drill, post-#281; includes `rows500k-commit`) | #22516773937 | FAIL (expected before fix) | `output/playwright/ga/22516773937/attendance-import-perf-longrun-rows500k-commit-22516773937-1/current/rows500k-commit/perf.log` |
+| Perf Longrun (branch `codex/attendance-longrun-500k-poll-timeout`, non-drill, same profile) | #22517307128 | PASS | `output/playwright/ga/22517307128/attendance-import-perf-longrun-rows500k-commit-22517307128-1/current/rows500k-commit/attendance-perf-mm62nb2h-ss8bf3/perf-summary.json`, `output/playwright/ga/22517307128/attendance-import-perf-longrun-trend-22517307128-1/20260228-085054/attendance-import-perf-longrun-trend.md` |
 
 Observed highlights:
 
@@ -3425,8 +3592,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Longrun (main, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | [#22519504604](https://github.com/zensgit/metasheet2/actions/runs/22519504604) | PASS | `output/playwright/ga/22519504604/attendance-import-perf-longrun-rows500k-commit-22519504604-1/current/rows500k-commit/attendance-perf-mm67u1m3-9ipq8w/perf-summary.json`, `output/playwright/ga/22519504604/attendance-import-perf-longrun-trend-22519504604-1/20260228-111543/attendance-import-perf-longrun-trend.md` |
-| Daily Gate Dashboard (main, post longrun recovery) | [#22519690633](https://github.com/zensgit/metasheet2/actions/runs/22519690633) | PASS | `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.md` |
+| Perf Longrun (main, non-drill, `upload_csv=true`, `include_rows500k_preview=false`) | #22519504604 | PASS | `output/playwright/ga/22519504604/attendance-import-perf-longrun-rows500k-commit-22519504604-1/current/rows500k-commit/attendance-perf-mm67u1m3-9ipq8w/perf-summary.json`, `output/playwright/ga/22519504604/attendance-import-perf-longrun-trend-22519504604-1/20260228-111543/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (main, post longrun recovery) | #22519690633 | PASS | `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22519690633/attendance-daily-gate-dashboard-22519690633-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3461,9 +3628,9 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Perf Baseline (main, non-drill, `upload_csv=true`) | [#22516230477](https://github.com/zensgit/metasheet2/actions/runs/22516230477) | PASS | `output/playwright/ga/22516230477/attendance-import-perf-22516230477-1/attendance-perf-mm60365o-nepgma/perf-summary.json` |
-| Perf Longrun (main, non-drill, upload path) | [#22516278422](https://github.com/zensgit/metasheet2/actions/runs/22516278422) | PASS | `output/playwright/ga/22516278422/attendance-import-perf-longrun-rows100k-commit-22516278422-1/current/rows100k-commit/attendance-perf-mm6071fd-lrebf8/perf-summary.json`, `output/playwright/ga/22516278422/attendance-import-perf-longrun-trend-22516278422-1/20260228-073456/attendance-import-perf-longrun-trend.json` |
-| Daily Gate Dashboard (main, after perf refresh) | [#22516327881](https://github.com/zensgit/metasheet2/actions/runs/22516327881) | PASS | `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (main, non-drill, `upload_csv=true`) | #22516230477 | PASS | `output/playwright/ga/22516230477/attendance-import-perf-22516230477-1/attendance-perf-mm60365o-nepgma/perf-summary.json` |
+| Perf Longrun (main, non-drill, upload path) | #22516278422 | PASS | `output/playwright/ga/22516278422/attendance-import-perf-longrun-rows100k-commit-22516278422-1/current/rows100k-commit/attendance-perf-mm6071fd-lrebf8/perf-summary.json`, `output/playwright/ga/22516278422/attendance-import-perf-longrun-trend-22516278422-1/20260228-073456/attendance-import-perf-longrun-trend.json` |
+| Daily Gate Dashboard (main, after perf refresh) | #22516327881 | PASS | `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22516327881/attendance-daily-gate-dashboard-22516327881-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3503,8 +3670,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, non-drill latest refresh) | [#22515557190](https://github.com/zensgit/metasheet2/actions/runs/22515557190) | PASS | `output/playwright/ga/22515557190/20260228-064805-1/gate-summary.json`, `output/playwright/ga/22515557190/20260228-064805-2/gate-summary.json` |
-| Daily Gate Dashboard (main, latest strict binding) | [#22515657453](https://github.com/zensgit/metasheet2/actions/runs/22515657453) | PASS | `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (main, non-drill latest refresh) | #22515557190 | PASS | `output/playwright/ga/22515557190/20260228-064805-1/gate-summary.json`, `output/playwright/ga/22515557190/20260228-064805-2/gate-summary.json` |
+| Daily Gate Dashboard (main, latest strict binding) | #22515657453 | PASS | `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515657453/attendance-daily-gate-dashboard-22515657453-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3529,8 +3696,8 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, non-drill refresh) | [#22515377178](https://github.com/zensgit/metasheet2/actions/runs/22515377178) | PASS | `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-1/gate-summary.json`, `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-2/gate-summary.json` |
-| Daily Gate Dashboard (main, post strict refresh) | [#22515481530](https://github.com/zensgit/metasheet2/actions/runs/22515481530) | PASS | `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.md` |
+| Strict Gates (main, non-drill refresh) | #22515377178 | PASS | `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-1/gate-summary.json`, `output/playwright/ga/22515377178/attendance-strict-gates-prod-22515377178-1/*-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post strict refresh) | #22515481530 | PASS | `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22515481530/attendance-daily-gate-dashboard-22515481530-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3549,15 +3716,15 @@ Decision:
 
 Goal:
 
-- Verify `main` remains green after merging PR [#276](https://github.com/zensgit/metasheet2/pull/276) (remote host-sync retry hardening).
+- Verify `main` remains green after merging PR #276 (remote host-sync retry hardening).
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Metrics (main, post-merge) | [#22514864401](https://github.com/zensgit/metasheet2/actions/runs/22514864401) | PASS | `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/step-summary.md`, `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/metrics.log` |
-| Remote Storage Health (main, post-merge) | [#22514873466](https://github.com/zensgit/metasheet2/actions/runs/22514873466) | PASS | `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/step-summary.md`, `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/storage.log` |
-| Daily Gate Dashboard (main, post-merge) | [#22514880638](https://github.com/zensgit/metasheet2/actions/runs/22514880638) | PASS | `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.md` |
+| Remote Metrics (main, post-merge) | #22514864401 | PASS | `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/step-summary.md`, `output/playwright/ga/22514864401/attendance-remote-metrics-prod-22514864401-1/metrics.log` |
+| Remote Storage Health (main, post-merge) | #22514873466 | PASS | `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/step-summary.md`, `output/playwright/ga/22514873466/attendance-remote-storage-prod-22514873466-1/storage.log` |
+| Daily Gate Dashboard (main, post-merge) | #22514880638 | PASS | `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514880638/attendance-daily-gate-dashboard-22514880638-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
@@ -3598,8 +3765,8 @@ Branch verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Metrics (branch `codex/attendance-host-sync-retry-20260228`) | [#22514807034](https://github.com/zensgit/metasheet2/actions/runs/22514807034) | PASS | `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/step-summary.md`, `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/metrics.log` |
-| Remote Storage Health (branch `codex/attendance-host-sync-retry-20260228`) | [#22514818248](https://github.com/zensgit/metasheet2/actions/runs/22514818248) | PASS | `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/step-summary.md`, `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/storage.log` |
+| Remote Metrics (branch `codex/attendance-host-sync-retry-20260228`) | #22514807034 | PASS | `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/step-summary.md`, `output/playwright/ga/22514807034/attendance-remote-metrics-prod-22514807034-1/metrics.log` |
+| Remote Storage Health (branch `codex/attendance-host-sync-retry-20260228`) | #22514818248 | PASS | `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/step-summary.md`, `output/playwright/ga/22514818248/attendance-remote-storage-prod-22514818248-1/storage.log` |
 
 Observed highlights:
 
@@ -3619,25 +3786,25 @@ Goal:
 
 Incident snapshot:
 
-- Dashboard run [#22514479433](https://github.com/zensgit/metasheet2/actions/runs/22514479433): `FAIL` with `p0Status=pass`
+- Dashboard run #22514479433: `FAIL` with `p0Status=pass`
 - Findings:
-  - Host Metrics failed: run [#22511923525](https://github.com/zensgit/metasheet2/actions/runs/22511923525) (`HOST_SYNC_FAILED`)
-  - Storage Health failed: run [#22511923381](https://github.com/zensgit/metasheet2/actions/runs/22511923381) (`HOST_SYNC_FAILED`)
+  - Host Metrics failed: run #22511923525 (`HOST_SYNC_FAILED`)
+  - Storage Health failed: run #22511923381 (`HOST_SYNC_FAILED`)
 
 Recovery runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Remote Metrics (main, recovery) | [#22514500377](https://github.com/zensgit/metasheet2/actions/runs/22514500377) | PASS | `output/playwright/ga/22514500377/step-summary.md`, `output/playwright/ga/22514500377/metrics.log` |
-| Remote Storage Health (main, recovery) | [#22514512568](https://github.com/zensgit/metasheet2/actions/runs/22514512568) | PASS | `output/playwright/ga/22514512568/step-summary.md`, `output/playwright/ga/22514512568/storage.log` |
-| Daily Gate Dashboard (post-recovery) | [#22514531102](https://github.com/zensgit/metasheet2/actions/runs/22514531102) | PASS | `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.md` |
+| Remote Metrics (main, recovery) | #22514500377 | PASS | `output/playwright/ga/22514500377/step-summary.md`, `output/playwright/ga/22514500377/metrics.log` |
+| Remote Storage Health (main, recovery) | #22514512568 | PASS | `output/playwright/ga/22514512568/step-summary.md`, `output/playwright/ga/22514512568/storage.log` |
+| Daily Gate Dashboard (post-recovery) | #22514531102 | PASS | `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22514531102/attendance-daily-gate-dashboard-22514531102-1/attendance-daily-gate-dashboard.md` |
 
 Observed highlights:
 
 - Recovery run summaries report host sync + gate outputs all `PASS`.
 - Tracking issues auto-closed after recovery:
-  - [#273](https://github.com/zensgit/metasheet2/issues/273) `[Attendance P1] Host metrics alert` -> `CLOSED`
-  - [#159](https://github.com/zensgit/metasheet2/issues/159) `[Attendance P1] Storage health alert` -> `CLOSED`
+  - #273 `[Attendance P1] Host metrics alert` -> `CLOSED`
+  - #159 `[Attendance P1] Storage health alert` -> `CLOSED`
 - Final dashboard (`#22514531102`) reports:
   - `overallStatus=pass`
   - `p0Status=pass`
@@ -3710,8 +3877,8 @@ Verification:
 | Check | Run | Status | Evidence |
 |---|---|---|---|
 | Perf script syntax | local | PASS | `node --check scripts/ops/attendance-import-perf.mjs` |
-| Perf Longrun (branch `codex/attendance-perf-async-deadlock-retry`, non-drill, `upload_csv=true`) | [#22489161445](https://github.com/zensgit/metasheet2/actions/runs/22489161445) | PASS | `output/playwright/ga/22489161445/attendance-import-perf-longrun-rows100k-commit-22489161445-1/current/rows100k-commit/attendance-perf-mm4yl57r-jv4h0p/perf-summary.json`, `output/playwright/ga/22489161445/attendance-import-perf-longrun-trend-22489161445-1/20260227-140204/attendance-import-perf-longrun-trend.json` |
-| Perf Longrun (main, post-merge PR #271, non-drill, `upload_csv=true`) | [#22489422349](https://github.com/zensgit/metasheet2/actions/runs/22489422349) | PASS | `output/playwright/ga/22489422349/attendance-import-perf-longrun-rows100k-commit-22489422349-1/current/rows100k-commit/attendance-perf-mm4yut7w-hduc0l/perf-summary.json`, `output/playwright/ga/22489422349/attendance-import-perf-longrun-trend-22489422349-1/20260227-141131/attendance-import-perf-longrun-trend.json` |
+| Perf Longrun (branch `codex/attendance-perf-async-deadlock-retry`, non-drill, `upload_csv=true`) | #22489161445 | PASS | `output/playwright/ga/22489161445/attendance-import-perf-longrun-rows100k-commit-22489161445-1/current/rows100k-commit/attendance-perf-mm4yl57r-jv4h0p/perf-summary.json`, `output/playwright/ga/22489161445/attendance-import-perf-longrun-trend-22489161445-1/20260227-140204/attendance-import-perf-longrun-trend.json` |
+| Perf Longrun (main, post-merge PR #271, non-drill, `upload_csv=true`) | #22489422349 | PASS | `output/playwright/ga/22489422349/attendance-import-perf-longrun-rows100k-commit-22489422349-1/current/rows100k-commit/attendance-perf-mm4yut7w-hduc0l/perf-summary.json`, `output/playwright/ga/22489422349/attendance-import-perf-longrun-trend-22489422349-1/20260227-141131/attendance-import-perf-longrun-trend.json` |
 
 Observed highlights (`#22489161445`, rows100k-commit summary):
 
@@ -3734,15 +3901,15 @@ Decision:
 
 Goal:
 
-- Confirm `main` remains production-ready after merging PR [#268](https://github.com/zensgit/metasheet2/pull/268) (`admin settings save-cycle assertion hardening` + evidence docs update).
+- Confirm `main` remains production-ready after merging PR #268 (`admin settings save-cycle assertion hardening` + evidence docs update).
 
 Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Strict Gates (main, post-merge, recovery+admin-save enabled) | [#22486048486](https://github.com/zensgit/metasheet2/actions/runs/22486048486) | PASS | `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-1/gate-summary.json`, `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-2/gate-summary.json` |
-| Daily Gate Dashboard (main, post strict refresh) | [#22486225516](https://github.com/zensgit/metasheet2/actions/runs/22486225516) | PASS | `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.md` |
-| Perf Baseline (main, post-merge, upload path) | [#22486265427](https://github.com/zensgit/metasheet2/actions/runs/22486265427) | PASS | `output/playwright/ga/22486265427/attendance-import-perf-22486265427-1/attendance-perf-mm4vdr0q-8gd1or/perf-summary.json` |
+| Strict Gates (main, post-merge, recovery+admin-save enabled) | #22486048486 | PASS | `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-1/gate-summary.json`, `output/playwright/ga/22486048486/attendance-strict-gates-prod-22486048486-1/20260227-122328-2/gate-summary.json` |
+| Daily Gate Dashboard (main, post strict refresh) | #22486225516 | PASS | `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22486225516/attendance-daily-gate-dashboard-22486225516-1/attendance-daily-gate-dashboard.md` |
+| Perf Baseline (main, post-merge, upload path) | #22486265427 | PASS | `output/playwright/ga/22486265427/attendance-import-perf-22486265427-1/attendance-perf-mm4vdr0q-8gd1or/perf-summary.json` |
 
 Observed highlights:
 
@@ -3776,10 +3943,10 @@ Goal:
 
 Code changes merged:
 
-- [#266](https://github.com/zensgit/metasheet2/pull/266)
+- #266
   - Added heavy-query timeout override wiring (`timeoutMs`) from attendance import paths into DB query config.
   - Added `ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS` (default `180000`) for heavy import SQL.
-- [#267](https://github.com/zensgit/metasheet2/pull/267)
+- #267
   - Applied both `query_timeout` and `statement_timeout` for heavy queries.
   - Added `SET LOCAL statement_timeout` for heavy import transactions to keep timeout policy consistent inside txn scope.
 
@@ -3787,10 +3954,10 @@ Verification runs:
 
 | Check | Run | Status | Evidence |
 |---|---|---|---|
-| Build + deploy (post-#266) | [#22394293493](https://github.com/zensgit/metasheet2/actions/runs/22394293493) | PASS | GitHub Actions deploy logs |
-| Perf Longrun (main, transitional after #266) | [#22394440411](https://github.com/zensgit/metasheet2/actions/runs/22394440411) | FAIL | `output/playwright/ga/22394440411/attendance-import-perf-longrun-rows500k-commit-22394440411-1/current/rows500k-commit/perf.log` |
-| Build + deploy (post-#267) | [#22394759732](https://github.com/zensgit/metasheet2/actions/runs/22394759732) | PASS | GitHub Actions deploy logs |
-| Perf Longrun (main, post-#267, `rows500k-commit` enabled) | [#22394865768](https://github.com/zensgit/metasheet2/actions/runs/22394865768) | PASS | `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/perf.log`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/attendance-perf-mm1ycxgl-l8z7x1/perf-summary.json`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-trend-22394865768-1/20260225-113750/attendance-import-perf-longrun-trend.md` |
+| Build + deploy (post-#266) | #22394293493 | PASS | GitHub Actions deploy logs |
+| Perf Longrun (main, transitional after #266) | #22394440411 | FAIL | `output/playwright/ga/22394440411/attendance-import-perf-longrun-rows500k-commit-22394440411-1/current/rows500k-commit/perf.log` |
+| Build + deploy (post-#267) | #22394759732 | PASS | GitHub Actions deploy logs |
+| Perf Longrun (main, post-#267, `rows500k-commit` enabled) | #22394865768 | PASS | `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/perf.log`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-rows500k-commit-22394865768-1/current/rows500k-commit/attendance-perf-mm1ycxgl-l8z7x1/perf-summary.json`, `output/playwright/ga/22394865768/attendance-import-perf-longrun-trend-22394865768-1/20260225-113750/attendance-import-perf-longrun-trend.md` |
 
 Observed highlights:
 
@@ -3802,7 +3969,7 @@ Observed highlights:
   - `commitMs=428928`
   - `elapsedMs=427000`
 - P1 tracker status after recovery:
-  - [#157](https://github.com/zensgit/metasheet2/issues/157) `[Attendance P1] Perf longrun alert` is `CLOSED`.
+  - #157 `[Attendance P1] Perf longrun alert` is `CLOSED`.
 
 Decision:
 
