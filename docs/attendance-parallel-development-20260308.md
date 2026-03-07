@@ -2,6 +2,8 @@
 
 ## Summary
 This round completed parallel hardening across workflow contracts, backend async-import reliability, and verification automation.
+- PR: `#374` (`https://github.com/zensgit/metasheet2/pull/374`)
+- Merge blocker: repository policy requires at least 1 approving review.
 
 ## Implemented Changes
 
@@ -75,6 +77,13 @@ Result: PASS
   - workflow run: `22803281293`
   - artifact path:
     - `output/playwright/ga/22803281293/attendance-import-perf-longrun-rows100k-commit-22803281293-1/current/rows100k-commit/perf.log`
+
+### PR CI evidence (post-fix branch)
+- `Attendance Gate Contract Matrix`: `22803514617` (PASS)
+- `Plugin System Tests`: `22803514632` (PASS)
+- `Observability E2E`: `22803514607` (PASS)
+- `Migration Replay`: `22803514615` (PASS)
+- `Batch2 Test Stabilization`: `22803514614` (PASS)
 
 ## Pending Gate Close (after merge/deploy)
 To close this stage on production environment, rerun:
