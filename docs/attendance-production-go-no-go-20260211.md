@@ -3974,3 +3974,44 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Post-Merge Verifier Re-Run (`verify:attendance-post-merge`)
+
+Goal:
+
+- run one-command post-merge verification on `main` and confirm latest branch-policy, strict, and dashboard gates are consistently green with artifacted evidence.
+
+Execution:
+
+- command: `pnpm verify:attendance-post-merge`
+- output root: `output/playwright/attendance-post-merge-verify/20260307-193140`
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22798252725 | PASS | `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798252725/attendance-branch-policy-drift-prod-22798252725-1/policy.json`, `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798252725/attendance-branch-policy-drift-prod-22798252725-1/step-summary.md` |
+| Attendance Strict Gates (Prod) | #22798270418 | PASS | `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798270418/attendance-strict-gates-prod-22798270418-1/20260307-113351-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798270418/attendance-strict-gates-prod-22798270418-1/20260307-113351-2/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798270418/attendance-strict-gates-prod-22798270418-1/20260307-113351-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard | #22798350381 | PASS | `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798350381/attendance-daily-gate-dashboard-22798350381-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-193140/ga/22798350381/attendance-daily-gate-dashboard-22798350381-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- strict smoke log includes:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `group + membership ok`
+  - `SMOKE PASS`
+- dashboard contract snapshot:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22798270418`
+  - `gateFlat.protection.runId=22798252725`
+  - `gateFlat.preflight.runId=22796432695`
+  - `gateFlat.storage.runId=22796432712`
+- open attendance issues:
+  - `[]`
+
+Decision:
+
+- **GO maintained**.
