@@ -4134,3 +4134,24 @@ Key assertions:
   - `rows=10000`
   - `commitAsync=false`
   - `uploadCsv=true`.
+
+### Update (2026-03-07): Mainline Full-Gate Re-Verify After PR #363
+
+Scope:
+
+- full `branch policy + strict + dashboard` verification on `main` after manual baseline default stabilization merged.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (main, no-input dispatch) | #22800666933 | PASS | `output/playwright/ga/22800666933/attendance-import-perf-22800666933-1/perf.log`, `output/playwright/ga/22800666933/attendance-import-perf-22800666933-1/attendance-perf-mmgerlrv-9ah5cw/perf-summary.json` |
+| Branch Policy Drift | #22800691297 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800691297/attendance-branch-policy-drift-prod-22800691297-1/policy.json` |
+| Strict Gates | #22800701116 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800701116/attendance-strict-gates-prod-22800701116-1/20260307-141956-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800701116/attendance-strict-gates-prod-22800701116-1/20260307-141956-2/gate-api-smoke.log` |
+| Daily Dashboard | #22800756778 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800756778/attendance-daily-gate-dashboard-22800756778-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800756778/attendance-daily-gate-dashboard-22800756778-1/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- baseline no-input dispatch confirms stable defaults (`rows=10000`, `commitAsync=false`, `uploadCsv=true`).
+- strict gate chain remains healthy with upload/idempotency/export checks passing.
+- dashboard remains green (`overallStatus=pass`, `p0Status=pass`).

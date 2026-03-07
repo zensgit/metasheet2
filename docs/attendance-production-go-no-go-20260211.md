@@ -2660,6 +2660,32 @@ Decision:
 
 - **GO maintained** (manual rerun ergonomics improved; no P0/P1 regression introduced).
 
+## Post-Go Verification (2026-03-07): Mainline Full Gate Pass After PR #363
+
+Scope:
+
+- validate the full mainline gate chain after merging PR #363 (`ci(attendance): stabilize manual perf baseline defaults`).
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (main, no-input dispatch after merge) | #22800666933 | PASS | `output/playwright/ga/22800666933/attendance-import-perf-22800666933-1/perf.log`, `output/playwright/ga/22800666933/attendance-import-perf-22800666933-1/attendance-perf-mmgerlrv-9ah5cw/perf-summary.json` (`rows=10000`, `commitAsync=false`, `uploadCsv=true`) |
+| Attendance Branch Policy Drift (Prod) | #22800691297 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800691297/attendance-branch-policy-drift-prod-22800691297-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22800701116 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800701116/attendance-strict-gates-prod-22800701116-1/20260307-141956-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800701116/attendance-strict-gates-prod-22800701116-1/20260307-141956-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard | #22800756778 | PASS | `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800756778/attendance-daily-gate-dashboard-22800756778-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-221932/ga/22800756778/attendance-daily-gate-dashboard-22800756778-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- baseline no-input dispatch now consistently uses stable defaults.
+- strict two-round smoke remained healthy (`import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`).
+- dashboard remains green with `overallStatus=pass`, `p0Status=pass`.
+- open `[Attendance ...]` issues: `[]`.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Hardening (2026-03-07): Perf Baseline Schedule Stability Defaults
 
 Goal:
