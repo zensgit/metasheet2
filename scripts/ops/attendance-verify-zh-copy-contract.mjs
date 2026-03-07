@@ -65,6 +65,16 @@ const fileContracts = [
       'Workflow capability is not enabled for this tenant.',
     ],
   },
+  {
+    path: 'apps/web/src/views/attendance/AttendanceExperienceView.vue',
+    scope: 'template',
+    snippets: [
+      'Desktop recommended',
+      'Back to Overview',
+      'Capability not available',
+      'Current account does not have access to this section.',
+    ],
+  },
 ]
 
 function fail(message) {

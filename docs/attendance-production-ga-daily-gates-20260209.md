@@ -4288,3 +4288,28 @@ Key assertions:
 - zh contract guard now covers both:
   - `AttendanceView.vue`
   - `AttendanceWorkflowDesigner.vue`.
+
+### Update (2026-03-07): Experience View zh Template Guard
+
+Scope:
+
+- extend zh copy contract to guard `AttendanceExperienceView.vue` template from hard-coded English copy regressions.
+
+Implementation:
+
+- file: `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added guarded template snippets for:
+    - `Desktop recommended`
+    - `Back to Overview`
+    - `Capability not available`
+    - `Current account does not have access to this section.`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | `node scripts/ops/attendance-verify-zh-copy-contract.mjs` |
+
+Key assertions:
+
+- attendance experience shell template now has explicit regression guard and remains localized via `t.*` bindings.
