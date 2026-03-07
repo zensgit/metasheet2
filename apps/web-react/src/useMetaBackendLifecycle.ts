@@ -33,13 +33,64 @@ interface UseMetaBackendLifecycleOptions {
   useBackend: boolean
 }
 
+export interface MetaBackendLifecycleMarker {
+  client: MetaBackendClientLike
+  token: number
+  useBackend: boolean
+}
+
+export function syncMetaBackendLifecycleMarker(
+  marker: MetaBackendLifecycleMarker,
+  client: MetaBackendClientLike,
+  useBackend: boolean,
+) {
+  if (marker.client === client && marker.useBackend === useBackend) {
+    return {
+      changed: false as const,
+      marker,
+    }
+  }
+
+  return {
+    changed: true as const,
+    marker: {
+      client,
+      token: marker.token + 1,
+      useBackend,
+    },
+  }
+}
+
+export function isCurrentMetaBackendLifecycleRequest(
+  marker: MetaBackendLifecycleMarker,
+  token: number,
+  client: MetaBackendClientLike,
+) {
+  return marker.token === token && marker.client === client && marker.useBackend
+}
+
 export function useMetaBackendLifecycle(options: UseMetaBackendLifecycleOptions) {
   const [state, setState] = useState<MetaBackendState>(() => createMetaBackendState(options.fallbackWorkbook))
   const [pageVisible, setPageVisible] = useState(true)
   const refreshInFlightRef = useRef(false)
   const stateRef = useRef(state)
+  const lifecycleRef = useRef<MetaBackendLifecycleMarker>({
+    client: options.client,
+    token: 0,
+    useBackend: options.useBackend,
+  })
   const lastSheetIdRef = useRef<string | null>(null)
   const tokenBootstrappedRef = useRef(false)
+  const lifecycleUpdate = syncMetaBackendLifecycleMarker(
+    lifecycleRef.current,
+    options.client,
+    options.useBackend,
+  )
+
+  if (lifecycleUpdate.changed) {
+    lifecycleRef.current = lifecycleUpdate.marker
+    refreshInFlightRef.current = false
+  }
 
   useEffect(() => {
     stateRef.current = state
@@ -58,7 +109,9 @@ export function useMetaBackendLifecycle(options: UseMetaBackendLifecycleOptions)
 
   const refreshBackend = useCallback(
     async ({ refreshViews = true, quiet = false }: RefreshBackendOptions = {}) => {
-      if (!options.useBackend || refreshInFlightRef.current) return
+      const lifecycleToken = lifecycleRef.current.token
+      const requestClient = options.client
+      if (!lifecycleRef.current.useBackend || refreshInFlightRef.current) return
 
       refreshInFlightRef.current = true
       setState((prev) => applyMetaBackendLoadingState(prev, { quiet, refreshViews }))
@@ -72,13 +125,19 @@ export function useMetaBackendLifecycle(options: UseMetaBackendLifecycleOptions)
           refreshViews,
         })
 
+        if (!isCurrentMetaBackendLifecycleRequest(lifecycleRef.current, lifecycleToken, requestClient)) {
+          return
+        }
+
         setState((prev) => applyMetaBackendSnapshot(prev, nextSnapshot))
       } finally {
-        refreshInFlightRef.current = false
-        setState((prev) => ({
-          ...prev,
-          isRefreshing: false,
-        }))
+        if (isCurrentMetaBackendLifecycleRequest(lifecycleRef.current, lifecycleToken, requestClient)) {
+          refreshInFlightRef.current = false
+          setState((prev) => ({
+            ...prev,
+            isRefreshing: false,
+          }))
+        }
       }
     },
     [options.buildWorkbook, options.client, options.fallbackWorkbook, options.useBackend],
