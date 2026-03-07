@@ -29,7 +29,7 @@
           <el-icon><Upload /></el-icon>
           保存
         </el-button>
-        <el-button type="success" @click="deployWorkflow" :loading="deploying" :disabled="!workflowId">
+        <el-button type="success" @click="deployWorkflow" :loading="deploying">
           <el-icon><Promotion /></el-icon>
           部署
         </el-button>
@@ -225,6 +225,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { createWorkflowClient } from '@metasheet/sdk/client'
 import {
   ArrowLeft,
   ZoomIn,
@@ -253,6 +254,8 @@ import 'bpmn-js/dist/assets/diagram-js.css'
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css'
 import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/message-box/style/css'
+import { useAuth } from '../composables/useAuth'
+import { getApiBase } from '../utils/api'
 
 // Types
 interface PaletteItem {
@@ -286,6 +289,12 @@ interface BpmnElement {
 // Router
 const router = useRouter()
 const route = useRoute()
+const { ensureToken, refreshDevToken } = useAuth()
+const workflowClient = createWorkflowClient({
+  baseUrl: getApiBase(),
+  getToken: () => ensureToken(),
+  refreshToken: () => refreshDevToken()
+})
 
 // State
 const bpmnCanvas = ref<HTMLElement | null>(null)
@@ -663,29 +672,19 @@ async function saveWorkflow() {
 
 // Deploy workflow
 async function deployWorkflow() {
-  if (!workflowId.value) {
-    ElMessage.warning('请先保存工作流')
+  if (!modeler) {
     return
-  }
-
-  if (isDirty.value) {
-    await ElMessageBox.confirm('有未保存的更改，是否先保存？', '提示', {
-      confirmButtonText: '保存并部署',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
-    await saveWorkflow()
   }
 
   deploying.value = true
   try {
-    const response = await fetch(`/api/workflow/deploy`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflowId: workflowId.value })
+    const { xml } = await modeler.saveXML({ format: true })
+    await workflowClient.deployWorkflowDefinition({
+      bpmnXml: xml,
+      description: workflowDescription.value || undefined,
+      key: workflowId.value || undefined,
+      name: workflowName.value || '未命名工作流'
     })
-
-    if (!response.ok) throw new Error('Failed to deploy workflow')
 
     ElMessage.success('工作流部署成功')
   } catch (err) {

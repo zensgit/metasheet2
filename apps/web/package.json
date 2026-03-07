@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@metasheet/sdk": "workspace:*",
     "axios": "^1.8.0",
     "bpmn-js": "^18.10.1",
     "element-plus": "^2.10.1",

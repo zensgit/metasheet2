@@ -63,6 +63,9 @@ importers:
       '@element-plus/icons-vue':
         specifier: ^2.3.2
         version: 2.3.2(vue@3.5.24(typescript@5.8.3))
+      '@metasheet/sdk':
+        specifier: workspace:*
+        version: link:../../packages/openapi/dist-sdk
       axios:
         specifier: ^1.8.0
         version: 1.13.2
@@ -315,6 +318,8 @@ importers:
       vitest:
         specifier: ^1.1.0
         version: 1.6.1(@types/node@20.19.25)(jsdom@27.2.0)(less@4.4.2)
+
+  packages/openapi/dist-sdk: {}
 
   plugins/plugin-audit-logger:
     dependencies:

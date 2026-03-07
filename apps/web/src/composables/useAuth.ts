@@ -1,4 +1,6 @@
 export function useAuth() {
+  type FetchLike = typeof globalThis.fetch
+
   function getToken(): string | null {
     try {
       return (
@@ -21,10 +23,42 @@ export function useAuth() {
 
   function clearToken() {
     try {
-      if (typeof localStorage !== 'undefined') localStorage.removeItem('jwt')
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('jwt')
+        localStorage.removeItem('devToken')
+      }
     } catch {
       return
     }
+  }
+
+  async function refreshDevToken(fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): Promise<string> {
+    const response = await fetchImpl('/api/auth/dev-token')
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const payload = (await response.json()) as { token?: string }
+    if (!payload.token) {
+      throw new Error('Missing dev token')
+    }
+
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('devToken', payload.token)
+    } catch {
+      return payload.token
+    }
+
+    return payload.token
+  }
+
+  async function ensureToken(fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): Promise<string> {
+    const token = getToken()
+    if (token) {
+      return token
+    }
+
+    return refreshDevToken(fetchImpl)
   }
 
   function buildAuthHeaders(): Record<string, string> {
@@ -36,5 +70,5 @@ export function useAuth() {
     return headers
   }
 
-  return { getToken, setToken, clearToken, buildAuthHeaders }
+  return { getToken, setToken, clearToken, refreshDevToken, ensureToken, buildAuthHeaders }
 }
