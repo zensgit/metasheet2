@@ -4389,3 +4389,47 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Post-Merge Verifier Adds Perf Baseline Gate
+
+Scope:
+
+- strengthen merge-close verification so the single script run covers policy + strict + perf + dashboard.
+
+Code changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - added `perf-baseline` gate execution (`attendance-import-perf-baseline.yml`)
+  - defaulted to stable perf profile (`rows=10000`, `commit_async=false`, `upload_csv=true`)
+  - added env toggles:
+    - `SKIP_PERF_BASELINE`
+    - `PERF_BASELINE_API_BASE`
+    - `PERF_BASELINE_ROWS`
+    - `PERF_BASELINE_MODE`
+    - `PERF_BASELINE_COMMIT_ASYNC`
+    - `PERF_BASELINE_EXPORT_CSV`
+    - `PERF_BASELINE_UPLOAD_CSV`
+    - `PERF_BASELINE_MAX_PREVIEW_MS`
+    - `PERF_BASELINE_MAX_COMMIT_MS`
+    - `PERF_BASELINE_MAX_EXPORT_MS`
+    - `PERF_BASELINE_MAX_ROLLBACK_MS`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22801390978 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801390978/attendance-branch-policy-drift-prod-22801390978-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22801398679 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801398679/attendance-strict-gates-prod-22801398679-1/20260307-150550-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801398679/attendance-strict-gates-prod-22801398679-1/20260307-150550-2/gate-api-smoke.log` |
+| Attendance Import Perf Baseline | #22801456427 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801456427/attendance-import-perf-22801456427-1/perf.log`, `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801456427/attendance-import-perf-22801456427-1/attendance-perf-mmgevpdn-6fcgij/perf-summary.json` |
+| Attendance Daily Gate Dashboard | #22801470217 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801470217/attendance-daily-gate-dashboard-22801470217-1/attendance-daily-gate-dashboard.json` |
+
+Observed highlights:
+
+- enhanced script summary root:
+  - `output/playwright/attendance-post-merge-verify/20260307-230440/summary.md`
+  - `output/playwright/attendance-post-merge-verify/20260307-230440/summary.json`
+- all four gates PASS in one run; no attendance open issues after run.
+
+Decision:
+
+- **GO maintained**.
