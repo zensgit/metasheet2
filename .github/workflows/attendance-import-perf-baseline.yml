@@ -42,6 +42,14 @@ on:
         description: 'Upload CSV via /attendance/import/upload (true/false)'
         required: false
         default: 'true'
+      payload_source:
+        description: 'Import payload source (auto|csv|rows)'
+        required: false
+        default: 'auto'
+      csv_rows_limit_hint:
+        description: 'CSV row limit hint used by auto payload selection'
+        required: false
+        default: '20000'
       max_preview_ms:
         description: 'Fail if preview latency exceeds this value (optional)'
         required: false
@@ -145,6 +153,8 @@ jobs:
       COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
@@ -169,6 +179,8 @@ jobs:
           echo "mode=${MODE}"
           echo "commit_async=${COMMIT_ASYNC}"
           echo "upload_csv=${UPLOAD_CSV}"
+          echo "payload_source=${PAYLOAD_SOURCE}"
+          echo "csv_rows_limit_hint=${CSV_ROWS_LIMIT_HINT}"
           echo "export_csv=${EXPORT_CSV}"
           echo "poll_timeout_ms=${IMPORT_JOB_POLL_TIMEOUT_MS}"
           echo "poll_timeout_large_ms=${IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"

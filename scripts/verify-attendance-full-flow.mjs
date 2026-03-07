@@ -19,6 +19,7 @@ const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-full-f
 const expectProductModeRaw = process.env.EXPECT_PRODUCT_MODE || ''
 const assertAdminRetry = process.env.ASSERT_ADMIN_RETRY !== 'false'
 const assertAdminSettingsSave = process.env.ASSERT_ADMIN_SETTINGS_SAVE !== 'false'
+const assertAdminRuleSave = process.env.ASSERT_ADMIN_RULE_SAVE !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
 const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT === 'true'
@@ -358,6 +359,76 @@ async function assertAdminSettingsSaveCycle(page) {
     'save button recovery',
   ].filter(Boolean).join(' + ')
   logInfo(`Admin settings save cycle verified (${saveCycleDetails})`)
+}
+
+async function assertAdminRuleSaveCycle(page) {
+  const ruleSection = page.locator('div.attendance__admin-section').filter({
+    has: page.getByRole('heading', { name: 'Default Rule', exact: true }),
+  }).first()
+  await ruleSection.waitFor({ timeout: adminReadyTimeoutMs })
+  const saveButton = ruleSection.getByRole('button', { name: 'Save rule', exact: true })
+  await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
+  if (!(await saveButton.isEnabled())) {
+    throw new Error('Save rule button is not enabled before save-cycle assertion')
+  }
+  await saveButton.click()
+
+  let sawStatusMessage = false
+  let sawBusyTransition = false
+
+  const statusMessage = page.getByText('Rule updated.', { exact: true }).first()
+  const transientDeadline = Date.now() + Math.max(8_000, Math.min(adminReadyTimeoutMs, 30_000))
+  while (Date.now() < transientDeadline) {
+    sawStatusMessage ||= await statusMessage.isVisible().catch(() => false)
+    const transientState = await ruleSection.evaluate((section) => {
+      const button = Array.from(section.querySelectorAll('button')).find((node) => {
+        const label = (node.textContent || '').trim()
+        return label === 'Save rule' || label === 'Saving...'
+      })
+      if (!button) return { present: false, label: '', disabled: false }
+      return {
+        present: true,
+        label: (button.textContent || '').trim(),
+        disabled: button.hasAttribute('disabled'),
+      }
+    }).catch(() => ({ present: false, label: '', disabled: false }))
+
+    if (transientState.present && (transientState.label === 'Saving...' || transientState.disabled)) {
+      sawBusyTransition = true
+      break
+    }
+    if (sawStatusMessage) break
+    await page.waitForTimeout(250)
+  }
+
+  if (!sawStatusMessage) {
+    try {
+      await statusMessage.waitFor({ timeout: 8_000 })
+      sawStatusMessage = true
+    } catch {
+      sawStatusMessage = false
+    }
+  }
+
+  await page.waitForFunction(() => {
+    const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
+    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Default Rule')
+    if (!section) return false
+    const button = Array.from(section.querySelectorAll('button')).find((node) => {
+      const label = (node.textContent || '').trim()
+      return label === 'Save rule' || label === 'Saving...'
+    })
+    if (!button) return false
+    const label = (button.textContent || '').trim()
+    return label === 'Save rule' && !button.hasAttribute('disabled')
+  }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
+
+  const saveCycleDetails = [
+    sawStatusMessage ? 'status message' : null,
+    sawBusyTransition ? 'busy transition' : 'no busy transition observed',
+    'save button recovery',
+  ].filter(Boolean).join(' + ')
+  logInfo(`Admin default rule save cycle verified (${saveCycleDetails})`)
 }
 
 async function captureDebugScreenshot(page, fileName) {
@@ -847,6 +918,11 @@ async function run() {
         await assertAdminSettingsSaveCycle(page)
       } else {
         logInfo('Admin settings save assertion skipped (ASSERT_ADMIN_SETTINGS_SAVE=false)')
+      }
+      if (assertAdminRuleSave) {
+        await assertAdminRuleSaveCycle(page)
+      } else {
+        logInfo('Admin rule save assertion skipped (ASSERT_ADMIN_RULE_SAVE=false)')
       }
       logInfo('Payroll batch UI verified')
     }
