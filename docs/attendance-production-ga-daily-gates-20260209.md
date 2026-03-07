@@ -3967,3 +3967,33 @@ Key assertions:
   - `gateFlat.storage.runId=22796432712`
   - `overallStatus=pass`, `p0Status=pass`
 - open `[Attendance ...]` issues: none.
+
+### Update (2026-03-07): Daily Dashboard P0 Recovery (Strict Source Rebound)
+
+Incident:
+
+- `Attendance Daily Gate Dashboard` run #22798523694 failed because the latest strict source run (#22798411201) was `cancelled`.
+- failure finding in dashboard JSON:
+  - `Strict Gates: latest completed run conclusion=cancelled`
+
+Recovery actions:
+
+1. Triggered strict recovery rerun on `main`.
+2. Triggered dashboard rerun after strict completed successfully.
+
+Recovery runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates (recovery rerun) | #22798551601 | PASS | `output/playwright/ga/22798551601/attendance-strict-gates-prod-22798551601-1/20260307-115420-1/gate-summary.json`, `output/playwright/ga/22798551601/attendance-strict-gates-prod-22798551601-1/20260307-115420-2/gate-api-smoke.log` |
+| Daily Dashboard (post strict recovery) | #22798612434 | PASS | `output/playwright/ga/22798612434/attendance-daily-gate-dashboard-22798612434-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22798612434/attendance-daily-gate-dashboard-22798612434-1/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- strict smoke recovered with full chain logs present: `import upload ok`, `idempotency ok`, `export csv ok`, `group + membership ok`, `SMOKE PASS`.
+- dashboard recovered and rebound strict gate source:
+  - `overallStatus=pass`, `p0Status=pass`
+  - `gateFlat.strict.runId=22798551601`
+  - `gateFlat.strict.conclusion=success`
+  - `gateFlat.protection.runId=22798505815`
+- open `[Attendance ...]` issues: none.
