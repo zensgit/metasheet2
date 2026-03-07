@@ -4356,3 +4356,36 @@ Verification:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Mainline Gate Snapshot Refresh (`228011*`)
+
+Scope:
+
+- validate latest production gate chain on `main` after dashboard source-selection hardening and perf baseline default stabilization merges.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22801116838 | PASS | `output/playwright/ga/22801116838/attendance-branch-policy-drift-prod-22801116838-1/policy.json`, `output/playwright/ga/22801116838/attendance-branch-policy-drift-prod-22801116838-1/step-summary.md` |
+| Attendance Strict Gates (Prod) | #22801122984 | PASS | `output/playwright/ga/22801122984/attendance-strict-gates-prod-22801122984-1/20260307-144829-1/gate-summary.json`, `output/playwright/ga/22801122984/attendance-strict-gates-prod-22801122984-1/20260307-144829-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard | #22801208941 | PASS | `output/playwright/ga/22801208941/attendance-daily-gate-dashboard-22801208941-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22801208941/attendance-daily-gate-dashboard-22801208941-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- strict smoke keeps production-required checks green:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `SMOKE PASS`
+- dashboard rebound to latest successful strict/policy runs:
+  - `gateFlat.strict.runId=22801122984`
+  - `gateFlat.protection.runId=22801116838`
+  - `overallStatus=pass`
+  - `p0Status=pass`
+- open attendance tracking issues:
+  - `[]` (checked via `gh issue list --search "[Attendance" --state open`)
+
+Decision:
+
+- **GO maintained**.
