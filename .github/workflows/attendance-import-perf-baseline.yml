@@ -138,18 +138,19 @@ jobs:
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      ROWS: ${{ inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
+      # Schedule runs must stay stable and short. Keep manual dispatch flexible.
+      ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
-      COMMIT_ASYNC: ${{ inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
       MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_BASELINE_MAX_ROLLBACK_MS || '30000' }}
-      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
-      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
+      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS || '600000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
+      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS || '900000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -158,6 +159,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Log resolved perf config
+        run: |
+          set -euo pipefail
+          echo "event=${{ github.event_name }}"
+          echo "api_base=${API_BASE}"
+          echo "rows=${ROWS}"
+          echo "mode=${MODE}"
+          echo "commit_async=${COMMIT_ASYNC}"
+          echo "upload_csv=${UPLOAD_CSV}"
+          echo "export_csv=${EXPORT_CSV}"
+          echo "poll_timeout_ms=${IMPORT_JOB_POLL_TIMEOUT_MS}"
+          echo "poll_timeout_large_ms=${IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"
 
       - name: Run perf baseline (rollback enabled)
         run: |

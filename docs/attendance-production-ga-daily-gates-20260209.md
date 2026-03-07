@@ -4056,3 +4056,33 @@ Key assertions:
   - markdown table column `Upload` shows `YES` for `rows10k-commit`.
   - trend json contains `uploadCsv: true`.
 - no open `[Attendance ...]` tracking issues after this run set.
+
+### Update (2026-03-07): Perf Baseline Schedule Stability Profile
+
+Problem:
+
+- recent scheduled `Attendance Import Perf Baseline` runs were frequently `cancelled` at ~45 minutes due long async commit polling.
+
+Hardening:
+
+- file: `.github/workflows/attendance-import-perf-baseline.yml`
+- schedule-only default profile introduced:
+  - `ROWS=10000` (override via `ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE`)
+  - `COMMIT_ASYNC=false` (override via `ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE`)
+  - `IMPORT_JOB_POLL_TIMEOUT_MS=600000` (override via `ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS`)
+  - `IMPORT_JOB_POLL_TIMEOUT_LARGE_MS=900000` (override via `ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS`)
+- added `Log resolved perf config` step for faster workflow-level triage.
+
+Validation run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch validation) | #22800446391 | PASS | `output/playwright/ga/22800446391/attendance-import-perf-22800446391-1/perf.log`, `output/playwright/ga/22800446391/attendance-import-perf-22800446391-1/attendance-perf-mmge8ydg-y4df9c/perf-summary.json` |
+
+Key assertions:
+
+- baseline run passed with upload path enabled:
+  - `rows=10000`
+  - `commitAsync=false`
+  - `uploadCsv=true`
+  - no regressions in `perf-summary.json`.
