@@ -4259,3 +4259,32 @@ Key assertions:
 
 - post-merge summary now covers branch policy + strict + perf baseline + dashboard in one run.
 - dashboard remains green after perf insertion (`overallStatus=pass`, `p0Status=pass`).
+
+### Update (2026-03-07): Workflow Designer zh Copy Guard
+
+Scope:
+
+- remove remaining hard-coded English text in attendance workflow designer fallback card.
+- extend zh copy contract guard to also protect `AttendanceWorkflowDesigner.vue`.
+
+Implementation:
+
+- file: `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`
+  - replaced hard-coded template text with locale-aware `t` computed values (`useLocale`).
+- file: `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added second guarded file contract for `AttendanceWorkflowDesigner.vue`.
+  - added template-only scan scope for this file so English fallback strings in script are allowed.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | `node scripts/ops/attendance-verify-zh-copy-contract.mjs` |
+| web build (compile) | PASS | `pnpm --filter @metasheet/web build` |
+
+Key assertions:
+
+- fallback card copy is now zh/en localized.
+- zh contract guard now covers both:
+  - `AttendanceView.vue`
+  - `AttendanceWorkflowDesigner.vue`.

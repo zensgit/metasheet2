@@ -1,9 +1,9 @@
 <template>
   <section v-if="!canDesign" class="attendance-workflow">
     <article class="attendance-workflow__card">
-      <h3>Approval Workflow Designer</h3>
+      <h3>{{ t.title }}</h3>
       <p class="attendance-workflow__empty">
-        Workflow capability is not enabled for this tenant.
+        {{ t.disabledHint }}
       </p>
     </article>
   </section>
@@ -12,6 +12,8 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import WorkflowDesigner from '../WorkflowDesigner.vue'
 
 withDefaults(
@@ -22,6 +24,21 @@ withDefaults(
     canDesign: false,
   },
 )
+
+const { isZh } = useLocale()
+
+const t = computed(() => {
+  if (isZh.value) {
+    return {
+      title: '审批流程设计',
+      disabledHint: '当前租户未启用流程能力。',
+    }
+  }
+  return {
+    title: 'Approval Workflow Designer',
+    disabledHint: 'Workflow capability is not enabled for this tenant.',
+  }
+})
 </script>
 
 <style scoped>

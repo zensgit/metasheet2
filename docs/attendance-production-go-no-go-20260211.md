@@ -4433,3 +4433,34 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Workflow Designer zh Localization + Copy Guard
+
+Scope:
+
+- close remaining zh localization gap in attendance workflow designer fallback UI.
+- extend zh copy contract guard coverage to include workflow designer file.
+
+Code changes:
+
+- `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`
+  - localized fallback title/hint via `useLocale` + computed `t`.
+- `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added guarded file contract for `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`.
+  - added `scope: 'template'` handling to avoid false positives from valid English fallback strings in script blocks.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | `node scripts/ops/attendance-verify-zh-copy-contract.mjs` |
+| Frontend compile | PASS | `pnpm --filter @metasheet/web build` |
+
+Observed highlights:
+
+- workflow fallback card now renders localized zh/en copy through unified locale state.
+- zh copy guard now protects both `AttendanceView.vue` and `AttendanceWorkflowDesigner.vue` from hard-coded English template regressions.
+
+Decision:
+
+- **GO maintained**.
