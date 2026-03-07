@@ -4230,3 +4230,32 @@ Key assertions:
   - `gateFlat.strict.runId=22801122984`
   - `gateFlat.protection.runId=22801116838`
   - `overallStatus=pass`, `p0Status=pass`.
+
+### Update (2026-03-07): Post-Merge Verifier Covers Perf Baseline
+
+Scope:
+
+- upgrade `scripts/ops/attendance-post-merge-verify.sh` so each post-merge verification run also executes `Attendance Import Perf Baseline`.
+- keep stable defaults (`rows=10000`, `commit_async=false`, `upload_csv=true`) for fast, deterministic merge-close checks.
+
+Implementation:
+
+- file: `scripts/ops/attendance-post-merge-verify.sh`
+  - added gate `perf-baseline` (`attendance-import-perf-baseline.yml`)
+  - new env controls:
+    - `SKIP_PERF_BASELINE` (default `false`)
+    - `PERF_BASELINE_*` knobs (`rows/mode/commit_async/export_csv/upload_csv/max_*`)
+
+Verification runs (main):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22801390978 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801390978/attendance-branch-policy-drift-prod-22801390978-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22801398679 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801398679/attendance-strict-gates-prod-22801398679-1/20260307-150550-1/gate-summary.json` |
+| Attendance Import Perf Baseline | #22801456427 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801456427/attendance-import-perf-22801456427-1/perf.log`, `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801456427/attendance-import-perf-22801456427-1/attendance-perf-mmgevpdn-6fcgij/perf-summary.json` |
+| Attendance Daily Gate Dashboard | #22801470217 | PASS | `output/playwright/attendance-post-merge-verify/20260307-230440/ga/22801470217/attendance-daily-gate-dashboard-22801470217-1/attendance-daily-gate-dashboard.json` |
+
+Key assertions:
+
+- post-merge summary now covers branch policy + strict + perf baseline + dashboard in one run.
+- dashboard remains green after perf insertion (`overallStatus=pass`, `p0Status=pass`).
