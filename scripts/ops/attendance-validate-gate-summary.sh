@@ -25,7 +25,14 @@ if [[ ! -d "$ROOT_DIR" ]]; then
   die "root directory not found: $ROOT_DIR"
 fi
 
-mapfile -t summaries < <(find "$ROOT_DIR" -type f -name 'gate-summary.json' | sort)
+summaries=()
+if declare -F mapfile >/dev/null 2>&1; then
+  mapfile -t summaries < <(find "$ROOT_DIR" -type f -name 'gate-summary.json' | sort)
+else
+  while IFS= read -r summary; do
+    summaries+=("$summary")
+  done < <(find "$ROOT_DIR" -type f -name 'gate-summary.json' | sort)
+fi
 count="${#summaries[@]}"
 
 if (( count < EXPECT_MIN_SUMMARIES )); then
