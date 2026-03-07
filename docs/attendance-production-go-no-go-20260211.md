@@ -4464,3 +4464,32 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Experience View zh Copy Guard
+
+Scope:
+
+- add guard coverage for attendance experience shell template copy to prevent future hard-coded English regressions.
+
+Code changes:
+
+- `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+  - added `AttendanceExperienceView.vue` template guard snippets:
+    - `Desktop recommended`
+    - `Back to Overview`
+    - `Capability not available`
+    - `Current account does not have access to this section.`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | `node scripts/ops/attendance-verify-zh-copy-contract.mjs` |
+
+Observed highlights:
+
+- experience shell remains localized through computed `t` dictionary; no hard-coded English template text introduced.
+
+Decision:
+
+- **GO maintained**.
