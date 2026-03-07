@@ -4533,3 +4533,39 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): 100k Perf Baseline Recovery (`CSV_TOO_LARGE` -> Rows Payload Fallback)
+
+Scope:
+
+- resolve 100k perf baseline regressions caused by low CSV row cap (`20000`) in production profile.
+
+Code changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - add `PAYLOAD_SOURCE=auto|csv|rows` and `CSV_ROWS_LIMIT_HINT` controls.
+  - default `auto` now falls back to `rows` payload when `ROWS` exceeds CSV limit hint.
+  - write payload selection metadata into `perf-summary.json`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline (main, pre-fix) | #22802735429 | FAIL (expected) | `output/playwright/ga/22802735429/attendance-import-perf-22802735429-1/perf.log` |
+| Perf baseline (branch, fix validation) | #22802826190 | PASS | `output/playwright/ga/22802826190/attendance-import-perf-22802826190-1/attendance-perf-mmgjnoxs-phigcg/perf-summary.json` |
+| Perf baseline (main, post-merge) | #22802882495 | PASS | `output/playwright/ga/22802882495/attendance-import-perf-22802882495-1/attendance-perf-mmgjsitb-lnb0jd/perf-summary.json`, `output/playwright/ga/22802882495/attendance-import-perf-22802882495-1/perf.log` |
+
+Observed highlights:
+
+- pre-fix failure message:
+  - `POST /attendance/import/preview: HTTP 400 ... CSV exceeds max rows (20000)`.
+- post-merge run confirms fallback metadata:
+  - `uploadCsvRequested=true`
+  - `uploadCsv=false`
+  - `payloadSource=rows`
+  - `payloadSourceReason=rows_exceeds_csv_limit_hint(20000)`
+- no open attendance gate issues after recovery (`gh issue list --search "[Attendance" --state open` returned empty).
+
+Decision:
+
+- **GO maintained**.

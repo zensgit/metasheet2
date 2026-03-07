@@ -4349,3 +4349,39 @@ Key assertions:
 
 - post-merge verifier now fails fast if perf summary profile drifts from expected merge-close contract.
 - latest mainline run finished with `Failures: 0` and no open attendance issues.
+
+### Update (2026-03-08): 100k Perf Baseline Fallback To Rows Payload
+
+Scope:
+
+- unblock `rows=100000` perf baseline when production CSV row cap is lower than longrun target (observed `CSV_TOO_LARGE` at `max rows 20000`).
+
+Implementation:
+
+- file: `scripts/ops/attendance-import-perf.mjs`
+  - added payload selection controls:
+    - `PAYLOAD_SOURCE=auto|csv|rows` (default `auto`)
+    - `CSV_ROWS_LIMIT_HINT` (default `20000`)
+  - `auto` mode now switches to `rows` payload when `ROWS > CSV_ROWS_LIMIT_HINT`.
+  - perf summary now records:
+    - `uploadCsvRequested`
+    - `uploadCsv` (effective)
+    - `payloadSource`
+    - `payloadSourceReason`
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (main, pre-fix) | #22802735429 | FAIL (expected, pre-fix) | `output/playwright/ga/22802735429/attendance-import-perf-22802735429-1/perf.log` |
+| Attendance Import Perf Baseline (branch validation) | #22802826190 | PASS | `output/playwright/ga/22802826190/attendance-import-perf-22802826190-1/attendance-perf-mmgjnoxs-phigcg/perf-summary.json` |
+| Attendance Import Perf Baseline (main, post-merge) | #22802882495 | PASS | `output/playwright/ga/22802882495/attendance-import-perf-22802882495-1/attendance-perf-mmgjsitb-lnb0jd/perf-summary.json`, `output/playwright/ga/22802882495/attendance-import-perf-22802882495-1/perf.log` |
+
+Key assertions:
+
+- pre-fix failure root cause was `CSV_TOO_LARGE` during preview.
+- post-fix `100k` runs pass with explicit metadata:
+  - `uploadCsvRequested=true`
+  - `uploadCsv=false`
+  - `payloadSource=rows`
+  - `payloadSourceReason=rows_exceeds_csv_limit_hint(20000)`.
