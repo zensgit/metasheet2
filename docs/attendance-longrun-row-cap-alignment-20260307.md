@@ -68,6 +68,28 @@ Artifacts downloaded to:
 - `output/playwright/ga/22791311493/attendance-import-perf-longrun-trend-22791311493-1/20260307-034409/attendance-import-perf-longrun-trend.md`
 - `output/playwright/ga/22791311493/attendance-import-perf-longrun-trend-22791311493-1/20260307-034409/attendance-import-perf-longrun-trend.json`
 
+## Post-Merge Mainline Verification
+
+After PR `#349` merged to `main` (merge commit `733fc7f9a2553ca9143884ebb1b725e776526ce3`):
+
+1. Longrun gate re-run on `main`:
+   - run `#22792753739` (`SUCCESS`)
+   - `rows10k-commit` executed with upload path (`uploadCsv=true`)
+   - `rows50k/100k/500k` scenarios were skipped by row-cap gate (expected with `max_csv_rows=20000`).
+2. Perf baseline refresh on `main`:
+   - run `#22792852619` (`SUCCESS`)
+   - used quick stable profile (`rows=1000`, `commit_async=false`, `export_csv=false`, `upload_csv=true`)
+3. Daily dashboard refresh:
+   - initial run `#22792786277` (`SUCCESS` workflow, but report `overallStatus=fail`) due previous cancelled baseline reference
+   - recovery run `#22792870621` (`SUCCESS`, `overallStatus=pass`, `gateFlat.perf=PASS`, `gateFlat.longrun=PASS`)
+
+Mainline evidence:
+
+- `output/playwright/ga/22792753739/attendance-import-perf-longrun-trend-22792753739-1/20260307-051842/attendance-import-perf-longrun-trend.md`
+- `output/playwright/ga/22792753739/attendance-import-perf-longrun-rows10k-commit-22792753739-1/current-flat/rows10000-commit.json`
+- `output/playwright/ga/22792852619/attendance-import-perf-22792852619-1/attendance-perf-*/perf-summary.json`
+- `output/playwright/ga/22792870621/attendance-daily-gate-dashboard-22792870621-1/attendance-daily-gate-dashboard.json`
+
 ## Operational Notes
 
 - This fix aligns longrun with the production safety cap and removes false P1 noise.
