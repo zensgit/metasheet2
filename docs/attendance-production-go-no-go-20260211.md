@@ -4055,3 +4055,38 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Dashboard Strict Source Selection Hardening (`cancelled` filter)
+
+Goal:
+
+- prevent false P0 dashboard failures when a newer strict run is `cancelled` and a valid strict signal already exists.
+
+Code changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - added `pickLatestCompletedRun()` with exclusion support.
+  - strict gate now selects latest completed run excluding `cancelled|neutral|skipped` (with fallback when no valid run exists).
+  - added direct-execution guard (`import.meta.url`) to allow safe function import for tests.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added regression tests for strict source selection behavior.
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Node syntax | local | PASS | `node --check scripts/ops/attendance-daily-gate-report.mjs` |
+| Source selection unit tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
+| Dashboard report generation (main, lookback=48h) | local (20260307-121208) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-121208/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-121208/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- dashboard result remains green and binds strict source to success run:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22798551601`
+  - `gateFlat.strict.conclusion=success`
+
+Decision:
+
+- **GO maintained**.
