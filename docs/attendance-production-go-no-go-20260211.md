@@ -2636,6 +2636,39 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Hardening (2026-03-07): Perf Baseline Schedule Stability Defaults
+
+Goal:
+
+- fix recurring `Attendance Import Perf Baseline` scheduled run cancellations (timeout at 45 minutes) without weakening upload-path coverage.
+
+Observed issue:
+
+- scheduled baseline runs repeatedly ended as `cancelled` around the workflow timeout window:
+  - #22791624805, #22748532755, #22701733946
+- artifact `perf.log` showed async commit polling remained in long-running state (`/attendance/import/jobs/:id` with intermittent `HTTP 502` retries), then step timeout cancelled the job.
+
+Change:
+
+- file: `.github/workflows/attendance-import-perf-baseline.yml`
+- schedule profile now defaults to stable lightweight settings:
+  - `ROWS=10000` (override: `ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE`)
+  - `COMMIT_ASYNC=false` (override: `ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE`)
+  - `IMPORT_JOB_POLL_TIMEOUT_MS=600000` (override: `ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS`)
+  - `IMPORT_JOB_POLL_TIMEOUT_LARGE_MS=900000` (override: `ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS`)
+- added `Log resolved perf config` step for fast triage from Actions logs.
+- manual `workflow_dispatch` behavior remains unchanged/flexible.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch verification, 10k sync + upload) | #22800446391 | PASS | `output/playwright/ga/22800446391/attendance-import-perf-22800446391-1/perf.log`, `output/playwright/ga/22800446391/attendance-import-perf-22800446391-1/attendance-perf-mmge8ydg-y4df9c/perf-summary.json` (`rows=10000`, `commitAsync=false`, `uploadCsv=true`) |
+
+Decision:
+
+- **GO maintained** (P0 chain unaffected; baseline schedule reliability hardened).
+
 ## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Longrun Upload Coverage
 
 Scope:
