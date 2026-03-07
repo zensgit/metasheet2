@@ -168,3 +168,35 @@ BUILD_WEB=1 BUILD_BACKEND=1 INSTALL_DEPS=1 scripts/ops/attendance-onprem-package
 5. UAT 签收模板：`docs/deployment/attendance-uat-signoff-template-20260306.md`
 6. Windows Server + WSL2 部署：`docs/deployment/attendance-windows-wsl-onprem-20260306.md`
 7. Windows Server + WSL2 参数集中命令版：`docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md`
+8. 新服务器 UAT 执行 Runbook：`docs/deployment/attendance-onprem-new-server-uat-runbook-20260307.md`
+
+## Update (2026-03-07): Latest Published On-Prem Package (Windows/WSL Ready)
+
+Latest release:
+
+- Tag: `v2.5.1-onprem-20260307-current`
+- Release URL: `https://github.com/zensgit/metasheet2/releases/tag/v2.5.1-onprem-20260307-current`
+- Package files:
+  - `metasheet-attendance-onprem-v2.5.0-20260307-current.zip`
+  - `metasheet-attendance-onprem-v2.5.0-20260307-current.tgz`
+  - `SHA256SUMS`
+
+Build evidence:
+
+- GitHub Actions run: `#22798975422` (workflow: `attendance-onprem-package-build.yml`)
+- Local artifact archive path:
+  - `output/playwright/ga/22798975422/`
+
+Integrity verification:
+
+```bash
+cd output/playwright/ga/22798975422
+shasum -a 256 -c SHA256SUMS
+```
+
+Package structural verification:
+
+```bash
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.zip
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.tgz
+```

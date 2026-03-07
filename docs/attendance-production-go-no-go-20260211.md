@@ -4090,3 +4090,43 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Mainline Re-Verify After PR #357 + On-Prem Release Publish
+
+Scope:
+
+- verified mainline gates after merging PR #357 (`cancelled` strict source filtering).
+- built and published a new on-prem package release for Windows/WSL deployment.
+
+Mainline gate verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22798887029 | PASS | `output/playwright/attendance-post-merge-verify/20260307-201628/ga/22798887029/attendance-branch-policy-drift-prod-22798887029-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22798894891 | PASS | `output/playwright/attendance-post-merge-verify/20260307-201628/ga/22798894891/attendance-strict-gates-prod-22798894891-1/20260307-122007-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-201628/ga/22798894891/attendance-strict-gates-prod-22798894891-1/20260307-122007-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard | #22798961789 | PASS | `output/playwright/attendance-post-merge-verify/20260307-201628/ga/22798961789/attendance-daily-gate-dashboard-22798961789-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-201628/ga/22798961789/attendance-daily-gate-dashboard-22798961789-1/attendance-daily-gate-dashboard.md` |
+
+Package release verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance On-Prem Package Build + Release publish | #22798975422 | PASS | `output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.zip`, `output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.tgz`, `output/playwright/ga/22798975422/SHA256SUMS` |
+| Package checksum verify | local | PASS | `cd output/playwright/ga/22798975422 && shasum -a 256 -c SHA256SUMS` |
+| Package content verify (.zip/.tgz) | local | PASS | `scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.zip`, `scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.tgz` |
+
+Release:
+
+- tag: `v2.5.1-onprem-20260307-current`
+- url: `https://github.com/zensgit/metasheet2/releases/tag/v2.5.1-onprem-20260307-current`
+
+Observed highlights:
+
+- dashboard is green with effective strict source:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22798894891`
+- open attendance issues: `[]`.
+
+Decision:
+
+- **GO maintained**.
