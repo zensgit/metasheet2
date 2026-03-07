@@ -4130,3 +4130,34 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): On-Prem Package No-GitHub-Link Guard
+
+Goal:
+
+- enforce customer delivery policy: Windows/on-prem package files must not include GitHub links.
+
+Changes:
+
+- `scripts/ops/attendance-onprem-package-verify.sh`
+  - added `VERIFY_NO_GITHUB_LINKS=1` (default enabled).
+  - now scans package `INSTALL.txt` + `docs/deployment/**` for:
+    - `github.com`
+    - `githubusercontent.com`
+    - `github.io`
+  - verification fails if any hit is found.
+- `docs/deployment/attendance-onprem-package-layout-20260306.md`
+  - removed direct GitHub release URL from packaged deployment doc.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Deployment docs scan (`docs/deployment`) | PASS | `rg -n --ignore-case "github\\.com|githubusercontent\\.com|github\\.io" docs/deployment` (no hits) |
+| Local package build (link-audit tag) | PASS | `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260307-linkaudit-local.zip`, `output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260307-linkaudit-local.tgz` |
+| Package verify (.zip) with link guard | PASS | `scripts/ops/attendance-onprem-package-verify.sh output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260307-linkaudit-local.zip` |
+| Package verify (.tgz) with link guard | PASS | `scripts/ops/attendance-onprem-package-verify.sh output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-20260307-linkaudit-local.tgz` |
+
+Decision:
+
+- **GO maintained**.

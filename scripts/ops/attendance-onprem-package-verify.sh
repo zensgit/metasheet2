@@ -3,6 +3,7 @@ set -euo pipefail
 
 PACKAGE_FILE="${1:-}"
 VERIFY_SHA="${VERIFY_SHA:-1}"
+VERIFY_NO_GITHUB_LINKS="${VERIFY_NO_GITHUB_LINKS:-1}"
 EXTRACT_ROOT="${EXTRACT_ROOT:-}"
 cleanup_extract_root=0
 list_file=""
@@ -14,6 +15,35 @@ function die() {
 
 function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
+}
+
+function verify_no_github_links() {
+  local root="$1"
+  local patterns='github\.com|githubusercontent\.com|github\.io'
+  local targets=()
+
+  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
+  [[ -d "${root}/docs/deployment" ]] && targets+=("${root}/docs/deployment")
+
+  if [[ ${#targets[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  if command -v rg >/dev/null 2>&1; then
+    if rg -n --ignore-case "$patterns" "${targets[@]}" >/tmp/attendance_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/attendance_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/attendance_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/attendance_onprem_link_hits.txt || true
+  else
+    if grep -RInE "$patterns" "${targets[@]}" >/tmp/attendance_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/attendance_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/attendance_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/attendance_onprem_link_hits.txt || true
+  fi
 }
 
 function verify_sha() {
@@ -106,6 +136,10 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
+  verify_no_github_links "$pkg_root"
+fi
 
 info "Package verify OK"
 info "  package: ${PACKAGE_FILE}"

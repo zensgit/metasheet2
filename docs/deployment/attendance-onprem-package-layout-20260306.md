@@ -175,7 +175,7 @@ BUILD_WEB=1 BUILD_BACKEND=1 INSTALL_DEPS=1 scripts/ops/attendance-onprem-package
 Latest release:
 
 - Tag: `v2.5.1-onprem-20260307-current`
-- Release URL: `https://github.com/zensgit/metasheet2/releases/tag/v2.5.1-onprem-20260307-current`
+- Release delivery channel: customer delivery repository / internal artifact source (no public GitHub link in package docs)
 - Package files:
   - `metasheet-attendance-onprem-v2.5.0-20260307-current.zip`
   - `metasheet-attendance-onprem-v2.5.0-20260307-current.tgz`
