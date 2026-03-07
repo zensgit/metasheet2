@@ -46,6 +46,12 @@ PERF_BASELINE_MAX_COMMIT_MS="${PERF_BASELINE_MAX_COMMIT_MS:-}"
 PERF_BASELINE_MAX_EXPORT_MS="${PERF_BASELINE_MAX_EXPORT_MS:-}"
 PERF_BASELINE_MAX_ROLLBACK_MS="${PERF_BASELINE_MAX_ROLLBACK_MS:-}"
 
+# Local contract assertions for perf artifacts downloaded from GA run.
+PERF_EXPECT_UPLOAD_CSV="${PERF_EXPECT_UPLOAD_CSV:-${PERF_BASELINE_UPLOAD_CSV}}"
+PERF_EXPECT_COMMIT_ASYNC="${PERF_EXPECT_COMMIT_ASYNC:-${PERF_BASELINE_COMMIT_ASYNC}}"
+PERF_EXPECT_ROWS_MIN="${PERF_EXPECT_ROWS_MIN:-${PERF_BASELINE_ROWS}}"
+PERF_EXPECT_MODE="${PERF_EXPECT_MODE:-${PERF_BASELINE_MODE}}"
+
 mkdir -p "$OUTPUT_ROOT"
 RESULTS_TSV="${OUTPUT_ROOT}/results.tsv"
 SUMMARY_MD="${OUTPUT_ROOT}/summary.md"
@@ -74,6 +80,11 @@ RUN_ID=''
 RUN_URL=''
 RUN_CONCLUSION=''
 RUN_ARTIFACTS=''
+GATE_LAST_STATUS=''
+GATE_LAST_RUN_ID=''
+GATE_LAST_RUN_URL=''
+GATE_LAST_CONCLUSION=''
+GATE_LAST_ARTIFACTS=''
 
 function append_result() {
   local gate="$1"
@@ -84,6 +95,122 @@ function append_result() {
   local url="$6"
   local artifacts="$7"
   echo -e "${gate}\t${workflow}\t${run_id}\t${status}\t${conclusion}\t${url}\t${artifacts}" >>"$RESULTS_TSV"
+}
+
+function to_bool() {
+  local value
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    1|true|yes|on) echo "true" ;;
+    0|false|no|off) echo "false" ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+function run_perf_baseline_contract_gate() {
+  local run_id="$1"
+  local run_url="$2"
+  local artifacts_dir="$3"
+  local log_file="${OUTPUT_ROOT}/gate-perf-baseline-contract.log"
+
+  local expected_upload
+  expected_upload="$(to_bool "$PERF_EXPECT_UPLOAD_CSV")"
+  local expected_commit_async
+  expected_commit_async="$(to_bool "$PERF_EXPECT_COMMIT_ASYNC")"
+  local expected_mode="${PERF_EXPECT_MODE}"
+  local expected_rows_min
+  expected_rows_min="$(printf '%s' "${PERF_EXPECT_ROWS_MIN:-0}" | tr -cd '0-9')"
+  if [[ -z "$expected_rows_min" ]]; then
+    expected_rows_min="0"
+  fi
+
+  {
+    echo "[attendance-post-merge-verify] validating perf artifact contract"
+    echo "run_id=${run_id}"
+    echo "artifacts_dir=${artifacts_dir}"
+    echo "expected_upload_csv=${expected_upload:-<skip>}"
+    echo "expected_commit_async=${expected_commit_async:-<skip>}"
+    echo "expected_rows_min=${expected_rows_min}"
+    echo "expected_mode=${expected_mode:-<skip>}"
+  } >"$log_file"
+
+  if [[ -z "$artifacts_dir" || ! -d "$artifacts_dir" ]]; then
+    failures=$((failures + 1))
+    echo "ERROR: artifacts dir missing" >>"$log_file"
+    append_result "perf-baseline-contract" "local-assert" "$run_id" "FAIL" "artifacts_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  local summary_path=''
+  summary_path="$(find "$artifacts_dir" -type f -name 'perf-summary.json' | head -n 1 || true)"
+  if [[ -z "$summary_path" || ! -f "$summary_path" ]]; then
+    failures=$((failures + 1))
+    echo "ERROR: perf-summary.json not found" >>"$log_file"
+    append_result "perf-baseline-contract" "local-assert" "$run_id" "FAIL" "summary_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  local actual_upload actual_commit_async actual_rows actual_mode
+  actual_upload="$(jq -r '.uploadCsv' "$summary_path" 2>/dev/null || echo '')"
+  actual_commit_async="$(jq -r '.commitAsync' "$summary_path" 2>/dev/null || echo '')"
+  actual_rows="$(jq -r '.rows' "$summary_path" 2>/dev/null || echo '')"
+  actual_mode="$(jq -r '.mode // empty' "$summary_path" 2>/dev/null || echo '')"
+
+  {
+    echo "summary_path=${summary_path}"
+    echo "actual_upload_csv=${actual_upload}"
+    echo "actual_commit_async=${actual_commit_async}"
+    echo "actual_rows=${actual_rows}"
+    echo "actual_mode=${actual_mode}"
+  } >>"$log_file"
+
+  local errors=()
+  if [[ -n "$expected_upload" ]]; then
+    local actual_upload_bool
+    actual_upload_bool="$(to_bool "$actual_upload")"
+    if [[ "$actual_upload_bool" != "$expected_upload" ]]; then
+      errors+=("uploadCsv mismatch (expected=${expected_upload} actual=${actual_upload})")
+    fi
+  fi
+
+  if [[ -n "$expected_commit_async" ]]; then
+    local actual_commit_async_bool
+    actual_commit_async_bool="$(to_bool "$actual_commit_async")"
+    if [[ "$actual_commit_async_bool" != "$expected_commit_async" ]]; then
+      errors+=("commitAsync mismatch (expected=${expected_commit_async} actual=${actual_commit_async})")
+    fi
+  fi
+
+  if [[ "$actual_rows" =~ ^[0-9]+$ ]]; then
+    if (( actual_rows < expected_rows_min )); then
+      errors+=("rows below minimum (expected>=${expected_rows_min} actual=${actual_rows})")
+    fi
+  else
+    errors+=("rows missing/invalid (actual=${actual_rows})")
+  fi
+
+  if [[ -n "$expected_mode" && "$actual_mode" != "$expected_mode" ]]; then
+    errors+=("mode mismatch (expected=${expected_mode} actual=${actual_mode})")
+  fi
+
+  if (( ${#errors[@]} > 0 )); then
+    failures=$((failures + 1))
+    {
+      echo "ERROR: perf contract validation failed"
+      for item in "${errors[@]}"; do
+        echo "- ${item}"
+      done
+    } >>"$log_file"
+    append_result "perf-baseline-contract" "local-assert" "$run_id" "FAIL" "contract_mismatch" "$run_url" "$summary_path"
+    return 1
+  fi
+
+  echo "OK: perf contract validation passed" >>"$log_file"
+  append_result "perf-baseline-contract" "local-assert" "$run_id" "PASS" "success" "$run_url" "$summary_path"
+  info "perf-baseline-contract ok: uploadCsv=${actual_upload} commitAsync=${actual_commit_async} rows=${actual_rows} mode=${actual_mode}"
+  return 0
 }
 
 function trigger_and_wait() {
@@ -168,6 +295,12 @@ function run_gate() {
 
   append_result "$gate" "$workflow" "$RUN_ID" "$status" "$RUN_CONCLUSION" "$RUN_URL" "$RUN_ARTIFACTS"
   info "gate result: ${gate} status=${status} run_id=${RUN_ID} conclusion=${RUN_CONCLUSION} rc=${rc}"
+
+  GATE_LAST_STATUS="$status"
+  GATE_LAST_RUN_ID="$RUN_ID"
+  GATE_LAST_RUN_URL="$RUN_URL"
+  GATE_LAST_CONCLUSION="$RUN_CONCLUSION"
+  GATE_LAST_ARTIFACTS="$RUN_ARTIFACTS"
 }
 
 run_gate \
@@ -216,6 +349,14 @@ run_gate \
   -f "max_commit_ms=${PERF_BASELINE_MAX_COMMIT_MS}" \
   -f "max_export_ms=${PERF_BASELINE_MAX_EXPORT_MS}" \
   -f "max_rollback_ms=${PERF_BASELINE_MAX_ROLLBACK_MS}"
+
+if [[ "$SKIP_PERF_BASELINE" == "true" ]]; then
+  append_result "perf-baseline-contract" "local-assert" "" "SKIP" "" "" ""
+elif [[ "$GATE_LAST_STATUS" == "PASS" ]]; then
+  run_perf_baseline_contract_gate "$GATE_LAST_RUN_ID" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS" || true
+else
+  append_result "perf-baseline-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "upstream_gate_failed" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
+fi
 
 run_gate \
   "daily-dashboard" \

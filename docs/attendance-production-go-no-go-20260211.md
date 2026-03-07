@@ -4493,3 +4493,43 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Post-Merge Perf Contract Assertion Gate
+
+Scope:
+
+- strengthen post-merge verifier by adding a local perf contract assertion step after perf baseline artifacts download.
+
+Code changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - new gate: `perf-baseline-contract` (local assert)
+  - validates downloaded `perf-summary.json` against expected merge-close profile:
+    - `uploadCsv == true` (default)
+    - `commitAsync == false` (default)
+    - `rows >= 10000` (default)
+    - `mode == commit` (default)
+  - new env controls:
+    - `PERF_EXPECT_UPLOAD_CSV`
+    - `PERF_EXPECT_COMMIT_ASYNC`
+    - `PERF_EXPECT_ROWS_MIN`
+    - `PERF_EXPECT_MODE`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22802456132 | PASS | `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802456132/attendance-branch-policy-drift-prod-22802456132-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22802462166 | PASS | `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802462166/attendance-strict-gates-prod-22802462166-1/20260307-161056-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802462166/attendance-strict-gates-prod-22802462166-1/20260307-161056-2/gate-api-smoke.log` |
+| Attendance Import Perf Baseline | #22802524824 | PASS | `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802524824/attendance-import-perf-22802524824-1/perf.log`, `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802524824/attendance-import-perf-22802524824-1/attendance-perf-mmgiyrs6-o3rlv5/perf-summary.json` |
+| perf-baseline-contract (local assert) | #22802524824 | PASS | `output/playwright/attendance-post-merge-verify/20260308-001057/gate-perf-baseline-contract.log`, `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802524824/attendance-import-perf-22802524824-1/attendance-perf-mmgiyrs6-o3rlv5/perf-summary.json` |
+| Attendance Daily Gate Dashboard | #22802536897 | PASS | `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802536897/attendance-daily-gate-dashboard-22802536897-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260308-001057/ga/22802536897/attendance-daily-gate-dashboard-22802536897-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- post-merge verification now covers policy + strict + perf + perf contract + dashboard in a single command.
+- `gh issue list --search "[Attendance" --state open` returned no open attendance issues after the run.
+
+Decision:
+
+- **GO maintained**.
