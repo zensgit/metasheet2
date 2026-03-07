@@ -4155,3 +4155,29 @@ Key assertions:
 - baseline no-input dispatch confirms stable defaults (`rows=10000`, `commitAsync=false`, `uploadCsv=true`).
 - strict gate chain remains healthy with upload/idempotency/export checks passing.
 - dashboard remains green (`overallStatus=pass`, `p0Status=pass`).
+
+### Update (2026-03-07): Perf/Longrun Source Selection Hardening (`cancelled` filter)
+
+Scope:
+
+- align perf source selection with strict-source behavior to avoid false dashboard P1 findings on cancelled runs.
+
+Implementation:
+
+- file: `scripts/ops/attendance-daily-gate-report.mjs`
+- `pickLatestCompletedRun(..., excludeConclusions=['cancelled','neutral','skipped'])` now applied to:
+  - `Perf Baseline`
+  - `Perf Long Run`
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Source-selection unit tests | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
+| Dashboard report generation (main) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-143043/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-143043/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- dashboard remains green and binds perf/longrun to effective runs:
+  - `gateFlat.perf.runId=22800666933`
+  - `gateFlat.longrun.runId=22800250399`.

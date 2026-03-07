@@ -2636,6 +2636,32 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Hardening (2026-03-07): Dashboard Perf/Longrun Source Selection (`cancelled` filtering)
+
+Goal:
+
+- avoid false P1 dashboard failures when the latest perf/longrun run is `cancelled` but a valid completed signal exists.
+
+Change:
+
+- file: `scripts/ops/attendance-daily-gate-report.mjs`
+- gate source selection now excludes `cancelled/neutral/skipped` for:
+  - `Perf Baseline`
+  - `Perf Long Run`
+- behavior matches strict gate strategy and still falls back to latest completed when all candidates are excluded.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `node --check scripts/ops/attendance-daily-gate-report.mjs` | PASS | local command |
+| `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | local command |
+| Dashboard report generation (`main`) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260307-143043/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260307-143043/attendance-daily-gate-dashboard.md` (`gateFlat.perf.runId=22800666933`, `gateFlat.longrun.runId=22800250399`) |
+
+Decision:
+
+- **GO maintained** (false-alert surface reduced, no contract change).
+
 ## Post-Go Hardening (2026-03-07): Perf Baseline Manual Default Profile
 
 Goal:
