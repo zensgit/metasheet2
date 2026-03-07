@@ -4015,3 +4015,43 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-07): Dashboard P0 Recovery After Cancelled Strict Source
+
+Goal:
+
+- clear transient dashboard P0 failure caused by an unintended cancelled strict run becoming the latest completed strict source.
+
+Incident summary:
+
+- dashboard run #22798523694 failed with:
+  - `Strict Gates: latest completed run conclusion=cancelled`
+  - source run: #22798411201 (`cancelled`)
+
+Recovery verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod, recovery rerun) | #22798551601 | PASS | `output/playwright/ga/22798551601/attendance-strict-gates-prod-22798551601-1/20260307-115420-1/gate-summary.json`, `output/playwright/ga/22798551601/attendance-strict-gates-prod-22798551601-1/20260307-115420-2/gate-summary.json`, `output/playwright/ga/22798551601/attendance-strict-gates-prod-22798551601-1/20260307-115420-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard (post strict recovery) | #22798612434 | PASS | `output/playwright/ga/22798612434/attendance-daily-gate-dashboard-22798612434-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22798612434/attendance-daily-gate-dashboard-22798612434-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- strict smoke recovered fully (both rounds):
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `group + membership ok`
+  - `SMOKE PASS`
+- dashboard recovered to green and now binds strict source to success run:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22798551601`
+  - `gateFlat.strict.conclusion=success`
+  - `gateFlat.protection.runId=22798505815`
+- open attendance issues:
+  - `[]`
+
+Decision:
+
+- **GO maintained**.
