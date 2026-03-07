@@ -2636,6 +2636,36 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Longrun Upload Coverage
+
+Scope:
+
+- reran the mainline gate chain (`branch policy -> strict -> dashboard`) after latest merges.
+- executed one non-drill `Attendance Import Perf Long Run` run with `upload_csv=true` to reconfirm upload-path trend coverage.
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22800015001 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800015001/attendance-branch-policy-drift-prod-22800015001-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22800020740 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800020740/attendance-strict-gates-prod-22800020740-1/20260307-133550-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800020740/attendance-strict-gates-prod-22800020740-1/20260307-133550-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard | #22800087930 | PASS | `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800087930/attendance-daily-gate-dashboard-22800087930-1/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-post-merge-verify/20260307-213438/ga/22800087930/attendance-daily-gate-dashboard-22800087930-1/attendance-daily-gate-dashboard.md` |
+| Attendance Import Perf Long Run (workflow_dispatch, upload enabled) | #22800096592 | PASS | `output/playwright/ga/22800096592-r2/attendance-import-perf-longrun-rows10k-commit-22800096592-1/current/rows10k-commit/attendance-perf-mmgdf55d-9o08th/perf-summary.json`, `output/playwright/ga/22800096592-r2/attendance-import-perf-longrun-trend-22800096592-1/20260307-134209/attendance-import-perf-longrun-trend.md` |
+
+Observed highlights:
+
+- strict two-round smoke includes: `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`.
+- dashboard stays green with `overallStatus=pass`, `p0Status=pass`.
+- longrun trend report confirms upload channel visibility:
+  - `rows10k-commit` row shows `Upload = YES`
+  - trend json includes `uploadCsv: true`.
+- open `[Attendance ...]` issues:
+  - `[]`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Source Regression Baseline
 
 Goal:
