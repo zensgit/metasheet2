@@ -4420,3 +4420,37 @@ Key assertions:
 - for `preview` scenarios above CSV cap, payload now falls back to rows mode:
   - `payloadSource=rows`
   - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(20000)`.
+
+### Update (2026-03-08): Post-Merge Verifier Retry/Polling Hardening
+
+Scope:
+
+- eliminate false negatives in `attendance-post-merge-verify.sh` caused by transient `gh` network/API errors.
+
+Implementation:
+
+- file: `scripts/ops/attendance-post-merge-verify.sh`
+  - added transient retry wrapper for `gh` calls (`TLS handshake timeout`, `unexpected EOF`, 5xx class).
+  - replaced `gh run watch` with explicit polling via `gh run view`.
+  - fixed rc capture bug in gate execution branch (`! trigger_and_wait` -> explicit rc check).
+  - added tunables:
+    - `GH_RETRY_MAX_ATTEMPTS`
+    - `GH_RETRY_DELAY_SECONDS`
+    - `RUN_DISCOVERY_ATTEMPTS`
+    - `RUN_DISCOVERY_INTERVAL_SECONDS`
+    - `RUN_POLL_ATTEMPTS`
+    - `RUN_POLL_INTERVAL_SECONDS`
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main) | #22813576963 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813576963/attendance-branch-policy-drift-prod-22813576963-1/policy.json` |
+| Strict Gates (main) | #22813587497 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813587497/attendance-strict-gates-prod-22813587497-1/20260308-042529-1/gate-summary.json` |
+| Perf Baseline (main) | #22813643133 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813643133/attendance-import-perf-22813643133-1/attendance-perf-mmh8lke3-alox6d/perf-summary.json` |
+| Daily Dashboard (main) | #22813652997 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813652997/attendance-daily-gate-dashboard-22813652997-1/attendance-daily-gate-dashboard.md` |
+
+Key assertions:
+
+- full post-merge verification completed with `Failures: 0`.
+- gate script now remains deterministic under intermittent GitHub API instability.

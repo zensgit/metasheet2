@@ -2636,6 +2636,45 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Preview Cap Fallback + Robust Post-Merge Verifier
+
+Scope:
+
+- merge `#375` to stabilize longrun preview payload behavior under production CSV cap.
+- harden post-merge verifier against transient GitHub API/network failures.
+
+Code changes:
+
+- `scripts/ops/attendance-import-perf.mjs`
+  - `preview` mode now falls back to rows payload when row count exceeds CSV hint.
+  - reason code: `preview_rows_exceeds_csv_limit_hint(20000)`.
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - default `include_rows500k_preview=false` (opt-in stress scenario).
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - transient retry wrapper for `gh` commands.
+  - explicit polling for workflow completion.
+  - fixed gate rc capture logic.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Longrun (branch, intermediate) | #22813243944 | FAIL (expected, captured RCA) | `output/playwright/ga/22813243944/attendance-import-perf-longrun-rows50k-preview-22813243944-1/current/rows50k-preview/perf.log` |
+| Longrun (branch, after fallback fix) | #22813306215 | PASS | `output/playwright/ga/22813306215/attendance-import-perf-longrun-rows100k-preview-22813306215-1/current/rows100k-preview/perf.log` |
+| Branch Policy Drift (main) | #22813576963 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813576963/attendance-branch-policy-drift-prod-22813576963-1/policy.json` |
+| Strict Gates (main) | #22813587497 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813587497/attendance-strict-gates-prod-22813587497-1/20260308-042529-1/gate-summary.json` |
+| Perf Baseline (main) | #22813643133 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813643133/attendance-import-perf-22813643133-1/attendance-perf-mmh8lke3-alox6d/perf-summary.json` |
+| Daily Dashboard (main) | #22813652997 | PASS | `output/playwright/attendance-post-merge-verify/20260308-1208-round2/ga/22813652997/attendance-daily-gate-dashboard-22813652997-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- longrun defaults are stable while keeping 500k preview as explicit stress opt-in.
+- post-merge verification now survives intermittent GitHub API handshake/EOF errors and reports accurate gate rc.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Hardening (2026-03-07): Dashboard Perf/Longrun Source Selection (`cancelled` filtering)
 
 Goal:

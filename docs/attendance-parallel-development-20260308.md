@@ -125,6 +125,41 @@ Result: PASS
     - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(20000)`
   - both preview scenarios completed successfully.
 
+## Round 3 Validation (Gate runner robustness + import UX recovery)
+
+### A-line: post-merge verifier robustness
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - replaced fragile `gh run watch` flow with explicit run polling.
+  - added transient `gh` retry wrapper (`TLS handshake timeout`/`unexpected EOF`/5xx class).
+  - fixed gate rc accounting bug (`! trigger_and_wait` swallowed non-zero rc).
+  - added env controls for retry/poll tuning:
+    - `GH_RETRY_MAX_ATTEMPTS`
+    - `GH_RETRY_DELAY_SECONDS`
+    - `RUN_DISCOVERY_ATTEMPTS`
+    - `RUN_DISCOVERY_INTERVAL_SECONDS`
+    - `RUN_POLL_ATTEMPTS`
+    - `RUN_POLL_INTERVAL_SECONDS`
+
+### C-line: import error UX hardening
+- `apps/web/src/views/AttendanceView.vue`
+  - for import contexts (`import-preview`/`import-run`), status errors are now sticky (no auto-dismiss), preserving retry/hint/code actions.
+  - import section now renders a persistent local error block with code/hint/retry action.
+  - `previewImport()` now clears stale preview rows/warnings before each attempt and on failure.
+
+### Verification
+- Frontend build:
+  - `pnpm --filter @metasheet/web build` PASS
+- Post-merge verifier full pass:
+  - output root: `output/playwright/attendance-post-merge-verify/20260308-1208-round2`
+  - branch-policy run `22813576963` PASS
+  - strict run `22813587497` PASS
+  - perf-baseline run `22813643133` PASS
+  - perf-baseline-contract PASS
+  - daily-dashboard run `22813652997` PASS
+- Additional manual dispatches:
+  - daily-dashboard run `22813502731` PASS
+  - perf-baseline run `22813507237` PASS
+
 ## Evidence Paths
 - Branch workspace: `/private/tmp/metasheet2-parallel-20260308`
 - GA artifacts root (downloaded):
@@ -132,3 +167,7 @@ Result: PASS
   - `output/playwright/ga/22803281301/...`
   - `output/playwright/ga/22813243944/...`
   - `output/playwright/ga/22813306215/...`
+  - `output/playwright/ga/22813382114/...`
+  - `output/playwright/ga/22813388778/...`
+  - `output/playwright/ga/22813502731/...`
+  - `output/playwright/ga/22813507237/...`
