@@ -4961,3 +4961,31 @@ Decision:
 
 - **GO maintained**.
 - No open Attendance P0/P1 alert issues after this round (`[Attendance P1] Locale zh smoke alert` closed).
+
+## Post-Go Verification (2026-03-08): Strict/Perf Auth Resolver Hardening (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- harden strict/perf workflow auth with a shared resolver so stale JWT formatting/expiry no longer causes random gate regressions.
+- keep token resolution diagnostics artifacted without writing any real secrets into docs.
+
+Code changes:
+
+- `scripts/ops/attendance-resolve-auth.sh` (new shared resolver).
+- workflow integration:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | #22821420163 | PASS | `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-1/gate-api-smoke.log`, `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-2/gate-summary.json` |
+| Attendance Import Perf Baseline | #22821420154 | PASS | `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/perf.log`, `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/attendance-perf-mmhr1rvj-7glun8/perf-summary.json` |
+| Attendance Import Perf Long Run | #22821486847 | PASS | `output/playwright/ga/22821486847/attendance-import-perf-longrun-rows10k-commit-22821486847-1/current/rows10k-commit/attendance-perf-mmhr7cyt-pwgumu/perf-summary.json`, `output/playwright/ga/22821486847/attendance-import-perf-longrun-trend-22821486847-1/20260308-125816/attendance-import-perf-longrun-trend.md` |
+
+Decision:
+
+- branch validation is green; ready to merge.
+- **GO maintained** on current production baseline (this section records branch hardening evidence).

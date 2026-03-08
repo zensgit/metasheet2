@@ -208,7 +208,9 @@ jobs:
     timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
       PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
       EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
       RUN_PREFLIGHT: 'false'
@@ -245,9 +247,66 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-prod-acceptance
+          meta_file="output/playwright/attendance-prod-acceptance/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            auth_me_last_http="unknown"
+            refresh_last_http="unknown"
+            login_last_http="unknown"
+            login_email_present="false"
+            login_password_present="false"
+            if [[ -f "${meta_file}" ]]; then
+              auth_me_last_http="$(awk -F= '/^AUTH_ME_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
+              refresh_last_http="$(awk -F= '/^AUTH_REFRESH_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
+              login_last_http="$(awk -F= '/^AUTH_LOGIN_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
+              login_email_present="$(awk -F= '/^AUTH_LOGIN_EMAIL_PRESENT=/{print $2}' "${meta_file}" | tail -n1)"
+              login_password_present="$(awk -F= '/^AUTH_LOGIN_PASSWORD_PRESENT=/{print $2}' "${meta_file}" | tail -n1)"
+            fi
+
+            cat > output/playwright/attendance-prod-acceptance/auth-error.txt <<EOF
+            No valid attendance admin token.
+            Tried (in order):
+            1) ATTENDANCE_ADMIN_JWT / vars token via /api/auth/me (retry-aware)
+            2) /api/auth/refresh-token with JWT token
+            3) ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars)
+            Diagnostic:
+            - auth_me_last_http=${auth_me_last_http}
+            - refresh_last_http=${refresh_last_http}
+            - login_last_http=${login_last_http}
+            - login_email_present=${login_email_present}
+            - login_password_present=${login_password_present}
+            API_BASE=${API_BASE}
+            EOF
+            echo "::error::No valid attendance admin token; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+
+          auth_source="unknown"
+          if [[ -f "${meta_file}" ]]; then
+            auth_source="$(awk -F= '/^AUTH_SOURCE=/{print $2}' "${meta_file}" | tail -n1)"
+          fi
+          echo "auth_source=${auth_source}" >> "$GITHUB_OUTPUT"
+
       - name: Run strict gates twice (remote)
         id: run_strict
         continue-on-error: true
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           ./scripts/ops/attendance-run-strict-gates-twice.sh
@@ -256,6 +315,8 @@ jobs:
         id: run_strict_retry
         if: always() && steps.run_strict.outcome == 'failure' && env.STRICT_RETRY_ON_RATE_LIMITED == 'true'
         continue-on-error: true
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           root="output/playwright/attendance-prod-acceptance"

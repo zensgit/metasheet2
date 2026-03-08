@@ -4691,3 +4691,37 @@ Summary:
 
 - locale zh smoke is now green on `main` with the same production gate profile.
 - all daily P0/P1 gates in post-merge verifier remained PASS.
+
+### Update (2026-03-08): Shared Auth Resolver for Strict/Perf Workflows (Branch Validation)
+
+Scope:
+
+- reduce auth-flake caused by stale/expired token formatting drift across strict/perf workflows.
+- unify auth bootstrap chain in one script and keep failure diagnostics artifacted without leaking secrets.
+
+Implementation:
+
+- added shared script: `scripts/ops/attendance-resolve-auth.sh`
+  - fallback order:
+    1. normalize and validate token with `/auth/me` (retry-aware),
+    2. refresh via `/auth/refresh-token`,
+    3. login via `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`.
+  - writes non-secret diagnostics (`auth-resolve-meta.txt`) when requested by caller.
+- wired into workflows:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+
+Verification run (branch `codex/attendance-parallel-round17`):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Strict Gates | #22821420163 | PASS | `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-1/gate-api-smoke.log`, `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-2/gate-summary.json` |
+| Perf Baseline | #22821420154 | PASS | `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/perf.log`, `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/attendance-perf-mmhr1rvj-7glun8/perf-summary.json` |
+| Perf Long Run | #22821486847 | PASS | `output/playwright/ga/22821486847/attendance-import-perf-longrun-rows10k-commit-22821486847-1/current/rows10k-commit/attendance-perf-mmhr7cyt-pwgumu/perf-summary.json`, `output/playwright/ga/22821486847/attendance-import-perf-longrun-trend-22821486847-1/20260308-125816/attendance-import-perf-longrun-trend.md` |
+
+Observed:
+
+- strict smoke logs contain `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`.
+- perf baseline and longrun summaries report `uploadCsv=true`.
+- this round contains no secret/token material in repo docs or artifacts.
