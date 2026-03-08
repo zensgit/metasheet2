@@ -5045,3 +5045,30 @@ Decision:
 
 - shared auth resolver adoption is validated for locale zh gate.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): UI Import Status Polish + Job 404 Regression Test (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- unify async/sync import completion status message with the same perf suffix (`engine/strategy/processed/failed/elapsedMs`).
+- add integration regression coverage for `GET /api/attendance/import/jobs/:id` not-found branch.
+
+Changes:
+
+- frontend:
+  - `apps/web/src/views/AttendanceView.vue`
+- backend integration test:
+  - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Targeted integration test (`unknown async import job id`) | PASS | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"unknown async import job id\"` |
+| Web type check | PASS | `pnpm --filter @metasheet/web exec vue-tsc -b --pretty false` |
+| PR CI sweep | PASS | Checks from runs `#22822063911`, `#22822063913`, `#22822063919`, `#22822063921`, `#22822063922`, `#22822063902` all green |
+
+Decision:
+
+- polish + regression coverage complete.
+- **GO maintained**.
