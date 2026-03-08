@@ -5018,3 +5018,9 @@ Decision:
 
 - contract sync is complete and backward compatible.
 - **GO maintained**.
+
+CI contract gate evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (`strict + dashboard + openapi`) | #22821820538 | PASS | `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/validate.log`, `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/build.log` |

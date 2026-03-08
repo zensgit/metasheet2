@@ -4757,3 +4757,11 @@ Verification:
   - `packages/openapi/dist/openapi.json`
   - `packages/openapi/dist/openapi.yaml`
   - `packages/openapi/dist/combined.openapi.yml`
+
+Contract matrix evidence:
+
+- Attendance Gate Contract Matrix #22821820538 (`SUCCESS`) now includes `contracts (openapi)`.
+- downloaded artifacts:
+  - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/build.log`
+  - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/validate.log`
+  - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/openapi.invalid.json`
