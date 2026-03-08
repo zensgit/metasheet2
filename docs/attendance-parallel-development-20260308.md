@@ -254,3 +254,24 @@ Result: PASS
 ### Verification
 - targeted integration:
   - `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` PASS (`16/16`)
+
+## Round 6 Validation (Post-Merge Gate Sweep after PR #379)
+
+### Scope
+- verify merged legacy import parity changes on `main` through full post-merge gate chain.
+
+### Execution
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-pr379 bash scripts/ops/attendance-post-merge-verify.sh`
+
+### Results
+- `branch-policy` run `22815956877` PASS
+- `strict-gates` run `22815962980` PASS
+- `perf-baseline` run `22816025761` PASS
+- `perf-baseline-contract` PASS
+- `daily-dashboard` run `22816034346` PASS
+
+### Evidence
+- `output/playwright/attendance-post-merge-verify/20260308-pr379/summary.md`
+- `output/playwright/attendance-post-merge-verify/20260308-pr379/summary.json`
+- `output/playwright/attendance-post-merge-verify/20260308-pr379/results.tsv`

@@ -2660,6 +2660,26 @@ Observed highlights:
 
 - legacy import now returns the same operational telemetry fields expected by downstream tooling, without breaking existing consumers.
 
+## Post-Go Verification (2026-03-08): Legacy Import Parity Post-Merge Gate Sweep
+
+Scope:
+
+- verify that `main` stays green after merging legacy import response parity (PR #379).
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22815956877 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22815956877/attendance-branch-policy-drift-prod-22815956877-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22815962980 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22815962980/attendance-strict-gates-prod-22815962980-1/20260308-065341-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22815962980/attendance-strict-gates-prod-22815962980-1/20260308-065341-2/gate-api-smoke.log` |
+| Attendance Import Perf Baseline | #22816025761 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22816025761/attendance-import-perf-22816025761-1/perf.log`, `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22816025761/attendance-import-perf-22816025761-1/attendance-perf-mmheh5ec-b04ff9/perf-summary.json` |
+| perf-baseline-contract (local assert) | #22816025761 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr379/gate-perf-baseline-contract.log` |
+| Attendance Daily Gate Dashboard | #22816034346 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22816034346/attendance-daily-gate-dashboard-22816034346-1/attendance-daily-gate-dashboard.md`, `output/playwright/attendance-post-merge-verify/20260308-pr379/ga/22816034346/attendance-daily-gate-dashboard-22816034346-1/attendance-daily-gate-dashboard.json` |
+
+Observed highlights:
+
+- all post-merge gates passed in one execution chain; no open attendance P0/P1 issues introduced by this merge.
+
 Decision:
 
 - **GO maintained**.
