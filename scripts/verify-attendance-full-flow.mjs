@@ -48,6 +48,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function bilingualName(en, zh, options = {}) {
+  const exact = options.exact !== false
+  const pattern = exact
+    ? `^(?:${escapeRegex(en)}|${escapeRegex(zh)})$`
+    : `${escapeRegex(en)}|${escapeRegex(zh)}`
+  return new RegExp(pattern, 'i')
+}
+
+const labels = {
+  attendance: bilingualName('Attendance', '考勤'),
+  grid: bilingualName('Grid', '表格'),
+  refresh: bilingualName('Refresh', '刷新'),
+  records: bilingualName('Records', '记录'),
+  reload: bilingualName('Reload', '刷新'),
+  noRecords: bilingualName('No records.', '暂无记录。', { exact: false }),
+  anomalies: bilingualName('Anomalies', '异常', { exact: false }),
+  adminCenter: bilingualName('Admin Center', '管理中心'),
+  workflowDesigner: bilingualName('Workflow Designer', '流程设计'),
+  desktopRecommended: bilingualName('Desktop recommended', '建议使用桌面端'),
+  backToOverview: bilingualName('Back to Overview', '返回总览'),
+}
+
 function deriveApiBaseFromWebUrl(url) {
   try {
     const u = new URL(url)
@@ -228,17 +254,17 @@ async function endpointExists(apiBase, pathname) {
 async function ensureAttendanceLoaded(page) {
   await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
   // Use exact match to avoid strict-mode collisions with headings like "Attendance groups".
-  await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+  await page.getByRole('heading', { name: labels.attendance }).first().waitFor({ timeout: timeoutMs })
 }
 
 async function assertNavForAttendanceMode(page) {
   const nav = page.locator('nav.app-nav')
   await nav.waitFor({ timeout: timeoutMs })
-  const gridLink = page.getByRole('link', { name: 'Grid' })
+  const gridLink = page.getByRole('link', { name: labels.grid })
   if (await gridLink.count()) {
     throw new Error('Expected attendance-focused nav (no Grid link), but Grid link is visible')
   }
-  const attendanceLink = page.getByRole('link', { name: 'Attendance' })
+  const attendanceLink = page.getByRole('link', { name: labels.attendance })
   if (!(await attendanceLink.count())) {
     throw new Error('Expected Attendance link in nav, but not found')
   }
@@ -254,16 +280,16 @@ async function setDateRange(page, from, to) {
 }
 
 async function refreshRecords(page) {
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await page.getByRole('button', { name: labels.refresh }).first().click()
   const recordsSection = page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: 'Records' }),
+    has: page.getByRole('heading', { name: labels.records }),
   })
-  await recordsSection.getByRole('button', { name: 'Reload' }).click()
+  await recordsSection.getByRole('button', { name: labels.reload }).first().click()
 }
 
 async function assertHasRecords(page) {
   await page.waitForTimeout(800)
-  const empty = page.locator('text=No records.')
+  const empty = page.getByText(labels.noRecords)
   if (allowEmptyRecords) return
   if (await empty.count()) {
     throw new Error('No records found in Records table')
@@ -272,11 +298,11 @@ async function assertHasRecords(page) {
 
 async function assertRecordsTableContainer(page) {
   const recordsSection = page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: 'Records' }),
+    has: page.getByRole('heading', { name: labels.records }),
   })
   const recordsTable = recordsSection.locator('table.attendance__table.attendance__table--records')
   if (!(await recordsTable.count())) {
-    const empty = recordsSection.locator('text=No records.')
+    const empty = recordsSection.getByText(labels.noRecords)
     if (allowEmptyRecords && (await empty.count())) {
       logInfo('Records table assertion skipped (ALLOW_EMPTY_RECORDS=true and no records)')
       return
@@ -854,7 +880,7 @@ async function run() {
   const today = new Date().toISOString().slice(0, 10)
   const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
   if (anomaliesSupported) {
-    await page.getByRole('heading', { name: 'Anomalies', exact: true }).waitFor({ timeout: timeoutMs })
+    await page.getByRole('heading', { name: labels.anomalies }).first().waitFor({ timeout: timeoutMs })
     logInfo('Anomalies card verified')
   } else {
     logInfo('WARN: /attendance/anomalies not available (skipping anomalies UI assertion)')
@@ -866,9 +892,9 @@ async function run() {
 
   // Admin Center (if enabled)
   if (features.attendanceAdmin) {
-    await page.getByRole('button', { name: 'Admin Center' }).click()
+    await page.getByRole('button', { name: labels.adminCenter }).click()
     if (mobile) {
-      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: labels.desktopRecommended }).waitFor({ timeout: timeoutMs })
     } else {
       const importSection = page.locator('div.attendance__admin-section').filter({
         has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)', exact: true }),
@@ -929,17 +955,17 @@ async function run() {
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
     logInfo('Saved admin screenshot')
     if (mobile) {
-      await page.getByRole('button', { name: 'Back to Overview' }).click()
+      await page.getByRole('button', { name: labels.backToOverview }).click()
     }
   }
 
   // Workflow Designer (if enabled)
   if (features.workflow) {
-    await page.getByRole('button', { name: 'Workflow Designer' }).click()
+    await page.getByRole('button', { name: labels.workflowDesigner }).click()
     if (mobile) {
-      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
-      await page.getByRole('button', { name: 'Back to Overview', exact: true }).click()
-      await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: labels.desktopRecommended }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('button', { name: labels.backToOverview }).click()
+      await page.getByRole('heading', { name: labels.attendance }).first().waitFor({ timeout: timeoutMs })
     } else {
       await page.locator('.workflow-designer').waitFor({ timeout: timeoutMs })
     }
