@@ -224,3 +224,33 @@ Result: PASS
   - `output/playwright/ga/22813507237/...`
 - Post-merge verifier artifacts:
   - `output/playwright/attendance-post-merge-verify/20260308-parallel-next/...`
+
+## Round 5 Validation (Parallel: Legacy Import Result Parity)
+
+### B-line: backend parity for `POST /api/attendance/import`
+- `plugins/plugin-attendance/index.cjs`
+  - legacy import response now aligns with `AttendanceImportResult` optional fields used by `/api/attendance/import/commit`.
+  - added fields:
+    - `processedRows`
+    - `failedRows`
+    - `elapsedMs`
+    - `engine`
+    - `recordUpsertStrategy`
+    - `batchId` (`null` for legacy route)
+    - `idempotent` (`false` for legacy route)
+    - `itemsTruncated` (`false` for legacy route)
+  - kept existing fields unchanged (`imported`, `items`, `skipped`, `csvWarnings`, `groupWarnings`, `meta`).
+
+### B-line: regression assertions
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - expanded legacy import assertions for both row payload and csv payload paths:
+    - `processedRows/failedRows/elapsedMs`
+    - `engine`
+    - `recordUpsertStrategy`
+    - `itemsTruncated`
+    - `idempotent`
+    - `batchId`
+
+### Verification
+- targeted integration:
+  - `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` PASS (`16/16`)

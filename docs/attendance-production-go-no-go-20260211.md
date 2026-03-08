@@ -2636,6 +2636,34 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Legacy Import Result Parity
+
+Scope:
+
+- align legacy `POST /api/attendance/import` response payload with current `AttendanceImportResult` contract used by commit/import jobs.
+
+Code changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - added optional parity fields in legacy import response:
+    - `processedRows`, `failedRows`, `elapsedMs`, `engine`, `recordUpsertStrategy`, `itemsTruncated`, `idempotent`, `batchId`.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - added assertions covering these fields for row-based and csv-based legacy import paths.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| attendance integration suite (`attendance-plugin.test.ts`) | PASS | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts` |
+
+Observed highlights:
+
+- legacy import now returns the same operational telemetry fields expected by downstream tooling, without breaking existing consumers.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-08): Parallel Next Round (OpenAPI + UX Regression Test + Nightly Wiring)
 
 Scope:

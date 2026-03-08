@@ -575,6 +575,16 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(importPayload),
     })
     expect(importRes.status).toBe(200)
+    const importData = (importRes.body as { data?: any } | undefined)?.data
+    expect(Number(importData?.imported ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(importData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(importData?.failedRows ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(Number(importData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(['standard', 'bulk']).toContain(String(importData?.engine))
+    expect(['values', 'unnest', 'staging']).toContain(String(importData?.recordUpsertStrategy))
+    expect(importData?.itemsTruncated).toBe(false)
+    expect(importData?.idempotent).toBe(false)
+    expect(importData?.batchId ?? null).toBe(null)
 
     const anomalyDate = (() => {
       const dt = new Date()
@@ -710,6 +720,11 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(csvImportPayload),
     })
     expect(csvImportRes.status).toBe(200)
+    const csvImportData = (csvImportRes.body as { data?: any } | undefined)?.data
+    expect(Number(csvImportData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(csvImportData?.failedRows ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(['standard', 'bulk']).toContain(String(csvImportData?.engine))
+    expect(['values', 'unnest', 'staging']).toContain(String(csvImportData?.recordUpsertStrategy))
 
     const listGroupsRes = await requestJson(`${baseUrl}/api/attendance/groups?pageSize=200`, {
       headers: {

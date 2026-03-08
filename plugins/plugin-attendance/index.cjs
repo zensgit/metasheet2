@@ -12192,6 +12192,10 @@ module.exports = {
 	            return
 	          }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
+	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+	            rowCount: rows.length,
+	            engine: importEngine,
+	          })
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -12590,28 +12594,38 @@ module.exports = {
             }
           })
 
-          res.json({
-            ok: true,
-            data: {
-              imported: results.length,
-              items: results,
-              skipped,
-              csvWarnings: [...csvWarnings, ...groupWarnings],
-              groupWarnings,
-              meta: groupSync
-                ? {
-                    groupCreated,
-                    groupMembersAdded,
-                    groupSync: {
-                      autoCreate: groupSync.autoCreate,
-                      autoAssignMembers: groupSync.autoAssignMembers,
-                      ruleSetId: groupSync.ruleSetId,
-                      timezone: groupSync.timezone,
-                    },
-                  }
-                : null,
-            },
-          })
+	          const importedCount = results.length
+	          const responseMeta = groupSync
+	            ? {
+	                groupCreated,
+	                groupMembersAdded,
+	                groupSync: {
+	                  autoCreate: groupSync.autoCreate,
+	                  autoAssignMembers: groupSync.autoAssignMembers,
+	                  ruleSetId: groupSync.ruleSetId,
+	                  timezone: groupSync.timezone,
+	                },
+	              }
+	            : null
+	          res.json({
+	            ok: true,
+	            data: {
+	              imported: importedCount,
+	              processedRows: importedCount,
+	              failedRows: skipped.length,
+	              elapsedMs: 0,
+	              engine: importEngine,
+	              recordUpsertStrategy: importRecordUpsertStrategy,
+	              batchId: null,
+	              idempotent: false,
+	              items: results,
+	              itemsTruncated: false,
+	              skipped,
+	              csvWarnings: [...csvWarnings, ...groupWarnings],
+	              groupWarnings,
+	              meta: responseMeta,
+	            },
+	          })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
