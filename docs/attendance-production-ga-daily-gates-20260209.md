@@ -4778,3 +4778,34 @@ Validation:
 - workflow run: Attendance Locale zh Smoke (Prod) #22821890815 (`PASS`)
 - evidence:
   - `output/playwright/ga/22821890815/attendance-locale-zh-smoke-prod-22821890815-1/attendance-zh-locale-calendar.png`
+
+### Update (2026-03-08): Auth Error Artifact Writer Hardened (Heredoc Parser Regression Fix)
+
+Scope:
+
+- fix a parser-level regression where workflow bash blocks could fail with `here-document ... wanted EOF` before gate logic ran.
+- keep diagnostics behavior unchanged while removing fragile `cat <<EOF` blocks from auth failure branches.
+
+Changes:
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+- `.github/workflows/attendance-import-perf-baseline.yml`
+- `.github/workflows/attendance-import-perf-longrun.yml`
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+- implementation detail:
+  - replace heredoc writes of `auth-error.txt` with grouped `echo` redirection.
+  - strict drill `gate-summary.json` now generated with `jq -n` to avoid heredoc interpolation drift.
+
+Verification (branch `codex/attendance-parallel-round17`):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | #22822270117 | PASS | `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-1/gate-api-smoke.log`, `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-2/gate-summary.json` |
+| Attendance Import Perf Baseline | #22822270124 | PASS | `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/perf.log`, `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/attendance-perf-mmhsx1mz-gzdja7/perf-summary.json` |
+| Attendance Import Perf Long Run | #22822270161 | PASS | `output/playwright/ga/22822270161/attendance-import-perf-longrun-rows10k-commit-22822270161-1/current/rows10k-commit/attendance-perf-mmhsx40h-a5csya/perf-summary.json`, `output/playwright/ga/22822270161/attendance-import-perf-longrun-trend-22822270161-1/20260308-134347/attendance-import-perf-longrun-trend.md` |
+| Attendance Locale zh Smoke (Prod) | #22822313880 | PASS | `output/playwright/ga/22822313880/attendance-locale-zh-smoke-prod-22822313880-1/attendance-zh-locale-calendar.png` |
+
+Observed:
+
+- strict smoke log contains `import upload ok`, `idempotency ok`, `export csv ok`, and `SMOKE PASS`.
+- baseline and longrun artifacts confirm `uploadCsv: true`.

@@ -5072,3 +5072,32 @@ Decision:
 
 - polish + regression coverage complete.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Auth Heredoc Regression Fix Revalidated (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- remediate workflow parser failures caused by fragile heredoc writes in auth error paths.
+- re-run strict/perf/locale gates to confirm restored stability.
+
+Changes:
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+- `.github/workflows/attendance-import-perf-baseline.yml`
+- `.github/workflows/attendance-import-perf-longrun.yml`
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | #22822270117 | PASS | `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-1/gate-api-smoke.log`, `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-2/gate-summary.json` |
+| Attendance Import Perf Baseline | #22822270124 | PASS | `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/perf.log`, `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/attendance-perf-mmhsx1mz-gzdja7/perf-summary.json` |
+| Attendance Import Perf Long Run | #22822270161 | PASS | `output/playwright/ga/22822270161/attendance-import-perf-longrun-rows10k-commit-22822270161-1/current/rows10k-commit/attendance-perf-mmhsx40h-a5csya/perf-summary.json`, `output/playwright/ga/22822270161/attendance-import-perf-longrun-trend-22822270161-1/20260308-134347/attendance-import-perf-longrun-trend.md` |
+| Attendance Locale zh Smoke (Prod) | #22822313880 | PASS | `output/playwright/ga/22822313880/attendance-locale-zh-smoke-prod-22822313880-1/attendance-zh-locale-calendar.png` |
+
+Decision:
+
+- parser regression is closed; auth fallback chain executes normally.
+- strict/perf/locale gates returned to stable PASS.
+- **GO maintained**.
