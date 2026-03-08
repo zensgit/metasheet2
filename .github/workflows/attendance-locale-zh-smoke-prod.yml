@@ -168,12 +168,25 @@ jobs:
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
+            echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json\`"
             echo ""
             echo "Download artifact:"
             echo '```bash'
             echo "gh run download ${{ github.run_id }} -n \"attendance-locale-zh-smoke-prod-${{ github.run_id }}-${{ github.run_attempt }}\" -D \"output/playwright/ga/${{ github.run_id }}\""
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          summary_path="output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json"
+          if [[ -f "${summary_path}" ]]; then
+            {
+              echo ""
+              echo "Locale summary:"
+              echo '```json'
+              node -e "const fs=require('fs');const p=process.argv[1];const d=JSON.parse(fs.readFileSync(p,'utf8'));const view={status:d.status||null,locale:d.locale||null,lunarCount:d.lunarCount??null,holidayCheck:d.holidayCheck||null,holidayBadgeCount:d.holidayBadgeCount??null,holidayCalendarLabel:d.holidayCalendarLabel||null,error:d.error||null};process.stdout.write(JSON.stringify(view,null,2));" "${summary_path}"
+              echo ""
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload artifacts
         if: always()

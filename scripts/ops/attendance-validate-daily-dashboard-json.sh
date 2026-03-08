@@ -220,7 +220,64 @@ function validate_perf_like_gate() {
   fi
 }
 
-validate_basic_gate "localeZh" "Locale zh Smoke"
+function validate_locale_gate() {
+  local gate_key="localeZh"
+  local gate_label="Locale zh Smoke"
+  local gate_status
+  local gate_reason_code
+  local gate_schema_version
+  local gate_locale
+  local gate_lunar_count
+  local gate_holiday_check
+  local gate_holiday_badge_count
+
+  validate_basic_gate "$gate_key" "$gate_label"
+
+  gate_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].status // empty' "$report_json")"
+  gate_reason_code="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("reasonCode") and .reasonCode != null then (.reasonCode | tostring) else "" end' "$report_json")"
+
+  if [[ "$gate_status" != "PASS" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$gate_reason_code" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.status=PASS but reasonCode=${gate_reason_code}"
+  fi
+
+  gate_schema_version="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].summarySchemaVersion // empty' "$report_json")"
+  gate_locale="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].locale // empty' "$report_json")"
+  gate_lunar_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].lunarCount // empty' "$report_json")"
+  gate_holiday_check="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayCheck // empty' "$report_json")"
+  gate_holiday_badge_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayBadgeCount // empty' "$report_json")"
+
+  if [[ -z "$gate_schema_version" ]] || ! [[ "$gate_schema_version" =~ ^[0-9]+$ ]] || (( gate_schema_version < 1 )); then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.summarySchemaVersion=${gate_schema_version:-<empty>} (expected integer >= 1 when status=PASS)"
+  fi
+
+  if [[ "$gate_locale" != "zh-CN" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.locale=${gate_locale:-<empty>} (expected zh-CN when status=PASS)"
+  fi
+
+  if [[ -z "$gate_lunar_count" ]] || ! [[ "$gate_lunar_count" =~ ^[0-9]+$ ]] || (( gate_lunar_count <= 0 )); then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.lunarCount=${gate_lunar_count:-<empty>} (expected positive integer when status=PASS)"
+  fi
+
+  case "$gate_holiday_check" in
+    enabled|disabled)
+      ;;
+    *)
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCheck=${gate_holiday_check:-<empty>} (expected enabled|disabled when status=PASS)"
+      ;;
+  esac
+
+  if [[ "$gate_holiday_check" == "enabled" ]]; then
+    if [[ -z "$gate_holiday_badge_count" ]] || ! [[ "$gate_holiday_badge_count" =~ ^[0-9]+$ ]] || (( gate_holiday_badge_count <= 0 )); then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayBadgeCount=${gate_holiday_badge_count:-<empty>} (expected positive integer when holidayCheck=enabled)"
+    fi
+  fi
+}
+
+validate_locale_gate
 validate_perf_like_gate "perf" "Perf Baseline"
 validate_perf_like_gate "longrun" "Perf Long Run"
 

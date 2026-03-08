@@ -272,6 +272,50 @@ function parseStorageStepSummary(text) {
   }
 }
 
+export function parseLocaleZhSummaryJson(text) {
+  if (!text) return null
+
+  let value = null
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+    ? schemaVersionRaw
+    : null
+  const status = typeof value?.status === 'string' ? value.status.trim().toLowerCase() : ''
+  const locale = typeof value?.locale === 'string' ? value.locale.trim() : ''
+  const holidayCheck = typeof value?.holidayCheck === 'string' ? value.holidayCheck.trim().toLowerCase() : ''
+  const lunarCountValue = typeof value?.lunarCount === 'number' ? value.lunarCount : null
+  const holidayBadgeCountValue = typeof value?.holidayBadgeCount === 'number' ? value.holidayBadgeCount : null
+  const holidayCalendarLabel = typeof value?.holidayCalendarLabel === 'string' ? value.holidayCalendarLabel.trim() : ''
+  const error = typeof value?.error === 'string' ? value.error.trim() : ''
+
+  let reason = null
+  if (status === 'fail') reason = 'LOCALE_SMOKE_FAILED'
+  else if (schemaVersion === null) reason = 'SUMMARY_INVALID'
+  else if (locale !== 'zh-CN') reason = 'LOCALE_NOT_ZH_CN'
+  else if (typeof lunarCountValue !== 'number' || lunarCountValue <= 0) reason = 'LUNAR_LABELS_MISSING'
+  else if (holidayCheck === 'enabled' && (typeof holidayBadgeCountValue !== 'number' || holidayBadgeCountValue <= 0)) {
+    reason = 'HOLIDAY_BADGE_MISSING'
+  }
+
+  return {
+    reason,
+    schemaVersion,
+    status: status || null,
+    locale: locale || null,
+    lunarCount: lunarCountValue === null ? null : String(lunarCountValue),
+    holidayCheck: holidayCheck || null,
+    holidayBadgeCount: holidayBadgeCountValue === null ? null : String(holidayBadgeCountValue),
+    holidayCalendarLabel: holidayCalendarLabel || null,
+    error: error || null,
+  }
+}
+
 function parseBranchProtectionStepSummary(text) {
   if (!text) return null
   const reason = text.match(/^- Failure reason: `([^`]+)`/m)?.[1] || null
@@ -736,6 +780,12 @@ function renderMarkdown({
       if (gate.name === 'Upload Cleanup') {
         if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
       }
+      if (gate.name === 'Locale zh Smoke') {
+        if (meta.locale) extra.push(`locale=${meta.locale}`)
+        if (meta.lunarCount) extra.push(`lunar=${meta.lunarCount}`)
+        if (meta.holidayCheck) extra.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta.holidayBadgeCount) extra.push(`holiday_badges=${meta.holidayBadgeCount}`)
+      }
       if (gate.name === 'Strict Gates') {
         if (meta.summaryValid === false) extra.push('summary=invalid')
         if (meta.summaryInvalidReasons && Array.isArray(meta.summaryInvalidReasons) && meta.summaryInvalidReasons.length > 0) {
@@ -843,6 +893,14 @@ function renderMarkdown({
       if (finding.gate === 'Upload Cleanup') {
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
+      if (finding.gate === 'Locale zh Smoke') {
+        if (meta?.locale) metaBits.push(`locale=${meta.locale}`)
+        if (meta?.lunarCount) metaBits.push(`lunar_count=${meta.lunarCount}`)
+        if (meta?.holidayCheck) metaBits.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta?.holidayBadgeCount) metaBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta?.holidayCalendarLabel) metaBits.push(`holiday_month=${meta.holidayCalendarLabel}`)
+        if (meta?.error) metaBits.push(`error=${meta.error}`)
+      }
       if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
         if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
         if (meta?.engine) metaBits.push(`engine=${meta.engine}`)
@@ -932,6 +990,12 @@ function renderMarkdown({
     if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'RUN_FAILED')) {
       lines.push('- Locale zh Smoke: auth or UI smoke failed. Rotate `ATTENDANCE_ADMIN_JWT` (or login secrets) and rerun locale smoke.')
       lines.push('- Locale zh Smoke: inspect screenshot/log artifacts (`attendance-zh-locale-calendar*.png`, `auth-error.txt`) for localization/lunar/holiday regressions.')
+    }
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_SUMMARY_INVALID')) {
+      lines.push('- Locale zh Smoke: summary contract invalid (locale/lunar/holiday fields). Inspect `attendance-zh-locale-summary.json`, fix verifier output, then rerun locale smoke.')
+    }
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_SUMMARY_MISSING')) {
+      lines.push('- Locale zh Smoke: run succeeded but locale summary artifact is missing. Check upload paths and ensure verifier writes `attendance-zh-locale-summary.json`.')
     }
 
     if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
@@ -1518,6 +1582,40 @@ async function run() {
       })
       if (meta) cleanupGate.meta = meta
     }
+    if (localeZhGate.completed?.id) {
+      const runId = localeZhGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-locale-zh-smoke-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'locale-zh'),
+        innerSuffix: 'attendance-zh-locale-summary.json',
+        parse: parseLocaleZhSummaryJson,
+      })
+      if (meta) {
+        localeZhGate.meta = meta
+        if (meta.reason) {
+          localeZhGate.ok = false
+          localeZhGate.findings.push({
+            severity: 'P1',
+            code: 'LOCALE_SUMMARY_INVALID',
+            gate: 'Locale zh Smoke',
+            message: `Locale zh Smoke: summary contract invalid (${meta.reason})`,
+            runUrl: localeZhGate.completed.url,
+          })
+        }
+      } else if (localeZhGate.completed?.conclusion === 'success') {
+        localeZhGate.ok = false
+        localeZhGate.findings.push({
+          severity: 'P1',
+          code: 'LOCALE_SUMMARY_MISSING',
+          gate: 'Locale zh Smoke',
+          message: 'Locale zh Smoke: latest completed run succeeded but attendance-zh-locale-summary.json is missing from artifacts',
+          runUrl: localeZhGate.completed.url,
+        })
+      }
+    }
     if (strictGate.completed?.id) {
       const runId = strictGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
@@ -1689,6 +1787,12 @@ async function run() {
         if (meta.oldestFileDays) summaryBits.push(`oldest_days=${meta.oldestFileDays}`)
       } else if (gate.name === 'Upload Cleanup') {
         if (meta.staleCount) summaryBits.push(`stale_count=${meta.staleCount}`)
+      } else if (gate.name === 'Locale zh Smoke') {
+        if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.locale) summaryBits.push(`locale=${meta.locale}`)
+        if (meta.lunarCount) summaryBits.push(`lunar=${meta.lunarCount}`)
+        if (meta.holidayCheck) summaryBits.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta.holidayBadgeCount) summaryBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
       } else if (gate.name === 'Strict Gates') {
         if (meta.failedGates) summaryBits.push(`failed=${meta.failedGates}`)
         const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
@@ -1756,6 +1860,15 @@ async function run() {
         flat.fileCount = meta.fileCount ?? null
       } else if (gate.name === 'Upload Cleanup') {
         flat.staleCount = meta.staleCount ?? null
+      } else if (gate.name === 'Locale zh Smoke') {
+        flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.locale = meta.locale ?? null
+        flat.lunarCount = meta.lunarCount ?? null
+        flat.holidayCheck = meta.holidayCheck ?? null
+        flat.holidayBadgeCount = meta.holidayBadgeCount ?? null
+        flat.holidayCalendarLabel = meta.holidayCalendarLabel ?? null
+        flat.localeSummaryStatus = meta.status ?? null
+        flat.localeSummaryError = meta.error ?? null
       } else if (gate.name === 'Strict Gates') {
         flat.failedGates = meta.failedGates ?? null
         flat.failedGateReasons = meta.failedGateReasons ?? null

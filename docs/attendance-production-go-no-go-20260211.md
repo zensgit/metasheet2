@@ -5239,3 +5239,32 @@ Decision:
 - auth fallback diagnostics are now reliable for triage.
 - auth error artifacts across strict/perf/locale workflows are unified and easier to maintain.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Locale Summary Contract + Dashboard Locale Metadata (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- make locale smoke evidence machine-readable and contract-enforced.
+- ensure Daily Dashboard can reason about locale/lunar/holiday health instead of only workflow conclusion.
+
+Changes:
+
+- locale smoke now writes `attendance-zh-locale-summary.json`.
+- locale smoke workflow summary includes this artifact and compact fields.
+- daily dashboard enrichment parses locale summary and populates `gateFlat.localeZh` metadata.
+- dashboard contract guard now validates locale PASS fields.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Locale summary parser unit tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | `scripts/ops/attendance-daily-gate-report.test.mjs` output |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/dashboard/*` |
+| Strict contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/strict/*` |
+| Locale workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-locale-zh-smoke-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS | stdout: `yaml-parse-ok` |
+
+Decision:
+
+- locale gate now has structured pass/fail contract data (`schemaVersion/locale/lunar/holiday`) and is no longer a blind “workflow green” signal.
+- dashboard contract catches locale artifact regressions before they appear in production runbooks.
+- **GO maintained** (P0 unaffected, P1 visibility strengthened).

@@ -223,7 +223,13 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 200004
+      "runId": 200004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -300,7 +306,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 600004
+      "runId": 600004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -371,7 +383,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 300004
+      "runId": 300004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -444,7 +462,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 400004
+      "runId": 400004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -517,7 +541,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 500004
+      "runId": 500004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {

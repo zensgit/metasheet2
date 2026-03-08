@@ -4953,3 +4953,48 @@ Verification:
 | API base override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (`rc=1`, guard allowed, token invalid expected) |
 | Meta diagnostics preserved (refresh/login attempted) | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
 | Contract strict case with auth regressions | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check` | PASS |
+
+### Update (2026-03-09): Locale zh Summary Contract + Daily Dashboard Locale Meta
+
+Scope:
+
+- make locale zh smoke produce structured evidence (`attendance-zh-locale-summary.json`) for machine-checked gate contracts.
+- enrich daily dashboard `gateFlat.localeZh` with locale/lunar/holiday metadata from locale smoke artifacts.
+- tighten dashboard contract validation for locale PASS semantics.
+
+Changes:
+
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - writes `output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json`.
+  - summary includes `schemaVersion/status/locale/lunarCount/holidayCheck/holidayBadgeCount/holidayCalendarLabel/error`.
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - step summary now lists locale summary artifact path and prints a compact JSON snippet when available.
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - added `parseLocaleZhSummaryJson`.
+  - dashboard now enriches `Locale zh Smoke` gate from `attendance-zh-locale-summary.json`.
+  - on successful locale run, missing summary now raises `LOCALE_SUMMARY_MISSING` (P1).
+  - invalid summary content now raises `LOCALE_SUMMARY_INVALID` (P1).
+  - `gateFlat.localeZh` now includes `summarySchemaVersion/locale/lunarCount/holidayCheck/holidayBadgeCount/holidayCalendarLabel`.
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - locale PASS contract now requires:
+    - `summarySchemaVersion >= 1`
+    - `locale=zh-CN`
+    - `lunarCount > 0`
+    - `holidayCheck in {enabled,disabled}`
+    - if `holidayCheck=enabled`, `holidayBadgeCount > 0`.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard valid/invalid fixtures updated with locale gate summary fields.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added parser regressions for locale summary normalization and invalid lunar-count detection.
+
+Verification (branch `codex/attendance-parallel-round17`):
+
+| Check | Command | Status |
+|---|---|---|
+| Locale smoke script syntax | `node --check scripts/verify-attendance-locale-zh-smoke.mjs` | PASS |
+| Daily dashboard report syntax | `node --check scripts/ops/attendance-daily-gate-report.mjs` | PASS |
+| Dashboard JSON validator syntax | `bash -n scripts/ops/attendance-validate-daily-dashboard-json.sh` | PASS |
+| Dashboard parser unit tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS |
+| Dashboard contract case | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17` | PASS |
+| Strict contract case regression | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17` | PASS |
+| Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-locale-zh-smoke-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS |
