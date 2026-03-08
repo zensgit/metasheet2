@@ -5141,6 +5141,7 @@ Verification:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+| Attendance Import Perf Baseline (`profile=high-scale`, profile-field recheck) | #22822710850 | PASS | `output/playwright/ga/22822710850/attendance-import-perf-22822710850-1/perf.log`, `output/playwright/ga/22822710850/attendance-import-perf-22822710850-1/attendance-perf-mmhtvqw5-ksyvdb/perf-summary.json` |
 
 Decision:
 
