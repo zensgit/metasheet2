@@ -4902,6 +4902,7 @@ Changes:
   - expanded bilingual coverage to admin assertions (settings/rule save cycle, import retry, async job action/status/telemetry, payroll section headings).
 - `scripts/ops/attendance-run-gates.sh` + `scripts/ops/attendance-regression-local.sh`
   - forward `UI_LOCALE` to full-flow playwright desktop/mobile checks for consistent locale assertions in CI and local regression runs.
+  - `gate-summary.json` now records `uiLocale` for run-level locale attribution.
 
 Verification:
 

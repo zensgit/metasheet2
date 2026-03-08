@@ -356,6 +356,7 @@ cat >"$summary_json" <<EOF
   "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "apiBase": "${API_BASE}",
   "webUrl": "${WEB_URL}",
+  "uiLocale": $(json_string_or_null "$UI_LOCALE"),
   "expectProductMode": "${EXPECT_PRODUCT_MODE}",
   "requireImportJobRecovery": ${REQUIRE_IMPORT_JOB_RECOVERY},
   "exitCode": ${exit_code},
@@ -386,6 +387,7 @@ cat <<EOF
   - Gate 4: Playwright Prod ...... ${gate_pw_prod}
   - Gate 5: Playwright Desktop ... ${gate_pw_desktop}
   - Gate 6: Playwright Mobile .... ${gate_pw_mobile}
+  - UI Locale .................... ${UI_LOCALE:-auto}
 
 Artifacts:
   ${OUTPUT_ROOT}
