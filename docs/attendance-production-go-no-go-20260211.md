@@ -4877,3 +4877,26 @@ Decision:
 - Required remediations:
   - rotate locale smoke auth secrets (`ATTENDANCE_ADMIN_JWT` and/or `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`).
   - rerun post-merge verifier and confirm strict passes (or strict retry succeeds).
+
+## Post-Go Verification (2026-03-08): Rerun Green After Locale Policy Activation
+
+Scope:
+
+- validate the updated verifier policy (`REQUIRE_LOCALE_ZH=false` default) on `main`.
+- confirm strict gate remains hard-blocking while locale gate is tracked as P1 non-blocking.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22817453866 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817453866/attendance-branch-policy-drift-prod-22817453866-1/policy.json` |
+| Strict Gates | #22817459768 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817459768/attendance-strict-gates-prod-22817459768-1/20260308-083325-1/gate-summary.json` |
+| Locale zh Smoke | #22817525740 | FAIL (non-blocking policy) | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817525740/attendance-locale-zh-smoke-prod-22817525740-1/auth-error.txt` |
+| Locale policy local assert | #22817525740 | PASS (`non_blocking`) | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/results.tsv` |
+| Perf Baseline | #22817571116 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817571116/attendance-import-perf-22817571116-1/attendance-perf-mmhi7bbc-nla77p/perf-summary.json` |
+| Daily Dashboard | #22817605455 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817605455/attendance-daily-gate-dashboard-22817605455-1/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- **GO maintained**.
+- Remaining action is P1 ops remediation (rotate locale smoke credentials); it no longer blocks post-merge closure.

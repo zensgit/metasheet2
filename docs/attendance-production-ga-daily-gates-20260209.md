@@ -4573,3 +4573,32 @@ Notes:
   - locale smoke credential remediation required (`ATTENDANCE_ADMIN_JWT` or login secrets).
 - branch protection was kept at enforced policy after PR merge closure:
   - `pr_reviews=true`, `min_approving_review_count=1`.
+
+### Update (2026-03-08): Post-Policy Rerun Green on Main (Locale Non-Blocking Active)
+
+Scope:
+
+- verify post-merge verifier behavior after adding locale non-blocking policy and strict retry logic.
+- confirm overall post-merge sweep can remain green while locale credential remediation is pending.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22817453866 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817453866/attendance-branch-policy-drift-prod-22817453866-1/policy.json` |
+| Strict Gates | #22817459768 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817459768/attendance-strict-gates-prod-22817459768-1/20260308-083325-1/gate-summary.json` |
+| Locale zh Smoke | #22817525740 | FAIL (non-blocking) | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817525740/attendance-locale-zh-smoke-prod-22817525740-1/auth-error.txt` |
+| Perf Baseline | #22817571116 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817571116/attendance-import-perf-22817571116-1/attendance-perf-mmhi7bbc-nla77p/perf-summary.json` |
+| Daily Dashboard | #22817605455 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817605455/attendance-daily-gate-dashboard-22817605455-1/attendance-daily-gate-dashboard.json` |
+
+Post-merge verifier summary:
+
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/summary.md`
+- `Failures: 0`
+
+PR closure:
+
+- `#389` merged (`61735a12c7eee42ad2f7ce2c97549cc4ef540bf7`) with branch protection restored to:
+  - `strict=true`
+  - `pr_reviews=true`
+  - `min_approving_review_count=1`
