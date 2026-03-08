@@ -82,6 +82,10 @@ on:
         description: 'Require admin settings save-cycle assertion in desktop full-flow (true/false)'
         required: false
         default: 'true'
+      retry_on_rate_limited:
+        description: 'Retry strict gates once when latest gate-summary reason includes RATE_LIMITED (true/false)'
+        required: false
+        default: 'true'
   schedule:
     # Daily at 02:15 UTC.
     - cron: '15 2 * * *'
@@ -218,6 +222,7 @@ jobs:
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       REQUIRE_IMPORT_JOB_RECOVERY: ${{ inputs.require_import_job_recovery || 'false' }}
       REQUIRE_ADMIN_SETTINGS_SAVE: ${{ inputs.require_admin_settings_save || 'true' }}
+      STRICT_RETRY_ON_RATE_LIMITED: ${{ inputs.retry_on_rate_limited || 'true' }}
       HEADLESS: 'true'
     steps:
       - name: Checkout
@@ -242,9 +247,89 @@ jobs:
 
       - name: Run strict gates twice (remote)
         id: run_strict
+        continue-on-error: true
         run: |
           set -euo pipefail
           ./scripts/ops/attendance-run-strict-gates-twice.sh
+
+      - name: Retry strict gates once on RATE_LIMITED
+        id: run_strict_retry
+        if: always() && steps.run_strict.outcome == 'failure' && env.STRICT_RETRY_ON_RATE_LIMITED == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          root="output/playwright/attendance-prod-acceptance"
+          latest_summary="$(find "$root" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
+          if [[ -z "${latest_summary}" || ! -f "${latest_summary}" ]]; then
+            echo "retry_ran=false" >> "$GITHUB_OUTPUT"
+            echo "No gate-summary.json found from initial strict run; skipping retry."
+            exit 0
+          fi
+
+          should_retry="$(jq -r '
+            [
+              .gateReasons.playwrightProd,
+              .gateReasons.playwrightDesktop,
+              .gateReasons.playwrightMobile
+            ]
+            | map(select(type == "string"))
+            | map(ascii_upcase)
+            | any(. == "RATE_LIMITED" or . == "PLAYWRIGHT_RATE_LIMITED")
+          ' "${latest_summary}" 2>/dev/null || echo false)"
+
+          if [[ "${should_retry}" != "true" ]]; then
+            echo "retry_ran=false" >> "$GITHUB_OUTPUT"
+            echo "Latest strict summary does not include RATE_LIMITED reason; skipping retry."
+            exit 0
+          fi
+
+          echo "retry_ran=true" >> "$GITHUB_OUTPUT"
+          retry_out="${root}/$(date -u +%Y%m%d-%H%M%S)-retry"
+          mkdir -p "${retry_out}"
+
+          API_BASE="${API_BASE}" \
+          AUTH_TOKEN="${AUTH_TOKEN}" \
+          WEB_URL="" \
+          EXPECT_PRODUCT_MODE="${EXPECT_PRODUCT_MODE}" \
+          HEADLESS="${HEADLESS}" \
+          RUN_PREFLIGHT="${RUN_PREFLIGHT}" \
+          PROVISION_USER_ID="${PROVISION_USER_ID}" \
+          REQUIRE_ATTENDANCE_ADMIN_API="${REQUIRE_ATTENDANCE_ADMIN_API}" \
+          REQUIRE_IDEMPOTENCY="${REQUIRE_IDEMPOTENCY}" \
+          REQUIRE_IMPORT_EXPORT="${REQUIRE_IMPORT_EXPORT}" \
+          REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD}" \
+          REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC}" \
+          REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY}" \
+          REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC}" \
+          REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE}" \
+          REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY}" \
+          REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE}" \
+          OUTPUT_ROOT="${retry_out}" \
+          ./scripts/ops/attendance-run-gates.sh
+
+      - name: Finalize strict outcome
+        id: strict_final
+        if: always()
+        run: |
+          set -euo pipefail
+          root="output/playwright/attendance-prod-acceptance"
+          latest_summary="$(find "$root" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
+          if [[ -z "${latest_summary}" || ! -f "${latest_summary}" ]]; then
+            echo "::error::Strict gates failed: gate-summary.json not found in ${root}"
+            exit 1
+          fi
+
+          exit_code="$(jq -r '.exitCode // 1' "${latest_summary}" 2>/dev/null || echo 1)"
+          if [[ "${exit_code}" == "0" ]]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "summary=${latest_summary}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          failed_gates="$(jq -r '.gates // {} | to_entries | map(select(.value == "FAIL") | .key) | join(",")' "${latest_summary}" 2>/dev/null || echo '')"
+          reasons="$(jq -r '.gateReasons // {} | to_entries | map(select(.value != null and (.value|tostring) != "") | "\(.key)=\(.value)") | join(" ")' "${latest_summary}" 2>/dev/null || echo '')"
+          echo "::error::Strict gates failed after optional retry (failed=${failed_gates:-unknown} reasons=${reasons:-none})"
+          exit 1
 
       - name: Validate gate-summary contract (strict)
         if: always()

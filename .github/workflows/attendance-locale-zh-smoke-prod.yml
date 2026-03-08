@@ -56,9 +56,9 @@ jobs:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
-      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
       DRILL_MODE: ${{ github.event.inputs.drill || 'false' }}
       DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
       HEADLESS: 'true'
@@ -150,13 +150,13 @@ jobs:
           cat > output/playwright/attendance-locale-zh-smoke/auth-error.txt <<EOF
           No valid attendance admin token.
           Tried: ATTENDANCE_ADMIN_JWT validation via /api/auth/me.
-          Fallback: ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login.
+          Fallback: ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars).
           Remediation:
           - Rotate ATTENDANCE_ADMIN_JWT, or
-          - Configure ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD secrets.
+          - Configure ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD in repo secrets/vars.
           API_BASE=${API_BASE}
           EOF
-          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
+          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD in secrets/vars."
           exit 1
 
       - name: Run zh locale smoke

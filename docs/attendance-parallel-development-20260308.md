@@ -511,3 +511,35 @@ Result: PASS
 - evidence:
   - `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/summary.md`
   - `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/results.tsv`
+
+## Round 13 Validation (A-line + C-line: Strict Rate-Limit Retry + Locale Credential Fallback)
+
+### Scope
+- reduce strict-gates false negatives by retrying once only when gate summary reason is `RATE_LIMITED`.
+- reduce locale zh smoke credential drift by allowing credential fallback from repo `vars` (in addition to `secrets`).
+
+### Implementation
+- `.github/workflows/attendance-strict-gates-prod.yml`
+  - added `workflow_dispatch` input:
+    - `retry_on_rate_limited` (default `true`)
+  - strict execution changes:
+    - `Run strict gates twice` marked `continue-on-error: true`.
+    - added `Retry strict gates once on RATE_LIMITED` step.
+    - added `Finalize strict outcome` step that inspects latest `gate-summary.json` and fails only if final `exitCode != 0`.
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - credential env fallback now supports both secrets and vars:
+    - `AUTH_TOKEN`: `secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT`
+    - `LOGIN_EMAIL`: `secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL`
+    - `LOGIN_PASSWORD`: `secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD`
+  - updated auth remediation text to explicitly mention `secrets/vars`.
+
+### Local validation
+- YAML parse:
+  - `.github/workflows/attendance-strict-gates-prod.yml` PASS
+  - `.github/workflows/attendance-locale-zh-smoke-prod.yml` PASS
+- shell syntax:
+  - `scripts/ops/attendance-run-gates.sh` PASS
+  - `scripts/ops/attendance-run-strict-gates-twice.sh` PASS
+- contract matrix:
+  - `bash scripts/ops/attendance-run-gate-contract-case.sh strict` PASS
+  - `bash scripts/ops/attendance-run-gate-contract-case.sh dashboard` PASS
