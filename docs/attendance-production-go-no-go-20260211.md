@@ -2636,6 +2636,37 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Admin Import Success Telemetry UX
+
+Scope:
+
+- improve import operator feedback by exposing backend commit telemetry directly in the Admin UI success status text.
+
+Code changes:
+
+- `apps/web/src/views/AttendanceView.vue`
+  - sync import success text now includes:
+    - `engine`
+    - `recordUpsertStrategy`
+    - `processedRows`
+    - `failedRows`
+    - `elapsedMs`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| `pnpm --filter @metasheet/web build` | PASS | local command output |
+| `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` | PASS | local command output |
+
+Observed highlights:
+
+- operators can confirm whether the run used `standard/bulk` and `values/unnest/staging` directly from the success toast, without opening batch item detail.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-08): Perf Baseline 100k Re-Check (Upload Requested)
 
 Scope:
