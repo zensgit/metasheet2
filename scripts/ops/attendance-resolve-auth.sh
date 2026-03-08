@@ -108,7 +108,7 @@ EOF
 
 function request_auth_me_code() {
   local token="$1"
-  local out_file
+  local out_file code
   if [[ -z "$token" ]]; then
     printf 'invalid-token'
     return 0
@@ -118,11 +118,13 @@ function request_auth_me_code() {
     return 0
   fi
   out_file="$(mktemp)"
-  curl -sS -o "$out_file" -w '%{http_code}' \
+  code="$(curl -sS -o "$out_file" -w '%{http_code}' \
     --connect-timeout 8 \
     --max-time 20 \
     -H "Authorization: Bearer ${token}" \
-    "${API_BASE}/auth/me" || true
+    "${API_BASE}/auth/me" || true)"
+  rm -f "$out_file" || true
+  printf '%s' "$code"
 }
 
 function validate_token_with_retry() {
@@ -172,9 +174,11 @@ function refresh_token() {
     -d "$payload" || true)"
   LAST_REFRESH_CODE="$code"
   if [[ "$code" != "200" ]]; then
+    rm -f "$refresh_json" || true
     return 1
   fi
   refreshed="$(jq -r '.data.token // empty' "$refresh_json")"
+  rm -f "$refresh_json" || true
   refreshed="$(normalize_safe_token_or_empty "$refreshed")"
   if [[ -z "$refreshed" ]]; then
     return 1
@@ -200,9 +204,11 @@ function login_token() {
     -d "$payload" || true)"
   LAST_LOGIN_CODE="$code"
   if [[ "$code" != "200" ]]; then
+    rm -f "$login_json" || true
     return 1
   fi
   token="$(jq -r '.data.token // empty' "$login_json")"
+  rm -f "$login_json" || true
   token="$(normalize_safe_token_or_empty "$token")"
   if [[ -z "$token" ]]; then
     return 1
