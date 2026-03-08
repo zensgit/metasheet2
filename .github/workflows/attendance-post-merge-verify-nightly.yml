@@ -1,0 +1,61 @@
+name: Attendance Post-Merge Verify (Nightly)
+
+on:
+  schedule:
+    # Nightly at 03:20 UTC.
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: attendance-post-merge-verify-nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  verify-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BRANCH: main
+      OUTPUT_ROOT: output/playwright/attendance-post-merge-verify/nightly-${{ github.run_id }}-${{ github.run_attempt }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run attendance post-merge verification
+        id: verify
+        shell: bash
+        run: |
+          set +e
+          bash scripts/ops/attendance-post-merge-verify.sh
+          rc=$?
+          echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
+          echo "output_root=${OUTPUT_ROOT}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-post-merge-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.verify.outputs.output_root }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on verification errors
+        if: always()
+        shell: bash
+        run: |
+          exit_code="${{ steps.verify.outputs.exit_code }}"
+          if [ -z "${exit_code}" ]; then
+            echo "Missing exit code from verify step." >&2
+            exit 1
+          fi
+          if [ "${exit_code}" -ne 0 ]; then
+            echo "attendance-post-merge-verify failed with exit code ${exit_code}" >&2
+            exit "${exit_code}"
+          fi
