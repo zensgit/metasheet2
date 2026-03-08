@@ -4654,3 +4654,40 @@ Summary:
 
 - `output/playwright/attendance-post-merge-verify/20260308-round15-main/summary.md`
 - verifier `Failures: 0`
+
+### Update (2026-03-08): Locale zh Auth Self-Heal Applied (PR #394)
+
+Scope:
+
+- remove locale zh smoke auth drift caused by stale token formatting/expiry edge cases.
+- preserve non-paging P1 issue policy, but make recovery automatic when refresh/login fallback succeeds.
+
+Implementation:
+
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - auth bootstrap chain is now:
+    1. normalize + validate `ATTENDANCE_ADMIN_JWT` (`/auth/me`, retry-aware),
+    2. fallback to `/auth/refresh-token` using same JWT,
+    3. fallback to `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`.
+  - failure diagnostics expanded in artifact:
+    - `auth_me_last_http`
+    - `refresh_last_http`
+    - `login_last_http`
+    - login credential presence flags.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Locale zh smoke (branch verify) | #22820870436 | PASS | `output/playwright/ga/22820870436/attendance-locale-zh-smoke-prod-22820870436-1/attendance-zh-locale-calendar.png` |
+| Locale zh issue recovery | #388 | CLOSED | `https://github.com/zensgit/metasheet2/issues/388` |
+| Branch Policy Drift | #22820946011 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22820946011/attendance-branch-policy-drift-prod-22820946011-1/policy.json` |
+| Strict Gates | #22820981401 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22820981401/attendance-strict-gates-prod-22820981401-1/20260308-122230-1/gate-summary.json` |
+| Locale zh smoke (main) | #22821050129 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821050129/attendance-locale-zh-smoke-prod-22821050129-1/attendance-zh-locale-calendar.png` |
+| Perf Baseline | #22821066944 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821066944/attendance-import-perf-22821066944-1/attendance-perf-mmhq89f9-lrwnwi/perf-summary.json` |
+| Daily Dashboard | #22821078317 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821078317/attendance-daily-gate-dashboard-22821078317-1/attendance-daily-gate-dashboard.json` |
+
+Summary:
+
+- locale zh smoke is now green on `main` with the same production gate profile.
+- all daily P0/P1 gates in post-merge verifier remained PASS.

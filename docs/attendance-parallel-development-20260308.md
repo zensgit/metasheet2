@@ -559,3 +559,50 @@ Result: PASS
 - evidence:
   - `output/playwright/attendance-post-merge-verify/20260308-round15-main/summary.md`
   - `output/playwright/attendance-post-merge-verify/20260308-round15-main/results.tsv`
+
+## Round 16 Validation (A-line): Locale zh Auth Bootstrap Self-Heal + Mainline Closure
+
+### Scope
+- remove remaining locale zh smoke auth fragility that depended on manual token rotation.
+- keep mainline strict/perf/dashboard closure unchanged while making locale gate resilient.
+
+### Implementation
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - auth resolver now performs:
+    - token normalization (`Bearer` prefix + whitespace trimming),
+    - retry-aware `/auth/me` validation,
+    - `/auth/refresh-token` fallback,
+    - login fallback (`ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`).
+  - enhanced failure diagnostics in `auth-error.txt`:
+    - `auth_me_last_http`, `refresh_last_http`, `login_last_http`
+    - presence flags for login email/password.
+
+### Local validation
+- YAML parse:
+  - `.github/workflows/attendance-locale-zh-smoke-prod.yml` PASS
+- contract matrix:
+  - `bash scripts/ops/attendance-run-gate-contract-case.sh dashboard` PASS
+
+### Branch verification before merge
+- locale workflow run (branch):
+  - `#22820870436` PASS
+  - `Resolve valid auth token` PASS
+  - `Run zh locale smoke` PASS
+- issue lifecycle:
+  - `#388 [Attendance P1] Locale zh smoke alert` auto-closed by recovery comment in run `#22820870436`.
+
+### Mainline verification (after PR #394 merge)
+- PR:
+  - `#394` merged at `2026-03-08T12:18:09Z` (merge commit `d8d979f12e6cc4a674a4794f7a3a8b109ded1647`)
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round16-main BRANCH=main bash scripts/ops/attendance-post-merge-verify.sh`
+- results:
+  - branch-policy `#22820946011` PASS
+  - strict-gates `#22820981401` PASS
+  - locale-zh-smoke `#22821050129` PASS
+  - perf-baseline `#22821066944` PASS
+  - daily-dashboard `#22821078317` PASS
+  - verifier summary: `Failures: 0`
+- evidence:
+  - `output/playwright/attendance-post-merge-verify/20260308-round16-main/summary.md`
+  - `output/playwright/attendance-post-merge-verify/20260308-round16-main/results.tsv`
