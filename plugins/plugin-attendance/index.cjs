@@ -7191,9 +7191,11 @@ module.exports = {
 	      importQueue.process(ATTENDANCE_IMPORT_ASYNC_QUEUE, ATTENDANCE_IMPORT_ASYNC_JOB, async (job) => {
 	        await processAsyncImportCommitJob(job.data ?? {})
 	      })
+	    }
 
-	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort with
-	      // the in-memory queue; for Bull-based backends, the queue will persist separately.
+	    if (ATTENDANCE_IMPORT_ASYNC_ENABLED) {
+	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort and
+	      // should run for both queue-backed and fallback in-process modes.
 	      setImmediate(async () => {
 	        try {
 	          const rows = await db.query(

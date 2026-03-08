@@ -5162,6 +5162,7 @@ Changes:
 - `plugins/plugin-attendance/index.cjs`
   - import upsert now detaches `source_batch_id` for existing rows (safety-first rollback scope).
   - async endpoints return `404 NOT_FOUND` immediately when `csvFileId` metadata is missing.
+  - startup requeue of `queued/running` import jobs now executes for both queue-backed and fallback in-process modes.
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
   - added `keeps existing records after rolling back a later update batch`.
   - added `deduplicates concurrent csvFileId commits with the same idempotencyKey`.
@@ -5179,6 +5180,7 @@ Verification:
 | Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist"` | PASS |
 | Web regression (new zh/mobile spec) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |
 | Full-flow verifier script syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
+| Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
 
 Decision:
 
