@@ -4454,3 +4454,29 @@ Key assertions:
 
 - full post-merge verification completed with `Failures: 0`.
 - gate script now remains deterministic under intermittent GitHub API instability.
+
+### Update (2026-03-08): Nightly Post-Merge Verification Workflow
+
+Scope:
+
+- automate a nightly full-chain verification run using `attendance-post-merge-verify.sh`.
+
+Implementation:
+
+- file: `.github/workflows/attendance-post-merge-verify-nightly.yml`
+  - schedule: `03:20 UTC` daily.
+  - supports `workflow_dispatch`.
+  - runs `scripts/ops/attendance-post-merge-verify.sh` with `BRANCH=main`.
+  - always uploads `${OUTPUT_ROOT}` artifacts.
+  - final step fails workflow when verify exit code is non-zero.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| workflow YAML parse | PASS | `python3` yaml load for `.github/workflows/attendance-post-merge-verify-nightly.yml` |
+| equivalent verify run (same script/runtime) | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/summary.md` |
+
+Notes:
+
+- GitHub API does not allow dispatching a workflow file that only exists on a non-default branch (`404 workflow ... not found on default branch`); this is expected before merge.

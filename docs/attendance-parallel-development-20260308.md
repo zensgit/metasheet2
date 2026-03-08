@@ -160,8 +160,56 @@ Result: PASS
   - daily-dashboard run `22813502731` PASS
   - perf-baseline run `22813507237` PASS
 
+## Round 4 Validation (Parallel: OpenAPI + Web regression test + Nightly workflow)
+
+### B-line: OpenAPI contract parity for import commit/jobs
+- `packages/openapi/src/paths/attendance.yml`
+  - added `POST /api/attendance/import/commit`.
+  - added `GET /api/attendance/import/jobs/{id}`.
+  - unified import request schema refs for `preview` and legacy `import`.
+- `packages/openapi/src/base.yml`
+  - added schemas:
+    - `AttendanceImportRequest`
+    - `AttendanceImportPreviewData`
+    - `AttendanceImportPreviewStats`
+    - `AttendanceImportJob`
+  - expanded `AttendanceImportResult` with optional parity fields:
+    - `processedRows`, `failedRows`, `elapsedMs`, `engine`, `recordUpsertStrategy`, `idempotent`, `itemsTruncated`, `groupWarnings`, `meta`.
+- `packages/openapi/dist/*`
+  - rebuilt combined OpenAPI outputs.
+
+### C-line: Frontend regression test coverage
+- `apps/web/tests/attendance-import-preview-regression.spec.ts`
+  - validates preview success -> preview failure -> retry loop:
+    - stale preview rows/warnings are cleared on failure.
+    - retry action remains available (`statusMeta.action=context` assertions).
+    - retry re-triggers preview without showing stale data.
+
+### A-line: Nightly gate automation
+- `.github/workflows/attendance-post-merge-verify-nightly.yml`
+  - new nightly `03:20 UTC` + `workflow_dispatch`.
+  - runs `scripts/ops/attendance-post-merge-verify.sh` against `main`.
+  - always uploads artifacts.
+  - final step fails job when verification exit code is non-zero.
+
+### Verification
+- OpenAPI build sanity:
+  - `node` merge/build run PASS (`Built OpenAPI to dist with parts: 14`).
+  - `yaml` parse PASS for `packages/openapi/src/*` and `packages/openapi/dist/openapi.yaml`.
+- Frontend targeted regression:
+  - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` PASS.
+- Post-merge verifier (equivalent runtime used by nightly workflow):
+  - output root: `output/playwright/attendance-post-merge-verify/20260308-parallel-next`
+  - branch-policy run `22814782044` PASS
+  - strict run `22814788217` PASS
+  - perf-baseline run `22814866134` PASS
+  - daily-dashboard run `22814879184` PASS
+  - perf-baseline-contract PASS.
+- Note:
+  - direct dispatch of new workflow file on non-default branch returns GitHub API 404; this is expected until merged to `main`.
+
 ## Evidence Paths
-- Branch workspace: `/private/tmp/metasheet2-parallel-20260308`
+- Branch workspace: `/private/tmp/metasheet2-parallel-next`
 - GA artifacts root (downloaded):
   - `output/playwright/ga/22803281293/...`
   - `output/playwright/ga/22803281301/...`
@@ -171,3 +219,5 @@ Result: PASS
   - `output/playwright/ga/22813388778/...`
   - `output/playwright/ga/22813502731/...`
   - `output/playwright/ga/22813507237/...`
+- Post-merge verifier artifacts:
+  - `output/playwright/attendance-post-merge-verify/20260308-parallel-next/...`
