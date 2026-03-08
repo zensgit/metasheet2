@@ -5175,6 +5175,7 @@ Changes:
 - `scripts/verify-attendance-full-flow.mjs`
   - key role/text locators switched to bilingual matchers (en/zh) for `Attendance`, `Records`, `Anomalies`, `Admin Center`, `Workflow Designer`, and mobile downgrade copy.
   - supports `UI_LOCALE` override (`zh-CN` / `en-US`) and writes locale to `metasheet_locale` before page load.
+  - admin flow locators are now bilingual as well (`Settings`, `Default Rule`, `Import`, `Retry preview`, async job status/actions/telemetry, payroll headings).
 - `scripts/ops/attendance-run-gates.sh` + `scripts/ops/attendance-regression-local.sh`
   - `UI_LOCALE` is now forwarded to desktop/mobile full-flow playwright runs for deterministic locale-mode verification.
 

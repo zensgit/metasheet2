@@ -4899,6 +4899,7 @@ Changes:
 - `scripts/verify-attendance-full-flow.mjs`
   - upgraded key UI locators to bilingual en/zh matchers for core attendance flow and mobile downgrade assertions.
   - added `UI_LOCALE` runtime override (`zh-CN` / `en-US`) and locale preseed through `metasheet_locale`.
+  - expanded bilingual coverage to admin assertions (settings/rule save cycle, import retry, async job action/status/telemetry, payroll section headings).
 - `scripts/ops/attendance-run-gates.sh` + `scripts/ops/attendance-regression-local.sh`
   - forward `UI_LOCALE` to full-flow playwright desktop/mobile checks for consistent locale assertions in CI and local regression runs.
 
