@@ -5225,6 +5225,7 @@ Verification:
 |---|---|---|
 | Resolver syntax | `bash -n scripts/ops/attendance-resolve-auth.sh` | PASS |
 | Shared auth-error helper syntax | `bash -n scripts/ops/attendance-write-auth-error.sh` | PASS |
+| Auth resolver/helper regression tests | `node --test scripts/ops/attendance-auth-scripts.test.mjs` | PASS |
 | Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-import-perf-baseline.yml .github/workflows/attendance-import-perf-longrun.yml .github/workflows/attendance-locale-zh-smoke-prod.yml` | PASS |
 | API base hardening guard | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (expected `rc=2`) |
 | HTTP override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (guard allowed; resolver continues fallback) |
