@@ -472,6 +472,17 @@ Result: PASS
     - locale-zh-smoke `#22817390323` FAIL (`auth-error.txt`: no valid admin token/login fallback)
     - perf-baseline `#22817404505` PASS
     - daily-dashboard `#22817416233` FAIL (reflecting strict + locale failures)
+- post-policy rerun (after locale non-blocking policy + strict retry logic):
+  - command:
+    - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy BRANCH=main bash scripts/ops/attendance-post-merge-verify.sh`
+  - results:
+    - branch-policy `#22817453866` PASS
+    - strict-gates `#22817459768` PASS
+    - locale-zh-smoke `#22817525740` FAIL (expected non-blocking, credential remediation pending)
+    - locale-zh-policy local assert PASS (`non_blocking`)
+    - perf-baseline `#22817571116` PASS
+    - daily-dashboard `#22817605455` PASS
+  - verifier summary: `Failures: 0`
 - local smoke of script matrix:
   - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_PERF_BASELINE=true SKIP_DASHBOARD=true bash scripts/ops/attendance-post-merge-verify.sh` PASS
 
@@ -481,4 +492,7 @@ Result: PASS
 - `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817325614/.../gate-summary.json`
 - `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817390323/attendance-locale-zh-smoke-prod-22817390323-1/auth-error.txt`
 - `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817416233/attendance-daily-gate-dashboard-22817416233-1/attendance-daily-gate-dashboard.json`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/summary.md`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/results.tsv`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817605455/attendance-daily-gate-dashboard-22817605455-1/attendance-daily-gate-dashboard.json`
 - `output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local/summary.md`
