@@ -1794,29 +1794,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                source: { type: string }
-                orgId: { type: string }
-                userId: { type: string }
-                timezone: { type: string }
-                ruleSetId: { type: string }
-                mappingProfileId: { type: string }
-                commitToken: { type: string }
-                engine: { type: object }
-                mapping: { type: object }
-                columns: { type: array, items: { type: object } }
-                data: { type: object }
-                csvText: { type: string }
-                csvOptions: { type: object }
-                rows: { type: array, items: { type: object } }
-                entries: { type: array, items: { type: object } }
-                userMap: { type: object }
-                userMapKeyField: { type: string }
-                userMapSourceFields: { type: array, items: { type: string } }
-                statusMap: { type: object }
-                mode: { type: string }
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
       responses:
         '200':
           description: OK
@@ -1826,20 +1804,59 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
-                      total: { type: integer }
-                      mappingUsed: { type: array, items: { type: object } }
-                      csvWarnings:
-                        type: array
-                        items: { type: string }
+                  data: { $ref: '#/components/schemas/AttendanceImportPreviewData' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/commit:
+    x-plugin: plugin-attendance
+    post:
+      summary: Commit attendance import
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/jobs/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance import job
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportJob' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/attendance/import:
     x-plugin: plugin-attendance
@@ -1850,29 +1867,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                source: { type: string }
-                orgId: { type: string }
-                userId: { type: string }
-                timezone: { type: string }
-                ruleSetId: { type: string }
-                mappingProfileId: { type: string }
-                commitToken: { type: string }
-                engine: { type: object }
-                mapping: { type: object }
-                columns: { type: array, items: { type: object } }
-                data: { type: object }
-                csvText: { type: string }
-                csvOptions: { type: object }
-                rows: { type: array, items: { type: object } }
-                entries: { type: array, items: { type: object } }
-                userMap: { type: object }
-                userMapKeyField: { type: string }
-                userMapSourceFields: { type: array, items: { type: string } }
-                statusMap: { type: object }
-                mode: { type: string }
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
       responses:
         '200':
           description: OK

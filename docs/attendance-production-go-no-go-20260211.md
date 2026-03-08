@@ -2636,6 +2636,46 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Parallel Next Round (OpenAPI + UX Regression Test + Nightly Wiring)
+
+Scope:
+
+- add OpenAPI contract parity for attendance import commit/jobs endpoints.
+- add frontend regression coverage for import preview failure/retry stale-state behavior.
+- wire nightly post-merge verification workflow.
+
+Code changes:
+
+- OpenAPI:
+  - `packages/openapi/src/base.yml`
+  - `packages/openapi/src/paths/attendance.yml`
+  - `packages/openapi/dist/openapi.yaml`
+  - `packages/openapi/dist/openapi.json`
+  - `packages/openapi/dist/combined.openapi.yml`
+- Frontend test:
+  - `apps/web/tests/attendance-import-preview-regression.spec.ts`
+- CI:
+  - `.github/workflows/attendance-post-merge-verify-nightly.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift (main) | #22814782044 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814782044/attendance-branch-policy-drift-prod-22814782044-1/policy.json` |
+| Strict Gates (main) | #22814788217 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814788217/attendance-strict-gates-prod-22814788217-1/20260308-070006-1/gate-summary.json` |
+| Perf Baseline (main) | #22814866134 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814866134/attendance-import-perf-22814866134-1/attendance-perf-mmhbl86j-lsc9xo/perf-summary.json` |
+| Daily Dashboard (main) | #22814879184 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814879184/attendance-daily-gate-dashboard-22814879184-1/attendance-daily-gate-dashboard.md` |
+| Frontend import regression spec | local | PASS | `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` |
+
+Observed highlights:
+
+- post-merge verifier recovered from transient GitHub API errors and still completed `Failures: 0`.
+- no open attendance issues after this run (`gh issue list --search "[Attendance" --state open` returned empty).
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-08): Preview Cap Fallback + Robust Post-Merge Verifier
 
 Scope:
