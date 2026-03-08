@@ -138,6 +138,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
         "id": 200003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 200004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
@@ -173,6 +179,11 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "expectedRecordUpsertStrategy": "values",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200004
     }
   },
   "escalationIssue": {
@@ -202,6 +213,12 @@ EOF
     "longrun": {
       "completed": {
         "id": 600003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 600004,
         "conclusion": "success"
       }
     }
@@ -239,6 +256,11 @@ EOF
       "expectedRecordUpsertStrategy": "staging",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600004
     }
   },
   "escalationIssue": {
@@ -270,6 +292,12 @@ EOF
         "id": 300003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 300004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
@@ -299,6 +327,11 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 300004
     }
   },
   "escalationIssue": {
@@ -328,6 +361,12 @@ EOF
     "longrun": {
       "completed": {
         "id": 400003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 400004,
         "conclusion": "success"
       }
     }
@@ -361,6 +400,11 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400004
     }
   },
   "escalationIssue": {
@@ -390,6 +434,12 @@ EOF
     "longrun": {
       "completed": {
         "id": 500003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 500004,
         "conclusion": "success"
       }
     }
@@ -423,6 +473,11 @@ EOF
       "uploadCsv": "maybe",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500004
     }
   },
   "escalationIssue": {

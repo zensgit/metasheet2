@@ -65,6 +65,41 @@ if [[ "$strict_conclusion" == "success" && "$strict_summary_valid" != "true" ]];
   die "strict summary contract failed: strict conclusion=success but gateFlat.strict.summaryValid=${strict_summary_valid:-<empty>}"
 fi
 
+function validate_basic_gate() {
+  local gate_key="$1"
+  local gate_label="$2"
+
+  local gate_object_exists
+  local gate_status
+  local gate_reason_code
+  local gate_run_id
+  local gate_completed_run_id
+
+  gate_object_exists="$(jq -r --arg gate "$gate_key" 'if (.gateFlat[$gate] | type == "object") then "true" else "false" end' "$report_json")"
+  [[ "$gate_object_exists" == "true" ]] || die "${gate_label} contract failed: gateFlat.${gate_key} is missing"
+
+  gate_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].status // empty' "$report_json")"
+  case "$gate_status" in
+    PASS|FAIL)
+      ;;
+    *)
+      die "${gate_label} contract failed: invalid gateFlat.${gate_key}.status=${gate_status:-<empty>} (expected PASS|FAIL)"
+      ;;
+  esac
+
+  gate_reason_code="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("reasonCode") and .reasonCode != null then (.reasonCode | tostring) else "" end' "$report_json")"
+  gate_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("runId") and .runId != null then (.runId | tostring) else "" end' "$report_json")"
+  gate_completed_run_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].completed | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
+
+  if [[ -n "$gate_run_id" && -n "$gate_completed_run_id" && "$gate_run_id" != "$gate_completed_run_id" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.runId=${gate_run_id} mismatches gates.${gate_key}.completed.id=${gate_completed_run_id}"
+  fi
+
+  if [[ "$gate_status" == "FAIL" && -z "$gate_reason_code" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.status=FAIL requires non-empty reasonCode"
+  fi
+}
+
 function validate_perf_like_gate() {
   local gate_key="$1"
   local gate_label="$2"
@@ -185,6 +220,7 @@ function validate_perf_like_gate() {
   fi
 }
 
+validate_basic_gate "localeZh" "Locale zh Smoke"
 validate_perf_like_gate "perf" "Perf Baseline"
 validate_perf_like_gate "longrun" "Perf Long Run"
 

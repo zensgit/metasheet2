@@ -4481,3 +4481,49 @@ Verification:
 Notes:
 
 - GitHub API does not allow dispatching a workflow file that only exists on a non-default branch (`404 workflow ... not found on default branch`); this is expected before merge.
+
+### Update (2026-03-08): Locale zh Smoke Integrated into Daily Dashboard (P1)
+
+Scope:
+
+- upgrade `Attendance Locale zh Smoke (Prod)` from manual-only check to daily operational gate + deterministic drill path.
+- include `Locale zh Smoke` in `Attendance Daily Gate Dashboard`.
+
+Implementation:
+
+- workflow: `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - schedule: `02:18 UTC` daily.
+  - dispatch inputs:
+    - `drill=true|false`
+    - `drill_fail=true|false`
+    - `issue_title` (optional drill-safe title override)
+  - drill runs tagged with `[DRILL]` in run-name.
+  - P1 issue-tracking behavior:
+    - default title: `[Attendance P1] Locale zh smoke alert`
+    - drill runs only manage issues when `issue_title` is provided.
+- workflow: `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - new env: `LOCALE_ZH_WORKFLOW=attendance-locale-zh-smoke-prod.yml`.
+- script: `scripts/ops/attendance-daily-gate-report.mjs`
+  - adds gate:
+    - `name: Locale zh Smoke`
+    - `severity: P1`
+  - renders gate in markdown table, `gateFlat`, findings, artifact commands, rerun hints.
+- contract scripts:
+  - `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - `scripts/ops/attendance-run-gate-contract-case.sh`
+  - now validate/pin `localeZh` gate presence and status contract.
+
+Verification runs (branch validation):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Locale zh smoke drill FAIL (expected) | #22816924836 | FAIL (expected) | `output/playwright/ga/22816924836/attendance-locale-zh-smoke-prod-22816924836-1/drill/drill.txt` |
+| Locale zh smoke drill recovery | #22816933373 | PASS | `output/playwright/ga/22816933373/attendance-locale-zh-smoke-prod-22816933373-1/drill/drill.txt` |
+| Daily dashboard (`include_drill_runs=false`) | #22816946058 | FAIL (expected branch P0), locale gate present | `output/playwright/ga/22816946058/attendance-daily-gate-dashboard-22816946058-1/attendance-daily-gate-dashboard.json` |
+| Daily dashboard (`include_drill_runs=true`) | #22816958859 | FAIL (expected branch P0), locale gate uses latest drill PASS | `output/playwright/ga/22816958859/attendance-daily-gate-dashboard-22816958859-1/attendance-daily-gate-dashboard.json` |
+
+Notes:
+
+- drill issue lifecycle validated with safe title:
+  - issue `#384` (`[Attendance Locale Drill] zh smoke gate test`) reopened on drill FAIL and closed on drill PASS.
+- dashboard drill issue (`#385`) used safe override title and was manually closed after verification.
