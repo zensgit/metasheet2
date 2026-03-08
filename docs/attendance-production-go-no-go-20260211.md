@@ -5262,9 +5262,12 @@ Verification:
 | Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/dashboard/*` |
 | Strict contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/strict/*` |
 | Locale workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-locale-zh-smoke-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS | stdout: `yaml-parse-ok` |
+| GA locale smoke (feature branch) | `gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-parallel-round17` | PASS (#22832016585) | `output/playwright/ga/22832016585/attendance-zh-locale-summary.json` |
+| GA dashboard parse check (feature branch) | `gh workflow run attendance-daily-gate-dashboard.yml --ref codex/attendance-parallel-round17 -f branch=codex/attendance-parallel-round17 -f lookback_hours=48` | FAIL expected (#22832043211) | `output/playwright/ga/22832043211/attendance-daily-gate-dashboard.json` (locale metadata present; branch missing preflight/metrics/storage histories) |
 
 Decision:
 
 - locale gate now has structured pass/fail contract data (`schemaVersion/locale/lunar/holiday`) and is no longer a blind “workflow green” signal.
 - dashboard contract catches locale artifact regressions before they appear in production runbooks.
+- temporary branch-run escalation issue `#397` was closed after validation to avoid production signal pollution.
 - **GO maintained** (P0 unaffected, P1 visibility strengthened).

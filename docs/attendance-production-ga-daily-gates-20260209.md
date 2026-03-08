@@ -4998,3 +4998,10 @@ Verification (branch `codex/attendance-parallel-round17`):
 | Dashboard contract case | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17` | PASS |
 | Strict contract case regression | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17` | PASS |
 | Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-locale-zh-smoke-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS |
+
+GA evidence (2026-03-09, branch verification):
+
+| Workflow | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | #22832016585 | PASS | `output/playwright/ga/22832016585/attendance-zh-locale-summary.json`, `output/playwright/ga/22832016585/attendance-zh-locale-calendar.png` |
+| Attendance Daily Gate Dashboard | #22832043211 | FAIL (expected on feature branch with missing preflight/metrics/storage history) | `output/playwright/ga/22832043211/attendance-daily-gate-dashboard.json` (`gateFlat.localeZh.summarySchemaVersion=1`, `locale=zh-CN`, `lunarCount=42`, `holidayBadgeCount=1`) |
