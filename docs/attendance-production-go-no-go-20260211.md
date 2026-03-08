@@ -4916,3 +4916,23 @@ Verification:
 Decision:
 
 - **GO maintained** (current mainline gate bundle green with locale gate tracked as non-blocking P1).
+
+## Post-Go Verification (2026-03-08): PR #392 Strict Retry + Locale Vars Fallback
+
+Scope:
+
+- validate strict one-shot retry plumbing and locale auth vars fallback after merge.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22820321013 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round15-main/ga/22820321013/attendance-branch-policy-drift-prod-22820321013-1/policy.json` |
+| Strict Gates | #22820329572 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round15-main/ga/22820329572/attendance-strict-gates-prod-22820329572-1/20260308-114015-1/gate-summary.json` |
+| Locale zh Smoke | #22820397642 | FAIL (non-blocking policy) | `output/playwright/attendance-post-merge-verify/20260308-round15-main/ga/22820397642/attendance-locale-zh-smoke-prod-22820397642-1/auth-error.txt` |
+| Perf Baseline | #22820414828 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round15-main/ga/22820414828/attendance-import-perf-22820414828-1/attendance-perf-mmhoqljl-4zihx2/perf-summary.json` |
+| Daily Dashboard | #22820426896 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round15-main/ga/22820426896/attendance-daily-gate-dashboard-22820426896-1/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- **GO maintained**.
