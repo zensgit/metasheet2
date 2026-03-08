@@ -4936,3 +4936,28 @@ Verification:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): PR #394 Locale zh Gate Recovery Closed
+
+Scope:
+
+- verify locale zh smoke P1 alert is remediated by workflow auth self-heal.
+- confirm merged mainline still satisfies full post-merge gate bundle.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| PR #394 | #394 | MERGED | `https://github.com/zensgit/metasheet2/pull/394`, merge commit `d8d979f12e6cc4a674a4794f7a3a8b109ded1647` |
+| Locale zh smoke (branch pre-merge) | #22820870436 | PASS | `output/playwright/ga/22820870436/attendance-locale-zh-smoke-prod-22820870436-1/attendance-zh-locale-calendar.png` |
+| Locale zh issue lifecycle | #388 | CLOSED | `https://github.com/zensgit/metasheet2/issues/388` |
+| Branch Policy Drift | #22820946011 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22820946011/attendance-branch-policy-drift-prod-22820946011-1/policy.json` |
+| Strict Gates | #22820981401 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22820981401/attendance-strict-gates-prod-22820981401-1/20260308-122230-1/gate-summary.json` |
+| Locale zh Smoke (main) | #22821050129 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821050129/attendance-locale-zh-smoke-prod-22821050129-1/attendance-zh-locale-calendar.png` |
+| Perf Baseline | #22821066944 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821066944/attendance-import-perf-22821066944-1/attendance-perf-mmhq89f9-lrwnwi/perf-summary.json` |
+| Daily Dashboard | #22821078317 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round16-main/ga/22821078317/attendance-daily-gate-dashboard-22821078317-1/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- **GO maintained**.
+- No open Attendance P0/P1 alert issues after this round (`[Attendance P1] Locale zh smoke alert` closed).
