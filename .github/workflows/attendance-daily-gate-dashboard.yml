@@ -48,6 +48,7 @@ jobs:
       METRICS_WORKFLOW: attendance-remote-metrics-prod.yml
       STORAGE_WORKFLOW: attendance-remote-storage-prod.yml
       CLEANUP_WORKFLOW: attendance-remote-upload-cleanup-prod.yml
+      LOCALE_ZH_WORKFLOW: attendance-locale-zh-smoke-prod.yml
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml

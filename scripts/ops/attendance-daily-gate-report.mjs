@@ -26,6 +26,7 @@ const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-r
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
 const storageWorkflow = String(process.env.STORAGE_WORKFLOW || 'attendance-remote-storage-prod.yml').trim()
 const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remote-upload-cleanup-prod.yml').trim()
+const localeZhWorkflow = String(process.env.LOCALE_ZH_WORKFLOW || 'attendance-locale-zh-smoke-prod.yml').trim()
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
@@ -657,6 +658,7 @@ function renderMarkdown({
   metricsGate,
   storageGate,
   cleanupGate,
+  localeZhGate,
   strictGate,
   perfGate,
   longrunGate,
@@ -673,6 +675,7 @@ function renderMarkdown({
     'Host Metrics': metricsWorkflow,
     'Storage Health': storageWorkflow,
     'Upload Cleanup': cleanupWorkflow,
+    'Locale zh Smoke': localeZhWorkflow,
     'Strict Gates': strictWorkflow,
     'Perf Baseline': perfWorkflow,
     'Perf Long Run': longrunWorkflow,
@@ -764,7 +767,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, localeZhGate, strictGate, perfGate, longrunGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -778,7 +781,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, localeZhGate, strictGate, perfGate, longrunGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -788,7 +791,7 @@ function renderMarkdown({
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Branch protection / host metrics / storage health / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
+  lines.push('- `P1` (Branch protection / host metrics / storage health / locale zh smoke / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
   lines.push('- `P2` (weekly upload cleanup signal / missing evidence metadata): fix within 24h.')
   lines.push('')
 
@@ -803,6 +806,7 @@ function renderMarkdown({
       [metricsGate.name]: metricsGate,
       [storageGate.name]: storageGate,
       [cleanupGate.name]: cleanupGate,
+      [localeZhGate.name]: localeZhGate,
       [strictGate.name]: strictGate,
       [perfGate.name]: perfGate,
       [longrunGate.name]: longrunGate,
@@ -923,6 +927,11 @@ function renderMarkdown({
         lines.push('- If `reason` includes `FS_USAGE_TOO_HIGH`: run `Attendance Remote Docker GC (Prod)` (`gh workflow run attendance-remote-docker-gc-prod.yml -f prune=true`), then rerun Storage Health.')
         lines.push('- If `reason` includes `UPLOAD_DIR_TOO_LARGE` or `OLDEST_FILE_TOO_OLD`: run `Remote Upload Cleanup (Prod)` (dry-run first; do not delete without confirm), then rerun Storage Health.')
       }
+    }
+
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'RUN_FAILED')) {
+      lines.push('- Locale zh Smoke: auth or UI smoke failed. Rotate `ATTENDANCE_ADMIN_JWT` (or login secrets) and rerun locale smoke.')
+      lines.push('- Locale zh Smoke: inspect screenshot/log artifacts (`attendance-zh-locale-calendar*.png`, `auth-error.txt`) for localization/lunar/holiday regressions.')
     }
 
     if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
@@ -1187,12 +1196,12 @@ function renderMarkdown({
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
+  lines.push('2. Re-run branch protection / host metrics / storage health / locale zh smoke / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, localeZhGate, strictGate, perfGate, longrunGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
@@ -1250,6 +1259,7 @@ async function run() {
   const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
   const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
   const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
+  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
@@ -1279,6 +1289,11 @@ async function run() {
   const cleanupList = includeDrillRuns ? cleanupListRaw : cleanupListRaw.filter((run) => !isDrillRun(run))
   if (!includeDrillRuns && cleanupListRaw.length !== cleanupList.length) {
     info(`cleanup: filtered drill/debug runs (${cleanupListRaw.length - cleanupList.length})`)
+  }
+  const localeZhListRaw = Array.isArray(localeZhRuns?.list) ? localeZhRuns.list : []
+  const localeZhList = includeDrillRuns ? localeZhListRaw : localeZhListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && localeZhListRaw.length !== localeZhList.length) {
+    info(`locale-zh: filtered drill/debug runs (${localeZhListRaw.length - localeZhList.length})`)
   }
   const strictListRaw = Array.isArray(strictRuns?.list) ? strictRuns.list : []
   const strictList = includeDrillRuns ? strictListRaw : strictListRaw.filter((run) => !isDrillRun(run))
@@ -1319,6 +1334,10 @@ async function run() {
   })
   const cleanupLatestAny = cleanupList[0] ?? null
   const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList, {
+    excludeConclusions: nonSignalConclusions,
+  })
+  const localeZhLatestAny = localeZhList[0] ?? null
+  const localeZhLatestCompleted = pickLatestCompletedRun(localeZhList, {
     excludeConclusions: nonSignalConclusions,
   })
   const strictLatestAny = strictList[0] ?? null
@@ -1383,6 +1402,15 @@ async function run() {
     now,
     lookbackHoursValue: cleanupLookbackHours,
     fetchError: cleanupRuns.error,
+  })
+  const localeZhGate = evaluateGate({
+    name: 'Locale zh Smoke',
+    severity: 'P1',
+    latestAny: localeZhLatestAny,
+    latestCompleted: localeZhLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: localeZhRuns.error,
   })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
@@ -1599,6 +1627,7 @@ async function run() {
     ...metricsGate.findings,
     ...storageGate.findings,
     ...cleanupGate.findings,
+    ...localeZhGate.findings,
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
@@ -1764,6 +1793,7 @@ async function run() {
     metrics: toGateFlat(metricsGate),
     storage: toGateFlat(storageGate),
     cleanup: toGateFlat(cleanupGate),
+    localeZh: toGateFlat(localeZhGate),
     strict: toGateFlat(strictGate),
     perf: toGateFlat(perfGate),
     longrun: toGateFlat(longrunGate),
@@ -1785,6 +1815,7 @@ async function run() {
       metrics: metricsGate,
       storage: storageGate,
       cleanup: cleanupGate,
+      localeZh: localeZhGate,
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
@@ -1804,6 +1835,7 @@ async function run() {
     metricsGate,
     storageGate,
     cleanupGate,
+    localeZhGate,
     strictGate,
     perfGate,
     longrunGate,
