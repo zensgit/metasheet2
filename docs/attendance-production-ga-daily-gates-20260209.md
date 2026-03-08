@@ -4536,3 +4536,40 @@ Post-merge sweep on `main` (after PR #386):
 | Strict Gates | #22817072638 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817072638/attendance-strict-gates-prod-22817072638-1/20260308-080412-1/gate-summary.json` |
 | Perf Baseline | #22817126369 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817126369/attendance-import-perf-22817126369-1/attendance-perf-mmhh3ql8-r0dnt1/perf-summary.json` |
 | Daily Dashboard | #22817137242 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817137242/attendance-daily-gate-dashboard-22817137242-1/attendance-daily-gate-dashboard.md` |
+
+### Update (2026-03-08): Post-Merge Verifier Includes Locale zh Gate + Strict Rate-Limit Retry
+
+Scope:
+
+- align post-merge verifier with current daily dashboard gate surface by including `locale-zh-smoke`.
+- reduce false negatives from transient strict Playwright rate limiting.
+
+Implementation:
+
+- file: `scripts/ops/attendance-post-merge-verify.sh`
+  - added new gate execution in verifier chain:
+    - `locale-zh-smoke` (`attendance-locale-zh-smoke-prod.yml`)
+    - `locale-zh-contract` local assert (`attendance-zh-locale-calendar*.png` artifact required on locale pass)
+  - added strict retry logic:
+    - if strict gate fails with `RATE_LIMITED` reason in `gate-summary.json`, auto rerun once (`strict-gates-retry`).
+  - added locale policy control:
+    - `REQUIRE_LOCALE_ZH=false` (default non-blocking)
+    - when set `true`, locale gate failure blocks verifier.
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22817319844 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817319844/attendance-branch-policy-drift-prod-22817319844-1/policy.json` |
+| Strict Gates | #22817325614 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817325614/attendance-strict-gates-prod-22817325614-1/20260308-082507-2/gate-summary.json` (`playwrightProd=RATE_LIMITED`) |
+| Locale zh Smoke | #22817390323 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817390323/attendance-locale-zh-smoke-prod-22817390323-1/auth-error.txt` |
+| Perf Baseline | #22817404505 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817404505/attendance-import-perf-22817404505-1/attendance-perf-mmhhrt10-xyzxik/perf-summary.json` |
+| Daily Dashboard | #22817416233 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817416233/attendance-daily-gate-dashboard-22817416233-1/attendance-daily-gate-dashboard.json` |
+
+Notes:
+
+- this run captured two production remediations:
+  - strict gate retry trigger condition observed (`RATE_LIMITED`).
+  - locale smoke credential remediation required (`ATTENDANCE_ADMIN_JWT` or login secrets).
+- branch protection was kept at enforced policy after PR merge closure:
+  - `pr_reviews=true`, `min_approving_review_count=1`.
