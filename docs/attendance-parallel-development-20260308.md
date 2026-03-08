@@ -427,3 +427,58 @@ Result: PASS
 - `output/playwright/attendance-post-merge-verify/20260308-pr386/summary.md`
 - `output/playwright/attendance-post-merge-verify/20260308-pr386/summary.json`
 - `output/playwright/attendance-post-merge-verify/20260308-pr386/results.tsv`
+
+## Round 12 Validation (A-line + C-line: Post-Merge Verifier Locale Gate Integration)
+
+### Scope
+- merge docs evidence PR `#387` cleanly and restore branch protection (`require_pr_reviews=true`, `min_approving_review_count=1`).
+- extend post-merge verifier to include `locale-zh-smoke` and local screenshot contract validation.
+- reduce verifier false negatives:
+  - add strict auto-retry when strict summary reason is `RATE_LIMITED`.
+  - make locale zh gate non-blocking by default (`REQUIRE_LOCALE_ZH=false`, overridable).
+
+### Implementation
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - new env:
+    - `SKIP_LOCALE_ZH`
+    - `LOCALE_ZH_WEB_URL`
+    - `LOCALE_ZH_API_BASE`
+    - `LOCALE_ZH_ORG_ID`
+    - `LOCALE_ZH_VERIFY_HOLIDAY`
+    - `REQUIRE_LOCALE_ZH`
+    - `STRICT_RETRY_ON_RATE_LIMITED`
+  - new local assertion gate: `locale-zh-contract`
+    - requires artifact `attendance-zh-locale-calendar*.png` when locale gate passes.
+  - strict retry behavior:
+    - when strict fails and gate summary reason contains `RATE_LIMITED` / `PLAYWRIGHT_RATE_LIMITED`, rerun strict once (`strict-gates-retry`) before finalizing verifier failure count.
+  - locale policy behavior:
+    - when locale gate fails and `REQUIRE_LOCALE_ZH=false`, record failure but do not block verifier exit code.
+
+### Verification
+- PR merge + policy restore:
+  - PR `#387` merged at `2026-03-08T08:22:07Z` (merge commit `d8e4019b3198505e48e1ea4e1bd34b441fd392d7`).
+  - branch protection re-verified to:
+    - `strict=true`
+    - `enforce_admins=true`
+    - `pr_reviews=true`
+    - `approving_review_count=1`
+    - `code_owner_reviews=false`
+- full post-merge verifier run:
+  - command:
+    - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round13-locale BRANCH=main bash scripts/ops/attendance-post-merge-verify.sh`
+  - results:
+    - branch-policy `#22817319844` PASS
+    - strict-gates `#22817325614` FAIL (`playwrightProd=RATE_LIMITED`)
+    - locale-zh-smoke `#22817390323` FAIL (`auth-error.txt`: no valid admin token/login fallback)
+    - perf-baseline `#22817404505` PASS
+    - daily-dashboard `#22817416233` FAIL (reflecting strict + locale failures)
+- local smoke of script matrix:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_PERF_BASELINE=true SKIP_DASHBOARD=true bash scripts/ops/attendance-post-merge-verify.sh` PASS
+
+### Evidence
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale/summary.md`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale/results.tsv`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817325614/.../gate-summary.json`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817390323/attendance-locale-zh-smoke-prod-22817390323-1/auth-error.txt`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817416233/attendance-daily-gate-dashboard-22817416233-1/attendance-daily-gate-dashboard.json`
+- `output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local/summary.md`

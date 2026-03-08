@@ -4843,3 +4843,37 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): PR #387 Merge Closure + Post-Merge Verifier Locale Gate Expansion
+
+Scope:
+
+- close open docs evidence PR `#387` and restore mandatory review policy.
+- include locale zh smoke in `attendance-post-merge-verify.sh`.
+- add strict `RATE_LIMITED` one-shot retry and locale non-blocking policy control.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| PR #387 merged | #387 | MERGED | `https://github.com/zensgit/metasheet2/pull/387`, merge commit `d8e4019b3198505e48e1ea4e1bd34b441fd392d7` |
+| Branch protection restore | local (2026-03-08) | PASS | `scripts/ops/attendance-check-branch-protection.sh` output: `pr_reviews_required_current=true`, `approving_review_count_current=1` |
+| Branch Policy Drift | #22817319844 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817319844/attendance-branch-policy-drift-prod-22817319844-1/policy.json` |
+| Strict Gates | #22817325614 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817325614/attendance-strict-gates-prod-22817325614-1/20260308-082507-2/gate-summary.json` (`playwrightProd=RATE_LIMITED`) |
+| Locale zh Smoke | #22817390323 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817390323/attendance-locale-zh-smoke-prod-22817390323-1/auth-error.txt` |
+| Perf Baseline | #22817404505 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817404505/attendance-import-perf-22817404505-1/attendance-perf-mmhhrt10-xyzxik/perf-summary.json` |
+| Daily Dashboard | #22817416233 | FAIL | `output/playwright/attendance-post-merge-verify/20260308-round13-locale/ga/22817416233/attendance-daily-gate-dashboard-22817416233-1/attendance-daily-gate-dashboard.json` (`Strict Gates` + `Locale zh Smoke` findings) |
+| post-merge verifier skip matrix smoke | local (2026-03-08) | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local/summary.md` |
+
+Observed findings:
+
+- `Strict Gates` failed because `playwrightProd=RATE_LIMITED`; this now matches retry trigger condition in updated verifier logic.
+- `Locale zh Smoke` failed due invalid credentials (`ATTENDANCE_ADMIN_JWT` and login fallback both invalid in run environment).
+- downstream dashboard failure is expected and correctly propagated from upstream P0/P1 findings.
+
+Decision:
+
+- **NO-GO until remediations are completed and rerun is green**.
+- Required remediations:
+  - rotate locale smoke auth secrets (`ATTENDANCE_ADMIN_JWT` and/or `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD`).
+  - rerun post-merge verifier and confirm strict passes (or strict retry succeeds).

@@ -11,6 +11,7 @@ DOWNLOAD_ARTIFACTS="${DOWNLOAD_ARTIFACTS:-true}"
 SKIP_BRANCH_POLICY="${SKIP_BRANCH_POLICY:-false}"
 SKIP_STRICT="${SKIP_STRICT:-false}"
 SKIP_PERF_BASELINE="${SKIP_PERF_BASELINE:-false}"
+SKIP_LOCALE_ZH="${SKIP_LOCALE_ZH:-false}"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-false}"
 
 REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV:-contracts (strict),contracts (dashboard)}"
@@ -32,6 +33,8 @@ REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-true}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
 REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
+REQUIRE_LOCALE_ZH="${REQUIRE_LOCALE_ZH:-false}"
+STRICT_RETRY_ON_RATE_LIMITED="${STRICT_RETRY_ON_RATE_LIMITED:-true}"
 
 LOOKBACK_HOURS="${LOOKBACK_HOURS:-48}"
 GH_RETRY_MAX_ATTEMPTS="${GH_RETRY_MAX_ATTEMPTS:-5}"
@@ -40,6 +43,11 @@ RUN_DISCOVERY_ATTEMPTS="${RUN_DISCOVERY_ATTEMPTS:-60}"
 RUN_DISCOVERY_INTERVAL_SECONDS="${RUN_DISCOVERY_INTERVAL_SECONDS:-2}"
 RUN_POLL_ATTEMPTS="${RUN_POLL_ATTEMPTS:-300}"
 RUN_POLL_INTERVAL_SECONDS="${RUN_POLL_INTERVAL_SECONDS:-3}"
+
+LOCALE_ZH_WEB_URL="${LOCALE_ZH_WEB_URL:-http://142.171.239.56:8081}"
+LOCALE_ZH_API_BASE="${LOCALE_ZH_API_BASE:-${API_BASE}}"
+LOCALE_ZH_ORG_ID="${LOCALE_ZH_ORG_ID:-default}"
+LOCALE_ZH_VERIFY_HOLIDAY="${LOCALE_ZH_VERIFY_HOLIDAY:-true}"
 
 PERF_BASELINE_API_BASE="${PERF_BASELINE_API_BASE:-${API_BASE}}"
 PERF_BASELINE_ROWS="${PERF_BASELINE_ROWS:-10000}"
@@ -306,6 +314,68 @@ function run_perf_baseline_contract_gate() {
   return 0
 }
 
+function run_locale_zh_contract_gate() {
+  local run_id="$1"
+  local run_url="$2"
+  local artifacts_dir="$3"
+  local log_file="${OUTPUT_ROOT}/gate-locale-zh-contract.log"
+
+  {
+    echo "[attendance-post-merge-verify] validating locale zh artifacts"
+    echo "run_id=${run_id}"
+    echo "artifacts_dir=${artifacts_dir}"
+  } >"$log_file"
+
+  if [[ -z "$artifacts_dir" || ! -d "$artifacts_dir" ]]; then
+    failures=$((failures + 1))
+    echo "ERROR: artifacts dir missing" >>"$log_file"
+    append_result "locale-zh-contract" "local-assert" "$run_id" "FAIL" "artifacts_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  local screenshot_path=''
+  screenshot_path="$(find "$artifacts_dir" -type f -name 'attendance-zh-locale-calendar*.png' | head -n 1 || true)"
+  if [[ -z "$screenshot_path" || ! -f "$screenshot_path" ]]; then
+    failures=$((failures + 1))
+    {
+      echo "ERROR: expected locale screenshot missing"
+      echo "required pattern: attendance-zh-locale-calendar*.png"
+    } >>"$log_file"
+    append_result "locale-zh-contract" "local-assert" "$run_id" "FAIL" "screenshot_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  {
+    echo "OK: locale screenshot found"
+    echo "screenshot_path=${screenshot_path}"
+  } >>"$log_file"
+  append_result "locale-zh-contract" "local-assert" "$run_id" "PASS" "success" "$run_url" "$screenshot_path"
+  info "locale-zh-contract ok: screenshot=${screenshot_path}"
+  return 0
+}
+
+function strict_gate_has_rate_limited_reason() {
+  local artifacts_dir="$1"
+  if [[ -z "$artifacts_dir" || ! -d "$artifacts_dir" ]]; then
+    return 1
+  fi
+  local summary_path=''
+  summary_path="$(find "$artifacts_dir" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
+  if [[ -z "$summary_path" || ! -f "$summary_path" ]]; then
+    return 1
+  fi
+  jq -e '
+    [
+      .gateReasons.playwrightProd,
+      .gateReasons.playwrightDesktop,
+      .gateReasons.playwrightMobile
+    ]
+    | map(select(type == "string"))
+    | map(ascii_upcase)
+    | any(. == "RATE_LIMITED" or . == "PLAYWRIGHT_RATE_LIMITED")
+  ' "$summary_path" >/dev/null 2>&1
+}
+
 function trigger_and_wait() {
   local workflow="$1"
   shift
@@ -448,6 +518,60 @@ run_gate \
   -f "require_batch_resolve=${REQUIRE_BATCH_RESOLVE}" \
   -f "require_import_job_recovery=${REQUIRE_IMPORT_JOB_RECOVERY}" \
   -f "require_admin_settings_save=${REQUIRE_ADMIN_SETTINGS_SAVE}"
+
+strict_retry_on_rate_limited="$(to_bool "$STRICT_RETRY_ON_RATE_LIMITED")"
+if [[ "$SKIP_STRICT" != "true" && "$GATE_LAST_STATUS" == "FAIL" && "$strict_retry_on_rate_limited" == "true" ]]; then
+  if strict_gate_has_rate_limited_reason "$GATE_LAST_ARTIFACTS"; then
+    info "strict-gates failed with RATE_LIMITED reason; retrying once"
+    if (( failures > 0 )); then
+      failures=$((failures - 1))
+    fi
+    run_gate \
+      "strict-gates-retry" \
+      "attendance-strict-gates-prod.yml" \
+      "false" \
+      -f "drill=false" \
+      -f "api_base=${API_BASE}" \
+      -f "expect_product_mode=${EXPECT_PRODUCT_MODE}" \
+      -f "require_attendance_admin_api=${REQUIRE_ATTENDANCE_ADMIN_API}" \
+      -f "require_idempotency=${REQUIRE_IDEMPOTENCY}" \
+      -f "require_import_export=${REQUIRE_IMPORT_EXPORT}" \
+      -f "require_import_upload=${REQUIRE_IMPORT_UPLOAD}" \
+      -f "require_import_async=${REQUIRE_IMPORT_ASYNC}" \
+      -f "require_import_telemetry=${REQUIRE_IMPORT_TELEMETRY}" \
+      -f "require_preview_async=${REQUIRE_PREVIEW_ASYNC}" \
+      -f "require_batch_resolve=${REQUIRE_BATCH_RESOLVE}" \
+      -f "require_import_job_recovery=${REQUIRE_IMPORT_JOB_RECOVERY}" \
+      -f "require_admin_settings_save=${REQUIRE_ADMIN_SETTINGS_SAVE}"
+  fi
+fi
+
+run_gate \
+  "locale-zh-smoke" \
+  "attendance-locale-zh-smoke-prod.yml" \
+  "$SKIP_LOCALE_ZH" \
+  -f "drill=false" \
+  -f "web_url=${LOCALE_ZH_WEB_URL}" \
+  -f "api_base=${LOCALE_ZH_API_BASE}" \
+  -f "org_id=${LOCALE_ZH_ORG_ID}" \
+  -f "verify_holiday=${LOCALE_ZH_VERIFY_HOLIDAY}"
+
+require_locale_zh_bool="$(to_bool "$REQUIRE_LOCALE_ZH")"
+if [[ "$SKIP_LOCALE_ZH" != "true" && "$GATE_LAST_STATUS" == "FAIL" && "$require_locale_zh_bool" != "true" ]]; then
+  info "locale-zh-smoke failed but REQUIRE_LOCALE_ZH=false; treated as non-blocking"
+  if (( failures > 0 )); then
+    failures=$((failures - 1))
+  fi
+  append_result "locale-zh-policy" "local-assert" "$GATE_LAST_RUN_ID" "PASS" "non_blocking" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
+fi
+
+if [[ "$SKIP_LOCALE_ZH" == "true" ]]; then
+  append_result "locale-zh-contract" "local-assert" "" "SKIP" "" "" ""
+elif [[ "$GATE_LAST_STATUS" == "PASS" ]]; then
+  run_locale_zh_contract_gate "$GATE_LAST_RUN_ID" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS" || true
+else
+  append_result "locale-zh-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "upstream_gate_failed" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
+fi
 
 run_gate \
   "perf-baseline" \
