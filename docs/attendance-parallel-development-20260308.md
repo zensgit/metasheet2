@@ -205,6 +205,9 @@ Result: PASS
   - perf-baseline run `22814866134` PASS
   - daily-dashboard run `22814879184` PASS
   - perf-baseline-contract PASS.
+- Nightly workflow validation (after merge to main):
+  - `Attendance Post-Merge Verify (Nightly)` run `22815149297` PASS
+  - artifact summary: `output/playwright/ga/22815149297/attendance-post-merge-verify-22815149297-1/summary.md`
 - Note:
   - direct dispatch of new workflow file on non-default branch returns GitHub API 404; this is expected until merged to `main`.
 

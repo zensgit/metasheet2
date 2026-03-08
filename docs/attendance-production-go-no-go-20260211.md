@@ -2665,6 +2665,7 @@ Verification:
 | Strict Gates (main) | #22814788217 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814788217/attendance-strict-gates-prod-22814788217-1/20260308-070006-1/gate-summary.json` |
 | Perf Baseline (main) | #22814866134 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814866134/attendance-import-perf-22814866134-1/attendance-perf-mmhbl86j-lsc9xo/perf-summary.json` |
 | Daily Dashboard (main) | #22814879184 | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/ga/22814879184/attendance-daily-gate-dashboard-22814879184-1/attendance-daily-gate-dashboard.md` |
+| Nightly post-merge verify workflow (main) | #22815149297 | PASS | `output/playwright/ga/22815149297/attendance-post-merge-verify-22815149297-1/summary.md` |
 | Frontend import regression spec | local | PASS | `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` |
 
 Observed highlights:

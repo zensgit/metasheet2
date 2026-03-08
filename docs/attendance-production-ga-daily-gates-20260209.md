@@ -4476,6 +4476,7 @@ Verification:
 |---|---|---|
 | workflow YAML parse | PASS | `python3` yaml load for `.github/workflows/attendance-post-merge-verify-nightly.yml` |
 | equivalent verify run (same script/runtime) | PASS | `output/playwright/attendance-post-merge-verify/20260308-parallel-next/summary.md` |
+| nightly workflow dispatch (main) | PASS (run `#22815149297`) | `output/playwright/ga/22815149297/attendance-post-merge-verify-22815149297-1/summary.md` |
 
 Notes:
 
