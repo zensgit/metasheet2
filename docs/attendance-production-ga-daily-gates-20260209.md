@@ -4765,3 +4765,16 @@ Contract matrix evidence:
   - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/build.log`
   - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/validate.log`
   - `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/openapi.invalid.json`
+
+### Update (2026-03-08): Locale zh Smoke Uses Shared Auth Resolver
+
+Scope:
+
+- replace duplicated locale workflow auth bootstrap with `scripts/ops/attendance-resolve-auth.sh`.
+- keep the same fallback behavior (token validate -> refresh -> login) while centralizing maintenance.
+
+Validation:
+
+- workflow run: Attendance Locale zh Smoke (Prod) #22821890815 (`PASS`)
+- evidence:
+  - `output/playwright/ga/22821890815/attendance-locale-zh-smoke-prod-22821890815-1/attendance-zh-locale-calendar.png`

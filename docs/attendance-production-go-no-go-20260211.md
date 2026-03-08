@@ -5024,3 +5024,24 @@ CI contract gate evidence:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Attendance Gate Contract Matrix (`strict + dashboard + openapi`) | #22821820538 | PASS | `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/validate.log`, `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/build.log` |
+
+## Post-Go Verification (2026-03-08): Locale zh Shared Auth Resolver Sync (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- migrate locale zh smoke workflow to shared auth resolver script to avoid auth logic drift.
+
+Changes:
+
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml` now calls `scripts/ops/attendance-resolve-auth.sh`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | #22821890815 | PASS | `output/playwright/ga/22821890815/attendance-locale-zh-smoke-prod-22821890815-1/attendance-zh-locale-calendar.png` |
+
+Decision:
+
+- shared auth resolver adoption is validated for locale zh gate.
+- **GO maintained**.
