@@ -1338,6 +1338,28 @@ describe('Attendance Plugin Integration', () => {
     expect(rollbackRes.status).toBe(200)
   })
 
+  it('returns NOT_FOUND for unknown async import job id', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const missingJobId = '00000000-0000-4000-8000-000000000000'
+    const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${missingJobId}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    expect(jobRes.status).toBe(404)
+    const error = (jobRes.body as { error?: { code?: string } } | undefined)?.error
+    expect(error?.code).toBe('NOT_FOUND')
+  })
+
   it('keeps large rows payload for commit-async jobs when csv payload is absent', async () => {
     if (!baseUrl) return
 
