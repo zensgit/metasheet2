@@ -41,6 +41,8 @@ PERF_BASELINE_MODE="${PERF_BASELINE_MODE:-commit}"
 PERF_BASELINE_COMMIT_ASYNC="${PERF_BASELINE_COMMIT_ASYNC:-false}"
 PERF_BASELINE_EXPORT_CSV="${PERF_BASELINE_EXPORT_CSV:-true}"
 PERF_BASELINE_UPLOAD_CSV="${PERF_BASELINE_UPLOAD_CSV:-true}"
+PERF_BASELINE_PAYLOAD_SOURCE="${PERF_BASELINE_PAYLOAD_SOURCE:-auto}"
+PERF_BASELINE_CSV_ROWS_LIMIT_HINT="${PERF_BASELINE_CSV_ROWS_LIMIT_HINT:-20000}"
 PERF_BASELINE_MAX_PREVIEW_MS="${PERF_BASELINE_MAX_PREVIEW_MS:-}"
 PERF_BASELINE_MAX_COMMIT_MS="${PERF_BASELINE_MAX_COMMIT_MS:-}"
 PERF_BASELINE_MAX_EXPORT_MS="${PERF_BASELINE_MAX_EXPORT_MS:-}"
@@ -51,6 +53,28 @@ PERF_EXPECT_UPLOAD_CSV="${PERF_EXPECT_UPLOAD_CSV:-${PERF_BASELINE_UPLOAD_CSV}}"
 PERF_EXPECT_COMMIT_ASYNC="${PERF_EXPECT_COMMIT_ASYNC:-${PERF_BASELINE_COMMIT_ASYNC}}"
 PERF_EXPECT_ROWS_MIN="${PERF_EXPECT_ROWS_MIN:-${PERF_BASELINE_ROWS}}"
 PERF_EXPECT_MODE="${PERF_EXPECT_MODE:-${PERF_BASELINE_MODE}}"
+PERF_EXPECT_UPLOAD_CSV_REQUESTED="${PERF_EXPECT_UPLOAD_CSV_REQUESTED:-${PERF_BASELINE_UPLOAD_CSV}}"
+PERF_EXPECT_PAYLOAD_SOURCE="${PERF_EXPECT_PAYLOAD_SOURCE:-}"
+
+if [[ -z "$PERF_EXPECT_PAYLOAD_SOURCE" ]]; then
+  perf_rows_num="$(printf '%s' "${PERF_BASELINE_ROWS:-}" | tr -cd '0-9')"
+  perf_hint_num="$(printf '%s' "${PERF_BASELINE_CSV_ROWS_LIMIT_HINT:-}" | tr -cd '0-9')"
+  [[ -n "$perf_rows_num" ]] || perf_rows_num="0"
+  [[ -n "$perf_hint_num" ]] || perf_hint_num="20000"
+  perf_payload_mode="$(printf '%s' "${PERF_BASELINE_PAYLOAD_SOURCE:-auto}" | tr '[:upper:]' '[:lower:]')"
+  case "$perf_payload_mode" in
+    rows|csv)
+      PERF_EXPECT_PAYLOAD_SOURCE="$perf_payload_mode"
+      ;;
+    *)
+      if (( perf_rows_num > perf_hint_num )); then
+        PERF_EXPECT_PAYLOAD_SOURCE="rows"
+      else
+        PERF_EXPECT_PAYLOAD_SOURCE="csv"
+      fi
+      ;;
+  esac
+fi
 
 mkdir -p "$OUTPUT_ROOT"
 RESULTS_TSV="${OUTPUT_ROOT}/results.tsv"
@@ -119,7 +143,11 @@ function run_perf_baseline_contract_gate() {
   expected_upload="$(to_bool "$PERF_EXPECT_UPLOAD_CSV")"
   local expected_commit_async
   expected_commit_async="$(to_bool "$PERF_EXPECT_COMMIT_ASYNC")"
+  local expected_upload_requested
+  expected_upload_requested="$(to_bool "$PERF_EXPECT_UPLOAD_CSV_REQUESTED")"
   local expected_mode="${PERF_EXPECT_MODE}"
+  local expected_payload_source
+  expected_payload_source="$(printf '%s' "${PERF_EXPECT_PAYLOAD_SOURCE:-}" | tr '[:upper:]' '[:lower:]')"
   local expected_rows_min
   expected_rows_min="$(printf '%s' "${PERF_EXPECT_ROWS_MIN:-0}" | tr -cd '0-9')"
   if [[ -z "$expected_rows_min" ]]; then
@@ -131,6 +159,8 @@ function run_perf_baseline_contract_gate() {
     echo "run_id=${run_id}"
     echo "artifacts_dir=${artifacts_dir}"
     echo "expected_upload_csv=${expected_upload:-<skip>}"
+    echo "expected_upload_csv_requested=${expected_upload_requested:-<skip>}"
+    echo "expected_payload_source=${expected_payload_source:-<skip>}"
     echo "expected_commit_async=${expected_commit_async:-<skip>}"
     echo "expected_rows_min=${expected_rows_min}"
     echo "expected_mode=${expected_mode:-<skip>}"
@@ -152,8 +182,10 @@ function run_perf_baseline_contract_gate() {
     return 1
   fi
 
-  local actual_upload actual_commit_async actual_rows actual_mode
+  local actual_upload actual_upload_requested actual_payload_source actual_commit_async actual_rows actual_mode
   actual_upload="$(jq -r '.uploadCsv' "$summary_path" 2>/dev/null || echo '')"
+  actual_upload_requested="$(jq -r '.uploadCsvRequested // empty' "$summary_path" 2>/dev/null || echo '')"
+  actual_payload_source="$(jq -r '.payloadSource // empty' "$summary_path" 2>/dev/null || echo '')"
   actual_commit_async="$(jq -r '.commitAsync' "$summary_path" 2>/dev/null || echo '')"
   actual_rows="$(jq -r '.rows' "$summary_path" 2>/dev/null || echo '')"
   actual_mode="$(jq -r '.mode // empty' "$summary_path" 2>/dev/null || echo '')"
@@ -161,6 +193,8 @@ function run_perf_baseline_contract_gate() {
   {
     echo "summary_path=${summary_path}"
     echo "actual_upload_csv=${actual_upload}"
+    echo "actual_upload_csv_requested=${actual_upload_requested}"
+    echo "actual_payload_source=${actual_payload_source}"
     echo "actual_commit_async=${actual_commit_async}"
     echo "actual_rows=${actual_rows}"
     echo "actual_mode=${actual_mode}"
@@ -180,6 +214,22 @@ function run_perf_baseline_contract_gate() {
     actual_commit_async_bool="$(to_bool "$actual_commit_async")"
     if [[ "$actual_commit_async_bool" != "$expected_commit_async" ]]; then
       errors+=("commitAsync mismatch (expected=${expected_commit_async} actual=${actual_commit_async})")
+    fi
+  fi
+
+  if [[ -n "$expected_upload_requested" ]]; then
+    local actual_upload_requested_bool
+    actual_upload_requested_bool="$(to_bool "$actual_upload_requested")"
+    if [[ "$actual_upload_requested_bool" != "$expected_upload_requested" ]]; then
+      errors+=("uploadCsvRequested mismatch (expected=${expected_upload_requested} actual=${actual_upload_requested})")
+    fi
+  fi
+
+  if [[ -n "$expected_payload_source" ]]; then
+    local actual_payload_source_normalized
+    actual_payload_source_normalized="$(printf '%s' "${actual_payload_source:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$actual_payload_source_normalized" != "$expected_payload_source" ]]; then
+      errors+=("payloadSource mismatch (expected=${expected_payload_source} actual=${actual_payload_source})")
     fi
   fi
 
@@ -209,7 +259,7 @@ function run_perf_baseline_contract_gate() {
 
   echo "OK: perf contract validation passed" >>"$log_file"
   append_result "perf-baseline-contract" "local-assert" "$run_id" "PASS" "success" "$run_url" "$summary_path"
-  info "perf-baseline-contract ok: uploadCsv=${actual_upload} commitAsync=${actual_commit_async} rows=${actual_rows} mode=${actual_mode}"
+  info "perf-baseline-contract ok: uploadCsv=${actual_upload} uploadCsvRequested=${actual_upload_requested} payloadSource=${actual_payload_source} commitAsync=${actual_commit_async} rows=${actual_rows} mode=${actual_mode}"
   return 0
 }
 
@@ -345,6 +395,8 @@ run_gate \
   -f "commit_async=${PERF_BASELINE_COMMIT_ASYNC}" \
   -f "export_csv=${PERF_BASELINE_EXPORT_CSV}" \
   -f "upload_csv=${PERF_BASELINE_UPLOAD_CSV}" \
+  -f "payload_source=${PERF_BASELINE_PAYLOAD_SOURCE}" \
+  -f "csv_rows_limit_hint=${PERF_BASELINE_CSV_ROWS_LIMIT_HINT}" \
   -f "max_preview_ms=${PERF_BASELINE_MAX_PREVIEW_MS}" \
   -f "max_commit_ms=${PERF_BASELINE_MAX_COMMIT_MS}" \
   -f "max_export_ms=${PERF_BASELINE_MAX_EXPORT_MS}" \

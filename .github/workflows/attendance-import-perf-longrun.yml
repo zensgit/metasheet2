@@ -22,8 +22,12 @@ on:
         description: 'Upload CSV via /attendance/import/upload (true/false)'
         required: false
         default: 'true'
+      payload_source:
+        description: 'Import payload source (auto|csv|rows)'
+        required: false
+        default: 'auto'
       max_csv_rows:
-        description: 'Server-side CSV max rows cap used to gate longrun scenarios'
+        description: 'CSV row limit hint for payload auto-selection (legacy name for compatibility)'
         required: false
         default: '20000'
       include_rows500k_preview:
@@ -224,7 +228,8 @@ jobs:
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
-      MAX_CSV_ROWS: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
       INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
       INCLUDE_ROWS100K_COMMIT: ${{ inputs.include_rows100k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_100K_COMMIT || 'false' }}
@@ -244,12 +249,17 @@ jobs:
           MATRIX_ROWS: ${{ matrix.rows }}
         run: |
           set -euo pipefail
-          if [[ ! "${MAX_CSV_ROWS}" =~ ^[0-9]+$ ]]; then
-            echo "MAX_CSV_ROWS must be an integer (got: '${MAX_CSV_ROWS}')" >&2
+          if [[ ! "${CSV_ROWS_LIMIT_HINT}" =~ ^[0-9]+$ ]]; then
+            echo "CSV_ROWS_LIMIT_HINT must be an integer (got: '${CSV_ROWS_LIMIT_HINT}')" >&2
             exit 1
           fi
           if [[ ! "${MATRIX_ROWS}" =~ ^[0-9]+$ ]]; then
             echo "MATRIX_ROWS must be an integer (got: '${MATRIX_ROWS}')" >&2
+            exit 1
+          fi
+          payload_source="$(printf '%s' "${PAYLOAD_SOURCE}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${payload_source}" != 'auto' && "${payload_source}" != 'csv' && "${payload_source}" != 'rows' ]]; then
+            echo "PAYLOAD_SOURCE must be one of auto|csv|rows (got: '${PAYLOAD_SOURCE}')" >&2
             exit 1
           fi
 
@@ -268,9 +278,11 @@ jobs:
             run_allowed='false'
             reasons+=("INCLUDE_ROWS500K_COMMIT=${INCLUDE_ROWS500K_COMMIT}")
           fi
-          if (( MATRIX_ROWS > MAX_CSV_ROWS )); then
+          # When forcing CSV payload, keep the legacy row cap guard.
+          # In auto/rows mode, large scenarios are allowed and perf script will fallback to rows payload.
+          if [[ "${payload_source}" == 'csv' ]] && (( MATRIX_ROWS > CSV_ROWS_LIMIT_HINT )); then
             run_allowed='false'
-            reasons+=("rows=${MATRIX_ROWS} exceeds MAX_CSV_ROWS=${MAX_CSV_ROWS}")
+            reasons+=("rows=${MATRIX_ROWS} exceeds CSV_ROWS_LIMIT_HINT=${CSV_ROWS_LIMIT_HINT} while PAYLOAD_SOURCE=csv")
           fi
 
           reason='enabled'
@@ -299,6 +311,8 @@ jobs:
           IMPORT_JOB_POLL_TIMEOUT_MS: ${{ matrix.import_job_poll_timeout_ms }}
           IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
           IMPORT_JOB_RECOVERY_ATTEMPTS: ${{ matrix.import_job_recovery_attempts }}
+          PAYLOAD_SOURCE: ${{ env.PAYLOAD_SOURCE }}
+          CSV_ROWS_LIMIT_HINT: ${{ env.CSV_ROWS_LIMIT_HINT }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail
