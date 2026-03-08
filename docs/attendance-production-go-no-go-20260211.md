@@ -5218,6 +5218,8 @@ Changes:
   - `.github/workflows/attendance-import-perf-longrun.yml`
   - `.github/workflows/attendance-locale-zh-smoke-prod.yml`
   - all now set/pass `AUTH_RESOLVE_ALLOW_INSECURE_HTTP` and call `attendance-write-auth-error.sh`.
+- contract matrix integration:
+  - `scripts/ops/attendance-run-gate-contract-case.sh` strict case now includes `node --test scripts/ops/attendance-auth-scripts.test.mjs`.
 
 Verification:
 
@@ -5230,6 +5232,7 @@ Verification:
 | API base hardening guard | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (expected `rc=2`) |
 | HTTP override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (guard allowed; resolver continues fallback) |
 | Resolver meta diagnostics | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
+| Contract strict case regression guard | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check` | PASS |
 
 Decision:
 

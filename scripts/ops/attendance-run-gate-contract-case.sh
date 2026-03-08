@@ -89,6 +89,9 @@ function expect_fail() {
 }
 
 if [[ "$CASE_ID" == "strict" ]]; then
+  info "running auth resolver script regressions"
+  node --test ./scripts/ops/attendance-auth-scripts.test.mjs
+
   cp "$valid_summary" "${strict_dir}/gate-summary.json"
   ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
   node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \

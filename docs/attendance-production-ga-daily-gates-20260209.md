@@ -4938,6 +4938,8 @@ Changes:
   - `.github/workflows/attendance-import-perf-longrun.yml`
   - `.github/workflows/attendance-locale-zh-smoke-prod.yml`
   - now pass `AUTH_RESOLVE_ALLOW_INSECURE_HTTP` and call the shared auth-error helper.
+- contract matrix guard:
+  - `scripts/ops/attendance-run-gate-contract-case.sh` (`strict` case) now executes `node --test scripts/ops/attendance-auth-scripts.test.mjs` to keep resolver hardening regression-protected in CI.
 
 Verification:
 
@@ -4950,3 +4952,4 @@ Verification:
 | API base guard (remote HTTP default blocked) | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (`rc=2`, expected block) |
 | API base override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (`rc=1`, guard allowed, token invalid expected) |
 | Meta diagnostics preserved (refresh/login attempted) | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
+| Contract strict case with auth regressions | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check` | PASS |
