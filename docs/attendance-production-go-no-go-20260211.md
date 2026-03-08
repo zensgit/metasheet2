@@ -5148,3 +5148,33 @@ Decision:
 - high-scale (100k) refresh path is available and validated.
 - daily default load profile remains unchanged.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Rollback Safety + zh Mobile Downgrade Regression (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- close a data-safety gap where rollback could delete updated existing records.
+- add deterministic web regression coverage for `zh-CN` + mobile desktop-only downgrade behavior.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - import upsert now detaches `source_batch_id` for existing rows (safety-first rollback scope).
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - added `keeps existing records after rolling back a later update batch`.
+  - added `deduplicates concurrent csvFileId commits with the same idempotencyKey`.
+- `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
+  - new regression spec for `AttendanceExperienceView` with `zh-CN` locale + mobile gate.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "deduplicates concurrent csvFileId commits with the same idempotencyKey|keeps existing records after rolling back a later update batch"` | PASS |
+| Web regression (new zh/mobile spec) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |
+
+Decision:
+
+- rollback deletion scope is hardened for existing-record update scenarios.
+- zh mobile downgrade path now has direct test coverage.
+- **GO maintained**.

@@ -4215,7 +4215,11 @@ function computeAttendanceRecordUpsertValues(options) {
   const finalMeta = meta && typeof meta === 'object'
     ? { ...existingMeta, ...meta }
     : existingMeta
-  const finalSourceBatchId = sourceBatchId ?? existingSourceBatchId
+  // Safety-first rollback semantics:
+  // - New records inserted by this import batch keep source_batch_id for rollback deletion.
+  // - Existing records updated by this batch are detached from batch rollback scope
+  //   to prevent deleting historical rows during rollback.
+  const finalSourceBatchId = existingRow ? null : (sourceBatchId ?? existingSourceBatchId)
 
   if (mode === 'override') {
     if (updateFirstInAt) firstInAt = updateFirstInAt
