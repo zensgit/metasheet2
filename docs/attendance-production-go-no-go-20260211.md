@@ -2636,6 +2636,56 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Locale zh Smoke Daily Gate + Dashboard Integration
+
+Scope:
+
+- make locale zh smoke a scheduled gate with deterministic drill pass/fail coverage.
+- include locale zh smoke in daily dashboard gate aggregation.
+- enforce dashboard contract coverage for `gateFlat.localeZh`.
+
+Code changes:
+
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - schedule `02:18 UTC`
+  - drill inputs: `drill`, `drill_fail`, `issue_title`
+  - drill run tagging: `[DRILL]`
+  - P1 issue tracking on failure/recovery.
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - add `LOCALE_ZH_WORKFLOW`.
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - add `Locale zh Smoke` (`P1`) gate in markdown/json/findings.
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - add `localeZh` basic gate contract assertions.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - update dashboard fixtures with `localeZh`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Locale zh smoke drill FAIL | #22816924836 | FAIL (expected) | `output/playwright/ga/22816924836/attendance-locale-zh-smoke-prod-22816924836-1/drill/drill.txt` |
+| Locale zh smoke drill recovery | #22816933373 | PASS | `output/playwright/ga/22816933373/attendance-locale-zh-smoke-prod-22816933373-1/drill/drill.txt` |
+| Daily dashboard (`include_drill_runs=false`) | #22816946058 | FAIL (expected branch P0); locale gate present and PASS | `output/playwright/ga/22816946058/attendance-daily-gate-dashboard-22816946058-1/attendance-daily-gate-dashboard.json` |
+| Daily dashboard (`include_drill_runs=true`) | #22816958859 | FAIL (expected branch P0); locale gate points to drill PASS run `#22816933373` | `output/playwright/ga/22816958859/attendance-daily-gate-dashboard-22816958859-1/attendance-daily-gate-dashboard.json` |
+
+Issue tracking checks:
+
+- Locale drill issue:
+  - `#384` (`[Attendance Locale Drill] zh smoke gate test`) reopened on drill FAIL and closed on drill PASS.
+- Dashboard drill issue:
+  - `#385` (`[Attendance Dashboard Drill] locale zh gate integration test`) created for drill verification and manually closed after evidence collection.
+
+Local reproducible evidence:
+
+- `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/node-check-attendance-daily-gate-report.log`
+- `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/dashboard-contract-case.log`
+- `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/local-attendance-daily-gate-dashboard.json`
+
+Decision:
+
+- **GO maintained** (locale gate coverage added; branch validation completed with expected drill outcomes).
+
 ## Post-Go Verification (2026-03-08): PR #382 Post-Merge Gate Sweep
 
 Scope:

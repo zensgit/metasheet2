@@ -345,3 +345,64 @@ Result: PASS
 - `output/playwright/attendance-post-merge-verify/20260308-pr382/summary.md`
 - `output/playwright/attendance-post-merge-verify/20260308-pr382/summary.json`
 - `output/playwright/attendance-post-merge-verify/20260308-pr382/results.tsv`
+
+## Round 10 Validation (A-line + C-line: Locale zh Smoke Gate Daily Integration)
+
+### Scope
+- make `Attendance Locale zh Smoke (Prod)` operational as a daily P1 gate with deterministic drill pass/fail paths.
+- integrate `Locale zh Smoke` into Daily Gate Dashboard aggregation (`gates` + `gateFlat` + markdown table + rerun hints).
+- strengthen dashboard JSON contract so `localeZh` gate drift is caught by contract checks.
+
+### Implementation
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - added schedule: `02:18 UTC` daily.
+  - added deterministic drill controls:
+    - `drill=true|false`
+    - `drill_fail=true|false`
+    - `issue_title` override for safe drill issue titles.
+  - drill runs are tagged with `[DRILL]` in `run-name`.
+  - added P1 issue-tracking job:
+    - default title: `[Attendance P1] Locale zh smoke alert`
+    - drill runs only manage issues when `issue_title` is provided.
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - added `LOCALE_ZH_WORKFLOW=attendance-locale-zh-smoke-prod.yml`.
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - added new gate:
+    - `name: Locale zh Smoke`
+    - `severity: P1`
+  - included in:
+    - markdown gate table
+    - artifact download commands
+    - quick rerun commands
+    - `findings` aggregation
+    - `gateFlat.localeZh` and `gates.localeZh`.
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - added base contract validation for `gateFlat.localeZh`.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - updated dashboard fixtures to include `localeZh` gate objects for contract testing.
+
+### Validation
+- Local checks:
+  - `node --check scripts/ops/attendance-daily-gate-report.mjs` PASS
+  - `bash scripts/ops/attendance-run-gate-contract-case.sh dashboard` PASS
+  - local dashboard generation with `LOCALE_ZH_WORKFLOW=attendance-locale-zh-smoke-prod.yml` PASS
+- GA drill + dashboard runs (branch: `codex/attendance-parallel-next`):
+  - Locale zh smoke drill FAIL (expected): `#22816924836`
+  - Locale zh smoke drill PASS (recovery): `#22816933373`
+  - Daily dashboard (`include_drill_runs=false`): `#22816946058` (workflow failure expected due unrelated P0 on branch; `localeZh` present and `PASS`)
+  - Daily dashboard (`include_drill_runs=true`): `#22816958859` (workflow failure expected due unrelated P0 on branch; `localeZh` points to latest drill PASS run)
+  - Drill issue lifecycle:
+    - issue `#384` (`[Attendance Locale Drill] zh smoke gate test`) reopened on FAIL and closed on PASS.
+
+### Evidence
+- Local evidence bundle:
+  - `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/node-check-attendance-daily-gate-report.log`
+  - `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/dashboard-contract-case.log`
+  - `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/local-dashboard-run.log`
+  - `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/local-attendance-daily-gate-dashboard.json`
+  - `output/playwright/attendance-parallel-next/20260308-locale-gate-integration/local-attendance-daily-gate-dashboard.md`
+- GA artifacts:
+  - `output/playwright/ga/22816924836/attendance-locale-zh-smoke-prod-22816924836-1/drill/drill.txt`
+  - `output/playwright/ga/22816933373/attendance-locale-zh-smoke-prod-22816933373-1/drill/drill.txt`
+  - `output/playwright/ga/22816946058/attendance-daily-gate-dashboard-22816946058-1/attendance-daily-gate-dashboard.json`
+  - `output/playwright/ga/22816958859/attendance-daily-gate-dashboard-22816958859-1/attendance-daily-gate-dashboard.json`
