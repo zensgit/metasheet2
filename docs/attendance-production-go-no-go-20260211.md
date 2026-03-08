@@ -2636,6 +2636,30 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): PR #382 Post-Merge Gate Sweep
+
+Scope:
+
+- verify production gates remain stable after importing telemetry UX change merge (`PR #382`).
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22816346917 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816346917/attendance-branch-policy-drift-prod-22816346917-1/policy.json` |
+| Attendance Strict Gates (Prod) | #22816352252 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816352252/attendance-strict-gates-prod-22816352252-1/20260308-071753-1/gate-summary.json`, `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816352252/attendance-strict-gates-prod-22816352252-1/20260308-071753-2/gate-api-smoke.log` |
+| Attendance Import Perf Baseline | #22816408359 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816408359/attendance-import-perf-22816408359-1/perf.log`, `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816408359/attendance-import-perf-22816408359-1/attendance-perf-mmhfea7x-6yvlj5/perf-summary.json` |
+| perf-baseline-contract (local assert) | #22816408359 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr382/gate-perf-baseline-contract.log` |
+| Attendance Daily Gate Dashboard | #22816418748 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816418748/attendance-daily-gate-dashboard-22816418748-1/attendance-daily-gate-dashboard.md`, `output/playwright/attendance-post-merge-verify/20260308-pr382/ga/22816418748/attendance-daily-gate-dashboard-22816418748-1/attendance-daily-gate-dashboard.json` |
+
+Observed highlights:
+
+- all P0/P1 production gates passed in one chain after merge; no new attendance gate issue opened.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-08): Admin Import Success Telemetry UX
 
 Scope:

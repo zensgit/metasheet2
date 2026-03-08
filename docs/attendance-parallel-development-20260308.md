@@ -324,3 +324,24 @@ Result: PASS
 ### Verification
 - `pnpm --filter @metasheet/web build` PASS
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` PASS
+
+## Round 9 Validation (Post-Merge Gate Sweep after PR #382)
+
+### Scope
+- verify `main` remains green after shipping import success telemetry UX changes.
+
+### Execution
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-pr382 bash scripts/ops/attendance-post-merge-verify.sh`
+
+### Results
+- `branch-policy` run `22816346917` PASS
+- `strict-gates` run `22816352252` PASS
+- `perf-baseline` run `22816408359` PASS
+- `perf-baseline-contract` PASS
+- `daily-dashboard` run `22816418748` PASS
+
+### Evidence
+- `output/playwright/attendance-post-merge-verify/20260308-pr382/summary.md`
+- `output/playwright/attendance-post-merge-verify/20260308-pr382/summary.json`
+- `output/playwright/attendance-post-merge-verify/20260308-pr382/results.tsv`
