@@ -496,3 +496,18 @@ Result: PASS
 - `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/results.tsv`
 - `output/playwright/attendance-post-merge-verify/20260308-round13-locale-policy/ga/22817605455/attendance-daily-gate-dashboard-22817605455-1/attendance-daily-gate-dashboard.json`
 - `output/playwright/attendance-post-merge-verify/20260308-round13-smoke-local/summary.md`
+
+### Final mainline rerun (after PR #389 + #390 merge)
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round13-final-main BRANCH=main bash scripts/ops/attendance-post-merge-verify.sh`
+- results:
+  - branch-policy `#22817683066` PASS
+  - strict-gates `#22817688331` PASS
+  - locale-zh-smoke `#22817746846` FAIL (tracked as non-blocking P1)
+  - locale-zh-policy local assert PASS (`non_blocking`)
+  - perf-baseline `#22817761859` PASS
+  - daily-dashboard `#22817772596` PASS
+  - verifier summary: `Failures: 0`
+- evidence:
+  - `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/summary.md`
+  - `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/results.tsv`
