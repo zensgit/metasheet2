@@ -137,38 +137,81 @@ jobs:
             reason="$DRILL_API_SMOKE_REASON"
           fi
           mkdir -p output/playwright/attendance-prod-acceptance/drill
-          cat > output/playwright/attendance-prod-acceptance/drill/drill.txt <<'EOF'
-          This is a DRILL run for Attendance Strict Gates (Prod).
-          The workflow intentionally skips calling production APIs.
-          EOF
+          printf '%s\n' \
+            'This is a DRILL run for Attendance Strict Gates (Prod).' \
+            'The workflow intentionally skips calling production APIs.' \
+            > output/playwright/attendance-prod-acceptance/drill/drill.txt
+
+          api_smoke_status='SKIP'
+          provisioning_status='SKIP'
+          playwright_prod_status='SKIP'
+          playwright_desktop_status='SKIP'
+          playwright_mobile_status='SKIP'
+          api_smoke_reason=''
+          provisioning_reason=''
+          playwright_prod_reason=''
+          playwright_desktop_reason=''
+          playwright_mobile_reason=''
+
+          case "$DRILL_FAILED_GATE" in
+            apiSmoke)
+              api_smoke_status='FAIL'
+              api_smoke_reason="$reason"
+              ;;
+            provisioning)
+              provisioning_status='FAIL'
+              provisioning_reason="$reason"
+              ;;
+            playwrightProd)
+              playwright_prod_status='FAIL'
+              playwright_prod_reason="$reason"
+              ;;
+            playwrightDesktop)
+              playwright_desktop_status='FAIL'
+              playwright_desktop_reason="$reason"
+              ;;
+            playwrightMobile)
+              playwright_mobile_status='FAIL'
+              playwright_mobile_reason="$reason"
+              ;;
+          esac
 
           # Provide a minimal gate-summary.json so dashboards can exercise
           # artifact parsing without calling production.
-          cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<EOF
-          {
-            "schemaVersion": 1,
-            "generatedAt": "1970-01-01T00:00:00Z",
-            "apiBase": "<DRILL>",
-            "webUrl": "<DRILL>",
-            "expectProductMode": "attendance",
-            "exitCode": 1,
-            "gates": {
-              "preflight": "SKIP",
-              "apiSmoke": "$([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo FAIL || echo SKIP)",
-              "provisioning": "$([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo FAIL || echo SKIP)",
-              "playwrightProd": "$([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo FAIL || echo SKIP)",
-              "playwrightDesktop": "$([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo FAIL || echo SKIP)",
-              "playwrightMobile": "$([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo FAIL || echo SKIP)"
-            },
-            "gateReasons": {
-              "apiSmoke": $([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo "\"$reason\"" || echo null),
-              "provisioning": $([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo "\"$reason\"" || echo null),
-              "playwrightProd": $([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo "\"$reason\"" || echo null),
-              "playwrightDesktop": $([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo "\"$reason\"" || echo null),
-              "playwrightMobile": $([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo "\"$reason\"" || echo null)
-            }
-          }
-          EOF
+          jq -n \
+            --arg apiSmokeStatus "$api_smoke_status" \
+            --arg provisioningStatus "$provisioning_status" \
+            --arg playwrightProdStatus "$playwright_prod_status" \
+            --arg playwrightDesktopStatus "$playwright_desktop_status" \
+            --arg playwrightMobileStatus "$playwright_mobile_status" \
+            --arg apiSmokeReason "$api_smoke_reason" \
+            --arg provisioningReason "$provisioning_reason" \
+            --arg playwrightProdReason "$playwright_prod_reason" \
+            --arg playwrightDesktopReason "$playwright_desktop_reason" \
+            --arg playwrightMobileReason "$playwright_mobile_reason" \
+            '{
+              schemaVersion: 1,
+              generatedAt: "1970-01-01T00:00:00Z",
+              apiBase: "<DRILL>",
+              webUrl: "<DRILL>",
+              expectProductMode: "attendance",
+              exitCode: 1,
+              gates: {
+                preflight: "SKIP",
+                apiSmoke: $apiSmokeStatus,
+                provisioning: $provisioningStatus,
+                playwrightProd: $playwrightProdStatus,
+                playwrightDesktop: $playwrightDesktopStatus,
+                playwrightMobile: $playwrightMobileStatus
+              },
+              gateReasons: {
+                apiSmoke: (if ($apiSmokeReason | length) > 0 then $apiSmokeReason else null end),
+                provisioning: (if ($provisioningReason | length) > 0 then $provisioningReason else null end),
+                playwrightProd: (if ($playwrightProdReason | length) > 0 then $playwrightProdReason else null end),
+                playwrightDesktop: (if ($playwrightDesktopReason | length) > 0 then $playwrightDesktopReason else null end),
+                playwrightMobile: (if ($playwrightMobileReason | length) > 0 then $playwrightMobileReason else null end)
+              }
+            }' > output/playwright/attendance-prod-acceptance/drill/gate-summary.json
 
           if [[ "$DRILL_INVALID_SUMMARY" == "true" ]]; then
             invalid_tmp="output/playwright/attendance-prod-acceptance/drill/gate-summary.tmp.json"
@@ -275,20 +318,20 @@ jobs:
               login_password_present="$(awk -F= '/^AUTH_LOGIN_PASSWORD_PRESENT=/{print $2}' "${meta_file}" | tail -n1)"
             fi
 
-            cat > output/playwright/attendance-prod-acceptance/auth-error.txt <<EOF
-            No valid attendance admin token.
-            Tried (in order):
-            1) ATTENDANCE_ADMIN_JWT / vars token via /api/auth/me (retry-aware)
-            2) /api/auth/refresh-token with JWT token
-            3) ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars)
-            Diagnostic:
-            - auth_me_last_http=${auth_me_last_http}
-            - refresh_last_http=${refresh_last_http}
-            - login_last_http=${login_last_http}
-            - login_email_present=${login_email_present}
-            - login_password_present=${login_password_present}
-            API_BASE=${API_BASE}
-            EOF
+            {
+              echo 'No valid attendance admin token.'
+              echo 'Tried (in order):'
+              echo '1) ATTENDANCE_ADMIN_JWT / vars token via /api/auth/me (retry-aware)'
+              echo '2) /api/auth/refresh-token with JWT token'
+              echo '3) ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars)'
+              echo 'Diagnostic:'
+              echo "- auth_me_last_http=${auth_me_last_http}"
+              echo "- refresh_last_http=${refresh_last_http}"
+              echo "- login_last_http=${login_last_http}"
+              echo "- login_email_present=${login_email_present}"
+              echo "- login_password_present=${login_password_present}"
+              echo "API_BASE=${API_BASE}"
+            } > output/playwright/attendance-prod-acceptance/auth-error.txt
             echo "::error::No valid attendance admin token; see auth-error.txt artifact."
             exit 1
           fi
