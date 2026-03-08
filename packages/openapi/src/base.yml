@@ -659,6 +659,8 @@ components:
           type: integer
         truncated:
           type: boolean
+        previewLimit:
+          type: integer
         mappingUsed:
           type: array
           items: { type: object }
@@ -668,6 +670,8 @@ components:
         groupWarnings:
           type: array
           items: { type: string }
+        asyncSimplified:
+          type: boolean
         stats:
           $ref: '#/components/schemas/AttendanceImportPreviewStats'
     AttendanceImportRequest:
@@ -810,9 +814,15 @@ components:
             properties:
               id:
                 type: string
+              userId:
+                type: string
+                nullable: true
               workDate:
                 type: string
                 format: date
+              engine:
+                type: string
+                nullable: true
         skipped:
           type: array
           items:
@@ -846,6 +856,40 @@ components:
             type: string
         meta:
           type: object
+    AttendanceImportPrepareData:
+      type: object
+      properties:
+        commitToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+    AttendanceImportUploadData:
+      type: object
+      properties:
+        fileId:
+          type: string
+        rowCount:
+          type: integer
+        bytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        maxBytes:
+          type: integer
+    AttendanceImportAsyncJobData:
+      type: object
+      properties:
+        job:
+          $ref: '#/components/schemas/AttendanceImportJob'
+        idempotent:
+          type: boolean
     AttendanceIntegration:
       type: object
       properties:

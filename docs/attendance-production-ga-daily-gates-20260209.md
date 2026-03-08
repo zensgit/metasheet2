@@ -4725,3 +4725,35 @@ Observed:
 - strict smoke logs contain `import upload ok`, `idempotency ok`, `export csv ok`, `SMOKE PASS`.
 - perf baseline and longrun summaries report `uploadCsv=true`.
 - this round contains no secret/token material in repo docs or artifacts.
+
+### Update (2026-03-08): OpenAPI Contract Parity for Import Async/Upload Paths
+
+Scope:
+
+- align OpenAPI with production runtime endpoints already used by gates and UI.
+
+Implemented:
+
+- add path contracts:
+  - `/api/attendance/import/upload`
+  - `/api/attendance/import/prepare`
+  - `/api/attendance/import/preview-async`
+  - `/api/attendance/import/commit-async`
+- add/align schemas:
+  - `AttendanceImportPrepareData`
+  - `AttendanceImportUploadData`
+  - `AttendanceImportAsyncJobData`
+  - `AttendanceImportPreviewData.previewLimit`
+  - `AttendanceImportPreviewData.asyncSimplified`
+  - `AttendanceImportResult.items[].userId`
+  - `AttendanceImportResult.items[].engine`
+- mark `/api/attendance/import/jobs/{id}` with `503 ServiceUnavailable`.
+
+Verification:
+
+- rebuilt spec artifacts:
+  - `pnpm exec tsx packages/openapi/tools/build.ts`
+- confirmed generated OpenAPI includes new paths and schemas:
+  - `packages/openapi/dist/openapi.json`
+  - `packages/openapi/dist/openapi.yaml`
+  - `packages/openapi/dist/combined.openapi.yml`

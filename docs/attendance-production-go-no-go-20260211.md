@@ -4989,3 +4989,32 @@ Decision:
 
 - branch validation is green; ready to merge.
 - **GO maintained** on current production baseline (this section records branch hardening evidence).
+
+## Post-Go Verification (2026-03-08): OpenAPI Import Contract Sync (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- close the contract gap where runtime supports async/upload import paths but OpenAPI did not fully describe them.
+
+Changes:
+
+- updated source contracts:
+  - `packages/openapi/src/paths/attendance.yml`
+  - `packages/openapi/src/base.yml`
+- regenerated outputs:
+  - `packages/openapi/dist/openapi.json`
+  - `packages/openapi/dist/openapi.yaml`
+  - `packages/openapi/dist/combined.openapi.yml`
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| OpenAPI build | PASS | command `pnpm exec tsx packages/openapi/tools/build.ts` |
+| Path coverage (`upload/prepare/preview-async/commit-async/jobs`) | PASS | `packages/openapi/dist/openapi.json` includes all paths |
+| Schema coverage (`AttendanceImportAsyncJobData` / upload / prepare) | PASS | `packages/openapi/dist/openapi.json` components updated |
+
+Decision:
+
+- contract sync is complete and backward compatible.
+- **GO maintained**.

@@ -679,6 +679,8 @@ components:
           type: integer
         truncated:
           type: boolean
+        previewLimit:
+          type: integer
         mappingUsed:
           type: array
           items:
@@ -691,6 +693,8 @@ components:
           type: array
           items:
             type: string
+        asyncSimplified:
+          type: boolean
         stats:
           $ref: '#/components/schemas/AttendanceImportPreviewStats'
     AttendanceImportRequest:
@@ -837,9 +841,15 @@ components:
             properties:
               id:
                 type: string
+              userId:
+                type: string
+                nullable: true
               workDate:
                 type: string
                 format: date
+              engine:
+                type: string
+                nullable: true
         skipped:
           type: array
           items:
@@ -873,6 +883,40 @@ components:
             type: string
         meta:
           type: object
+    AttendanceImportPrepareData:
+      type: object
+      properties:
+        commitToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+    AttendanceImportUploadData:
+      type: object
+      properties:
+        fileId:
+          type: string
+        rowCount:
+          type: integer
+        bytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        maxBytes:
+          type: integer
+    AttendanceImportAsyncJobData:
+      type: object
+      properties:
+        job:
+          $ref: '#/components/schemas/AttendanceImportJob'
+        idempotent:
+          type: boolean
     AttendanceIntegration:
       type: object
       properties:
@@ -4214,6 +4258,70 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/upload:
+    x-plugin: plugin-attendance
+    post:
+      summary: Upload attendance import CSV and receive csvFileId
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: filename
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportUploadData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/prepare:
+    x-plugin: plugin-attendance
+    post:
+      summary: Prepare attendance import commit token
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportPrepareData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/attendance/import/preview:
     x-plugin: plugin-attendance
     post:
@@ -4244,6 +4352,38 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/preview-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import preview async job
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceImportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportAsyncJobData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/attendance/import/commit:
     x-plugin: plugin-attendance
     post:
@@ -4274,6 +4414,38 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/commit-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import commit async job
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceImportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportAsyncJobData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/attendance/import/jobs/{id}:
     x-plugin: plugin-attendance
     get:
@@ -4306,6 +4478,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/attendance/import:
     x-plugin: plugin-attendance
     post:
