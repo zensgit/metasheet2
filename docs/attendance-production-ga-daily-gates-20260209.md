@@ -4602,3 +4602,20 @@ PR closure:
   - `strict=true`
   - `pr_reviews=true`
   - `min_approving_review_count=1`
+
+### Update (2026-03-08): Final Mainline Post-Merge Sweep (After #389 + #390)
+
+Verification run:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22817683066 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/ga/22817683066/attendance-branch-policy-drift-prod-22817683066-1/policy.json` |
+| Strict Gates | #22817688331 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/ga/22817688331/attendance-strict-gates-prod-22817688331-1/20260308-084938-1/gate-summary.json` |
+| Locale zh Smoke | #22817746846 | FAIL (non-blocking) | `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/ga/22817746846/attendance-locale-zh-smoke-prod-22817746846-1/auth-error.txt` |
+| Perf Baseline | #22817761859 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/ga/22817761859/attendance-import-perf-22817761859-1/attendance-perf-mmhimcpl-cpvx5v/perf-summary.json` |
+| Daily Dashboard | #22817772596 | PASS | `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/ga/22817772596/attendance-daily-gate-dashboard-22817772596-1/attendance-daily-gate-dashboard.json` |
+
+Summary:
+
+- `output/playwright/attendance-post-merge-verify/20260308-round13-final-main/summary.md`
+- verifier `Failures: 0`
