@@ -1,6 +1,6 @@
 name: Attendance Locale zh Smoke (Prod)
 run-name: >-
-  Attendance Locale zh Smoke (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill == 'true' && ' [DRILL]' || '' }}
+  Attendance Locale zh Smoke (Prod)${{ github.event_name == 'workflow_dispatch' && inputs.drill && ' [DRILL]' || '' }}
 
 on:
   workflow_dispatch:
