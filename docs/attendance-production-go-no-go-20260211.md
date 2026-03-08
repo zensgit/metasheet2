@@ -5131,6 +5131,8 @@ Changes:
 - `.github/workflows/attendance-import-perf-baseline.yml`
   - new `workflow_dispatch` input `profile=standard|high-scale`
   - high-scale default resolution for `rows/commit_async/upload_csv` and large-run threshold/poll timeout fallbacks
+- `scripts/ops/attendance-run-perf-high-scale.sh`
+  - local/ops wrapper for the same 100k high-scale defaults (requires `AUTH_TOKEN`)
 
 Verification:
 

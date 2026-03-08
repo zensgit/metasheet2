@@ -4853,6 +4853,14 @@ gh workflow run attendance-import-perf-baseline.yml \
   --ref main
 ```
 
+Local/ops one-liner (same defaults):
+
+```bash
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+bash scripts/ops/attendance-run-perf-high-scale.sh
+```
+
 Verification (branch `codex/attendance-parallel-round17`):
 
 | Gate | Run | Status | Evidence |
