@@ -444,6 +444,81 @@
           }
         }
       },
+      "AttendanceAnomaly": {
+        "type": "object",
+        "properties": {
+          "recordId": {
+            "type": "string"
+          },
+          "workDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "status": {
+            "type": "string"
+          },
+          "isWorkday": {
+            "type": "boolean"
+          },
+          "firstInAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastOutAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "workMinutes": {
+            "type": "integer"
+          },
+          "lateMinutes": {
+            "type": "integer"
+          },
+          "earlyLeaveMinutes": {
+            "type": "integer"
+          },
+          "leaveMinutes": {
+            "type": "integer"
+          },
+          "overtimeMinutes": {
+            "type": "integer"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "pending"
+            ]
+          },
+          "request": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "requestType": {
+                "type": "string"
+              }
+            }
+          },
+          "suggestedRequestType": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "AttendanceLeaveType": {
         "type": "object",
         "properties": {
@@ -892,11 +967,253 @@
           }
         }
       },
+      "AttendanceImportPreviewStats": {
+        "type": "object",
+        "properties": {
+          "invalid": {
+            "type": "integer"
+          },
+          "duplicates": {
+            "type": "integer"
+          }
+        }
+      },
+      "AttendanceImportPreviewData": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttendanceImportPreviewItem"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "rowCount": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "mappingUsed": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "csvWarnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groupWarnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stats": {
+            "$ref": "#/components/schemas/AttendanceImportPreviewStats"
+          }
+        }
+      },
+      "AttendanceImportRequest": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "ruleSetId": {
+            "type": "string"
+          },
+          "mappingProfileId": {
+            "type": "string"
+          },
+          "commitToken": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "engine": {
+            "type": "object"
+          },
+          "mapping": {
+            "type": "object"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "data": {
+            "type": "object"
+          },
+          "csvText": {
+            "type": "string"
+          },
+          "csvFileId": {
+            "type": "string"
+          },
+          "csvOptions": {
+            "type": "object"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "userMap": {
+            "type": "object"
+          },
+          "userMapKeyField": {
+            "type": "string"
+          },
+          "userMapSourceFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "statusMap": {
+            "type": "object"
+          },
+          "mode": {
+            "type": "string"
+          }
+        }
+      },
+      "AttendanceImportJob": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "engine": {
+            "type": "string",
+            "nullable": true
+          },
+          "chunkConfig": {
+            "type": "object",
+            "nullable": true
+          },
+          "recordUpsertStrategy": {
+            "type": "string",
+            "nullable": true
+          },
+          "progress": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "progressPercent": {
+            "type": "integer"
+          },
+          "processedRows": {
+            "type": "integer"
+          },
+          "failedRows": {
+            "type": "integer"
+          },
+          "elapsedMs": {
+            "type": "integer"
+          },
+          "throughputRowsPerSec": {
+            "type": "number",
+            "format": "float"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "preview": {
+            "$ref": "#/components/schemas/AttendanceImportPreviewData"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
       "AttendanceImportResult": {
         "type": "object",
         "properties": {
           "imported": {
             "type": "integer"
+          },
+          "processedRows": {
+            "type": "integer"
+          },
+          "failedRows": {
+            "type": "integer"
+          },
+          "elapsedMs": {
+            "type": "integer"
+          },
+          "engine": {
+            "type": "string",
+            "nullable": true
+          },
+          "recordUpsertStrategy": {
+            "type": "string",
+            "nullable": true
           },
           "items": {
             "type": "array",
@@ -940,11 +1257,26 @@
             "type": "string",
             "nullable": true
           },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "itemsTruncated": {
+            "type": "boolean"
+          },
           "csvWarnings": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "groupWarnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "meta": {
+            "type": "object"
           }
         }
       },
@@ -2553,6 +2885,116 @@
                         },
                         "pageSize": {
                           "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance/anomalies": {
+      "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "List attendance anomalies (workday records needing attention)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "userId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "orgId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/AttendanceAnomaly"
+                          }
+                        },
+                        "total": {
+                          "type": "integer"
+                        },
+                        "page": {
+                          "type": "integer"
+                        },
+                        "pageSize": {
+                          "type": "integer"
+                        },
+                        "from": {
+                          "type": "string",
+                          "format": "date"
+                        },
+                        "to": {
+                          "type": "string",
+                          "format": "date"
                         }
                       }
                     }
@@ -6253,81 +6695,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "source": {
-                    "type": "string"
-                  },
-                  "orgId": {
-                    "type": "string"
-                  },
-                  "userId": {
-                    "type": "string"
-                  },
-                  "timezone": {
-                    "type": "string"
-                  },
-                  "ruleSetId": {
-                    "type": "string"
-                  },
-                  "mappingProfileId": {
-                    "type": "string"
-                  },
-                  "commitToken": {
-                    "type": "string"
-                  },
-                  "engine": {
-                    "type": "object"
-                  },
-                  "mapping": {
-                    "type": "object"
-                  },
-                  "columns": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "data": {
-                    "type": "object"
-                  },
-                  "csvText": {
-                    "type": "string"
-                  },
-                  "csvOptions": {
-                    "type": "object"
-                  },
-                  "rows": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "entries": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "userMap": {
-                    "type": "object"
-                  },
-                  "userMapKeyField": {
-                    "type": "string"
-                  },
-                  "userMapSourceFields": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "statusMap": {
-                    "type": "object"
-                  },
-                  "mode": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/AttendanceImportRequest"
               }
             }
           }
@@ -6344,30 +6712,7 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "items": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/AttendanceImportPreviewItem"
-                          }
-                        },
-                        "total": {
-                          "type": "integer"
-                        },
-                        "mappingUsed": {
-                          "type": "array",
-                          "items": {
-                            "type": "object"
-                          }
-                        },
-                        "csvWarnings": {
-                          "type": "array",
-                          "items": {
-                            "type": "string"
-                          }
-                        }
-                      }
+                      "$ref": "#/components/schemas/AttendanceImportPreviewData"
                     }
                   }
                 }
@@ -6386,6 +6731,109 @@
         }
       }
     },
+    "/api/attendance/import/commit": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Commit attendance import",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceImportResult"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance/import/jobs/{id}": {
+      "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Get attendance import job",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceImportJob"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/api/attendance/import": {
       "x-plugin": "plugin-attendance",
       "post": {
@@ -6400,81 +6848,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "source": {
-                    "type": "string"
-                  },
-                  "orgId": {
-                    "type": "string"
-                  },
-                  "userId": {
-                    "type": "string"
-                  },
-                  "timezone": {
-                    "type": "string"
-                  },
-                  "ruleSetId": {
-                    "type": "string"
-                  },
-                  "mappingProfileId": {
-                    "type": "string"
-                  },
-                  "commitToken": {
-                    "type": "string"
-                  },
-                  "engine": {
-                    "type": "object"
-                  },
-                  "mapping": {
-                    "type": "object"
-                  },
-                  "columns": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "data": {
-                    "type": "object"
-                  },
-                  "csvText": {
-                    "type": "string"
-                  },
-                  "csvOptions": {
-                    "type": "object"
-                  },
-                  "rows": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "entries": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "userMap": {
-                    "type": "object"
-                  },
-                  "userMapKeyField": {
-                    "type": "string"
-                  },
-                  "userMapSourceFields": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "statusMap": {
-                    "type": "object"
-                  },
-                  "mode": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/AttendanceImportRequest"
               }
             }
           }
@@ -7413,6 +7787,112 @@
                     },
                     "data": {
                       "$ref": "#/components/schemas/AttendancePayrollCycle"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/attendance/payroll-cycles/generate": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Batch generate payroll cycles from a template",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "templateId": {
+                    "type": "string"
+                  },
+                  "anchorDate": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "default": 1
+                  },
+                  "status": {
+                    "type": "string",
+                    "default": "open"
+                  },
+                  "namePrefix": {
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  },
+                  "orgId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "anchorDate"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "templateId": {
+                          "type": "string"
+                        },
+                        "created": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/AttendancePayrollCycle"
+                          }
+                        },
+                        "skipped": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "startDate": {
+                                "type": "string",
+                                "format": "date"
+                              },
+                              "endDate": {
+                                "type": "string",
+                                "format": "date"
+                              }
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }

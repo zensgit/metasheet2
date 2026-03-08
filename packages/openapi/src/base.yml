@@ -640,11 +640,169 @@ components:
           type: array
           items:
             type: string
+    AttendanceImportPreviewStats:
+      type: object
+      properties:
+        invalid:
+          type: integer
+        duplicates:
+          type: integer
+    AttendanceImportPreviewData:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
+        total:
+          type: integer
+        rowCount:
+          type: integer
+        truncated:
+          type: boolean
+        mappingUsed:
+          type: array
+          items: { type: object }
+        csvWarnings:
+          type: array
+          items: { type: string }
+        groupWarnings:
+          type: array
+          items: { type: string }
+        stats:
+          $ref: '#/components/schemas/AttendanceImportPreviewStats'
+    AttendanceImportRequest:
+      type: object
+      properties:
+        source:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+        mappingProfileId:
+          type: string
+        commitToken:
+          type: string
+        idempotencyKey:
+          type: string
+        engine:
+          type: object
+        mapping:
+          type: object
+        columns:
+          type: array
+          items: { type: object }
+        data:
+          type: object
+        csvText:
+          type: string
+        csvFileId:
+          type: string
+        csvOptions:
+          type: object
+        rows:
+          type: array
+          items: { type: object }
+        entries:
+          type: array
+          items: { type: object }
+        userMap:
+          type: object
+        userMapKeyField:
+          type: string
+        userMapSourceFields:
+          type: array
+          items: { type: string }
+        statusMap:
+          type: object
+        mode:
+          type: string
+    AttendanceImportJob:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        batchId:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          nullable: true
+        idempotencyKey:
+          type: string
+          nullable: true
+        kind:
+          type: string
+        status:
+          type: string
+        engine:
+          type: string
+          nullable: true
+        chunkConfig:
+          type: object
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
+        progress:
+          type: integer
+        total:
+          type: integer
+        progressPercent:
+          type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        elapsedMs:
+          type: integer
+        throughputRowsPerSec:
+          type: number
+          format: float
+        error:
+          type: string
+          nullable: true
+        preview:
+          $ref: '#/components/schemas/AttendanceImportPreviewData'
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendanceImportResult:
       type: object
       properties:
         imported:
           type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        elapsedMs:
+          type: integer
+        engine:
+          type: string
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
         items:
           type: array
           items:
@@ -674,10 +832,20 @@ components:
         batchId:
           type: string
           nullable: true
+        idempotent:
+          type: boolean
+        itemsTruncated:
+          type: boolean
         csvWarnings:
           type: array
           items:
             type: string
+        groupWarnings:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
     AttendanceIntegration:
       type: object
       properties:
