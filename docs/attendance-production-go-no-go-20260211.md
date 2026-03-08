@@ -5175,6 +5175,8 @@ Changes:
 - `scripts/verify-attendance-full-flow.mjs`
   - key role/text locators switched to bilingual matchers (en/zh) for `Attendance`, `Records`, `Anomalies`, `Admin Center`, `Workflow Designer`, and mobile downgrade copy.
   - supports `UI_LOCALE` override (`zh-CN` / `en-US`) and writes locale to `metasheet_locale` before page load.
+- `scripts/ops/attendance-run-gates.sh` + `scripts/ops/attendance-regression-local.sh`
+  - `UI_LOCALE` is now forwarded to desktop/mobile full-flow playwright runs for deterministic locale-mode verification.
 
 Verification:
 
@@ -5184,6 +5186,8 @@ Verification:
 | Web regression (attendance import + zh/mobile) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts tests/attendance-import-preview-regression.spec.ts` | PASS |
 | Full-flow verifier script syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
 | Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Gate runner shell syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS |
+| Local regression shell syntax | `bash -n scripts/ops/attendance-regression-local.sh` | PASS |
 
 Decision:
 

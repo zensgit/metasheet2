@@ -8,6 +8,7 @@ WEB_URL="${WEB_URL:-}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 EXPECT_PRODUCT_MODE="${EXPECT_PRODUCT_MODE:-attendance}"
 HEADLESS="${HEADLESS:-true}"
+UI_LOCALE="${UI_LOCALE:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-auto}" # auto|true|false
 PROVISION_USER_ID="${PROVISION_USER_ID:-}" # optional
@@ -88,6 +89,7 @@ gate_pw_mobile="FAIL"
 info "API_BASE=${API_BASE}"
 info "WEB_URL=${WEB_URL}"
 info "OUTPUT_ROOT=${OUTPUT_ROOT}"
+info "UI_LOCALE=${UI_LOCALE:-auto}"
 info "REQUIRE_IMPORT_JOB_RECOVERY=${REQUIRE_IMPORT_JOB_RECOVERY}"
 info "REQUIRE_IMPORT_TELEMETRY=${REQUIRE_IMPORT_TELEMETRY}"
 info "REQUIRE_ADMIN_SETTINGS_SAVE=${REQUIRE_ADMIN_SETTINGS_SAVE}"
@@ -180,6 +182,7 @@ function run_playwright_full_flow_desktop() {
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
     ASSERT_IMPORT_JOB_RECOVERY="$REQUIRE_IMPORT_JOB_RECOVERY" \
     ASSERT_ADMIN_SETTINGS_SAVE="$REQUIRE_ADMIN_SETTINGS_SAVE" \
+    UI_LOCALE="$UI_LOCALE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-desktop" \
     HEADLESS="$HEADLESS" \
     node "${ROOT_DIR}/scripts/verify-attendance-full-flow.mjs" \
@@ -197,6 +200,7 @@ function run_playwright_full_flow_mobile() {
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
+    UI_LOCALE="$UI_LOCALE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-mobile" \
     HEADLESS="$HEADLESS" \
     UI_MOBILE="true" \

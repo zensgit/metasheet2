@@ -8,6 +8,7 @@ timestamp="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-output/playwright/attendance-local-regression/${timestamp}}"
 RUN_PLAYWRIGHT="${RUN_PLAYWRIGHT:-false}"
 PLAYWRIGHT_MOBILE="${PLAYWRIGHT_MOBILE:-true}"
+UI_LOCALE="${UI_LOCALE:-}"
 
 mkdir -p "$OUTPUT_ROOT"
 RESULTS_TSV="${OUTPUT_ROOT}/results.tsv"
@@ -70,11 +71,11 @@ if [[ "$RUN_PLAYWRIGHT" == "true" ]]; then
   if [[ -n "${WEB_URL:-}" && -n "${AUTH_TOKEN:-}" ]]; then
     run_check \
       "playwright-full-flow-desktop" \
-      "WEB_URL=\"$WEB_URL\" AUTH_TOKEN=\"$AUTH_TOKEN\" OUTPUT_DIR=\"$OUTPUT_ROOT/playwright-desktop\" node scripts/verify-attendance-full-flow.mjs"
+      "WEB_URL=\"$WEB_URL\" AUTH_TOKEN=\"$AUTH_TOKEN\" UI_LOCALE=\"$UI_LOCALE\" OUTPUT_DIR=\"$OUTPUT_ROOT/playwright-desktop\" node scripts/verify-attendance-full-flow.mjs"
     if [[ "$PLAYWRIGHT_MOBILE" == "true" ]]; then
       run_check \
         "playwright-full-flow-mobile" \
-        "WEB_URL=\"$WEB_URL\" AUTH_TOKEN=\"$AUTH_TOKEN\" UI_MOBILE=true OUTPUT_DIR=\"$OUTPUT_ROOT/playwright-mobile\" node scripts/verify-attendance-full-flow.mjs"
+        "WEB_URL=\"$WEB_URL\" AUTH_TOKEN=\"$AUTH_TOKEN\" UI_LOCALE=\"$UI_LOCALE\" UI_MOBILE=true OUTPUT_DIR=\"$OUTPUT_ROOT/playwright-mobile\" node scripts/verify-attendance-full-flow.mjs"
     fi
   else
     info "skip playwright: RUN_PLAYWRIGHT=true but WEB_URL/AUTH_TOKEN missing"
