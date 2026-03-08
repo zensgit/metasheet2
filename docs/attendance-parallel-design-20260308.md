@@ -70,3 +70,22 @@ Out of scope:
 - Baseline PASS: `attendance-import-perf-baseline.yml` run `22803281301`
 - Longrun pre-fix FAIL evidence: run `22803281293`
   - failure log: `output/playwright/ga/22803281293/.../rows100k-commit/perf.log`
+
+## 8. Round-3 Design Addendum (2026-03-08)
+### A-line reliability principle
+- Gate orchestration must tolerate transient GitHub API instability.
+- `attendance-post-merge-verify.sh` now uses:
+  - retryable `gh` wrappers for transient network/5xx errors.
+  - explicit run polling + deterministic completion detection.
+  - accurate gate rc accounting (no inversion side-effect).
+
+### C-line UX principle
+- Import failures need persistent, local recovery context.
+- Admin import section now keeps error details visible until a subsequent action clears them.
+- Preview retries must never leave stale rows/warnings visible after failure.
+
+### B-line contract parity backlog (identified)
+- Runtime already includes `engine` (`/import/commit`) and `processedRows/failedRows/elapsedMs` (`/import/jobs/:id`).
+- Remaining gap is OpenAPI/SDK parity:
+  - `packages/openapi/src/paths/attendance.yml` lacks `/import/commit` and `/import/jobs/{id}` contracts.
+  - `packages/openapi/src/base.yml` `AttendanceImportResult` misses new optional fields.

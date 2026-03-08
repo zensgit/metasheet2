@@ -1956,6 +1956,22 @@
                 </div>
                 <div v-if="importAsyncJob.error">{{ tr('Error', '错误') }}: {{ importAsyncJob.error }}</div>
               </div>
+              <div v-if="importStatusVisible" class="attendance__status attendance__status--error">
+                <div>
+                  {{ statusMessage }}
+                </div>
+                <div v-if="statusCode">{{ tr('Code', '代码') }}: {{ statusCode }}</div>
+                <div v-if="statusHint">{{ statusHint }}</div>
+                <button
+                  v-if="statusActionLabel"
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  :disabled="statusActionBusy"
+                  @click="runStatusAction"
+                >
+                  {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
+                </button>
+              </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
                 {{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}
               </div>
@@ -3306,6 +3322,8 @@ interface AttendanceStatusMeta {
   code?: string
   hint?: string
   action?: AttendanceStatusAction
+  context?: AttendanceStatusContext
+  sticky?: boolean
 }
 
 const props = withDefaults(
@@ -4139,6 +4157,14 @@ const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
+const importStatusVisible = computed(() => {
+  const context = statusMeta.value?.context
+  return Boolean(
+    statusKind.value === 'error'
+    && statusMessage.value
+    && (context === 'import-preview' || context === 'import-run')
+  )
+})
 const canResumeImportJobFromStatus = computed(() => {
   const action = statusMeta.value?.action
   if (action !== 'retry-run-import') return false
@@ -5507,6 +5533,8 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 async function previewImport() {
   clearImportPreviewTask()
   clearImportAsyncJob()
+  importPreview.value = []
+  importCsvWarnings.value = []
   const payload = buildImportPayload()
   if (!payload) {
     setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
@@ -5592,6 +5620,8 @@ async function previewImport() {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
+    importPreview.value = []
+    importCsvWarnings.value = []
     if (importPreviewTask.value) {
       importPreviewTask.value = {
         ...importPreviewTask.value,
@@ -6415,7 +6445,12 @@ function classifyStatusError(
 
 function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
   const { message, meta } = classifyStatusError(error, fallbackMessage, context)
-  setStatus(message || fallbackMessage, 'error', meta)
+  const sticky = context === 'import-preview' || context === 'import-run'
+  setStatus(message || fallbackMessage, 'error', {
+    ...(meta || {}),
+    context,
+    sticky,
+  })
 }
 
 async function runStatusAction() {
@@ -6484,6 +6519,7 @@ function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: Atten
     statusMessage.value = message
   }
   if (!message) return
+  if (kind === 'error' && meta?.sticky) return
   const timeoutMs = kind === 'error'
     ? (meta?.action || meta?.hint ? 10000 : 7000)
     : 4000

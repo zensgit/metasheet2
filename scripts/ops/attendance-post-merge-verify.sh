@@ -34,6 +34,12 @@ REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
 
 LOOKBACK_HOURS="${LOOKBACK_HOURS:-48}"
+GH_RETRY_MAX_ATTEMPTS="${GH_RETRY_MAX_ATTEMPTS:-5}"
+GH_RETRY_DELAY_SECONDS="${GH_RETRY_DELAY_SECONDS:-3}"
+RUN_DISCOVERY_ATTEMPTS="${RUN_DISCOVERY_ATTEMPTS:-60}"
+RUN_DISCOVERY_INTERVAL_SECONDS="${RUN_DISCOVERY_INTERVAL_SECONDS:-2}"
+RUN_POLL_ATTEMPTS="${RUN_POLL_ATTEMPTS:-300}"
+RUN_POLL_INTERVAL_SECONDS="${RUN_POLL_INTERVAL_SECONDS:-3}"
 
 PERF_BASELINE_API_BASE="${PERF_BASELINE_API_BASE:-${API_BASE}}"
 PERF_BASELINE_ROWS="${PERF_BASELINE_ROWS:-10000}"
@@ -94,6 +100,43 @@ function die() {
 
 function require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+function is_transient_gh_error() {
+  local text
+  text="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$text" == *"tls handshake timeout"* ]] \
+    || [[ "$text" == *"unexpected eof"* ]] \
+    || [[ "$text" == *"i/o timeout"* ]] \
+    || [[ "$text" == *"connection reset"* ]] \
+    || [[ "$text" == *"service unavailable"* ]] \
+    || [[ "$text" == *"bad gateway"* ]] \
+    || [[ "$text" == *"gateway timeout"* ]] \
+    || [[ "$text" == *"http 5"* ]]
+}
+
+function gh_capture() {
+  local attempt=1
+  local out=''
+  local rc=0
+  while (( attempt <= GH_RETRY_MAX_ATTEMPTS )); do
+    out="$("$@" 2>&1)"
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      printf '%s' "$out"
+      return 0
+    fi
+    if is_transient_gh_error "$out" && (( attempt < GH_RETRY_MAX_ATTEMPTS )); then
+      info "WARN: transient gh failure (attempt ${attempt}/${GH_RETRY_MAX_ATTEMPTS}): $*"
+      sleep "$GH_RETRY_DELAY_SECONDS"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    printf '%s\n' "$out" >&2
+    return "$rc"
+  done
+  printf '%s\n' "$out" >&2
+  return "$rc"
 }
 
 require_cmd gh
@@ -272,16 +315,18 @@ function trigger_and_wait() {
   local run_json=''
   local attempt
 
-  before_id="$(gh run list --workflow "$workflow" --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId // 0' 2>/dev/null || echo '0')"
+  before_id="$(gh_capture gh run list --workflow "$workflow" --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId // 0' || echo '0')"
   if [[ -z "$before_id" ]]; then
     before_id='0'
   fi
 
   info "dispatch workflow: ${workflow} (branch=${BRANCH})"
-  gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" >/dev/null
+  if ! gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" >/dev/null; then
+    return 3
+  fi
 
-  for attempt in $(seq 1 60); do
-    run_json="$(gh run list --workflow "$workflow" --branch "$BRANCH" --limit 20 --json databaseId,event,conclusion,status,url,createdAt 2>/dev/null || echo '[]')"
+  for attempt in $(seq 1 "$RUN_DISCOVERY_ATTEMPTS"); do
+    run_json="$(gh_capture gh run list --workflow "$workflow" --branch "$BRANCH" --limit 20 --json databaseId,event,conclusion,status,url,createdAt 2>/dev/null || echo '[]')"
     run_id="$(printf '%s' "$run_json" | jq -r --arg before "${before_id}" '
       map(select(.event == "workflow_dispatch"))
       | map(select((.databaseId | tonumber) > ($before | tonumber)))
@@ -292,16 +337,35 @@ function trigger_and_wait() {
     if [[ -n "$run_id" ]]; then
       break
     fi
-    sleep 2
+    sleep "$RUN_DISCOVERY_INTERVAL_SECONDS"
   done
 
   [[ -n "$run_id" ]] || return 2
 
-  info "watch run: ${run_id}"
-  gh run watch "$run_id" --exit-status
-  local watch_rc=$?
+  info "poll run: ${run_id}"
+  local run_status=''
+  local watch_rc=1
+  for attempt in $(seq 1 "$RUN_POLL_ATTEMPTS"); do
+    run_json="$(gh_capture gh run view "$run_id" --json databaseId,url,conclusion,status 2>/dev/null || echo '{}')"
+    run_status="$(printf '%s' "$run_json" | jq -r '.status // empty')"
+    if [[ "$run_status" == "completed" ]]; then
+      local conclusion
+      conclusion="$(printf '%s' "$run_json" | jq -r '.conclusion // empty')"
+      if [[ "$conclusion" == "success" ]]; then
+        watch_rc=0
+      else
+        watch_rc=1
+      fi
+      break
+    fi
+    sleep "$RUN_POLL_INTERVAL_SECONDS"
+  done
 
-  run_json="$(gh run view "$run_id" --json databaseId,url,conclusion,status 2>/dev/null || echo '{}')"
+  if [[ "$run_status" != "completed" ]]; then
+    watch_rc=4
+  fi
+
+  run_json="$(gh_capture gh run view "$run_id" --json databaseId,url,conclusion,status 2>/dev/null || echo '{}')"
   RUN_ID="$(printf '%s' "$run_json" | jq -r '.databaseId // empty')"
   RUN_URL="$(printf '%s' "$run_json" | jq -r '.url // empty')"
   RUN_CONCLUSION="$(printf '%s' "$run_json" | jq -r '.conclusion // empty')"
@@ -310,7 +374,7 @@ function trigger_and_wait() {
   if [[ "$DOWNLOAD_ARTIFACTS" == "true" && -n "$RUN_ID" ]]; then
     local artifacts_dir="${OUTPUT_ROOT}/ga/${RUN_ID}"
     mkdir -p "$artifacts_dir"
-    if gh run download "$RUN_ID" -D "$artifacts_dir" >"${artifacts_dir}/download.log" 2>&1; then
+    if gh_capture gh run download "$RUN_ID" -D "$artifacts_dir" >"${artifacts_dir}/download.log" 2>&1; then
       RUN_ARTIFACTS="$artifacts_dir"
     else
       RUN_ARTIFACTS="${artifacts_dir} (download failed; see download.log)"
@@ -337,8 +401,9 @@ function run_gate() {
 
   local status='PASS'
   local rc=0
-  if ! trigger_and_wait "$workflow" "${args[@]}"; then
-    rc=$?
+  trigger_and_wait "$workflow" "${args[@]}"
+  rc=$?
+  if [[ "$rc" -ne 0 ]]; then
     status='FAIL'
     failures=$((failures + 1))
   fi
