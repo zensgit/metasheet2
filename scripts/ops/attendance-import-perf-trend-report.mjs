@@ -263,6 +263,7 @@ function recordFromSummary(summary, sourcePath, sourceType) {
   return {
     scenario,
     rows,
+    profile: String(summary?.profile || ''),
     mode,
     uploadCsv: Boolean(summary?.uploadCsv),
     uploadCsvRequested: summary?.uploadCsvRequested === undefined
@@ -346,9 +347,10 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Mode | Upload(eff) | Upload(req) | Payload | Upsert | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Profile | Mode | Upload(eff) | Upload(req) | Payload | Upsert | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
+  lines.push('|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
+    const profile = row?.latest?.profile ? String(row.latest.profile).toLowerCase() : '--'
     const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
     const uploadRequested = row?.latest?.uploadCsvRequested === null
       || row?.latest?.uploadCsvRequested === undefined
@@ -357,7 +359,7 @@ function renderMarkdown(payload) {
     const payloadSource = row?.latest?.payloadSource ? String(row.latest.payloadSource).toLowerCase() : '--'
     const upsert = row?.latest?.recordUpsertStrategy ? String(row.latest.recordUpsertStrategy).toUpperCase() : '--'
     const chunk = formatChunk(row?.latest?.chunkItemsSize, row?.latest?.chunkRecordsSize)
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${row.mode || '--'} | ${upload} | ${uploadRequested} | ${payloadSource} | ${upsert} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${profile} | ${row.mode || '--'} | ${upload} | ${uploadRequested} | ${payloadSource} | ${upsert} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')

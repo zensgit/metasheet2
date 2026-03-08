@@ -5133,6 +5133,8 @@ Changes:
   - high-scale default resolution for `rows/commit_async/upload_csv` and large-run threshold/poll timeout fallbacks
 - `scripts/ops/attendance-run-perf-high-scale.sh`
   - local/ops wrapper for the same 100k high-scale defaults (requires `AUTH_TOKEN`)
+- `scripts/ops/attendance-import-perf.mjs` + `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - write/read `profile` in perf summary and render `Profile` column in longrun trend markdown.
 
 Verification:
 

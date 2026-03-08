@@ -20,6 +20,7 @@ const mappingProfileIdOverride = String(process.env.MAPPING_PROFILE_ID || '')
 const rows = Math.max(1, Number(process.env.ROWS || 10_000))
 const mode = String(process.env.MODE || 'commit') // preview|commit
 const scenario = String(process.env.SCENARIO || `${rows}-${mode}`)
+const perfProfile = String(process.env.PERF_PROFILE || process.env.PROFILE || 'standard').trim().toLowerCase()
 const doRollback = process.env.ROLLBACK !== 'false' // default true
 const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC === 'true'
 
@@ -619,6 +620,7 @@ async function run() {
 
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
+  log(`profile=${perfProfile}`)
   await refreshAuthToken()
   const payloadPlan = resolvePayloadSource()
   const requestedImportEngine = resolveEngineByRows(rows)
@@ -795,6 +797,7 @@ async function run() {
       schemaVersion: 2,
       startedAt,
       scenario,
+      profile: perfProfile,
       mode,
       apiBase,
       orgId,
@@ -1073,6 +1076,7 @@ async function run() {
     schemaVersion: 2,
     startedAt,
     scenario,
+    profile: perfProfile,
     mode,
     apiBase,
     orgId,

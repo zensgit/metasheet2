@@ -4871,3 +4871,4 @@ Observed:
 
 - workflow logs show resolved profile config: `profile=high-scale`, `rows=100000`, `commit_async=true`, `upload_csv=true`.
 - perf summary confirms `rows: 100000`, `commitAsync: true`.
+- `scripts/ops/attendance-import-perf-trend-report.mjs` scenario table now includes `Profile` column, sourced from `perf-summary.json.profile`.
