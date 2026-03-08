@@ -4809,3 +4809,21 @@ Observed:
 
 - strict smoke log contains `import upload ok`, `idempotency ok`, `export csv ok`, and `SMOKE PASS`.
 - baseline and longrun artifacts confirm `uploadCsv: true`.
+
+### Update (2026-03-08): Branch Policy Drift + Daily Dashboard Recheck
+
+Scope:
+
+- verify policy gate and dashboard remained green after workflow parser hardening changes.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22822410248 | PASS | `output/playwright/ga/22822410248/attendance-branch-policy-drift-prod-22822410248-1/policy.json` |
+| Attendance Daily Gate Dashboard | #22822410238 | PASS | `output/playwright/ga/22822410238/attendance-daily-gate-dashboard-22822410238-1/attendance-daily-gate-dashboard.json` |
+
+Observed:
+
+- dashboard `overallStatus=pass`.
+- dashboard artifact includes `Branch Protection`, `Remote Preflight`, and `Storage Health` gate rows.

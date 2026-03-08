@@ -5101,3 +5101,21 @@ Decision:
 - parser regression is closed; auth fallback chain executes normally.
 - strict/perf/locale gates returned to stable PASS.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Policy + Dashboard Stability Recheck (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- confirm branch policy and daily dashboard gates stayed green after auth heredoc hardening rollout.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22822410248 | PASS | `output/playwright/ga/22822410248/attendance-branch-policy-drift-prod-22822410248-1/policy.json` |
+| Attendance Daily Gate Dashboard | #22822410238 | PASS | `output/playwright/ga/22822410238/attendance-daily-gate-dashboard-22822410238-1/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- policy and dashboard lines are stable after this fix round.
+- **GO maintained**.
