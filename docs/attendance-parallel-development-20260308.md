@@ -543,3 +543,19 @@ Result: PASS
 - contract matrix:
   - `bash scripts/ops/attendance-run-gate-contract-case.sh strict` PASS
   - `bash scripts/ops/attendance-run-gate-contract-case.sh dashboard` PASS
+
+### Mainline verification (after PR #392 merge)
+- PR:
+  - `#392` merged at `2026-03-08T11:38:27Z` (merge commit `2fbb0804439305e01c9ab232d9d336160d026589`)
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-round15-main BRANCH=main bash scripts/ops/attendance-post-merge-verify.sh`
+- results:
+  - branch-policy `#22820321013` PASS
+  - strict-gates `#22820329572` PASS
+  - locale-zh-smoke `#22820397642` FAIL (non-blocking, policy PASS)
+  - perf-baseline `#22820414828` PASS
+  - daily-dashboard `#22820426896` PASS
+  - verifier summary: `Failures: 0`
+- evidence:
+  - `output/playwright/attendance-post-merge-verify/20260308-round15-main/summary.md`
+  - `output/playwright/attendance-post-merge-verify/20260308-round15-main/results.tsv`
