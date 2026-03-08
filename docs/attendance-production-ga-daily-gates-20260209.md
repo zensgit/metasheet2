@@ -4893,16 +4893,18 @@ Changes:
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
   - added rollback safety regression and concurrent `csvFileId` idempotency regression.
   - added async-missing-upload fail-fast regressions (`preview-async` / `commit-async`).
+  - added async-expired-upload regressions (`preview-async` / `commit-async` return `EXPIRED`).
 - `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
   - validates `建议使用桌面端` / `返回总览` flow for `admin` and `workflow` tabs.
 - `scripts/verify-attendance-full-flow.mjs`
   - upgraded key UI locators to bilingual en/zh matchers for core attendance flow and mobile downgrade assertions.
+  - added `UI_LOCALE` runtime override (`zh-CN` / `en-US`) and locale preseed through `metasheet_locale`.
 
 Verification:
 
 | Check | Command | Status |
 |---|---|---|
-| Backend integration targeted suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist"` | PASS |
-| Web regression (`zh-CN` + mobile) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |
+| Backend integration targeted suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for preview-async when csvFileId meta is older than TTL|returns EXPIRED for commit-async when csvFileId meta is older than TTL"` | PASS |
+| Web regression (`zh-CN` + mobile + import retry`) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts tests/attendance-import-preview-regression.spec.ts` | PASS |
 | Full-flow verifier syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
 | Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |

@@ -2701,4 +2701,158 @@ describe('Attendance Plugin Integration', () => {
     const code = (response.body as { error?: { code?: string } } | undefined)?.error?.code
     expect(code).toBe('NOT_FOUND')
   })
+
+  it('returns EXPIRED for preview-async when csvFileId meta is older than TTL', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvText = `${csvHeader}\n${workDate},A001,CSV Async Preview Expired,09:00,18:00,正常\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=expired-preview-async.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    const rawMeta = await fs.readFile(metaPath, 'utf8')
+    const meta = rawMeta ? JSON.parse(rawMeta) : {}
+    meta.createdAt = '1970-01-01T00:00:00.000Z'
+    await fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const response = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        userId: 'attendance-test',
+        timezone: 'UTC',
+        csvFileId: String(fileId || ''),
+        mapping: {
+          columns: [
+            { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+            { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+            { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+            { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+            { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+            { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+          ],
+        },
+        userMap: { A001: 'attendance-test' },
+        mode: 'override',
+        commitToken,
+      }),
+    })
+
+    expect(response.status).toBe(410)
+    const code = (response.body as { error?: { code?: string } } | undefined)?.error?.code
+    expect(code).toBe('EXPIRED')
+  })
+
+  it('returns EXPIRED for commit-async when csvFileId meta is older than TTL', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvText = `${csvHeader}\n${workDate},A001,CSV Async Commit Expired,09:00,18:00,正常\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=expired-commit-async.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    const rawMeta = await fs.readFile(metaPath, 'utf8')
+    const meta = rawMeta ? JSON.parse(rawMeta) : {}
+    meta.createdAt = '1970-01-01T00:00:00.000Z'
+    await fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8')
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const response = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        userId: 'attendance-test',
+        timezone: 'UTC',
+        csvFileId: String(fileId || ''),
+        mapping: {
+          columns: [
+            { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+            { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+            { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+            { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+            { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+            { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+          ],
+        },
+        userMap: { A001: 'attendance-test' },
+        mode: 'override',
+        commitToken,
+      }),
+    })
+
+    expect(response.status).toBe(410)
+    const code = (response.body as { error?: { code?: string } } | undefined)?.error?.code
+    expect(code).toBe('EXPIRED')
+  })
 })

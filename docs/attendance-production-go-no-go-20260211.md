@@ -5168,17 +5168,20 @@ Changes:
   - added `deduplicates concurrent csvFileId commits with the same idempotencyKey`.
   - added `returns NOT_FOUND for preview-async when csvFileId does not exist`.
   - added `returns NOT_FOUND for commit-async when csvFileId does not exist`.
+  - added `returns EXPIRED for preview-async when csvFileId meta is older than TTL`.
+  - added `returns EXPIRED for commit-async when csvFileId meta is older than TTL`.
 - `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
   - new regression spec for `AttendanceExperienceView` with `zh-CN` locale + mobile gate.
 - `scripts/verify-attendance-full-flow.mjs`
   - key role/text locators switched to bilingual matchers (en/zh) for `Attendance`, `Records`, `Anomalies`, `Admin Center`, `Workflow Designer`, and mobile downgrade copy.
+  - supports `UI_LOCALE` override (`zh-CN` / `en-US`) and writes locale to `metasheet_locale` before page load.
 
 Verification:
 
 | Check | Command | Status |
 |---|---|---|
-| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist"` | PASS |
-| Web regression (new zh/mobile spec) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |
+| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for preview-async when csvFileId meta is older than TTL|returns EXPIRED for commit-async when csvFileId meta is older than TTL"` | PASS |
+| Web regression (attendance import + zh/mobile) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts tests/attendance-import-preview-regression.spec.ts` | PASS |
 | Full-flow verifier script syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
 | Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
 

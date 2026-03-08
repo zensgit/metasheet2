@@ -23,6 +23,7 @@ const assertAdminRuleSave = process.env.ASSERT_ADMIN_RULE_SAVE !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
 const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT === 'true'
+const uiLocaleRaw = process.env.UI_LOCALE || ''
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
@@ -46,6 +47,14 @@ function normalizeProductMode(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function normalizeUiLocale(raw) {
+  const value = String(raw || '').trim().toLowerCase()
+  if (!value) return ''
+  if (value === 'zh' || value === 'zh-cn' || value === 'zh-hans') return 'zh-CN'
+  if (value === 'en' || value === 'en-us' || value === 'en-gb') return 'en-US'
+  return ''
 }
 
 function escapeRegex(value) {
@@ -162,6 +171,14 @@ async function setImportDebugOverrides(page) {
     }
     localStorage.setItem('metasheet_attendance_debug', JSON.stringify(next))
   }, { pollTimeoutMs: importRecoveryTimeoutMs, pollIntervalMs: importRecoveryIntervalMs })
+}
+
+async function setLocaleOverride(page, localeValue) {
+  if (!localeValue) return
+  const localeStorageValue = localeValue.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+  await page.addInitScript((value) => {
+    if (value) localStorage.setItem('metasheet_locale', value)
+  }, localeStorageValue)
 }
 
 function parseFeatures(raw) {
@@ -845,19 +862,22 @@ async function run() {
       throw new Error(`Expected product mode '${expectProductMode}', got '${actualMode}'`)
     }
   }
+  const uiLocale = normalizeUiLocale(uiLocaleRaw)
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({
     viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 720 },
     deviceScaleFactor: mobile ? 2 : 1,
     isMobile: mobile,
+    locale: uiLocale || undefined,
   })
   const page = await context.newPage()
   await setAuth(page)
   await setProductFeatures(page)
   await setImportDebugOverrides(page)
+  await setLocaleOverride(page, uiLocale)
 
-  logInfo(`Navigating to ${webUrl}`)
+  logInfo(`Navigating to ${webUrl} (ui_locale=${uiLocale || 'auto'})`)
   await page.goto(webUrl, { waitUntil: 'networkidle', timeout: timeoutMs })
 
   await ensureAttendanceLoaded(page)
