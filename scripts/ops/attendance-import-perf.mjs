@@ -472,6 +472,15 @@ function resolvePayloadSource() {
   if (payloadSourceRaw === 'csv') {
     return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'forced_csv' }
   }
+  // Large preview payloads are prone to request-size limits if sent as JSON rows.
+  // Prefer upload+csvFileId when upload channel is enabled.
+  if (mode === 'preview' && uploadCsv && rows > csvRowsLimitHint) {
+    return {
+      payloadSource: 'csv',
+      effectiveUploadCsv: true,
+      reason: `preview_prefers_upload_csv_for_large_rows(${csvRowsLimitHint})`,
+    }
+  }
   if (rows > csvRowsLimitHint) {
     return {
       payloadSource: 'rows',
