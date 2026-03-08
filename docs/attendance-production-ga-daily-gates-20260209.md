@@ -4527,3 +4527,12 @@ Notes:
 - drill issue lifecycle validated with safe title:
   - issue `#384` (`[Attendance Locale Drill] zh smoke gate test`) reopened on drill FAIL and closed on drill PASS.
 - dashboard drill issue (`#385`) used safe override title and was manually closed after verification.
+
+Post-merge sweep on `main` (after PR #386):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Branch Policy Drift | #22817065562 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817065562/attendance-branch-policy-drift-prod-22817065562-1/policy.json` |
+| Strict Gates | #22817072638 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817072638/attendance-strict-gates-prod-22817072638-1/20260308-080412-1/gate-summary.json` |
+| Perf Baseline | #22817126369 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817126369/attendance-import-perf-22817126369-1/attendance-perf-mmhh3ql8-r0dnt1/perf-summary.json` |
+| Daily Dashboard | #22817137242 | PASS | `output/playwright/attendance-post-merge-verify/20260308-pr386/ga/22817137242/attendance-daily-gate-dashboard-22817137242-1/attendance-daily-gate-dashboard.md` |

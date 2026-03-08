@@ -406,3 +406,24 @@ Result: PASS
   - `output/playwright/ga/22816933373/attendance-locale-zh-smoke-prod-22816933373-1/drill/drill.txt`
   - `output/playwright/ga/22816946058/attendance-daily-gate-dashboard-22816946058-1/attendance-daily-gate-dashboard.json`
   - `output/playwright/ga/22816958859/attendance-daily-gate-dashboard-22816958859-1/attendance-daily-gate-dashboard.json`
+
+## Round 11 Validation (Post-Merge Gate Sweep after PR #386)
+
+### Scope
+- verify `main` remains green after merging locale-zh gate integration.
+
+### Execution
+- command:
+  - `OUTPUT_ROOT=output/playwright/attendance-post-merge-verify/20260308-pr386 bash scripts/ops/attendance-post-merge-verify.sh`
+
+### Results
+- `branch-policy` run `22817065562` PASS
+- `strict-gates` run `22817072638` PASS
+- `perf-baseline` run `22817126369` PASS
+- `perf-baseline-contract` PASS
+- `daily-dashboard` run `22817137242` PASS
+
+### Evidence
+- `output/playwright/attendance-post-merge-verify/20260308-pr386/summary.md`
+- `output/playwright/attendance-post-merge-verify/20260308-pr386/summary.json`
+- `output/playwright/attendance-post-merge-verify/20260308-pr386/results.tsv`
