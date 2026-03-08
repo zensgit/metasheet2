@@ -13,9 +13,9 @@ This round completed parallel hardening across workflow contracts, backend async
 
 ### 5) Longrun preview payload strategy hardening
 - `scripts/ops/attendance-import-perf.mjs`
-  - In `PAYLOAD_SOURCE=auto`, large `preview` runs now prefer `csvFileId` when `UPLOAD_CSV=true`.
-  - New reason code: `preview_prefers_upload_csv_for_large_rows(<hint>)`.
-  - Goal: avoid 413 on large preview requests caused by JSON rows payload size.
+  - In `PAYLOAD_SOURCE=auto`, `preview` runs above CSV row cap now force rows payload fallback.
+  - New reason code: `preview_rows_exceeds_csv_limit_hint(<hint>)`.
+  - Goal: avoid hard `CSV_TOO_LARGE` failures when production keeps strict CSV row caps.
 
 ### 6) Longrun default stability
 - `.github/workflows/attendance-import-perf-longrun.yml`

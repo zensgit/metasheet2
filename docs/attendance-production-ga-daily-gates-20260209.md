@@ -4400,9 +4400,9 @@ Implementation:
   - 500k preview is still available by explicit opt-in:
     - `-f include_rows500k_preview=true`
 - file: `scripts/ops/attendance-import-perf.mjs`
-  - in `PAYLOAD_SOURCE=auto`, when `mode=preview` and `UPLOAD_CSV=true` and rows exceed hint, payload source now prefers CSV upload channel:
-    - `payloadSource=csv`
-    - `payloadSourceReason=preview_prefers_upload_csv_for_large_rows(<hint>)`
+  - in `PAYLOAD_SOURCE=auto`, when `mode=preview` and rows exceed CSV hint, payload source now falls back to rows:
+    - `payloadSource=rows`
+    - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(<hint>)`
 
 Verification runs:
 
