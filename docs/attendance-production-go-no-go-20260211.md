@@ -2636,6 +2636,28 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Verification (2026-03-08): Perf Baseline 100k Re-Check (Upload Requested)
+
+Scope:
+
+- re-run high-row perf baseline after PR #379/#380 merges to confirm bulk path stability and upload fallback telemetry.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`rows=100000`, `upload_csv=true`, `mode=commit`, `commit_async=false`) | #22816159099 | PASS | `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/attendance-perf-mmhest9g-9i59fm/perf-summary.json`, `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/perf.log` |
+
+Observed highlights:
+
+- `engine=bulk`, `recordUpsertStrategy=staging`.
+- `uploadCsvRequested=true` but `uploadCsv=false` with `payloadSource=rows` because production hint remains `CSV_ROWS_LIMIT_HINT=20000`.
+- `regressions=[]`.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-08): Legacy Import Result Parity
 
 Scope:

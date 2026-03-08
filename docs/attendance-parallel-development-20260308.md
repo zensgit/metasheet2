@@ -275,3 +275,33 @@ Result: PASS
 - `output/playwright/attendance-post-merge-verify/20260308-pr379/summary.md`
 - `output/playwright/attendance-post-merge-verify/20260308-pr379/summary.json`
 - `output/playwright/attendance-post-merge-verify/20260308-pr379/results.tsv`
+
+## Round 7 Validation (Perf Line: 100k Baseline Re-Check)
+
+### Scope
+- execute an additional 100k perf baseline on `main` with `upload_csv=true` requested, to verify fallback behavior and bulk-path health.
+
+### Execution
+- workflow: `attendance-import-perf-baseline.yml`
+- run: `22816159099`
+- dispatch inputs:
+  - `rows=100000`
+  - `mode=commit`
+  - `commit_async=false`
+  - `upload_csv=true`
+
+### Result
+- workflow status: PASS
+- summary highlights:
+  - `rows=100000`
+  - `engine=bulk`
+  - `recordUpsertStrategy=staging`
+  - `uploadCsvRequested=true`
+  - `uploadCsv=false`
+  - `payloadSource=rows`
+  - `payloadSourceReason=rows_exceeds_csv_limit_hint(20000)`
+  - `regressions=[]`
+
+### Evidence
+- `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/attendance-perf-mmhest9g-9i59fm/perf-summary.json`
+- `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/perf.log`
