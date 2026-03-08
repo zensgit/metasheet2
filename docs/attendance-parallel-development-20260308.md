@@ -305,3 +305,22 @@ Result: PASS
 ### Evidence
 - `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/attendance-perf-mmhest9g-9i59fm/perf-summary.json`
 - `output/playwright/ga/22816159099/attendance-import-perf-22816159099-1/perf.log`
+
+## Round 8 Validation (C-line: Import Success Telemetry in Admin UI)
+
+### Scope
+- make sync import success feedback include backend execution telemetry so operators can confirm runtime path without opening batch detail.
+
+### Change
+- `apps/web/src/views/AttendanceView.vue`
+  - on successful sync import (`/api/attendance/import/commit` and legacy `/api/attendance/import` fallback), status message now appends:
+    - `engine`
+    - `recordUpsertStrategy`
+    - `processedRows`
+    - `failedRows`
+    - `elapsedMs`
+  - keeps existing group-sync success details (`groupCreated`, `groupMembersAdded`) unchanged.
+
+### Verification
+- `pnpm --filter @metasheet/web build` PASS
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendance-import-preview-regression.spec.ts` PASS

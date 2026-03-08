@@ -5851,13 +5851,39 @@ async function runImport() {
       ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
     ]
     importCsvWarnings.value = Array.from(new Set(importWarnings))
-    const count = data.data?.imported ?? 0
+    const count = Number(data.data?.imported ?? 0)
+    const processedRows = toNonNegativeNumber(data.data?.processedRows) ?? count
+    const failedRows = toNonNegativeNumber(data.data?.failedRows) ?? 0
+    const elapsedMs = toNonNegativeNumber(data.data?.elapsedMs) ?? 0
+    const importEngine = String(data.data?.engine ?? '').trim().toLowerCase()
+    const importStrategy = String(data.data?.recordUpsertStrategy ?? '').trim().toLowerCase()
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
+    const perfBitsEn: string[] = []
+    const perfBitsZh: string[] = []
+    if (importEngine) {
+      perfBitsEn.push(`engine=${importEngine}`)
+      perfBitsZh.push(`引擎=${importEngine}`)
+    }
+    if (importStrategy) {
+      perfBitsEn.push(`strategy=${importStrategy}`)
+      perfBitsZh.push(`策略=${importStrategy}`)
+    }
+    perfBitsEn.push(`processed=${processedRows}`)
+    perfBitsZh.push(`处理=${processedRows}`)
+    perfBitsEn.push(`failed=${failedRows}`)
+    perfBitsZh.push(`失败=${failedRows}`)
+    perfBitsEn.push(`elapsedMs=${elapsedMs}`)
+    perfBitsZh.push(`耗时毫秒=${elapsedMs}`)
+    const perfSuffixEn = perfBitsEn.length ? ` (${perfBitsEn.join(', ')})` : ''
+    const perfSuffixZh = perfBitsZh.length ? `（${perfBitsZh.join('，')}）` : ''
     if (groupCreated || groupMembersAdded) {
-      setStatus(tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`))
+      setStatus(tr(
+        `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffixEn}`,
+        `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffixZh}`,
+      ))
     } else {
-      setStatus(tr(`Imported ${count} rows.`, `已导入 ${count} 行。`))
+      setStatus(tr(`Imported ${count} rows.${perfSuffixEn}`, `已导入 ${count} 行。${perfSuffixZh}`))
     }
     await loadRecords()
     await loadImportBatches()
