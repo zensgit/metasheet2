@@ -472,6 +472,15 @@ function resolvePayloadSource() {
   if (payloadSourceRaw === 'csv') {
     return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'forced_csv' }
   }
+  // Preview payloads cannot exceed the CSV row cap when using upload+csvFileId.
+  // Fall back to rows mode above this cap.
+  if (mode === 'preview' && uploadCsv && rows > csvRowsLimitHint) {
+    return {
+      payloadSource: 'rows',
+      effectiveUploadCsv: false,
+      reason: `preview_rows_exceeds_csv_limit_hint(${csvRowsLimitHint})`,
+    }
+  }
   if (rows > csvRowsLimitHint) {
     return {
       payloadSource: 'rows',

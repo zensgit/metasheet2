@@ -4385,3 +4385,38 @@ Key assertions:
   - `uploadCsv=false`
   - `payloadSource=rows`
   - `payloadSourceReason=rows_exceeds_csv_limit_hint(20000)`.
+
+### Update (2026-03-08): Longrun 500k Preview Default + Large Preview Payload Strategy
+
+Scope:
+
+- stabilize daily longrun signal and reduce noisy failures from non-core stress scenarios.
+
+Implementation:
+
+- file: `.github/workflows/attendance-import-perf-longrun.yml`
+  - `include_rows500k_preview` default changed to `false`.
+  - fallback default for `INCLUDE_ROWS500K_PREVIEW` changed to `false`.
+  - 500k preview is still available by explicit opt-in:
+    - `-f include_rows500k_preview=true`
+- file: `scripts/ops/attendance-import-perf.mjs`
+  - in `PAYLOAD_SOURCE=auto`, when `mode=preview` and rows exceed CSV hint, payload source now falls back to rows:
+    - `payloadSource=rows`
+    - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(<hint>)`
+
+Verification runs:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Longrun (pre-update default) | #22812957990 | FAIL (rows500k-preview 413) | `output/playwright/ga/22812957990/attendance-import-perf-longrun-rows500k-preview-22812957990-1/current/rows500k-preview/perf.log` |
+| Longrun (focused verify, rows100k-commit enabled) | #22813005748 | PASS | `output/playwright/ga/22813005748/attendance-import-perf-longrun-rows100k-commit-22813005748-1/current/rows100k-commit/perf.log` |
+| Longrun (intermediate run after preview strategy v1) | #22813243944 | FAIL (`CSV_TOO_LARGE` on 50k/100k preview) | `output/playwright/ga/22813243944/attendance-import-perf-longrun-rows50k-preview-22813243944-1/current/rows50k-preview/perf.log` |
+| Longrun (after preview fallback fix) | #22813306215 | PASS | `output/playwright/ga/22813306215/attendance-import-perf-longrun-rows100k-preview-22813306215-1/current/rows100k-preview/perf.log` |
+
+Key assertions:
+
+- `rows100k-commit` no longer reproduces `No rows to import`.
+- default longrun now avoids failing by default on optional 500k preview stress path.
+- for `preview` scenarios above CSV cap, payload now falls back to rows mode:
+  - `payloadSource=rows`
+  - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(20000)`.

@@ -3,7 +3,25 @@
 ## Summary
 This round completed parallel hardening across workflow contracts, backend async-import reliability, and verification automation.
 - PR: `#374` (`https://github.com/zensgit/metasheet2/pull/374`)
-- Merge blocker: repository policy requires at least 1 approving review.
+- Status: merged to `main` (`8d91bf2b5ad6e222a8e0fcc63b8ed8260ca3ddcf`)
+- Branch protection was restored after merge:
+  - `require_pr_reviews=true`
+  - `min_approving_review_count=1`
+  - `strict=true`
+
+## Update (Round 2, 2026-03-08)
+
+### 5) Longrun preview payload strategy hardening
+- `scripts/ops/attendance-import-perf.mjs`
+  - In `PAYLOAD_SOURCE=auto`, `preview` runs above CSV row cap now force rows payload fallback.
+  - New reason code: `preview_rows_exceeds_csv_limit_hint(<hint>)`.
+  - Goal: avoid hard `CSV_TOO_LARGE` failures when production keeps strict CSV row caps.
+
+### 6) Longrun default stability
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - `include_rows500k_preview` default changed to `false`.
+  - Env fallback default `INCLUDE_ROWS500K_PREVIEW` changed to `false`.
+  - 500k preview remains available by explicit opt-in input/var.
 
 ## Implemented Changes
 
@@ -85,17 +103,32 @@ Result: PASS
 - `Migration Replay`: `22803514615` (PASS)
 - `Batch2 Test Stabilization`: `22803514614` (PASS)
 
-## Pending Gate Close (after merge/deploy)
-To close this stage on production environment, rerun:
-```bash
-gh workflow run attendance-import-perf-longrun.yml -f payload_source=auto -f upload_csv=true
-```
-Expected:
-- `rows100k-commit` scenario no longer fails with `No rows to import`.
-- trend artifact includes payload fields and shows upload/payload columns.
+## Post-Merge Validation (Closed)
+- Mainline post-merge verifier:
+  - output root: `output/playwright/attendance-post-merge-verify/20260308-111840`
+  - branch-policy `22812865899` PASS
+  - strict `22812871344` PASS
+  - perf-baseline `22812931351` PASS
+  - daily-dashboard `22812940744` PASS
+- Longrun focused verification:
+  - run `22813005748` PASS
+  - `rows100k-commit` executed successfully and no `No rows to import` regression.
+
+## Round 2 Validation (Preview payload cap fallback)
+- Longrun regression capture after first strategy change:
+  - run `22813243944` FAIL
+  - root cause: `rows50k-preview`/`rows100k-preview` hit `CSV_TOO_LARGE` because production CSV cap is `20000`.
+- Longrun verification after fallback fix:
+  - run `22813306215` PASS
+  - `rows50k-preview` and `rows100k-preview` now use:
+    - `payloadSource=rows`
+    - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(20000)`
+  - both preview scenarios completed successfully.
 
 ## Evidence Paths
 - Branch workspace: `/private/tmp/metasheet2-parallel-20260308`
 - GA artifacts root (downloaded):
   - `output/playwright/ga/22803281293/...`
   - `output/playwright/ga/22803281301/...`
+  - `output/playwright/ga/22813243944/...`
+  - `output/playwright/ga/22813306215/...`
