@@ -6,10 +6,13 @@ AUTH_TOKEN_RAW="${AUTH_TOKEN:-}"
 LOGIN_EMAIL="${LOGIN_EMAIL:-}"
 LOGIN_PASSWORD="${LOGIN_PASSWORD:-}"
 AUTH_RESOLVE_META_FILE="${AUTH_RESOLVE_META_FILE:-}"
+AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP:-}"
 
 LAST_AUTH_CODE=""
 LAST_REFRESH_CODE=""
 LAST_LOGIN_CODE=""
+REFRESH_TOKEN_RESULT=""
+LOGIN_TOKEN_RESULT=""
 
 function trim() {
   printf '%s' "${1:-}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'
@@ -23,6 +26,63 @@ function normalize_token() {
   raw="${raw#bearer }"
   raw="$(trim "$raw")"
   printf '%s' "$raw"
+}
+
+function token_is_safe_for_header() {
+  local token="$1"
+  [[ "$token" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+function normalize_safe_token_or_empty() {
+  local token
+  token="$(normalize_token "${1:-}")"
+  if [[ -z "$token" ]]; then
+    printf ''
+    return 0
+  fi
+  if ! token_is_safe_for_header "$token"; then
+    echo "[attendance-resolve-auth] WARN: token contains unsafe characters; ignoring token candidate" >&2
+    printf ''
+    return 0
+  fi
+  printf '%s' "$token"
+}
+
+function is_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+function validate_api_base() {
+  local base="$1"
+  local lower
+  if [[ "$base" == *$'\r'* || "$base" == *$'\n'* ]]; then
+    echo "[attendance-resolve-auth] ERROR: API_BASE contains CR/LF characters" >&2
+    return 2
+  fi
+  lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" =~ ^https:// ]]; then
+    return 0
+  fi
+  if [[ "$lower" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])([/:]|$) ]]; then
+    return 0
+  fi
+  if [[ "$lower" =~ ^http:// ]] && is_truthy "$AUTH_RESOLVE_ALLOW_INSECURE_HTTP"; then
+    echo "[attendance-resolve-auth] WARN: API_BASE uses insecure HTTP and is allowed by AUTH_RESOLVE_ALLOW_INSECURE_HTTP" >&2
+    return 0
+  fi
+  if [[ "$lower" =~ ^http:// ]]; then
+    echo "[attendance-resolve-auth] ERROR: API_BASE must use HTTPS for non-local hosts (or set AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 explicitly)" >&2
+    return 2
+  fi
+  echo "[attendance-resolve-auth] ERROR: API_BASE must start with http:// or https://" >&2
+  return 2
 }
 
 function bool_present() {
@@ -49,6 +109,14 @@ EOF
 function request_auth_me_code() {
   local token="$1"
   local out_file
+  if [[ -z "$token" ]]; then
+    printf 'invalid-token'
+    return 0
+  fi
+  if ! token_is_safe_for_header "$token"; then
+    printf 'invalid-token'
+    return 0
+  fi
   out_file="$(mktemp)"
   curl -sS -o "$out_file" -w '%{http_code}' \
     --connect-timeout 8 \
@@ -86,7 +154,12 @@ function refresh_token() {
   local token="$1"
   local refresh_json code refreshed payload
   LAST_REFRESH_CODE=""
+  REFRESH_TOKEN_RESULT=""
   if [[ -z "$token" ]]; then
+    return 1
+  fi
+  if ! token_is_safe_for_header "$token"; then
+    LAST_REFRESH_CODE="invalid-token"
     return 1
   fi
   refresh_json="$(mktemp)"
@@ -102,16 +175,18 @@ function refresh_token() {
     return 1
   fi
   refreshed="$(jq -r '.data.token // empty' "$refresh_json")"
-  refreshed="$(normalize_token "$refreshed")"
+  refreshed="$(normalize_safe_token_or_empty "$refreshed")"
   if [[ -z "$refreshed" ]]; then
     return 1
   fi
-  printf '%s' "$refreshed"
+  REFRESH_TOKEN_RESULT="$refreshed"
+  return 0
 }
 
 function login_token() {
   local login_json code token payload
   LAST_LOGIN_CODE=""
+  LOGIN_TOKEN_RESULT=""
   if [[ -z "$LOGIN_EMAIL" || -z "$LOGIN_PASSWORD" ]]; then
     return 1
   fi
@@ -128,11 +203,12 @@ function login_token() {
     return 1
   fi
   token="$(jq -r '.data.token // empty' "$login_json")"
-  token="$(normalize_token "$token")"
+  token="$(normalize_safe_token_or_empty "$token")"
   if [[ -z "$token" ]]; then
     return 1
   fi
-  printf '%s' "$token"
+  LOGIN_TOKEN_RESULT="$token"
+  return 0
 }
 
 function main() {
@@ -142,9 +218,10 @@ function main() {
     echo "[attendance-resolve-auth] ERROR: API_BASE is required" >&2
     return 2
   fi
+  validate_api_base "$API_BASE" || return $?
 
   local base_token refreshed_token login_auth_token resolved_token auth_source
-  base_token="$(normalize_token "$AUTH_TOKEN_RAW")"
+  base_token="$(normalize_safe_token_or_empty "$AUTH_TOKEN_RAW")"
   resolved_token=""
   auth_source="none"
 
@@ -154,20 +231,22 @@ function main() {
   fi
 
   if [[ -z "$resolved_token" ]]; then
-    refreshed_token="$(refresh_token "$base_token" || true)"
-    refreshed_token="$(normalize_token "$refreshed_token")"
-    if validate_token_with_retry "$refreshed_token"; then
-      resolved_token="$refreshed_token"
-      auth_source="refresh"
+    if refresh_token "$base_token"; then
+      refreshed_token="$(normalize_safe_token_or_empty "$REFRESH_TOKEN_RESULT")"
+      if validate_token_with_retry "$refreshed_token"; then
+        resolved_token="$refreshed_token"
+        auth_source="refresh"
+      fi
     fi
   fi
 
   if [[ -z "$resolved_token" ]]; then
-    login_auth_token="$(login_token || true)"
-    login_auth_token="$(normalize_token "$login_auth_token")"
-    if validate_token_with_retry "$login_auth_token"; then
-      resolved_token="$login_auth_token"
-      auth_source="login"
+    if login_token; then
+      login_auth_token="$(normalize_safe_token_or_empty "$LOGIN_TOKEN_RESULT")"
+      if validate_token_with_retry "$login_auth_token"; then
+        resolved_token="$login_auth_token"
+        auth_source="login"
+      fi
     fi
   fi
 

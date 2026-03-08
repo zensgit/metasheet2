@@ -254,6 +254,7 @@ jobs:
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
       PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
       EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
       RUN_PREFLIGHT: 'false'
@@ -302,36 +303,14 @@ jobs:
             AUTH_TOKEN="${AUTH_TOKEN}" \
             LOGIN_EMAIL="${LOGIN_EMAIL}" \
             LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
             AUTH_RESOLVE_META_FILE="${meta_file}" \
             ./scripts/ops/attendance-resolve-auth.sh
           )"; then
-            auth_me_last_http="unknown"
-            refresh_last_http="unknown"
-            login_last_http="unknown"
-            login_email_present="false"
-            login_password_present="false"
-            if [[ -f "${meta_file}" ]]; then
-              auth_me_last_http="$(awk -F= '/^AUTH_ME_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
-              refresh_last_http="$(awk -F= '/^AUTH_REFRESH_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
-              login_last_http="$(awk -F= '/^AUTH_LOGIN_LAST_HTTP=/{print $2}' "${meta_file}" | tail -n1)"
-              login_email_present="$(awk -F= '/^AUTH_LOGIN_EMAIL_PRESENT=/{print $2}' "${meta_file}" | tail -n1)"
-              login_password_present="$(awk -F= '/^AUTH_LOGIN_PASSWORD_PRESENT=/{print $2}' "${meta_file}" | tail -n1)"
-            fi
-
-            {
-              echo 'No valid attendance admin token.'
-              echo 'Tried (in order):'
-              echo '1) ATTENDANCE_ADMIN_JWT / vars token via /api/auth/me (retry-aware)'
-              echo '2) /api/auth/refresh-token with JWT token'
-              echo '3) ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars)'
-              echo 'Diagnostic:'
-              echo "- auth_me_last_http=${auth_me_last_http}"
-              echo "- refresh_last_http=${refresh_last_http}"
-              echo "- login_last_http=${login_last_http}"
-              echo "- login_email_present=${login_email_present}"
-              echo "- login_password_present=${login_password_present}"
-              echo "API_BASE=${API_BASE}"
-            } > output/playwright/attendance-prod-acceptance/auth-error.txt
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-prod-acceptance/auth-error.txt"
             echo "::error::No valid attendance admin token; see auth-error.txt artifact."
             exit 1
           fi

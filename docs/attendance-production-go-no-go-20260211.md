@@ -5196,3 +5196,42 @@ Decision:
 - rollback deletion scope is hardened for existing-record update scenarios.
 - zh mobile downgrade path now has direct test coverage.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Auth Resolver Hardening + Unified Workflow Auth Failure Artifacts (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- resolve review findings in auth resolver fallback path and diagnostics.
+- keep GA workflows maintainable by replacing repeated auth-error text blocks with a single helper script.
+
+Changes:
+
+- `scripts/ops/attendance-resolve-auth.sh`
+  - fixed `LAST_REFRESH_CODE` / `LAST_LOGIN_CODE` propagation by removing command-substitution subshell dependency.
+  - added token safety filter before bearer header usage.
+  - added API base security guard (`https` required for non-local by default, explicit override via `AUTH_RESOLVE_ALLOW_INSECURE_HTTP`).
+- `scripts/ops/attendance-write-auth-error.sh` (new)
+  - centralized generator for `auth-error.txt`, reading `AUTH_*` diagnostics from resolver meta file.
+- workflow wiring updates:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+  - `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - all now set/pass `AUTH_RESOLVE_ALLOW_INSECURE_HTTP` and call `attendance-write-auth-error.sh`.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Resolver syntax | `bash -n scripts/ops/attendance-resolve-auth.sh` | PASS |
+| Shared auth-error helper syntax | `bash -n scripts/ops/attendance-write-auth-error.sh` | PASS |
+| Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-import-perf-baseline.yml .github/workflows/attendance-import-perf-longrun.yml .github/workflows/attendance-locale-zh-smoke-prod.yml` | PASS |
+| API base hardening guard | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (expected `rc=2`) |
+| HTTP override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (guard allowed; resolver continues fallback) |
+| Resolver meta diagnostics | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
+
+Decision:
+
+- auth fallback diagnostics are now reliable for triage.
+- auth error artifacts across strict/perf/locale workflows are unified and easier to maintain.
+- **GO maintained**.

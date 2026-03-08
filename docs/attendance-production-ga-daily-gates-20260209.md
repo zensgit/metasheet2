@@ -4914,3 +4914,38 @@ Verification:
 | Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
 | Gate runner shell syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS |
 | Local regression shell syntax | `bash -n scripts/ops/attendance-regression-local.sh` | PASS |
+
+### Update (2026-03-09): Auth Resolver Security + Workflow Error-Handling Unification
+
+Scope:
+
+- close PR review findings around auth resolver diagnostics and token/API base hardening.
+- remove duplicated auth failure blocks in GA workflows by introducing a shared writer script.
+
+Changes:
+
+- `scripts/ops/attendance-resolve-auth.sh`
+  - fixed refresh/login HTTP diagnostic propagation by removing subshell-dependent capture.
+  - added token safety guard (`[A-Za-z0-9._-]+`) before using bearer token in headers.
+  - added API base validation:
+    - non-local hosts require HTTPS by default;
+    - explicit override supported via `AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1`.
+- `scripts/ops/attendance-write-auth-error.sh` (new)
+  - shared helper that writes `auth-error.txt` from `auth-resolve-meta.txt`.
+- workflows updated:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+  - `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - now pass `AUTH_RESOLVE_ALLOW_INSECURE_HTTP` and call the shared auth-error helper.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Auth resolver shell syntax | `bash -n scripts/ops/attendance-resolve-auth.sh` | PASS |
+| Shared auth-error helper syntax | `bash -n scripts/ops/attendance-write-auth-error.sh` | PASS |
+| Workflow YAML parsing | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-import-perf-baseline.yml .github/workflows/attendance-import-perf-longrun.yml .github/workflows/attendance-locale-zh-smoke-prod.yml` | PASS |
+| API base guard (remote HTTP default blocked) | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (`rc=2`, expected block) |
+| API base override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (`rc=1`, guard allowed, token invalid expected) |
+| Meta diagnostics preserved (refresh/login attempted) | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
