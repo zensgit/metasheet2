@@ -4827,3 +4827,39 @@ Observed:
 
 - dashboard `overallStatus=pass`.
 - dashboard artifact includes `Branch Protection`, `Remote Preflight`, and `Storage Health` gate rows.
+
+### Update (2026-03-08): Perf Baseline Adds High-Scale Profile (100k Manual Refresh)
+
+Scope:
+
+- close the remaining backlog item “100k+ baseline refresh” with a reusable manual profile, without changing daily schedule defaults.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - new workflow input: `profile` (`standard|high-scale`, default `standard`)
+  - `high-scale` defaults:
+    - `rows=100000`
+    - `commit_async=true`
+    - `upload_csv=true`
+    - higher default timeout/threshold env fallbacks for large runs
+  - schedule path remains stable/short (`standard`) to avoid daily load inflation.
+
+Manual command:
+
+```bash
+gh workflow run attendance-import-perf-baseline.yml \
+  -f profile=high-scale \
+  --ref main
+```
+
+Verification (branch `codex/attendance-parallel-round17`):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+
+Observed:
+
+- workflow logs show resolved profile config: `profile=high-scale`, `rows=100000`, `commit_async=true`, `upload_csv=true`.
+- perf summary confirms `rows: 100000`, `commitAsync: true`.

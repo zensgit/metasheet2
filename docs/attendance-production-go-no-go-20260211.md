@@ -5119,3 +5119,27 @@ Decision:
 
 - policy and dashboard lines are stable after this fix round.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Perf Baseline High-Scale Profile Refresh (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- add and validate a reusable manual baseline profile for 100k imports while keeping daily schedule defaults unchanged.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - new `workflow_dispatch` input `profile=standard|high-scale`
+  - high-scale default resolution for `rows/commit_async/upload_csv` and large-run threshold/poll timeout fallbacks
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+
+Decision:
+
+- high-scale (100k) refresh path is available and validated.
+- daily default load profile remains unchanged.
+- **GO maintained**.
