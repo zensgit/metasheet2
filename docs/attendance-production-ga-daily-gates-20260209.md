@@ -4881,14 +4881,17 @@ Observed:
 Scope:
 
 - add regression protection for rollback safety on existing-record updates.
+- enforce async parity for upload references (`preview-async` / `commit-async` fail fast on missing `csvFileId`).
 - add deterministic `zh-CN` + mobile downgrade regression coverage at web test layer.
 
 Changes:
 
 - `plugins/plugin-attendance/index.cjs`
   - upsert keeps rollback scope safe by clearing `source_batch_id` for pre-existing rows.
+  - async import enqueue endpoints now return `404 NOT_FOUND` for missing upload metadata.
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
   - added rollback safety regression and concurrent `csvFileId` idempotency regression.
+  - added async-missing-upload fail-fast regressions (`preview-async` / `commit-async`).
 - `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
   - validates `建议使用桌面端` / `返回总览` flow for `admin` and `workflow` tabs.
 
@@ -4896,5 +4899,5 @@ Verification:
 
 | Check | Command | Status |
 |---|---|---|
-| Backend integration targeted suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "deduplicates concurrent csvFileId commits with the same idempotencyKey|keeps existing records after rolling back a later update batch"` | PASS |
+| Backend integration targeted suite | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist"` | PASS |
 | Web regression (`zh-CN` + mobile) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |

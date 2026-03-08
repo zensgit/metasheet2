@@ -5154,15 +5154,19 @@ Decision:
 Scope:
 
 - close a data-safety gap where rollback could delete updated existing records.
+- enforce async import parity: `preview-async` / `commit-async` now fail fast on missing `csvFileId`.
 - add deterministic web regression coverage for `zh-CN` + mobile desktop-only downgrade behavior.
 
 Changes:
 
 - `plugins/plugin-attendance/index.cjs`
   - import upsert now detaches `source_batch_id` for existing rows (safety-first rollback scope).
+  - async endpoints return `404 NOT_FOUND` immediately when `csvFileId` metadata is missing.
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
   - added `keeps existing records after rolling back a later update batch`.
   - added `deduplicates concurrent csvFileId commits with the same idempotencyKey`.
+  - added `returns NOT_FOUND for preview-async when csvFileId does not exist`.
+  - added `returns NOT_FOUND for commit-async when csvFileId does not exist`.
 - `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
   - new regression spec for `AttendanceExperienceView` with `zh-CN` locale + mobile gate.
 
@@ -5170,7 +5174,7 @@ Verification:
 
 | Check | Command | Status |
 |---|---|---|
-| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "deduplicates concurrent csvFileId commits with the same idempotencyKey|keeps existing records after rolling back a later update batch"` | PASS |
+| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist"` | PASS |
 | Web regression (new zh/mobile spec) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts` | PASS |
 
 Decision:

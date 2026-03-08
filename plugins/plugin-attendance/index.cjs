@@ -11872,6 +11872,9 @@ module.exports = {
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
 	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
 	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (!meta) {
+	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+	            }
 	            if (meta && isImportUploadExpired(meta)) {
 	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 	            }
@@ -12022,6 +12025,9 @@ module.exports = {
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
 	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
 	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (!meta) {
+	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+	            }
 	            if (meta && isImportUploadExpired(meta)) {
 	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 	            }
