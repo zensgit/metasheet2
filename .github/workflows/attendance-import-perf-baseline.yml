@@ -22,8 +22,12 @@ on:
         description: 'API base (must end with /api)'
         required: false
         default: 'http://142.171.239.56:8081/api'
+      profile:
+        description: 'Perf profile (standard|high-scale). high-scale defaults to 100k rows + async.'
+        required: false
+        default: 'standard'
       rows:
-        description: 'CSV rows to generate (default 10000)'
+        description: 'CSV rows to generate (overrides profile default when set)'
         required: false
         default: '10000'
       mode:
@@ -148,21 +152,22 @@ jobs:
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      PERF_PROFILE: ${{ github.event_name == 'schedule' && 'standard' || inputs.profile || vars.ATTENDANCE_PERF_BASELINE_PROFILE || 'standard' }}
       # Schedule runs must stay stable and short. Keep manual dispatch flexible.
-      ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
+      ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_HIGH || '100000')) || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
-      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || (inputs.profile == 'high-scale' && 'true') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
-      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
-      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
-      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
-      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
-      MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_PAYLOAD_SOURCE_HIGH || 'auto')) || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_CSV_ROWS_LIMIT_HINT_HIGH || '100000')) || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '240000')) || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
+      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '420000')) || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
+      MAX_EXPORT_MS: ${{ inputs.max_export_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_EXPORT_MS_HIGH || '90000')) || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
       MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_BASELINE_MAX_ROLLBACK_MS || '30000' }}
-      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS || '600000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
-      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS || '900000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
+      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS || '600000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_HIGH_MS || '3600000')) || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
+      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS || '900000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_HIGH_MS || '5400000')) || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -232,6 +237,7 @@ jobs:
           set -euo pipefail
           echo "event=${{ github.event_name }}"
           echo "api_base=${API_BASE}"
+          echo "profile=${PERF_PROFILE}"
           echo "auth_source=${{ steps.resolve-auth-token.outputs.auth_source || 'unknown' }}"
           echo "rows=${ROWS}"
           echo "mode=${MODE}"
