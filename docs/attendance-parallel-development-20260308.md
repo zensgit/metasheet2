@@ -114,8 +114,21 @@ Result: PASS
   - run `22813005748` PASS
   - `rows100k-commit` executed successfully and no `No rows to import` regression.
 
+## Round 2 Validation (Preview payload cap fallback)
+- Longrun regression capture after first strategy change:
+  - run `22813243944` FAIL
+  - root cause: `rows50k-preview`/`rows100k-preview` hit `CSV_TOO_LARGE` because production CSV cap is `20000`.
+- Longrun verification after fallback fix:
+  - run `22813306215` PASS
+  - `rows50k-preview` and `rows100k-preview` now use:
+    - `payloadSource=rows`
+    - `payloadSourceReason=preview_rows_exceeds_csv_limit_hint(20000)`
+  - both preview scenarios completed successfully.
+
 ## Evidence Paths
 - Branch workspace: `/private/tmp/metasheet2-parallel-20260308`
 - GA artifacts root (downloaded):
   - `output/playwright/ga/22803281293/...`
   - `output/playwright/ga/22803281301/...`
+  - `output/playwright/ga/22813243944/...`
+  - `output/playwright/ga/22813306215/...`
