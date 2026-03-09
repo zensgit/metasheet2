@@ -62,8 +62,13 @@ This round focused on production-gate reliability and async import regression ha
 - `scripts/ops/attendance-fast-parallel-regression.sh` (new)
   - runs key ops tests + strict/dashboard contract cases in parallel.
   - emits unified `summary.md` / `summary.json` under `output/playwright/attendance-fast-parallel-regression/<timestamp>/`.
+  - supports `PROFILE=full|ops|contracts` and `MAX_PARALLEL=<n>` to target specific lanes.
+  - default output root now uses `timestamp + pid` to avoid same-second collisions during concurrent runs.
 - `package.json`
-  - adds npm shortcut `pnpm verify:attendance-regression-fast`.
+  - adds npm shortcuts:
+    - `pnpm verify:attendance-regression-fast`
+    - `pnpm verify:attendance-regression-fast:ops`
+    - `pnpm verify:attendance-regression-fast:contracts`
 - `scripts/ops/attendance-regression-local.sh`
   - fixes command execution context to always run from repo root (`bash -c "cd <root> && ..."`), preventing login-shell cwd drift.
 
@@ -91,6 +96,8 @@ Both documents now include:
 7. `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` -> PASS
 8. `scripts/ops/attendance-fast-parallel-regression.sh` -> PASS
 9. `pnpm verify:attendance-regression-fast` -> PASS
+10. `pnpm verify:attendance-regression-fast:ops` -> PASS
+11. `pnpm verify:attendance-regression-fast:contracts` -> PASS
 
 Fast parallel evidence:
 
@@ -100,6 +107,12 @@ Fast parallel evidence:
 - `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json`
 - `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`
 - `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json`
 
 Evidence:
 

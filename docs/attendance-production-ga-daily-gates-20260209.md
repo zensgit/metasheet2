@@ -5500,9 +5500,14 @@ Changes:
 
 - new script `scripts/ops/attendance-fast-parallel-regression.sh`:
   - executes ops test suites and gate contract checks in parallel.
+  - supports `PROFILE=full|ops|contracts` and `MAX_PARALLEL=<n>` to target specific lanes.
   - emits normalized artifacts (`results.tsv`, `summary.md`, `summary.json`) under:
-    - `output/playwright/attendance-fast-parallel-regression/<timestamp>/`
+    - `output/playwright/attendance-fast-parallel-regression/<timestamp>-<pid>/`
 - `scripts/ops/attendance-regression-local.sh` now forces per-check cwd to repository root, avoiding false failures from login-shell cwd differences.
+- `package.json` adds shortcuts:
+  - `pnpm verify:attendance-regression-fast`
+  - `pnpm verify:attendance-regression-fast:ops`
+  - `pnpm verify:attendance-regression-fast:contracts`
 
 Verification:
 
@@ -5511,6 +5516,9 @@ Verification:
 | Syntax checks | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh` | PASS | stdout |
 | Fast parallel run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
 | Fast parallel run (pnpm shortcut) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json` |
+| Fast parallel run (ops lane) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.json` |
+| Fast parallel run (contracts lane) | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
+| Fast parallel run (full lane, collision-safe output path) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json` |
 
 Operational note:
 

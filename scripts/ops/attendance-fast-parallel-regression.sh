@@ -4,9 +4,18 @@ set -u
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-timestamp="$(date +%Y%m%d-%H%M%S)"
+timestamp="$(date +%Y%m%d-%H%M%S)-$$"
 OUTPUT_ROOT="${OUTPUT_ROOT:-output/playwright/attendance-fast-parallel-regression/${timestamp}}"
-RUN_CONTRACT_CASES="${RUN_CONTRACT_CASES:-true}"
+PROFILE="${PROFILE:-full}"
+MAX_PARALLEL="${MAX_PARALLEL:-0}"
+
+if [[ -z "${RUN_CONTRACT_CASES+x}" ]]; then
+  if [[ "$PROFILE" == "ops" ]]; then
+    RUN_CONTRACT_CASES="false"
+  else
+    RUN_CONTRACT_CASES="true"
+  fi
+fi
 
 mkdir -p "$OUTPUT_ROOT"
 RESULTS_TSV="${OUTPUT_ROOT}/results.tsv"
@@ -17,6 +26,11 @@ echo -e "check\tstatus\trc\tlog" >"$RESULTS_TSV"
 
 function info() {
   echo "[attendance-fast-parallel-regression] $*" >&2
+}
+
+function die() {
+  echo "[attendance-fast-parallel-regression] ERROR: $*" >&2
+  exit 1
 }
 
 function slugify() {
@@ -58,23 +72,28 @@ function run_check_async() {
   CHECK_PIDS[$index]=$!
 }
 
-add_check \
-  "ops-auth-scripts-tests" \
-  "node --test scripts/ops/attendance-auth-scripts.test.mjs"
+[[ "$PROFILE" =~ ^(full|ops|contracts)$ ]] || die "PROFILE must be one of: full, ops, contracts"
+[[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || die "MAX_PARALLEL must be an integer >= 0"
 
-add_check \
-  "ops-dispatcher-tests" \
-  "node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs"
+if [[ "$PROFILE" == "full" || "$PROFILE" == "ops" ]]; then
+  add_check \
+    "ops-auth-scripts-tests" \
+    "node --test scripts/ops/attendance-auth-scripts.test.mjs"
 
-add_check \
-  "ops-telemetry-utils-tests" \
-  "node --test scripts/ops/attendance-import-telemetry-utils.test.mjs"
+  add_check \
+    "ops-dispatcher-tests" \
+    "node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs"
 
-add_check \
-  "ops-daily-gate-report-tests" \
-  "node --test scripts/ops/attendance-daily-gate-report.test.mjs"
+  add_check \
+    "ops-telemetry-utils-tests" \
+    "node --test scripts/ops/attendance-import-telemetry-utils.test.mjs"
 
-if [[ "$RUN_CONTRACT_CASES" == "true" ]]; then
+  add_check \
+    "ops-daily-gate-report-tests" \
+    "node --test scripts/ops/attendance-daily-gate-report.test.mjs"
+fi
+
+if [[ "$PROFILE" == "contracts" || "$RUN_CONTRACT_CASES" == "true" ]]; then
   add_check \
     "contract-strict" \
     "bash scripts/ops/attendance-run-gate-contract-case.sh strict \"$OUTPUT_ROOT/contracts\""
@@ -85,14 +104,30 @@ if [[ "$RUN_CONTRACT_CASES" == "true" ]]; then
 fi
 
 total_checks="${#CHECK_NAMES[@]}"
-info "starting ${total_checks} checks in parallel"
+if (( total_checks == 0 )); then
+  die "no checks selected (PROFILE=${PROFILE}, RUN_CONTRACT_CASES=${RUN_CONTRACT_CASES})"
+fi
 
+if (( MAX_PARALLEL == 0 )); then
+  MAX_PARALLEL="$total_checks"
+fi
+if (( MAX_PARALLEL < 1 )); then
+  die "MAX_PARALLEL must be >= 1"
+fi
+
+info "starting ${total_checks} checks in parallel (profile=${PROFILE}, max_parallel=${MAX_PARALLEL})"
+
+declare -a ACTIVE_PIDS=()
 for index in "${!CHECK_NAMES[@]}"; do
   run_check_async "$index"
+  ACTIVE_PIDS+=("${CHECK_PIDS[$index]}")
+  if (( ${#ACTIVE_PIDS[@]} >= MAX_PARALLEL )); then
+    wait "${ACTIVE_PIDS[0]}" || true
+    ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
+  fi
 done
 
-for index in "${!CHECK_PIDS[@]}"; do
-  pid="${CHECK_PIDS[$index]}"
+for pid in "${ACTIVE_PIDS[@]}"; do
   if [[ -n "$pid" ]]; then
     wait "$pid" || true
   fi
@@ -117,6 +152,8 @@ total_count="$(awk -F'\t' 'NR>1 {c++} END {print c+0}' "$RESULTS_TSV")"
   echo "# Attendance Fast Parallel Regression Summary"
   echo
   echo "- Timestamp: ${timestamp}"
+  echo "- Profile: \`${PROFILE}\`"
+  echo "- Max parallel: \`${MAX_PARALLEL}\`"
   echo "- Output root: \`${OUTPUT_ROOT}\`"
   echo "- Totals: ${total_count} checks, ${pass_count} pass, ${fail_count} fail, ${skip_count} skip"
   echo
