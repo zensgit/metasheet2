@@ -5740,6 +5740,7 @@ Verification:
 | Syntax guard | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
 | Dispatcher fallback tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
 | Fast parallel regression run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
+| Fast parallel regression run (pnpm shortcut) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json` |
 
 Decision:
 

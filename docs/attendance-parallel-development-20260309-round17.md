@@ -62,6 +62,8 @@ This round focused on production-gate reliability and async import regression ha
 - `scripts/ops/attendance-fast-parallel-regression.sh` (new)
   - runs key ops tests + strict/dashboard contract cases in parallel.
   - emits unified `summary.md` / `summary.json` under `output/playwright/attendance-fast-parallel-regression/<timestamp>/`.
+- `package.json`
+  - adds npm shortcut `pnpm verify:attendance-regression-fast`.
 - `scripts/ops/attendance-regression-local.sh`
   - fixes command execution context to always run from repo root (`bash -c "cd <root> && ..."`), preventing login-shell cwd drift.
 
@@ -88,6 +90,7 @@ Both documents now include:
 6. `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` -> PASS
 7. `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` -> PASS
 8. `scripts/ops/attendance-fast-parallel-regression.sh` -> PASS
+9. `pnpm verify:attendance-regression-fast` -> PASS
 
 Fast parallel evidence:
 
@@ -95,6 +98,8 @@ Fast parallel evidence:
 - `output/playwright/attendance-fast-parallel-regression/20260309-170637/summary.json`
 - `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`
 - `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json`
 
 Evidence:
 

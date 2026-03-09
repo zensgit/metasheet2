@@ -5510,6 +5510,7 @@ Verification:
 |---|---|---|---|
 | Syntax checks | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh` | PASS | stdout |
 | Fast parallel run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
+| Fast parallel run (pnpm shortcut) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json` |
 
 Operational note:
 
