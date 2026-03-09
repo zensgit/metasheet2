@@ -55,6 +55,9 @@ This round focused on production-gate reliability and async import regression ha
 - `scripts/ops/attendance-run-workflow-dispatch.test.mjs`
   - added regression tests for fallback and normal dispatch flows.
 
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - strict contract case now executes dispatcher regression tests, so dispatcher compatibility is protected in the existing gate contract matrix path.
+
 ### Documentation Updates
 
 - `docs/attendance-production-ga-daily-gates-20260209.md`
@@ -76,6 +79,7 @@ Both documents now include:
 4. `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` -> PASS
 5. `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` -> PASS
 6. `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` -> PASS
+7. `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` -> PASS
 
 Evidence:
 
@@ -106,3 +110,4 @@ Evidence:
 4. `62798a19` docs(attendance): add full-chain compatibility fallback evidence
 5. `aace2dd1` fix(ops): reset post-merge gate run metadata on dispatch
 6. `203120c0` docs(attendance): add round17 parallel development report
+7. `fb1e66e3` test(ops): harden shared workflow dispatcher input-fallback

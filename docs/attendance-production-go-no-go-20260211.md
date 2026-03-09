@@ -5713,6 +5713,7 @@ Verification:
 | Shared dispatcher tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
 | Shared dispatcher syntax | `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
 | Post-merge verifier syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Strict contract matrix (includes dispatcher tests) | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` | PASS | `/tmp/attendance-gate-contract-check-round17-dispatch/strict/*` |
 
 Decision:
 

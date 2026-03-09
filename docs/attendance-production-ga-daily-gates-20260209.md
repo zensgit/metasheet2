@@ -5483,6 +5483,7 @@ Verification:
 | Dispatcher fallback regression tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
 | Dispatcher syntax | `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
 | Post-merge syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Strict contract matrix with dispatcher tests | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` | PASS | `/tmp/attendance-gate-contract-check-round17-dispatch/strict/*` |
 
 Decision:
 
