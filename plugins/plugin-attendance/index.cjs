@@ -6183,10 +6183,23 @@ module.exports = {
 	        })
 	      }
 
+	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rows.length)
+	      const asyncPreviewFailedRows = Math.max(
+	        0,
+	        Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0)
+	      )
 	      return {
 	        items: preview,
 	        total: preview.length,
 	        rowCount: rows.length,
+	        engine: asyncPreviewEngine,
+	        processedRows: rows.length,
+	        failedRows: asyncPreviewFailedRows,
+	        elapsedMs: 0,
+	        recordUpsertStrategy: resolveImportRecordUpsertStrategy({
+	          rowCount: rows.length,
+	          engine: asyncPreviewEngine,
+	        }),
 	        truncated: rows.length > previewLimit,
 	        previewLimit,
 	        stats: previewStats,
@@ -6196,11 +6209,19 @@ module.exports = {
 	      }
 		    }
 
-		    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
-		      const result = await buildAsyncPreviewResult({ payload, requesterId, orgId })
-		      await db.query(
-		        `UPDATE attendance_import_jobs
-		         SET status = 'completed',
+	    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
+	      const previewStartedAtMs = Date.now()
+	      const result = await buildAsyncPreviewResult({ payload, requesterId, orgId })
+	      const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
+	      const previewSummary = {
+	        processedRows: Number(result.processedRows ?? result.rowCount ?? 0),
+	        failedRows: Number(result.failedRows ?? 0),
+	        elapsedMs: previewElapsedMs,
+	        recordUpsertStrategy: result.recordUpsertStrategy ?? null,
+	      }
+	      await db.query(
+	        `UPDATE attendance_import_jobs
+	         SET status = 'completed',
 	             progress = $3,
 	             total = $4,
 	             error = NULL,
@@ -6216,8 +6237,12 @@ module.exports = {
 		          JSON.stringify({
 		            __jobType: 'preview',
 		            idempotencyKey: payload.idempotencyKey ?? null,
-		            __importEngine: resolveImportEngineFromMeta(payload, result.rowCount),
-		            previewResult: result,
+		            __importEngine: result.engine ?? resolveImportEngineFromMeta(payload, result.rowCount),
+		            summary: previewSummary,
+		            previewResult: {
+		              ...result,
+		              elapsedMs: previewElapsedMs,
+		            },
 		          }),
 	        ]
 	      )
@@ -7664,12 +7689,8 @@ module.exports = {
 	            }
 	          })
 
-	          if (csvFileId) {
-	            await deleteImportUpload({ orgId, fileId: csvFileId })
-	          }
-
-	          res.json({
-	            ok: true,
+		          res.json({
+		            ok: true,
 	            data: {
 	              items,
 	              total,
@@ -10420,6 +10441,7 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
           return
         }
+        const previewStartedAtMs = Date.now()
         if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -10846,12 +10868,24 @@ module.exports = {
           }
 
           const combinedWarnings = [...csvWarnings, ...groupWarnings]
+          const previewFailedRows = Math.max(0, Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0))
+          const previewEngine = resolveImportEngineFromMeta(parsed.data, rows.length)
+          const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
+          const previewRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+            rowCount: rows.length,
+            engine: previewEngine,
+          })
           res.json({
             ok: true,
             data: {
               items: preview,
               total: preview.length,
               rowCount: rows.length,
+              engine: previewEngine,
+              processedRows: rows.length,
+              failedRows: previewFailedRows,
+              elapsedMs: previewElapsedMs,
+              recordUpsertStrategy: previewRecordUpsertStrategy,
               truncated,
               previewLimit,
               stats: previewStats,

@@ -5507,3 +5507,29 @@ Decision:
 
 - telemetry contract enforcement is now script-level default for perf runs, reducing hidden regression risk.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Preview Telemetry Contract Consistency
+
+Scope:
+
+- ensure sync preview and async preview job payloads expose telemetry fields required by strict perf scripts.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - sync preview API now returns `engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`.
+  - async preview worker persists telemetry summary under payload `summary`.
+  - removed erroneous anomalies-route `csvFileId` cleanup reference that caused a 500 in integration tests.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - expanded assertions for preview telemetry fields.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+Decision:
+
+- preview telemetry contract is now aligned across sync/async paths and supports strict perf telemetry enforcement.
+- **GO maintained**.

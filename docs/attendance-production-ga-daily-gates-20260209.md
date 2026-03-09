@@ -5266,3 +5266,32 @@ Verification:
 | Smoke API script syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | stdout |
 | Telemetry util unit tests | `node --test scripts/ops/attendance-import-telemetry-utils.test.mjs` | PASS | stdout |
 | Daily report unit tests (regression) | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+
+### Update (2026-03-09): Backend Preview Telemetry Alignment
+
+Scope:
+
+- align `/api/attendance/import/preview` with commit/async job telemetry fields so perf strict mode can rely on consistent contracts.
+- ensure async preview jobs persist telemetry summary in job payload.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - sync preview response now includes:
+    - `engine`
+    - `processedRows`
+    - `failedRows`
+    - `elapsedMs`
+    - `recordUpsertStrategy`
+  - async preview worker now stores `summary.{processedRows,failedRows,elapsedMs,recordUpsertStrategy}` in job payload.
+  - removed stray invalid `csvFileId` cleanup reference from anomalies route.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - added preview telemetry assertions in:
+    - `registers attendance routes and lists plugin`
+    - `supports async import preview jobs (preview-async + job polling)`
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Backend integration (preview + async preview) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |

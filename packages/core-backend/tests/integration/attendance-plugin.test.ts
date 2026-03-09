@@ -565,6 +565,12 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(importPayload),
     })
     expect(importPreviewRes.status).toBe(200)
+    const importPreviewData = (importPreviewRes.body as { data?: any } | undefined)?.data
+    expect(Number(importPreviewData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(importPreviewData?.failedRows ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(Number(importPreviewData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(['standard', 'bulk']).toContain(String(importPreviewData?.engine))
+    expect(['values', 'unnest', 'staging']).toContain(String(importPreviewData?.recordUpsertStrategy))
 
     const importRes = await requestJson(`${baseUrl}/api/attendance/import`, {
       method: 'POST',
@@ -1380,6 +1386,7 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof job?.processedRows).toBe('number')
     expect(typeof job?.failedRows).toBe('number')
     expect(typeof job?.elapsedMs).toBe('number')
+    expect(['values', 'unnest', 'staging']).toContain(String(job?.recordUpsertStrategy || ''))
     expect(typeof job?.progressPercent).toBe('number')
     expect(typeof job?.throughputRowsPerSec).toBe('number')
     expectChunkConfigMatchesEngine(job?.engine, job?.chunkConfig)
@@ -1696,6 +1703,7 @@ describe('Attendance Plugin Integration', () => {
     expect(typeof completedPreviewJob?.failedRows).toBe('number')
     expect(completedPreviewJob?.processedRows).toBeGreaterThanOrEqual(2)
     expect(typeof completedPreviewJob?.elapsedMs).toBe('number')
+    expect(['values', 'unnest', 'staging']).toContain(String(completedPreviewJob?.recordUpsertStrategy || ''))
     expect(typeof completedPreviewJob?.progressPercent).toBe('number')
     expect(typeof completedPreviewJob?.throughputRowsPerSec).toBe('number')
   })
