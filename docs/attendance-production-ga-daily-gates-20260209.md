@@ -5394,3 +5394,32 @@ Post-merge verify shortcut:
 PERF_BASELINE_PROFILE="high-scale" \
 bash scripts/ops/attendance-post-merge-verify.sh
 ```
+
+### Update (2026-03-09): Nightly Post-Merge Verify Re-run + Async Large-Payload Import Regression
+
+Scope:
+
+- re-verify the mainline nightly post-merge chain after profile/contract hardening.
+- add regression coverage for async `commit-async` idempotent retry when request payload uses large `entries` and retry omits `commitToken`.
+
+Changes:
+
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - increased async commit polling ceiling in integration test to avoid CI false timeout.
+  - added `keeps large entries payload for commit-async jobs when csv payload is absent`.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Attendance Post-Merge Verify (Nightly) | #22842467070 | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.md`, `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.json` |
+| Strict gate retry path in nightly | #22842479790 -> #22842628652 | PASS after retry | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.md` |
+| Perf baseline contract assert in nightly | local assert (run #22842759903) | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/gate-perf-baseline-contract.log` |
+| Locale zh contract assert in nightly | local assert (run #22842730292) | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/gate-locale-zh-contract.log` |
+| Async commit polling regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "supports async import commit jobs \\(commit-async \\+ job polling\\)"` | PASS | vitest stdout |
+| Async large-payload idempotency regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps large entries payload for commit-async jobs when csv payload is absent"` | PASS | vitest stdout |
+
+Decision:
+
+- nightly chain remains stable and produces complete artifacts.
+- async large-payload retry behavior now has explicit regression protection.
