@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseLocaleZhSummaryJson, pickLatestCompletedRun, resolveGateSignalBranch } from './attendance-daily-gate-report.mjs'
+import {
+  parseLocaleZhSummaryJson,
+  pickLatestCompletedRun,
+  resolveGateSignalBranch,
+  resolveQueryBranchDisplayValue,
+} from './attendance-daily-gate-report.mjs'
 
 test('pickLatestCompletedRun skips excluded conclusions and falls back to previous valid run', () => {
   const list = [
@@ -106,4 +111,20 @@ test('resolveGateSignalBranch can override remote signal branch explicitly', () 
     remoteSignalBranchValue: 'release/ops-signal',
   })
   assert.equal(resolved, 'release/ops-signal')
+})
+
+test('resolveQueryBranchDisplayValue prefers gate query branch', () => {
+  const resolved = resolveQueryBranchDisplayValue({
+    gate: { queryBranch: 'main' },
+    reportBranchValue: 'codex/feature-branch',
+  })
+  assert.equal(resolved, 'main')
+})
+
+test('resolveQueryBranchDisplayValue falls back to report branch', () => {
+  const resolved = resolveQueryBranchDisplayValue({
+    gate: { queryBranch: '' },
+    reportBranchValue: 'codex/feature-branch',
+  })
+  assert.equal(resolved, 'codex/feature-branch')
 })

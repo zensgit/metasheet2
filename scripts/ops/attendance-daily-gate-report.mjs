@@ -640,6 +640,13 @@ export function resolveGateSignalBranch({ gateName, reportBranch, remoteSignalBr
   return report
 }
 
+export function resolveQueryBranchDisplayValue({ gate, reportBranchValue }) {
+  const gateBranch = typeof gate?.queryBranch === 'string' ? gate.queryBranch.trim() : ''
+  if (gateBranch) return gateBranch
+  const reportBranch = typeof reportBranchValue === 'string' ? reportBranchValue.trim() : ''
+  return reportBranch || '-'
+}
+
 function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, queryBranch }) {
   const findings = []
   let ok = true
@@ -759,8 +766,8 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Gate Status')
   lines.push('')
-  lines.push('| Gate | Severity | Latest Completed | Conclusion | Reason | Updated (UTC) | Status | Link |')
-  lines.push('|---|---|---|---|---|---|---|---|')
+  lines.push('| Gate | Query Branch | Severity | Latest Completed | Conclusion | Reason | Updated (UTC) | Status | Link |')
+  lines.push('|---|---|---|---|---|---|---|---|---|')
 
   function gateReasonCell(gate) {
     if (!gate || gate.ok) return '-'
@@ -842,11 +849,12 @@ function renderMarkdown({
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
+    const queryBranch = `\`${resolveQueryBranchDisplayValue({ gate, reportBranchValue: branchValue })}\``
     const reason = gateReasonCell(gate)
     const updatedAt = completed.updatedAt || '-'
     const status = gate.ok ? 'PASS' : 'FAIL'
     const link = completed.url ? `[run](${completed.url})` : '-'
-    lines.push(`| ${gate.name} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
+    lines.push(`| ${gate.name} | ${queryBranch} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
   }
 
   lines.push('')

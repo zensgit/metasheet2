@@ -5445,3 +5445,31 @@ Decision:
 - feature-branch dashboard validation can now pass with production-like remote signals without forcing `main` branch verification only.
 - production `main` behavior remains unchanged.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Dashboard Query Branch Visibility
+
+Scope:
+
+- expose gate query-branch routing directly in dashboard markdown (`Gate Status`) for faster triage and operator auditability.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - Gate Status table now includes `Query Branch`.
+  - added `resolveQueryBranchDisplayValue()` to keep output stable when `gate.queryBranch` is absent.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added unit tests for helper behavior.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Daily report unit tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Feature-branch dashboard replay (remote signals on main) | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.md` (Query Branch column present), `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` |
+| Dashboard JSON validator | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` | PASS | stdout |
+
+Decision:
+
+- daily dashboard now exposes branch routing decisions directly in markdown and remains contract-valid.
+- **GO maintained**.

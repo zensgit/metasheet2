@@ -5207,3 +5207,26 @@ Additional hardening (same round):
   - now supports local report JSON (no `escalationIssue` field) by treating it as `none_or_closed` instead of hard-failing.
 - `scripts/ops/attendance-run-gate-contract-case.sh`
   - adds negative fixture `dashboard.invalid.query-branch.json` proving non-main strict gate cannot accidentally bind to `main`.
+
+### Update (2026-03-09): Gate Status Markdown Adds Query Branch Column
+
+Scope:
+
+- make per-gate branch routing immediately visible in the rendered dashboard markdown, not only in JSON (`gateFlat.*.queryBranch`).
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - Gate Status table now includes a `Query Branch` column.
+  - added helper `resolveQueryBranchDisplayValue()` to keep display behavior deterministic.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added unit coverage for `resolveQueryBranchDisplayValue()` fallback/override behavior.
+
+Verification:
+
+| Check | Command/Run | Status | Evidence |
+|---|---|---|---|
+| Daily report tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Feature-branch dashboard replay | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.md` (contains `Query Branch` column), `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` |
+| Dashboard JSON contract validator | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` | PASS | stdout |
