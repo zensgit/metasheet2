@@ -5460,3 +5460,31 @@ Full-chain replay (same compatibility path enabled):
 | Strict retry path | #22843329945 -> #22843491398 | PASS after retry | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md` |
 | Perf baseline dispatch fallback | #22843641249 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843641249/attendance-import-perf-22843641249-1/attendance-perf-mmivxy9u-pyo5ab/perf-summary.json` |
 | Daily dashboard | #22843663627 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843663627` |
+
+### Update (2026-03-09): Shared Workflow Dispatcher Compatibility Guard
+
+Scope:
+
+- propagate unsupported-input fallback logic from post-merge verifier to the shared dispatcher script used by ops workflows.
+
+Changes:
+
+- `scripts/ops/attendance-run-workflow-dispatch.sh`
+  - detects dispatch error pattern `Unexpected inputs provided: [...]`.
+  - retries once after removing rejected `-f key=value` entries.
+  - preserves accepted inputs and normal run discovery/watch flow.
+- `scripts/ops/attendance-run-workflow-dispatch.test.mjs` (new)
+  - mocked `gh` integration tests for fallback path and normal path.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Dispatcher fallback regression tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
+| Dispatcher syntax | `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
+| Post-merge syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+
+Decision:
+
+- shared workflow dispatch now has the same schema-drift resilience as post-merge verifier.
+- reduces repeated manual fixes when workflow inputs are introduced incrementally across branches.

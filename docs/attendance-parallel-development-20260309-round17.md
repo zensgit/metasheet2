@@ -7,7 +7,8 @@ This round focused on production-gate reliability and async import regression ha
 1. close async `commit-async` regression gap for large in-memory payload retries.
 2. harden `attendance-post-merge-verify.sh` against workflow dispatch schema skew (`Unexpected inputs provided`).
 3. eliminate stale run metadata leakage on dispatch failure paths.
-4. record full evidence (local + GA run IDs) into production handoff documents.
+4. apply the same dispatch compatibility guard to generic workflow dispatcher used by ops scripts.
+5. record full evidence (local + GA run IDs) into production handoff documents.
 
 ## Design Decisions
 
@@ -29,6 +30,13 @@ This round focused on production-gate reliability and async import regression ha
 - Reset `RUN_ID/RUN_URL/RUN_CONCLUSION/RUN_ARTIFACTS` at each gate trigger start.
 - Prevent stale run IDs from previous gates being reused when dispatch fails early.
 
+### D. Shared dispatcher hardening
+
+- Extend `attendance-run-workflow-dispatch.sh` with unsupported-input fallback, so any ops script using this helper can survive temporary workflow input drift.
+- Add deterministic node tests with mocked `gh` to verify:
+  - fallback retry removes rejected inputs only,
+  - normal dispatch path stays single-shot.
+
 ## Implementation
 
 ### Code
@@ -40,6 +48,12 @@ This round focused on production-gate reliability and async import regression ha
 - `scripts/ops/attendance-post-merge-verify.sh`
   - unsupported-input fallback retry for workflow dispatch.
   - per-gate run metadata reset before dispatch.
+
+- `scripts/ops/attendance-run-workflow-dispatch.sh`
+  - unsupported-input fallback retry for workflow dispatch.
+
+- `scripts/ops/attendance-run-workflow-dispatch.test.mjs`
+  - added regression tests for fallback and normal dispatch flows.
 
 ### Documentation Updates
 
@@ -60,6 +74,8 @@ Both documents now include:
 2. `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "supports async import commit jobs \\(commit-async \\+ job polling\\)"` -> PASS
 3. `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps large entries payload for commit-async jobs when csv payload is absent"` -> PASS
 4. `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` -> PASS
+5. `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` -> PASS
+6. `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` -> PASS
 
 Evidence:
 
@@ -89,3 +105,4 @@ Evidence:
 3. `e0fbe671` fix(ops): retry post-merge dispatch without unsupported inputs
 4. `62798a19` docs(attendance): add full-chain compatibility fallback evidence
 5. `aace2dd1` fix(ops): reset post-merge gate run metadata on dispatch
+6. `203120c0` docs(attendance): add round17 parallel development report

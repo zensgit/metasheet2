@@ -5690,3 +5690,31 @@ Conclusion:
 
 - fallback logic is validated on both perf-only replay and full-chain replay.
 - production-oriented post-merge verification is stable under mixed workflow schema versions.
+
+## Post-Go Verification (2026-03-09): Shared Dispatcher Fallback Compatibility
+
+Scope:
+
+- make the shared workflow dispatch utility resilient to workflow input-schema drift (same failure mode fixed in post-merge verifier).
+
+Changes:
+
+- `scripts/ops/attendance-run-workflow-dispatch.sh`
+  - adds unsupported-input fallback retry logic for `gh workflow run`.
+- `scripts/ops/attendance-run-workflow-dispatch.test.mjs`
+  - adds deterministic mocked-`gh` coverage for:
+    - fallback path (unsupported input removed on retry),
+    - regular success path (single dispatch).
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Shared dispatcher tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
+| Shared dispatcher syntax | `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
+| Post-merge verifier syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+
+Decision:
+
+- dispatcher-level compatibility is now regression-tested, not only script-local patched.
+- **GO maintained**.
