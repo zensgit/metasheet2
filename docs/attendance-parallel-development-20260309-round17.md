@@ -159,3 +159,5 @@ Evidence:
 10. `e3bcf950` chore(attendance): add fast regression pnpm entry and evidence
 11. `2696fa0b` feat(ops): add lane profiles for fast attendance regression
 12. `d54051ca` test(ops): cover fast attendance regression lane profiles
+13. `4077520b` docs(attendance): update round17 commit log and profile evidence
+14. `02a9855b` feat(ops): export fast regression profile metadata in summaries
