@@ -5449,3 +5449,12 @@ Observed:
 
 - dispatch first emitted `Unexpected inputs provided: ["profile"]`, then fallback retry succeeded automatically.
 - contract assertion still passed (`uploadCsv=true`, `payloadSource=csv`, `rows=10000`, `mode=commit`).
+
+Full-chain replay (same compatibility path enabled):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Post-Merge Verify (full chain, `PERF_BASELINE_PROFILE=high-scale`) | local run `output/playwright/attendance-post-merge-verify/20260309-154253` | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-154253/summary.json` |
+| Strict retry path | #22843329945 -> #22843491398 | PASS after retry | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md` |
+| Perf baseline dispatch fallback | #22843641249 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843641249/attendance-import-perf-22843641249-1/attendance-perf-mmivxy9u-pyo5ab/perf-summary.json` |
+| Daily dashboard | #22843663627 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843663627` |

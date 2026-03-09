@@ -5674,3 +5674,17 @@ Decision:
 - post-merge verifier now tolerates temporary workflow input skew across branches.
 - gate chain remains actionable and no longer fails early on dispatch contract drift.
 - **GO maintained**.
+
+Follow-up full-chain replay:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Attendance Post-Merge Verify (full chain, `PERF_BASELINE_PROFILE=high-scale`) | local run `output/playwright/attendance-post-merge-verify/20260309-154253` | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-154253/summary.json` |
+| Strict gate retry path | #22843329945 -> #22843491398 | PASS after retry | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md` |
+| Perf baseline fallback dispatch run | #22843641249 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843641249/attendance-import-perf-22843641249-1/attendance-perf-mmivxy9u-pyo5ab/perf-summary.json` |
+| Daily dashboard run | #22843663627 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843663627` |
+
+Conclusion:
+
+- fallback logic is validated on both perf-only replay and full-chain replay.
+- production-oriented post-merge verification is stable under mixed workflow schema versions.
