@@ -4,6 +4,9 @@ import { query } from '../db/pg'
 import { TokenBucketRateLimiter } from '../integration/rate-limiting/token-bucket'
 import {
   attendanceApiErrorsTotal,
+  attendanceImportElapsedSeconds,
+  attendanceImportFailedRowsTotal,
+  attendanceImportProcessedRowsTotal,
   attendanceImportUploadBytesTotal,
   attendanceImportUploadRowsTotal,
   attendanceOperationFailuresTotal,
@@ -135,6 +138,26 @@ function resolveAttendanceOperation(req: Request, normalizedRoute: string): stri
   return 'other'
 }
 
+const importTelemetryOperations = new Set([
+  'import_preview',
+  'import_preview_async',
+  'import_commit',
+  'import_commit_async',
+  'import_job_poll',
+])
+
+function parseNonNegativeNumber(value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return null
+  return numeric
+}
+
+function normalizeImportEngine(value: unknown): 'standard' | 'bulk' | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'standard' || normalized === 'bulk') return normalized
+  return null
+}
+
 function shouldAudit(req: Request): boolean {
   if (!req.path.startsWith('/api/')) return false
   if (req.path.startsWith('/api/attendance/')) return true
@@ -205,7 +228,18 @@ export function attendanceAuditMiddleware(): RequestHandler {
     let responseOk: boolean | null = null
     let errorCode: string | null = null
     let errorMessage: string | null = null
-    const captured: { batchId?: string; requestId?: string; targetUserId?: string; uploadFileId?: string; uploadBytes?: number; uploadRows?: number } = {}
+    const captured: {
+      batchId?: string
+      requestId?: string
+      targetUserId?: string
+      uploadFileId?: string
+      uploadBytes?: number
+      uploadRows?: number
+      importEngine?: string
+      importProcessedRows?: number
+      importFailedRows?: number
+      importElapsedMs?: number
+    } = {}
 
     const originalJson = res.json.bind(res)
     res.json = (body: unknown) => {
@@ -224,6 +258,17 @@ export function attendanceAuditMiddleware(): RequestHandler {
             if (typeof data.fileId === 'string') captured.uploadFileId = data.fileId
             if (typeof data.bytes === 'number' && Number.isFinite(data.bytes)) captured.uploadBytes = data.bytes
             if (typeof data.rowCount === 'number' && Number.isFinite(data.rowCount)) captured.uploadRows = data.rowCount
+            const telemetrySource = (data.job && typeof data.job === 'object')
+              ? (data.job as Record<string, unknown>)
+              : data
+            const engine = normalizeImportEngine(telemetrySource.engine)
+            const processedRows = parseNonNegativeNumber(telemetrySource.processedRows)
+            const failedRows = parseNonNegativeNumber(telemetrySource.failedRows)
+            const elapsedMs = parseNonNegativeNumber(telemetrySource.elapsedMs)
+            if (engine) captured.importEngine = engine
+            if (processedRows !== null) captured.importProcessedRows = processedRows
+            if (failedRows !== null) captured.importFailedRows = failedRows
+            if (elapsedMs !== null) captured.importElapsedMs = elapsedMs
           }
         }
       } catch {
@@ -253,6 +298,29 @@ export function attendanceAuditMiddleware(): RequestHandler {
           }
           if (typeof captured.uploadRows === 'number' && captured.uploadRows >= 0) {
             attendanceImportUploadRowsTotal.inc(captured.uploadRows)
+          }
+        }
+        if (importTelemetryOperations.has(op) && requestResult === 'ok') {
+          const engine = normalizeImportEngine(captured.importEngine)
+          if (engine) {
+            if (typeof captured.importProcessedRows === 'number' && captured.importProcessedRows >= 0) {
+              attendanceImportProcessedRowsTotal.inc(
+                { operation: op, engine },
+                captured.importProcessedRows,
+              )
+            }
+            if (typeof captured.importFailedRows === 'number' && captured.importFailedRows >= 0) {
+              attendanceImportFailedRowsTotal.inc(
+                { operation: op, engine },
+                captured.importFailedRows,
+              )
+            }
+            if (typeof captured.importElapsedMs === 'number' && captured.importElapsedMs >= 0) {
+              attendanceImportElapsedSeconds.observe(
+                { operation: op, engine },
+                Math.max(0, captured.importElapsedMs / 1000),
+              )
+            }
           }
         }
 

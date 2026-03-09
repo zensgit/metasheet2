@@ -5295,3 +5295,32 @@ Verification:
 | Check | Command | Status | Evidence |
 |---|---|---|---|
 | Backend integration (preview + async preview) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+### Update (2026-03-09): Prometheus Import Telemetry Metrics
+
+Scope:
+
+- expose import telemetry (`processedRows`, `failedRows`, `elapsedMs`, `engine`) as Prometheus series from production middleware.
+
+Changes:
+
+- `packages/core-backend/src/metrics/attendance-metrics.ts`
+  - added:
+    - `attendance_import_processed_rows_total{operation,engine}`
+    - `attendance_import_failed_rows_total{operation,engine}`
+    - `attendance_import_elapsed_seconds{operation,engine}`
+- `packages/core-backend/src/middleware/attendance-production.ts`
+  - captures telemetry from import responses (`data` or `data.job`) for:
+    - `import_preview`
+    - `import_preview_async`
+    - `import_commit`
+    - `import_commit_async`
+    - `import_job_poll`
+  - records counters/histogram on successful responses only.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Core backend type check | `pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.json --noEmit` | PASS | stdout |
+| Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |

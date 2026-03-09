@@ -5533,3 +5533,32 @@ Decision:
 
 - preview telemetry contract is now aligned across sync/async paths and supports strict perf telemetry enforcement.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Import Telemetry Metrics Export
+
+Scope:
+
+- emit import telemetry fields from middleware into Prometheus with low-cardinality labels.
+
+Changes:
+
+- `packages/core-backend/src/metrics/attendance-metrics.ts`
+  - new metrics:
+    - `attendance_import_processed_rows_total{operation,engine}`
+    - `attendance_import_failed_rows_total{operation,engine}`
+    - `attendance_import_elapsed_seconds{operation,engine}`
+- `packages/core-backend/src/middleware/attendance-production.ts`
+  - telemetry capture from response payload (`data` / `data.job`) for import preview/commit/job poll operations.
+  - writes metrics only for successful requests.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Core backend type check | `pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.json --noEmit` | PASS | stdout |
+| Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+Decision:
+
+- production middleware now exports row/failure/elapsed telemetry for import operations, enabling trend alerting without parsing logs.
+- **GO maintained**.
