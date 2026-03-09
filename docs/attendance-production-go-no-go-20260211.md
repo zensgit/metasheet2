@@ -5660,6 +5660,7 @@ Changes:
   - detects `Unexpected inputs provided` from `gh workflow run`.
   - strips unsupported dispatch keys and retries automatically once.
   - avoids false post-merge failures caused only by workflow input skew.
+  - clears per-gate run metadata before trigger to avoid stale run identifiers when dispatch fails before run discovery.
 
 Verification:
 
@@ -5667,6 +5668,7 @@ Verification:
 |---|---|---|---|
 | Script syntax guard | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
 | Compatibility replay (perf-only chain, `PERF_BASELINE_PROFILE=high-scale`) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-153802/summary.json` |
+| Compatibility replay (perf-only chain + stale-run-id guard) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-155917/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-155917/summary.json` |
 | Perf baseline downstream run | #22843172792 | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/ga/22843172792/attendance-import-perf-22843172792-1/attendance-perf-mmivdf41-hrc4ue/perf-summary.json` |
 
 Decision:

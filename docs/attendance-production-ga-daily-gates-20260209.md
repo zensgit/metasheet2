@@ -5436,6 +5436,7 @@ Changes:
   - parses `gh workflow run` errors for `Unexpected inputs provided`.
   - retries dispatch once after removing unsupported `-f key=value` inputs.
   - keeps remaining inputs unchanged and preserves downstream artifact contract checks.
+  - resets gate run metadata (`RUN_ID/RUN_URL/RUN_CONCLUSION/RUN_ARTIFACTS`) at trigger start to avoid stale run IDs on early dispatch failure paths.
 
 Verification:
 
@@ -5443,6 +5444,7 @@ Verification:
 |---|---|---|---|
 | Script syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
 | Backward-compatible perf dispatch replay | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-153802/summary.json` |
+| Backward-compatible perf dispatch replay (metadata reset check) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-155917/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-155917/summary.json` |
 | Perf baseline run (after unsupported input fallback) | #22843172792 | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/ga/22843172792/attendance-import-perf-22843172792-1/attendance-perf-mmivdf41-hrc4ue/perf-summary.json` |
 
 Observed:

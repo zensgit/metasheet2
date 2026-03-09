@@ -417,6 +417,13 @@ function trigger_and_wait() {
   local run_json=''
   local attempt
 
+  # Reset global run metadata at the beginning of each gate trigger to avoid stale IDs
+  # when dispatch/discovery fails before a new run is created.
+  RUN_ID=''
+  RUN_URL=''
+  RUN_CONCLUSION=''
+  RUN_ARTIFACTS=''
+
   before_id="$(gh_capture gh run list --workflow "$workflow" --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId // 0' || echo '0')"
   if [[ -z "$before_id" ]]; then
     before_id='0'
