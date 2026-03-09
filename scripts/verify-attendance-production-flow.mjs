@@ -196,7 +196,7 @@ async function clickImportAndWaitForCommitResponse(page, importSection) {
     if (resp.request().method() !== 'POST') return false
     return isImportCommitUrl(resp.url())
   }, { timeout: timeoutMs })
-  await importSection.getByRole('button', { name: 'Import' }).click()
+  await importSection.getByRole('button', { name: 'Import', exact: true }).click()
   const response = await responsePromise
   const raw = await response.text()
   let body = null

@@ -300,6 +300,10 @@ function detect_playwright_reason() {
     echo "FEATURE_DISABLED"
     return 0
   fi
+  if grep -qiE 'strict mode violation|locator\\.click' "$log"; then
+    echo "SELECTOR_STRICT_VIOLATION"
+    return 0
+  fi
   if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
     echo "RATE_LIMITED"
     return 0
