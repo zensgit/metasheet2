@@ -1,3 +1,5 @@
+import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
+
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
 const orgId = process.env.ORG_ID || 'default'
@@ -22,8 +24,6 @@ const groupRetryAttempts = Math.max(1, Number(process.env.GROUP_RETRY_ATTEMPTS |
 const groupRetryDelayMs = Math.max(100, Number(process.env.GROUP_RETRY_DELAY_MS || 1000))
 const groupPageSize = Math.max(1, Number(process.env.GROUP_PAGE_SIZE || 200))
 const groupPageMax = Math.max(1, Number(process.env.GROUP_PAGE_MAX || 20))
-const importEngines = new Set(['standard', 'bulk'])
-const importRecordUpsertStrategies = new Set(['values', 'unnest', 'staging'])
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -189,56 +189,6 @@ function isoMinutesAgo(minutes) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function coerceNonNegativeNumber(value) {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed >= 0) return parsed
-  }
-  return null
-}
-
-function assertImportTelemetry(payload, label, options = {}) {
-  const minProcessedRows = Number.isFinite(options.minProcessedRows) ? Number(options.minProcessedRows) : null
-  const requireUpsertStrategy = options.requireUpsertStrategy === true
-  const engine = typeof payload?.engine === 'string' ? payload.engine.trim().toLowerCase() : ''
-  if (!importEngines.has(engine)) {
-    throw new Error(`${label}: telemetry.engine missing or invalid`)
-  }
-  const processedRows = coerceNonNegativeNumber(payload?.processedRows ?? payload?.rowCount ?? payload?.imported)
-  if (processedRows === null) {
-    throw new Error(`${label}: telemetry.processedRows missing or invalid`)
-  }
-  if (minProcessedRows !== null && processedRows < minProcessedRows) {
-    throw new Error(`${label}: telemetry.processedRows below minimum (${processedRows} < ${minProcessedRows})`)
-  }
-  const failedRows = coerceNonNegativeNumber(payload?.failedRows ?? payload?.skippedCount ?? 0)
-  if (failedRows === null) {
-    throw new Error(`${label}: telemetry.failedRows missing or invalid`)
-  }
-  const elapsedMs = coerceNonNegativeNumber(payload?.elapsedMs ?? payload?.jobElapsedMs)
-  if (elapsedMs === null) {
-    throw new Error(`${label}: telemetry.elapsedMs missing or invalid`)
-  }
-  const recordUpsertStrategy = typeof payload?.recordUpsertStrategy === 'string'
-    ? payload.recordUpsertStrategy.trim().toLowerCase()
-    : ''
-  if (recordUpsertStrategy) {
-    if (!importRecordUpsertStrategies.has(recordUpsertStrategy)) {
-      throw new Error(`${label}: telemetry.recordUpsertStrategy invalid (${recordUpsertStrategy})`)
-    }
-  } else if (requireUpsertStrategy) {
-    throw new Error(`${label}: telemetry.recordUpsertStrategy missing`)
-  }
-  return {
-    engine,
-    processedRows,
-    failedRows,
-    elapsedMs,
-    recordUpsertStrategy: recordUpsertStrategy || null,
-  }
 }
 
 function isRetriableStatus(status) {

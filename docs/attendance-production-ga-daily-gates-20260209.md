@@ -5231,3 +5231,38 @@ Verification:
 | Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
 | Feature-branch dashboard replay | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.md` (contains `Query Branch` column), `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` |
 | Dashboard JSON contract validator | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` | PASS | stdout |
+
+### Update (2026-03-09): Perf Telemetry Strictness + Preview Mode Routing
+
+Scope:
+
+- stop perf scripts from masking missing commit telemetry via fallback values.
+- support `PREVIEW_MODE=sync|async|auto` so large scenarios can automatically switch to `preview-async`.
+- remove duplicated telemetry assertions between smoke/perf scripts.
+
+Changes:
+
+- added shared helper: `scripts/ops/attendance-import-telemetry-utils.mjs`
+  - `assertImportTelemetry()`
+  - `coerceNonNegativeNumber()`
+- `scripts/ops/attendance-smoke-api.mjs`
+  - now imports shared telemetry assertions (no duplicated local implementation).
+- `scripts/ops/attendance-import-perf.mjs`
+  - new envs:
+    - `PREVIEW_MODE=sync|async|auto` (default `sync`)
+    - `PREVIEW_ASYNC_ROW_THRESHOLD` (default `50000`)
+    - `REQUIRE_IMPORT_TELEMETRY` (default `true`)
+    - `REQUIRE_IMPORT_UPSERT_STRATEGY` (default `false`)
+  - preview stage can call `/attendance/import/preview-async` and poll job when mode resolves to `async`.
+  - commit telemetry now enforces explicit `processedRows/failedRows/elapsedMs` when `REQUIRE_IMPORT_TELEMETRY=true` (no synthetic backfill from `rows`/`0`).
+  - perf summary now records `previewMode` and `previewEndpoint`.
+- added test: `scripts/ops/attendance-import-telemetry-utils.test.mjs`
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Perf script syntax | `node --check scripts/ops/attendance-import-perf.mjs` | PASS | stdout |
+| Smoke API script syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | stdout |
+| Telemetry util unit tests | `node --test scripts/ops/attendance-import-telemetry-utils.test.mjs` | PASS | stdout |
+| Daily report unit tests (regression) | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |

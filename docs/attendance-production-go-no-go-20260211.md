@@ -5474,3 +5474,36 @@ Decision:
 
 - daily dashboard now exposes branch routing decisions directly in markdown and remains contract-valid.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Telemetry Enforcement + Preview Mode Controls
+
+Scope:
+
+- enforce explicit import telemetry in perf runs to avoid false-positive baselines.
+- add preview routing controls (`sync|async|auto`) for high-row scenarios.
+- deduplicate telemetry assertions by sharing helper utilities with strict smoke.
+
+Changes:
+
+- `scripts/ops/attendance-import-telemetry-utils.mjs` (new shared helper).
+- `scripts/ops/attendance-smoke-api.mjs` imports shared telemetry assertions.
+- `scripts/ops/attendance-import-perf.mjs`
+  - adds `PREVIEW_MODE`, `PREVIEW_ASYNC_ROW_THRESHOLD`, `REQUIRE_IMPORT_TELEMETRY`, `REQUIRE_IMPORT_UPSERT_STRATEGY`.
+  - supports preview async job polling path.
+  - removes synthetic fallback defaults for commit telemetry when strict mode is enabled.
+  - emits `previewMode` and `previewEndpoint` in `perf-summary.json`.
+- `scripts/ops/attendance-import-telemetry-utils.test.mjs` (new unit tests).
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Perf script syntax | `node --check scripts/ops/attendance-import-perf.mjs` | PASS | stdout |
+| Strict smoke script syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | stdout |
+| Telemetry helper unit tests | `node --test scripts/ops/attendance-import-telemetry-utils.test.mjs` | PASS | stdout |
+| Dashboard unit regression | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+
+Decision:
+
+- telemetry contract enforcement is now script-level default for perf runs, reducing hidden regression risk.
+- **GO maintained**.
