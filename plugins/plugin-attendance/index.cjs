@@ -7680,6 +7680,10 @@ module.exports = {
 	            },
 	          })
 	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
@@ -12108,21 +12112,25 @@ module.exports = {
           const isIdempotencyUnique = Boolean(cleanIdempotencyKey)
             && String(error?.code ?? '') === '23505'
             && maybeConstraint.includes('uq_attendance_import_jobs_idempotency')
-          if (isIdempotencyUnique) {
-            try {
-              const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
-              if (existingJob) {
-                res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
-                return
-              }
-            } catch (_error) {
-              // Fall through to generic error response.
-            }
-          }
+	          if (isIdempotencyUnique) {
+	            try {
+	              const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
+	              if (existingJob) {
+	                res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
+	                return
+	              }
+	            } catch (_error) {
+	              // Fall through to generic error response.
+	            }
+	          }
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 
-          logger.error('Attendance import async commit failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue import job' } })
-        }
+	          logger.error('Attendance import async commit failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue import job' } })
+	        }
       })
     )
 
@@ -13578,6 +13586,10 @@ module.exports = {
 	          res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`)
 	          res.send(lines.join('\n'))
 	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
