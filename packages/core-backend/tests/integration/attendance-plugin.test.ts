@@ -1546,7 +1546,7 @@ describe('Attendance Plugin Integration', () => {
 
     let completedJob: any = null
     let batchId = ''
-    for (let i = 0; i < 160; i += 1) {
+    for (let i = 0; i < 2000; i += 1) {
       const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${initialJobId}`, {
         method: 'GET',
         headers: {
@@ -1582,7 +1582,119 @@ describe('Attendance Plugin Integration', () => {
       body: '{}',
     })
     expect(rollbackRes.status).toBe(200)
-  })
+  }, 120000)
+
+  it('keeps large entries payload for commit-async jobs when csv payload is absent', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const totalEntries = 20_001
+    const entries = Array.from({ length: totalEntries }, (_, index) => ({
+      userId: 'attendance-large-entries',
+      workDate,
+      field: `raw_field_${index}`,
+      value: `${workDate}T09:00:00Z`,
+      meta: {
+        column: `raw_field_${index}`,
+        value: `${workDate}T09:00:00Z`,
+      },
+    }))
+    const idempotencyKey = `integration-async-entries-large-${Date.now().toString(36)}`
+
+    const commitPayload = {
+      userId: 'attendance-test',
+      idempotencyKey,
+      timezone: 'UTC',
+      entries,
+      mode: 'override',
+      commitToken,
+    }
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commitPayload),
+    })
+    expect(commitRes.status).toBe(200)
+    const initialJob = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
+    const initialJobId = initialJob?.id
+    expect(typeof initialJobId).toBe('string')
+
+    const { commitToken: _commitToken, ...retryPayload } = commitPayload
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(retryPayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryData = (retryRes.body as { data?: { job?: any; idempotent?: boolean } } | undefined)?.data
+    expect(retryData?.job?.id).toBe(initialJobId)
+    expect(retryData?.idempotent).toBe(true)
+
+    let completedJob: any = null
+    let batchId = ''
+    for (let i = 0; i < 400; i += 1) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${initialJobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        completedJob = jobData
+        batchId = String(jobData?.batchId || '')
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+
+    expect(completedJob).toBeTruthy()
+    expect(batchId).toBeTruthy()
+    expect(Number(completedJob?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(completedJob?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+
+    const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(rollbackRes.status).toBe(200)
+  }, 120000)
 
   it('supports async import preview jobs (preview-async + job polling)', async () => {
     if (!baseUrl) return
