@@ -5005,3 +5005,40 @@ GA evidence (2026-03-09, branch verification):
 |---|---|---|---|
 | Attendance Locale zh Smoke (Prod) | #22832016585 | PASS | `output/playwright/ga/22832016585/attendance-zh-locale-summary.json`, `output/playwright/ga/22832016585/attendance-zh-locale-calendar.png` |
 | Attendance Daily Gate Dashboard | #22832043211 | FAIL (expected on feature branch with missing preflight/metrics/storage history) | `output/playwright/ga/22832043211/attendance-daily-gate-dashboard.json` (`gateFlat.localeZh.summarySchemaVersion=1`, `locale=zh-CN`, `lunarCount=42`, `holidayBadgeCount=1`) |
+
+### Update (2026-03-09): Daily Dashboard Non-main Escalation Suppression + OpenAPI Import Telemetry Contract
+
+Scope:
+
+- suppress paging/issue side effects when running dashboard verification on non-main branches.
+- strengthen OpenAPI contract to ensure import job telemetry fields remain present.
+
+Changes:
+
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - new dispatch input: `escalate_issues_for_non_main` (default `false`).
+  - issue open/close steps now run only on `main` (or when override is `true`).
+  - markdown/json escalation metadata now records non-main suppression mode.
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - allows `escalationIssue.mode=suppressed_non_main`.
+- `scripts/ops/attendance-validate-openapi-import-contract.mjs`
+  - now enforces `AttendanceImportJob` telemetry fields:
+    - `engine`, `processedRows`, `failedRows`, `elapsedMs`, `recordUpsertStrategy`.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - openapi case adds negative fixture removing `AttendanceImportJob.properties.processedRows`; expected failure is now enforced.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Dashboard workflow YAML parse | `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/attendance-daily-gate-dashboard.yml"); puts "yaml-parse-ok"'` | PASS |
+| Dashboard report contract | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17c` | PASS |
+| OpenAPI import contract | `node ./scripts/ops/attendance-validate-openapi-import-contract.mjs packages/openapi/dist/openapi.json packages/openapi/src/paths/attendance.yml` | PASS |
+| OpenAPI negative telemetry contract | `jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' ... | node ./scripts/ops/attendance-validate-openapi-import-contract.mjs ...` | PASS (expected failure) |
+| OpenAPI contract matrix case | `./scripts/ops/attendance-run-gate-contract-case.sh openapi /tmp/attendance-gate-contract-check-round17c` | PASS |
+
+GA evidence:
+
+| Workflow | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Daily Gate Dashboard (feature branch verify) | #22834176090 | FAIL expected (P0 missing histories), no issue opened | `output/playwright/ga/22834176090/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_non_main`) |

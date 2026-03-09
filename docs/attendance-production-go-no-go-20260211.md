@@ -5271,3 +5271,27 @@ Decision:
 - dashboard contract catches locale artifact regressions before they appear in production runbooks.
 - temporary branch-run escalation issue `#397` was closed after validation to avoid production signal pollution.
 - **GO maintained** (P0 unaffected, P1 visibility strengthened).
+
+## Post-Go Verification (2026-03-09): Non-main Dashboard Escalation Suppression + OpenAPI Import Job Telemetry Contract (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- prevent feature-branch dashboard verification from opening production escalation issues.
+- enforce import job telemetry fields at OpenAPI contract level.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Dashboard contract regression | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17c` | PASS | `/tmp/attendance-gate-contract-check-round17c/dashboard/*` |
+| OpenAPI contract (positive) | `node ./scripts/ops/attendance-validate-openapi-import-contract.mjs packages/openapi/dist/openapi.json packages/openapi/src/paths/attendance.yml` | PASS | stdout |
+| OpenAPI contract (negative telemetry) | `jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' ... | node ./scripts/ops/attendance-validate-openapi-import-contract.mjs ...` | PASS (expected failure) | stderr includes `AttendanceImportJob missing telemetry field: processedRows` |
+| OpenAPI contract matrix case | `./scripts/ops/attendance-run-gate-contract-case.sh openapi /tmp/attendance-gate-contract-check-round17c` | PASS | `/tmp/attendance-gate-contract-check-round17c/openapi/*` |
+| GA dashboard feature-branch verification | `gh workflow run attendance-daily-gate-dashboard.yml --ref codex/attendance-parallel-round17 -f branch=codex/attendance-parallel-round17 -f lookback_hours=48` | FAIL expected | `output/playwright/ga/22834176090/attendance-daily-gate-dashboard.json` with `escalationIssue.mode=suppressed_non_main` and no opened issue |
+
+Decision:
+
+- feature-branch dashboard verification no longer opens production paging issues by default.
+- import job telemetry compatibility (`engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`) is now contract-protected in OpenAPI checks.
+- temporary branch-run issue `#398` was closed after verification.
+- **GO maintained**.
