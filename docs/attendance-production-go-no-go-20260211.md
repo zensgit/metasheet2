@@ -5296,3 +5296,26 @@ Decision:
 - import job telemetry compatibility (`engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`) is now contract-protected in OpenAPI checks.
 - temporary branch-run issue `#398` was closed after verification.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Strict Upsert Telemetry Requirement + Feature-branch Dashboard Failure Policy (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- enforce optional strict telemetry field requirement (`recordUpsertStrategy`) in API smoke path.
+- control dashboard workflow conclusion on non-main branch without polluting production escalation flows.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| API smoke syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | local check |
+| Gate runner syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS | local check |
+| Strict-twice syntax | `bash -n scripts/ops/attendance-run-strict-gates-twice.sh` | PASS | local check |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17e` | PASS | `/tmp/attendance-gate-contract-check-round17e/dashboard/*` |
+| OpenAPI telemetry contract (positive/negative) | `node ./scripts/ops/attendance-validate-openapi-import-contract.mjs ...` + delete-field negative check | PASS | negative case rejects missing `AttendanceImportJob.processedRows` |
+
+Decision:
+
+- strict gates now support hard enforcement of `recordUpsertStrategy` telemetry through workflow input (`require_import_upsert_strategy=true` by default).
+- feature-branch dashboard verification can preserve artifact evidence without forced red workflow when `fail_on_p0_non_main=false`.
+- **GO maintained** (main-branch production gates unchanged).

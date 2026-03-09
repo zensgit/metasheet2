@@ -5044,3 +5044,36 @@ GA evidence:
 | Workflow | Run | Status | Evidence |
 |---|---|---|---|
 | Attendance Daily Gate Dashboard (feature branch verify) | #22834176090 | FAIL expected (P0 missing histories), no issue opened | `output/playwright/ga/22834176090/attendance-daily-gate-dashboard.json` (`escalationIssue.mode=suppressed_non_main`) |
+
+### Update (2026-03-09): Strict Telemetry Upsert Strategy Gate + Non-main Dashboard Fail Policy
+
+Scope:
+
+- tighten strict API smoke telemetry checks with optional `recordUpsertStrategy` requirement.
+- allow feature-branch dashboard verification to avoid hard-failing workflow by default while still writing `P0 fail` evidence.
+
+Changes:
+
+- `scripts/ops/attendance-smoke-api.mjs`
+  - new env flag: `REQUIRE_IMPORT_UPSERT_STRATEGY=true|false`.
+  - telemetry assertion now validates `recordUpsertStrategy` (`values|unnest|staging`) when required.
+  - commit / idempotency retry / commit-async telemetry logs now include `recordUpsertStrategy`.
+- `scripts/ops/attendance-run-gates.sh`
+  - forwards `REQUIRE_IMPORT_UPSERT_STRATEGY` to API smoke.
+- `scripts/ops/attendance-run-strict-gates-twice.sh`
+  - strict default now sets `REQUIRE_IMPORT_UPSERT_STRATEGY=true`.
+- `.github/workflows/attendance-strict-gates-prod.yml`
+  - new input `require_import_upsert_strategy` (default `true`), passed through strict gate runs.
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - new input `fail_on_p0_non_main` (default `false`).
+  - when `branch != main` and `fail_on_p0_non_main=false`, workflow no longer exits non-zero on P0 fail; report still records failure state for evidence.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| API smoke script syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS |
+| Gate runner syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS |
+| Strict-twice runner syntax | `bash -n scripts/ops/attendance-run-strict-gates-twice.sh` | PASS |
+| Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17e` | PASS |

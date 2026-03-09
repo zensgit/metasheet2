@@ -66,6 +66,10 @@ on:
         description: 'Require import telemetry fields (engine/processedRows/failedRows/elapsedMs) (true/false)'
         required: false
         default: 'true'
+      require_import_upsert_strategy:
+        description: 'Require recordUpsertStrategy in import telemetry payloads (true/false)'
+        required: false
+        default: 'true'
       require_preview_async:
         description: 'Require async import preview gate (true/false)'
         required: false
@@ -264,6 +268,7 @@ jobs:
       REQUIRE_IMPORT_UPLOAD: ${{ inputs.require_import_upload || 'true' }}
       REQUIRE_IMPORT_ASYNC: ${{ inputs.require_import_async || 'true' }}
       REQUIRE_IMPORT_TELEMETRY: ${{ inputs.require_import_telemetry || 'true' }}
+      REQUIRE_IMPORT_UPSERT_STRATEGY: ${{ inputs.require_import_upsert_strategy || 'true' }}
       REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'true' }}
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       REQUIRE_IMPORT_JOB_RECOVERY: ${{ inputs.require_import_job_recovery || 'false' }}
@@ -383,6 +388,7 @@ jobs:
           REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD}" \
           REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC}" \
           REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY}" \
+          REQUIRE_IMPORT_UPSERT_STRATEGY="${REQUIRE_IMPORT_UPSERT_STRATEGY}" \
           REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC}" \
           REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE}" \
           REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY}" \
