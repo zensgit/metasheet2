@@ -5021,6 +5021,8 @@ Changes:
   - markdown/json escalation metadata now records non-main suppression mode.
 - `scripts/ops/attendance-validate-daily-dashboard-json.sh`
   - allows `escalationIssue.mode=suppressed_non_main`.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard case adds `dashboard.valid.non-main.json` fixture to keep `suppressed_non_main` mode contract-covered.
 - `scripts/ops/attendance-validate-openapi-import-contract.mjs`
   - now enforces `AttendanceImportJob` telemetry fields:
     - `engine`, `processedRows`, `failedRows`, `elapsedMs`, `recordUpsertStrategy`.

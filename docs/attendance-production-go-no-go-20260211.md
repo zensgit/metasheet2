@@ -5292,6 +5292,7 @@ Verification:
 Decision:
 
 - feature-branch dashboard verification no longer opens production paging issues by default.
+- dashboard contract matrix now includes a valid `suppressed_non_main` fixture to prevent regression.
 - import job telemetry compatibility (`engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`) is now contract-protected in OpenAPI checks.
 - temporary branch-run issue `#398` was closed after verification.
 - **GO maintained**.
