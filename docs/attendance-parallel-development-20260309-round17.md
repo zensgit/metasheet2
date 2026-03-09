@@ -8,7 +8,8 @@ This round focused on production-gate reliability and async import regression ha
 2. harden `attendance-post-merge-verify.sh` against workflow dispatch schema skew (`Unexpected inputs provided`).
 3. eliminate stale run metadata leakage on dispatch failure paths.
 4. apply the same dispatch compatibility guard to generic workflow dispatcher used by ops scripts.
-5. record full evidence (local + GA run IDs) into production handoff documents.
+5. add a local fast parallel regression entrypoint to cut validation loop time.
+6. record full evidence (local + GA run IDs) into production handoff documents.
 
 ## Design Decisions
 
@@ -58,6 +59,12 @@ This round focused on production-gate reliability and async import regression ha
 - `scripts/ops/attendance-run-gate-contract-case.sh`
   - strict contract case now executes dispatcher regression tests, so dispatcher compatibility is protected in the existing gate contract matrix path.
 
+- `scripts/ops/attendance-fast-parallel-regression.sh` (new)
+  - runs key ops tests + strict/dashboard contract cases in parallel.
+  - emits unified `summary.md` / `summary.json` under `output/playwright/attendance-fast-parallel-regression/<timestamp>/`.
+- `scripts/ops/attendance-regression-local.sh`
+  - fixes command execution context to always run from repo root (`bash -c "cd <root> && ..."`), preventing login-shell cwd drift.
+
 ### Documentation Updates
 
 - `docs/attendance-production-ga-daily-gates-20260209.md`
@@ -80,6 +87,14 @@ Both documents now include:
 5. `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` -> PASS
 6. `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` -> PASS
 7. `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` -> PASS
+8. `scripts/ops/attendance-fast-parallel-regression.sh` -> PASS
+
+Fast parallel evidence:
+
+- `output/playwright/attendance-fast-parallel-regression/20260309-170637/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-170637/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json`
 
 Evidence:
 
@@ -98,7 +113,7 @@ Evidence:
 ## PR Status
 
 - PR: `https://github.com/zensgit/metasheet2/pull/396`
-- Head: `aace2dd101f22e6a145d68044c484132bc5228b3`
+- Head: latest `codex/attendance-parallel-round17` commit on PR #396
 - Required checks: PASS
 - Remaining blocker: repository policy requires at least 1 approving review with write access.
 
@@ -111,3 +126,4 @@ Evidence:
 5. `aace2dd1` fix(ops): reset post-merge gate run metadata on dispatch
 6. `203120c0` docs(attendance): add round17 parallel development report
 7. `fb1e66e3` test(ops): harden shared workflow dispatcher input-fallback
+8. `8a0f4b97` test(contracts): include dispatcher fallback regressions in strict case

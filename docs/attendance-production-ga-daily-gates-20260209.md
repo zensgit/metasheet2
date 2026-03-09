@@ -5489,3 +5489,28 @@ Decision:
 
 - shared workflow dispatch now has the same schema-drift resilience as post-merge verifier.
 - reduces repeated manual fixes when workflow inputs are introduced incrementally across branches.
+
+### Update (2026-03-09): Fast Local Parallel Regression Entry Point
+
+Scope:
+
+- improve iteration speed for gate-script development without reducing coverage.
+
+Changes:
+
+- new script `scripts/ops/attendance-fast-parallel-regression.sh`:
+  - executes ops test suites and gate contract checks in parallel.
+  - emits normalized artifacts (`results.tsv`, `summary.md`, `summary.json`) under:
+    - `output/playwright/attendance-fast-parallel-regression/<timestamp>/`
+- `scripts/ops/attendance-regression-local.sh` now forces per-check cwd to repository root, avoiding false failures from login-shell cwd differences.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Syntax checks | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh` | PASS | stdout |
+| Fast parallel run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
+
+Operational note:
+
+- this script is local CI-prep tooling; GA gate workflows and escalation behavior remain unchanged.

@@ -60,7 +60,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required"
 [[ "$POLL_SECONDS" =~ ^[0-9]+$ ]] || die "POLL_SECONDS must be integer"
 [[ "$LOOKBACK_LIMIT" =~ ^[0-9]+$ ]] || die "LOOKBACK_LIMIT must be integer"
 
-dispatch_args=()
+declare -a dispatch_args=()
 for token in "$@"; do
   if [[ "$token" != *=* ]]; then
     die "invalid dispatch token '$token' (expected key=value)"
@@ -82,7 +82,7 @@ if (( ${#dispatch_args[@]} > 0 )); then
   info "dispatch_args=${dispatch_args[*]}"
 fi
 
-workflow_run_args=()
+declare -a workflow_run_args=()
 if [[ -n "$REF" ]]; then
   workflow_run_args+=("--ref" "$REF")
   if [[ "$BRANCH" == "main" ]]; then
@@ -92,12 +92,12 @@ fi
 
 dispatch_output=''
 dispatch_rc=0
-dispatch_attempt_args=("${dispatch_args[@]}")
+declare -a dispatch_attempt_args=("${dispatch_args[@]}")
 dispatch_output="$(gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_attempt_args[@]}" 2>&1)" || dispatch_rc=$?
 if [[ "$dispatch_rc" -ne 0 ]]; then
   unsupported_inputs="$(extract_unexpected_workflow_inputs "$dispatch_output" || true)"
   if [[ -n "$unsupported_inputs" ]]; then
-    filtered_dispatch_args=()
+    declare -a filtered_dispatch_args=()
     dropped=0
     index=0
     while (( index < ${#dispatch_attempt_args[@]} )); do

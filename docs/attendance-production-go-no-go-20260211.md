@@ -5719,3 +5719,29 @@ Decision:
 
 - dispatcher-level compatibility is now regression-tested, not only script-local patched.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Fast Parallel Local Regression Harness
+
+Scope:
+
+- reduce local regression feedback cycle for ops scripts and contract checks while keeping evidence artifacts normalized.
+
+Changes:
+
+- added `scripts/ops/attendance-fast-parallel-regression.sh`:
+  - runs core ops test blocks + strict/dashboard contract cases in parallel.
+  - writes `results.tsv`, `summary.md`, and `summary.json` to a timestamped evidence directory.
+- updated `scripts/ops/attendance-regression-local.sh` to execute checks from repository root explicitly (`cd "$ROOT_DIR"`), preventing login-shell cwd drift.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Syntax guard | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
+| Dispatcher fallback tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
+| Fast parallel regression run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
+
+Decision:
+
+- local pre-PR gate verification now has a deterministic high-speed entrypoint.
+- **GO maintained** (P0/P1 production gate posture unchanged).

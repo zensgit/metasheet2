@@ -38,7 +38,7 @@ function run_check() {
   log="${OUTPUT_ROOT}/${slug}.log"
 
   info "run: ${name}"
-  if bash -lc "$cmd" >"$log" 2>&1; then
+  if bash -c "cd \"$ROOT_DIR\" && $cmd" >"$log" 2>&1; then
     echo -e "${name}\tPASS\t0\t${log}" >>"$RESULTS_TSV"
   else
     rc=$?
