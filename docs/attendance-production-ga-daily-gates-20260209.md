@@ -5077,3 +5077,30 @@ Verification:
 | Strict-twice runner syntax | `bash -n scripts/ops/attendance-run-strict-gates-twice.sh` | PASS |
 | Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS |
 | Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17e` | PASS |
+
+### Update (2026-03-09): Strict Async Upload Path Gate Coverage
+
+Scope:
+
+- API smoke now supports async upload gate coverage via `REQUIRE_IMPORT_UPLOAD_ASYNC`.
+- Default behavior: if `REQUIRE_IMPORT_UPLOAD_ASYNC` is unset, it inherits `REQUIRE_IMPORT_UPLOAD`.
+- strict-twice coverage now includes this async upload path.
+- telemetry validation still requires `recordUpsertStrategy`.
+
+Example command:
+
+```bash
+REQUIRE_IMPORT_UPLOAD="true" \
+REQUIRE_IMPORT_UPLOAD_ASYNC="true" \
+REQUIRE_IMPORT_TELEMETRY="true" \
+REQUIRE_IMPORT_UPSERT_STRATEGY="true" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
+Expected logs (`gate-api-smoke.log`):
+
+- `import async upload ok`
+- `import async telemetry ok`
+- `SMOKE PASS`

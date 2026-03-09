@@ -5319,3 +5319,30 @@ Decision:
 - strict gates now support hard enforcement of `recordUpsertStrategy` telemetry through workflow input (`require_import_upsert_strategy=true` by default).
 - feature-branch dashboard verification can preserve artifact evidence without forced red workflow when `fail_on_p0_non_main=false`.
 - **GO maintained** (main-branch production gates unchanged).
+
+## Post-Go Verification (2026-03-09): Strict Async Upload Path in API Smoke
+
+Scope:
+
+- API smoke supports async upload path checks via `REQUIRE_IMPORT_UPLOAD_ASYNC`.
+- If `REQUIRE_IMPORT_UPLOAD_ASYNC` is not set, it defaults to `REQUIRE_IMPORT_UPLOAD`.
+- strict-twice includes this path so upload async + telemetry are exercised together.
+- telemetry validation continues to enforce `recordUpsertStrategy`.
+
+Example command:
+
+```bash
+REQUIRE_IMPORT_UPLOAD="true" \
+REQUIRE_IMPORT_UPLOAD_ASYNC="true" \
+REQUIRE_IMPORT_TELEMETRY="true" \
+REQUIRE_IMPORT_UPSERT_STRATEGY="true" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
+Expected logs (`gate-api-smoke.log`):
+
+- `import async upload ok`
+- `import async telemetry ok`
+- `SMOKE PASS`

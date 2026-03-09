@@ -6709,28 +6709,42 @@ module.exports = {
             totalRows: rows.length,
 	          })
 
-	          for (const item of chunk) {
-	            const record = upserted.get(`${item.userId}:${item.workDate}`)
-	            if (!record?.id) {
-	              throw new Error(`Attendance record upsert failed for ${item.userId}:${item.workDate}`)
-	            }
+		          for (const item of chunk) {
+		            const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+		            let record = upserted.get(`${item.userId}:${workDateKey}`)
+		            if (!record?.id) {
+		              const fallbackRows = await queryImportHeavy(
+		                trx,
+		                `SELECT id, user_id, work_date
+		                   FROM attendance_records
+		                  WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
+		                  LIMIT 1`,
+		                [orgId, item.userId, workDateKey]
+		              )
+		              if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
+		                record = fallbackRows[0]
+		              }
+		            }
+		            if (!record?.id) {
+		              throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+		            }
 
-	            await enqueueImportItem({
-	              userId: item.userId,
-	              workDate: item.workDate,
-	              recordId: record.id,
-	              previewSnapshot: item.previewSnapshot,
-	            })
+		            await enqueueImportItem({
+		              userId: item.userId,
+		              workDate: workDateKey,
+		              recordId: record.id,
+		              previewSnapshot: item.previewSnapshot,
+		            })
 
 	            importedCount += 1
 	            if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
 	              results.push({
 	                id: record.id,
 	                userId: item.userId,
-	                workDate: item.workDate,
-	                engine: item.engine,
-	              })
-	            }
+		                workDate: workDateKey,
+		                engine: item.engine,
+		              })
+		            }
 	          }
 
 	          if (typeof onProgress === 'function') {
@@ -11254,12 +11268,25 @@ module.exports = {
                     totalRows: rows.length,
 				              })
 
-				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const record = upserted.get(`${item.userId}:${workDateKey}`)
-				                if (!record?.id) {
-				                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
-				                }
+					              for (const item of chunk) {
+					                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+					                let record = upserted.get(`${item.userId}:${workDateKey}`)
+					                if (!record?.id) {
+					                  const fallbackRows = await queryImportHeavy(
+					                    trx,
+					                    `SELECT id, user_id, work_date
+					                       FROM attendance_records
+					                      WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
+					                      LIMIT 1`,
+					                    [orgId, item.userId, workDateKey]
+					                  )
+					                  if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
+					                    record = fallbackRows[0]
+					                  }
+					                }
+					                if (!record?.id) {
+					                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+					                }
 
 				                await enqueueImportItem({
 				                  userId: item.userId,

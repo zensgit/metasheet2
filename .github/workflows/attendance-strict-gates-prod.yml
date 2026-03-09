@@ -58,6 +58,10 @@ on:
         description: 'Require CSV upload channel (/attendance/import/upload + csvFileId) (true/false)'
         required: false
         default: 'true'
+      require_import_upload_async:
+        description: 'Require async import commit to use CSV upload channel (/attendance/import/upload + csvFileId) (true/false)'
+        required: false
+        default: 'true'
       require_import_async:
         description: 'Require async import commit gate (true/false)'
         required: false
@@ -266,6 +270,7 @@ jobs:
       REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
       REQUIRE_IMPORT_EXPORT: ${{ inputs.require_import_export || 'true' }}
       REQUIRE_IMPORT_UPLOAD: ${{ inputs.require_import_upload || 'true' }}
+      REQUIRE_IMPORT_UPLOAD_ASYNC: ${{ inputs.require_import_upload_async || 'true' }}
       REQUIRE_IMPORT_ASYNC: ${{ inputs.require_import_async || 'true' }}
       REQUIRE_IMPORT_TELEMETRY: ${{ inputs.require_import_telemetry || 'true' }}
       REQUIRE_IMPORT_UPSERT_STRATEGY: ${{ inputs.require_import_upsert_strategy || 'true' }}
@@ -386,6 +391,7 @@ jobs:
           REQUIRE_IDEMPOTENCY="${REQUIRE_IDEMPOTENCY}" \
           REQUIRE_IMPORT_EXPORT="${REQUIRE_IMPORT_EXPORT}" \
           REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD}" \
+          REQUIRE_IMPORT_UPLOAD_ASYNC="${REQUIRE_IMPORT_UPLOAD_ASYNC}" \
           REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC}" \
           REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY}" \
           REQUIRE_IMPORT_UPSERT_STRATEGY="${REQUIRE_IMPORT_UPSERT_STRATEGY}" \

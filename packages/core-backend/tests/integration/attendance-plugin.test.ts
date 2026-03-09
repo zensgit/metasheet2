@@ -2593,6 +2593,142 @@ describe('Attendance Plugin Integration', () => {
     expect(code).toBe('EXPIRED')
   })
 
+  it('supports commit-async with csvFileId and idempotent retry after upload cleanup', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const mappedUserId = `attendance-async-${Date.now().toString(36)}`
+    const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvText = `${csvHeader}\n${workDate},${mappedUserId},CSV Async Success,09:00,18:00,正常\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=async-success.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const idempotencyKey = `upload-async-idempo-${Date.now()}`
+    const commitPayload = {
+      orgId,
+      userId: 'attendance-test',
+      timezone: 'UTC',
+      csvFileId: String(fileId || ''),
+      idempotencyKey,
+      mappingProfileId: 'dingtalk_csv_daily_summary',
+      mode: 'override',
+      commitToken,
+    }
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commitPayload),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: { job?: any } } | undefined)?.data
+    const jobId = String(commitData?.job?.id || '')
+    const batchId = String(commitData?.job?.batchId || '')
+    expect(jobId).toBeTruthy()
+    expect(batchId).toBeTruthy()
+    expect(['standard', 'bulk']).toContain(String(commitData?.job?.engine || ''))
+
+    let completedJob: any = null
+    for (let i = 0; i < 160; i += 1) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        completedJob = jobData
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'async csv upload job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(completedJob).toBeTruthy()
+    expect(String(completedJob?.batchId || '')).toBe(batchId)
+    expect(['standard', 'bulk']).toContain(String(completedJob?.engine || ''))
+    expect(typeof completedJob?.processedRows).toBe('number')
+    expect(completedJob?.processedRows).toBeGreaterThanOrEqual(1)
+    expect(typeof completedJob?.failedRows).toBe('number')
+    expect(typeof completedJob?.elapsedMs).toBe('number')
+    expect(typeof completedJob?.progressPercent).toBe('number')
+    expect(typeof completedJob?.throughputRowsPerSec).toBe('number')
+    expectChunkConfigMatchesEngine(completedJob?.engine, completedJob?.chunkConfig)
+    expect(['values', 'unnest', 'staging']).toContain(String(completedJob?.recordUpsertStrategy || ''))
+
+    const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
+    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+
+    const { commitToken: _commitToken, ...retryPayload } = commitPayload
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(retryPayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryData = (retryRes.body as { data?: { idempotent?: boolean; job?: any } } | undefined)?.data
+    expect(String(retryData?.job?.id || '')).toBe(jobId)
+    expect(String(retryData?.job?.batchId || '')).toBe(batchId)
+    expect(retryData?.idempotent).toBe(true)
+    expect(['values', 'unnest', 'staging']).toContain(
+      String(retryData?.job?.recordUpsertStrategy || completedJob?.recordUpsertStrategy || '')
+    )
+
+    const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(rollbackRes.status).toBe(200)
+  })
+
   it('returns NOT_FOUND for preview-async when csvFileId does not exist', async () => {
     if (!baseUrl) return
 

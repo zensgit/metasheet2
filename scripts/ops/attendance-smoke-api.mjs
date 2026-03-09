@@ -10,6 +10,9 @@ const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY === 'true'
 const requireImportUpsertStrategy = process.env.REQUIRE_IMPORT_UPSERT_STRATEGY === 'true'
+const requireImportUploadAsync = process.env.REQUIRE_IMPORT_UPLOAD_ASYNC == null
+  ? requireImportUpload
+  : process.env.REQUIRE_IMPORT_UPLOAD_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
@@ -717,6 +720,27 @@ async function run() {
     const workDateAsync = toDateOnly(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
     const idempotencyKeyAsync = `${idempotencyKey}-async`
     const csvTextAsync = makeCsv(workDateAsync, userId, groupName)
+    let csvFileIdAsync = ''
+
+    if (requireImportUploadAsync) {
+      const query = new URLSearchParams()
+      if (orgId) query.set('orgId', orgId)
+      query.set('filename', `attendance-smoke-async-${workDateAsync}.csv`)
+      const uploadAsyncRes = await apiFetchRaw(`/attendance/import/upload?${query.toString()}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/csv',
+        },
+        body: csvTextAsync,
+      })
+      assertOk(uploadAsyncRes, 'POST /attendance/import/upload (async)')
+      if (uploadAsyncRes.res.status !== 201) {
+        log(`WARN: import async upload returned HTTP ${uploadAsyncRes.res.status} (expected 201)`)
+      }
+      csvFileIdAsync = String(uploadAsyncRes.body?.data?.fileId || uploadAsyncRes.body?.data?.id || '')
+      if (!csvFileIdAsync) die('import async upload did not return fileId')
+      log(`import async upload ok: fileId=${csvFileIdAsync}`)
+    }
 
     const asyncPayload = {
       ...payloadExample,
@@ -724,7 +748,7 @@ async function run() {
       userId,
       timezone: payloadExample.timezone || defaultTimezone,
       mappingProfileId: 'dingtalk_csv_daily_summary',
-      csvText: csvTextAsync,
+      ...(requireImportUploadAsync ? { csvFileId: csvFileIdAsync } : { csvText: csvTextAsync }),
       idempotencyKey: idempotencyKeyAsync,
       groupSync: {
         autoCreate: true,
