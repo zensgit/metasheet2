@@ -5387,3 +5387,10 @@ Observed:
 
 - workflow log resolves `profile=high-scale`, `rows=100000`, `commit_async=true`, `upload_csv=true`.
 - `perf-summary.json` confirms `rows: 100000` and `commitAsync: true`.
+
+Post-merge verify shortcut:
+
+```bash
+PERF_BASELINE_PROFILE="high-scale" \
+bash scripts/ops/attendance-post-merge-verify.sh
+```

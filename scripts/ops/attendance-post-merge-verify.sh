@@ -50,6 +50,7 @@ LOCALE_ZH_ORG_ID="${LOCALE_ZH_ORG_ID:-default}"
 LOCALE_ZH_VERIFY_HOLIDAY="${LOCALE_ZH_VERIFY_HOLIDAY:-true}"
 
 PERF_BASELINE_API_BASE="${PERF_BASELINE_API_BASE:-${API_BASE}}"
+PERF_BASELINE_PROFILE="${PERF_BASELINE_PROFILE:-standard}"
 PERF_BASELINE_ROWS="${PERF_BASELINE_ROWS:-10000}"
 PERF_BASELINE_MODE="${PERF_BASELINE_MODE:-commit}"
 PERF_BASELINE_COMMIT_ASYNC="${PERF_BASELINE_COMMIT_ASYNC:-false}"
@@ -189,6 +190,8 @@ function run_perf_baseline_contract_gate() {
   local run_url="$2"
   local artifacts_dir="$3"
   local log_file="${OUTPUT_ROOT}/gate-perf-baseline-contract.log"
+  local profile_lower
+  profile_lower="$(printf '%s' "${PERF_BASELINE_PROFILE:-standard}" | tr '[:upper:]' '[:lower:]')"
 
   local expected_upload
   expected_upload="$(to_bool "$PERF_EXPECT_UPLOAD_CSV")"
@@ -209,6 +212,7 @@ function run_perf_baseline_contract_gate() {
     echo "[attendance-post-merge-verify] validating perf artifact contract"
     echo "run_id=${run_id}"
     echo "artifacts_dir=${artifacts_dir}"
+    echo "profile=${profile_lower}"
     echo "expected_upload_csv=${expected_upload:-<skip>}"
     echo "expected_upload_csv_requested=${expected_upload_requested:-<skip>}"
     echo "expected_payload_source=${expected_payload_source:-<skip>}"
@@ -252,6 +256,10 @@ function run_perf_baseline_contract_gate() {
   } >>"$log_file"
 
   local errors=()
+  if [[ "$profile_lower" != "standard" && "$profile_lower" != "high-scale" ]]; then
+    errors+=("PERF_BASELINE_PROFILE must be standard|high-scale (actual=${PERF_BASELINE_PROFILE})")
+  fi
+
   if [[ -n "$expected_upload" ]]; then
     local actual_upload_bool
     actual_upload_bool="$(to_bool "$actual_upload")"
@@ -579,6 +587,7 @@ run_gate \
   "$SKIP_PERF_BASELINE" \
   -f "drill=false" \
   -f "api_base=${PERF_BASELINE_API_BASE}" \
+  -f "profile=${PERF_BASELINE_PROFILE}" \
   -f "rows=${PERF_BASELINE_ROWS}" \
   -f "mode=${PERF_BASELINE_MODE}" \
   -f "commit_async=${PERF_BASELINE_COMMIT_ASYNC}" \

@@ -5612,3 +5612,7 @@ Decision:
 - 100k baseline refresh path is validated and reproducible via workflow_dispatch.
 - daily schedule remains unchanged (standard profile), so production daily load posture is preserved.
 - **GO maintained**.
+
+Operator note:
+
+- `scripts/ops/attendance-post-merge-verify.sh` now accepts `PERF_BASELINE_PROFILE=standard|high-scale` and forwards it to `attendance-import-perf-baseline.yml`.
