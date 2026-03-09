@@ -43,6 +43,9 @@ test('attendance-fast-parallel-regression ops profile defaults to ops checks onl
   const summary = JSON.parse(
     readFileSync(path.join(result.outputRoot, 'summary.json'), 'utf8'),
   );
+  assert.equal(summary.profile, 'ops');
+  assert.equal(summary.maxParallel, 2);
+  assert.equal(summary.runContractCases, false);
   assert.equal(summary.totals.total, 4);
   const checks = summary.checks.map((item) => item.check);
   assert.ok(checks.every((name) => name.startsWith('ops-')));
@@ -54,6 +57,9 @@ test('attendance-fast-parallel-regression contracts profile defaults to contract
   const summary = JSON.parse(
     readFileSync(path.join(result.outputRoot, 'summary.json'), 'utf8'),
   );
+  assert.equal(summary.profile, 'contracts');
+  assert.equal(summary.maxParallel, 1);
+  assert.equal(summary.runContractCases, true);
   assert.equal(summary.totals.total, 2);
   const checks = summary.checks.map((item) => item.check);
   assert.deepEqual(checks.sort(), ['contract-dashboard', 'contract-strict']);

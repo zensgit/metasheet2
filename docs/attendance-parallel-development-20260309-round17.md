@@ -64,6 +64,7 @@ This round focused on production-gate reliability and async import regression ha
   - emits unified `summary.md` / `summary.json` under `output/playwright/attendance-fast-parallel-regression/<timestamp>/`.
   - supports `PROFILE=full|ops|contracts` and `MAX_PARALLEL=<n>` to target specific lanes.
   - default output root now uses `timestamp + pid` to avoid same-second collisions during concurrent runs.
+  - emits structured summary metadata (`profile`, `maxParallel`, `runContractCases`) in `summary.json`.
 - `scripts/ops/attendance-fast-parallel-regression.test.mjs` (new)
   - validates profile and max-parallel input guards.
   - validates default check selection:
@@ -120,6 +121,8 @@ Fast parallel evidence:
 - `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json`
 - `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`
 - `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json`
+- `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.md`
+- `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json`
 
 Evidence:
 

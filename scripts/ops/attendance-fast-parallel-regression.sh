@@ -162,7 +162,7 @@ total_count="$(awk -F'\t' 'NR>1 {c++} END {print c+0}' "$RESULTS_TSV")"
   awk -F'\t' 'NR>1 {printf "| %s | %s | %s | `%s` |\n", $1, $2, $3, $4}' "$RESULTS_TSV"
 } >"$SUMMARY_MD"
 
-python3 - "$RESULTS_TSV" "$SUMMARY_JSON" "$timestamp" "$OUTPUT_ROOT" <<'PY'
+python3 - "$RESULTS_TSV" "$SUMMARY_JSON" "$timestamp" "$OUTPUT_ROOT" "$PROFILE" "$MAX_PARALLEL" "$RUN_CONTRACT_CASES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -171,6 +171,9 @@ results_tsv = Path(sys.argv[1])
 summary_json = Path(sys.argv[2])
 timestamp = sys.argv[3]
 output_root = sys.argv[4]
+profile = sys.argv[5]
+max_parallel = int(sys.argv[6])
+run_contract_cases = sys.argv[7].lower() == "true"
 
 rows = []
 with results_tsv.open() as f:
@@ -194,6 +197,9 @@ with results_tsv.open() as f:
 payload = {
     "timestamp": timestamp,
     "outputRoot": output_root,
+    "profile": profile,
+    "maxParallel": max_parallel,
+    "runContractCases": run_contract_cases,
     "totals": {
         "total": len(rows),
         "pass": sum(1 for r in rows if r["status"] == "PASS"),

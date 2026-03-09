@@ -5523,6 +5523,7 @@ Verification:
 | Fast parallel run (ops lane) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.json` |
 | Fast parallel run (contracts lane) | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
 | Fast parallel run (full lane, collision-safe output path) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json` |
+| Fast parallel run (`summary.json` metadata contract) | `pnpm verify:attendance-regression-fast` + `jq '.profile,.maxParallel,.runContractCases,.totals.total' <summary.json>` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` |
 
 Operational note:
 
