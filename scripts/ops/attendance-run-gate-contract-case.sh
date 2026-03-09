@@ -88,6 +88,16 @@ function expect_fail() {
   info "expected failure confirmed: ${label}"
 }
 
+function line_matches() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$pattern" "$file" >/dev/null
+    return $?
+  fi
+  grep -Eq "$pattern" "$file"
+}
+
 if [[ "$CASE_ID" == "strict" ]]; then
   info "running auth resolver script regressions"
   node --test ./scripts/ops/attendance-auth-scripts.test.mjs
@@ -661,13 +671,13 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
 
   workflow_file=".github/workflows/attendance-daily-gate-dashboard.yml"
-  if ! rg -n "branch:\\s*$" "$workflow_file" >/dev/null; then
+  if ! line_matches "^[[:space:]]*branch:[[:space:]]*$" "$workflow_file"; then
     die "dashboard workflow contract failed: missing workflow_dispatch.inputs.branch"
   fi
-  if ! rg -n "default:\\s*''" "$workflow_file" >/dev/null; then
+  if ! line_matches "^[[:space:]]*default:[[:space:]]*''[[:space:]]*$" "$workflow_file"; then
     die "dashboard workflow contract failed: inputs.branch default must be empty string for ref fallback"
   fi
-  if ! rg -n "BRANCH:\\s*\\$\\{\\{\\s*inputs\\.branch\\s*\\|\\|\\s*github\\.ref_name\\s*\\|\\|\\s*'main'\\s*\\}\\}" "$workflow_file" >/dev/null; then
+  if ! line_matches "BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.branch[[:space:]]*\\|\\|[[:space:]]*github\\.ref_name[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
     die "dashboard workflow contract failed: BRANCH env must fallback to github.ref_name"
   fi
 
