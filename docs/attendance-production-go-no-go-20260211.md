@@ -5647,3 +5647,30 @@ Decision:
 - nightly post-merge chain remains production-usable with reproducible artifacts.
 - async large-payload retry path is now under regression protection.
 - **GO maintained** (no new open Attendance P0/P1 blocker introduced).
+
+## Post-Go Verification (2026-03-09): Post-Merge Perf Dispatch Backward Compatibility
+
+Scope:
+
+- fix and verify post-merge verifier behavior when dispatching to a branch where perf workflow inputs lag behind script capabilities.
+
+Changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - detects `Unexpected inputs provided` from `gh workflow run`.
+  - strips unsupported dispatch keys and retries automatically once.
+  - avoids false post-merge failures caused only by workflow input skew.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Script syntax guard | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Compatibility replay (perf-only chain, `PERF_BASELINE_PROFILE=high-scale`) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-153802/summary.json` |
+| Perf baseline downstream run | #22843172792 | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/ga/22843172792/attendance-import-perf-22843172792-1/attendance-perf-mmivdf41-hrc4ue/perf-summary.json` |
+
+Decision:
+
+- post-merge verifier now tolerates temporary workflow input skew across branches.
+- gate chain remains actionable and no longer fails early on dispatch contract drift.
+- **GO maintained**.

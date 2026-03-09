@@ -185,6 +185,30 @@ function to_bool() {
   esac
 }
 
+function extract_unexpected_workflow_inputs() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    return 0
+  fi
+  python3 - "$raw" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1]
+match = re.search(r'Unexpected inputs provided:\s*(\[[^\]]*\])', text)
+if not match:
+    raise SystemExit(0)
+try:
+    values = json.loads(match.group(1))
+except Exception:
+    raise SystemExit(0)
+for value in values:
+    if isinstance(value, str) and value:
+        print(value)
+PY
+}
+
 function run_perf_baseline_contract_gate() {
   local run_id="$1"
   local run_url="$2"
@@ -399,8 +423,44 @@ function trigger_and_wait() {
   fi
 
   info "dispatch workflow: ${workflow} (branch=${BRANCH})"
-  if ! gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" >/dev/null; then
-    return 3
+  local dispatch_output=''
+  local dispatch_rc=0
+  dispatch_output="$(gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" 2>&1)"
+  dispatch_rc=$?
+  if [[ "$dispatch_rc" -ne 0 ]]; then
+    local unsupported_inputs=''
+    unsupported_inputs="$(extract_unexpected_workflow_inputs "$dispatch_output" || true)"
+    if [[ -n "$unsupported_inputs" ]]; then
+      info "WARN: workflow ${workflow} rejected unsupported inputs, retrying without: $(printf '%s' "$unsupported_inputs" | paste -sd ',' -)"
+      local -a filtered_args=()
+      local dropped=0
+      local index=0
+      while (( index < ${#args[@]} )); do
+        local token="${args[$index]}"
+        if [[ "$token" == "-f" ]] && (( index + 1 < ${#args[@]} )); then
+          local kv="${args[$((index + 1))]}"
+          local key="${kv%%=*}"
+          if printf '%s\n' "$unsupported_inputs" | grep -Fxq "$key"; then
+            dropped=1
+          else
+            filtered_args+=("-f" "$kv")
+          fi
+          index=$((index + 2))
+          continue
+        fi
+        filtered_args+=("$token")
+        index=$((index + 1))
+      done
+      if (( dropped == 1 )); then
+        args=("${filtered_args[@]}")
+        dispatch_output="$(gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" 2>&1)"
+        dispatch_rc=$?
+      fi
+    fi
+    if [[ "$dispatch_rc" -ne 0 ]]; then
+      printf '%s\n' "$dispatch_output" >&2
+      return 3
+    fi
   fi
 
   for attempt in $(seq 1 "$RUN_DISCOVERY_ATTEMPTS"); do
