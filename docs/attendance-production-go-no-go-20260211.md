@@ -5356,3 +5356,27 @@ Evidence (2026-03-09):
 - `Attendance Daily Gate Dashboard` run `#22835574844` (input `branch=codex/attendance-parallel-round17`):
   - `output/playwright/ga/22835574844/attendance-daily-gate-dashboard.json`
   - `gateFlat.localeZh` now points to locale run `#22835516014` with `status=PASS`.
+
+## Post-Go Verification (2026-03-09): commit-async csvFileId error codes + dashboard branch default
+
+Changes:
+
+- `commit-async` now returns expected API codes for upload channel failures:
+  - missing upload id -> `404/NOT_FOUND`
+  - expired upload id -> `410/EXPIRED`
+- Daily dashboard dispatch now defaults `branch` to workflow ref when not provided.
+
+Verification:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest \
+  --config vitest.integration.config.ts \
+  run tests/integration/attendance-plugin.test.ts \
+  -t "returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for commit-async when csvFileId meta is older than TTL"
+```
+
+Evidence:
+
+- Daily dashboard run `#22835813042`:
+  - `output/playwright/ga/22835813042/attendance-daily-gate-dashboard.json`
+  - confirmed `branch=codex/attendance-parallel-round17` without explicit `branch` input.

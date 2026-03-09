@@ -5114,3 +5114,27 @@ Execution evidence (2026-03-09):
 - Daily Dashboard run (branch=`codex/attendance-parallel-round17`): `22835574844` (SUCCESS)
   - `output/playwright/ga/22835574844/attendance-daily-gate-dashboard.md`
   - Locale row now resolves to `#22835516014` and no `LOCALE_SUMMARY_MISSING`.
+
+### Update (2026-03-09): commit-async upload error mapping + dashboard branch fallback
+
+Scope:
+
+- `POST /api/attendance/import/commit-async` now preserves `HttpError` for upload checks:
+  - missing `csvFileId` -> `404 NOT_FOUND`
+  - expired upload meta -> `410 EXPIRED`
+- Daily dashboard workflow dispatch now defaults `branch` to `${{ github.ref_name }}` when input is empty.
+
+Validation:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest \
+  --config vitest.integration.config.ts \
+  run tests/integration/attendance-plugin.test.ts \
+  -t "returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for commit-async when csvFileId meta is older than TTL"
+```
+
+Evidence:
+
+- Dashboard run without explicit `branch` input: `22835813042` (SUCCESS)
+  - `output/playwright/ga/22835813042/attendance-daily-gate-dashboard.json`
+  - `branch=codex/attendance-parallel-round17` (auto-selected from workflow ref)
