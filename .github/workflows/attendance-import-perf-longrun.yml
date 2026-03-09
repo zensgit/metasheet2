@@ -26,6 +26,14 @@ on:
         description: 'Import payload source (auto|csv|rows)'
         required: false
         default: 'auto'
+      preview_mode:
+        description: 'Preview execution mode (sync|async|auto)'
+        required: false
+        default: 'auto'
+      preview_async_row_threshold:
+        description: 'Rows threshold for PREVIEW_MODE=auto async routing'
+        required: false
+        default: '50000'
       max_csv_rows:
         description: 'CSV row limit hint for payload auto-selection (legacy name for compatibility)'
         required: false
@@ -232,6 +240,8 @@ jobs:
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      PREVIEW_MODE: ${{ inputs.preview_mode || vars.ATTENDANCE_PERF_LONGRUN_PREVIEW_MODE || 'auto' }}
+      PREVIEW_ASYNC_ROW_THRESHOLD: ${{ inputs.preview_async_row_threshold || vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
       CSV_ROWS_LIMIT_HINT: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'false' }}
       INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
@@ -343,6 +353,8 @@ jobs:
           IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
           IMPORT_JOB_RECOVERY_ATTEMPTS: ${{ matrix.import_job_recovery_attempts }}
           PAYLOAD_SOURCE: ${{ env.PAYLOAD_SOURCE }}
+          PREVIEW_MODE: ${{ env.PREVIEW_MODE }}
+          PREVIEW_ASYNC_ROW_THRESHOLD: ${{ env.PREVIEW_ASYNC_ROW_THRESHOLD }}
           CSV_ROWS_LIMIT_HINT: ${{ env.CSV_ROWS_LIMIT_HINT }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |

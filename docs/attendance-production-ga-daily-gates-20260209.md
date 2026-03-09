@@ -5324,3 +5324,30 @@ Verification:
 |---|---|---|---|
 | Core backend type check | `pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.json --noEmit` | PASS | stdout |
 | Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+### Update (2026-03-09): GA Perf Workflows Support Preview Mode Routing
+
+Scope:
+
+- wire new perf script controls into GA workflows so preview async routing can be configured without code changes.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - new `workflow_dispatch` input: `preview_mode` (`sync|async|auto`, default `sync`)
+  - env passes:
+    - `PREVIEW_MODE`
+    - `PREVIEW_ASYNC_ROW_THRESHOLD`
+  - config log now prints preview mode settings.
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - new `workflow_dispatch` inputs:
+    - `preview_mode` (`sync|async|auto`, default `auto`)
+    - `preview_async_row_threshold` (default `50000`)
+  - env passes these values into each scenario run.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Baseline workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-baseline.yml\"); puts \"baseline ok\"'` | PASS | stdout |
+| Longrun workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-longrun.yml\"); puts \"longrun ok\"'` | PASS | stdout |

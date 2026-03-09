@@ -5562,3 +5562,29 @@ Decision:
 
 - production middleware now exports row/failure/elapsed telemetry for import operations, enabling trend alerting without parsing logs.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Workflow Preview Routing Inputs
+
+Scope:
+
+- expose `PREVIEW_MODE` controls in GA perf workflows so high-row preview scenarios can route to async path deterministically.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - added `preview_mode` dispatch input and passes `PREVIEW_MODE` / `PREVIEW_ASYNC_ROW_THRESHOLD`.
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - added `preview_mode` + `preview_async_row_threshold` dispatch inputs.
+  - passes values to each scenario execution step.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Baseline workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-baseline.yml\"); puts \"baseline ok\"'` | PASS | stdout |
+| Longrun workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-longrun.yml\"); puts \"longrun ok\"'` | PASS | stdout |
+
+Decision:
+
+- perf workflows now expose preview routing knobs required by the new strict telemetry/perf script behavior.
+- **GO maintained**.

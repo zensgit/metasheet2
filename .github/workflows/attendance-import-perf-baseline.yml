@@ -34,6 +34,10 @@ on:
         description: 'preview or commit'
         required: false
         default: 'commit'
+      preview_mode:
+        description: 'Preview execution mode (sync|async|auto)'
+        required: false
+        default: 'sync'
       commit_async:
         description: 'Use /commit-async path (true/false, default false for stable manual reruns)'
         required: false
@@ -157,6 +161,8 @@ jobs:
       # Schedule runs must stay stable and short. Keep manual dispatch flexible.
       ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_HIGH || '100000')) || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
       MODE: ${{ inputs.mode || 'commit' }}
+      PREVIEW_MODE: ${{ inputs.preview_mode || (inputs.profile == 'high-scale' && 'auto') || vars.ATTENDANCE_PERF_PREVIEW_MODE || 'sync' }}
+      PREVIEW_ASYNC_ROW_THRESHOLD: ${{ vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
       ROLLBACK: 'true'
       COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || (inputs.profile == 'high-scale' && 'true') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
@@ -220,6 +226,8 @@ jobs:
           echo "auth_source=${{ steps.resolve-auth-token.outputs.auth_source || 'unknown' }}"
           echo "rows=${ROWS}"
           echo "mode=${MODE}"
+          echo "preview_mode=${PREVIEW_MODE}"
+          echo "preview_async_row_threshold=${PREVIEW_ASYNC_ROW_THRESHOLD}"
           echo "commit_async=${COMMIT_ASYNC}"
           echo "upload_csv=${UPLOAD_CSV}"
           echo "payload_source=${PAYLOAD_SOURCE}"
