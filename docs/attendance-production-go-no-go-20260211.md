@@ -5457,6 +5457,7 @@ Changes:
 - `scripts/ops/attendance-daily-gate-report.mjs`
   - Gate Status table now includes `Query Branch`.
   - added `resolveQueryBranchDisplayValue()` to keep output stable when `gate.queryBranch` is absent.
+  - Findings metadata now includes `query_branch=...` to make branch routing explicit during incident triage.
 - `scripts/ops/attendance-daily-gate-report.test.mjs`
   - added unit tests for helper behavior.
 

@@ -897,6 +897,8 @@ function renderMarkdown({
       const gate = gateByName[finding.gate] || null
       const meta = gate?.meta || null
       const metaBits = []
+      const queryBranch = resolveQueryBranchDisplayValue({ gate, reportBranchValue: branchValue })
+      if (queryBranch !== '-') metaBits.push(`query_branch=${queryBranch}`)
       if (meta?.reason) metaBits.push(`reason=${meta.reason}`)
       if (finding.gate === 'Remote Preflight') {
         if (meta?.rc) metaBits.push(`rc=${meta.rc}`)
