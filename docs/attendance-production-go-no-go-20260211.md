@@ -5588,3 +5588,27 @@ Decision:
 
 - perf workflows now expose preview routing knobs required by the new strict telemetry/perf script behavior.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Baseline High-Scale Profile (100k) Validation
+
+Scope:
+
+- validate new manual `high-scale` profile for baseline perf refresh (100k rows) without changing daily scheduled profile.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - adds `profile=standard|high-scale` dispatch option.
+  - high-scale defaults to `rows=100000`, `commit_async=true`, and large-window thresholds/timeouts.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+
+Decision:
+
+- 100k baseline refresh path is validated and reproducible via workflow_dispatch.
+- daily schedule remains unchanged (standard profile), so production daily load posture is preserved.
+- **GO maintained**.

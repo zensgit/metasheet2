@@ -5351,3 +5351,39 @@ Verification:
 |---|---|---|---|
 | Baseline workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-baseline.yml\"); puts \"baseline ok\"'` | PASS | stdout |
 | Longrun workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-longrun.yml\"); puts \"longrun ok\"'` | PASS | stdout |
+
+### Update (2026-03-09): Perf Baseline Adds High-Scale Profile (100k Manual Refresh)
+
+Scope:
+
+- add a reusable manual profile for 100k refresh runs while keeping scheduled daily baseline unchanged.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - adds dispatch input `profile` (`standard|high-scale`, default `standard`).
+  - `high-scale` profile defaults:
+    - `rows=100000`
+    - `commit_async=true`
+    - `upload_csv=true`
+    - higher fallback timeouts/thresholds for large import latency windows.
+  - schedule branch still forces `standard` profile.
+
+Manual command:
+
+```bash
+gh workflow run attendance-import-perf-baseline.yml \
+  -f profile=high-scale \
+  --ref main
+```
+
+Verification (branch `codex/attendance-parallel-round17`):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+
+Observed:
+
+- workflow log resolves `profile=high-scale`, `rows=100000`, `commit_async=true`, `upload_csv=true`.
+- `perf-summary.json` confirms `rows: 100000` and `commitAsync: true`.
