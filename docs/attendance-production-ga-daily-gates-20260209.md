@@ -5104,3 +5104,13 @@ Expected logs (`gate-api-smoke.log`):
 - `import async upload ok`
 - `import async telemetry ok`
 - `SMOKE PASS`
+
+Execution evidence (2026-03-09):
+
+- Strict Gates DRILL run: `22835442102` (SUCCESS)
+  - `output/playwright/ga/22835442102/drill/gate-summary.json`
+- Locale zh Smoke run: `22835516014` (SUCCESS)
+  - `output/playwright/ga/22835516014/attendance-zh-locale-summary.json`
+- Daily Dashboard run (branch=`codex/attendance-parallel-round17`): `22835574844` (SUCCESS)
+  - `output/playwright/ga/22835574844/attendance-daily-gate-dashboard.md`
+  - Locale row now resolves to `#22835516014` and no `LOCALE_SUMMARY_MISSING`.

@@ -5346,3 +5346,13 @@ Expected logs (`gate-api-smoke.log`):
 - `import async upload ok`
 - `import async telemetry ok`
 - `SMOKE PASS`
+
+Evidence (2026-03-09):
+
+- `Attendance Strict Gates (Prod) [DRILL]` run `#22835442102`:
+  - `output/playwright/ga/22835442102/drill/gate-summary.json`
+- `Attendance Locale zh Smoke (Prod)` run `#22835516014`:
+  - `output/playwright/ga/22835516014/attendance-zh-locale-summary.json`
+- `Attendance Daily Gate Dashboard` run `#22835574844` (input `branch=codex/attendance-parallel-round17`):
+  - `output/playwright/ga/22835574844/attendance-daily-gate-dashboard.json`
+  - `gateFlat.localeZh` now points to locale run `#22835516014` with `status=PASS`.
