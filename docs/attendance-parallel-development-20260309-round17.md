@@ -152,3 +152,7 @@ Evidence:
 6. `203120c0` docs(attendance): add round17 parallel development report
 7. `fb1e66e3` test(ops): harden shared workflow dispatcher input-fallback
 8. `8a0f4b97` test(contracts): include dispatcher fallback regressions in strict case
+9. `7d6b7151` feat(ops): add fast parallel attendance regression entrypoint
+10. `e3bcf950` chore(attendance): add fast regression pnpm entry and evidence
+11. `2696fa0b` feat(ops): add lane profiles for fast attendance regression
+12. `d54051ca` test(ops): cover fast attendance regression lane profiles
