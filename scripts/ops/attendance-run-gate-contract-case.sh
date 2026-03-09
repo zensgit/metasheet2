@@ -174,6 +174,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
+  dashboard_invalid_query_branch="${case_dir}/dashboard.invalid.query-branch.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -659,6 +660,41 @@ EOF
 }
 EOF
 
+  function annotate_dashboard_fixture() {
+    local fixture="$1"
+    local report_branch="$2"
+    local remote_branch="$3"
+    local tmp_fixture="${fixture}.tmp"
+    jq \
+      --arg report_branch "$report_branch" \
+      --arg remote_branch "$remote_branch" \
+      '
+      .branch = $report_branch
+      | .remoteSignalBranch = $remote_branch
+      | (if (.gateFlat.preflight | type == "object") then .gateFlat.preflight.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.protection | type == "object") then .gateFlat.protection.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.metrics | type == "object") then .gateFlat.metrics.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.storage | type == "object") then .gateFlat.storage.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.cleanup | type == "object") then .gateFlat.cleanup.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.strict | type == "object") then .gateFlat.strict.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.perf | type == "object") then .gateFlat.perf.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.longrun | type == "object") then .gateFlat.longrun.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.contract | type == "object") then .gateFlat.contract.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.localeZh | type == "object") then .gateFlat.localeZh.queryBranch = $report_branch else . end)
+      ' \
+      "$fixture" >"$tmp_fixture"
+    mv "$tmp_fixture" "$fixture"
+  }
+
+  annotate_dashboard_fixture "$dashboard_valid" "main" "main"
+  annotate_dashboard_fixture "$dashboard_valid_non_main" "codex/feature-branch" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_strict" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_perf" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_longrun" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_upsert" "main" "main"
+
+  jq '.gateFlat.strict.queryBranch = "main"' "$dashboard_valid_non_main" >"$dashboard_invalid_query_branch"
+
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_non_main"
   expect_fail "dashboard strict-summary-validity contract" \
@@ -669,6 +705,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
+  expect_fail "dashboard query-branch routing contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_query_branch"
 
   workflow_file=".github/workflows/attendance-daily-gate-dashboard.yml"
   if ! line_matches "^[[:space:]]*branch:[[:space:]]*$" "$workflow_file"; then

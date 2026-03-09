@@ -5199,3 +5199,11 @@ Verification:
 | Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
 | Local feature-branch report replay | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS (`REPORT_STATUS=pass`) | `output/playwright/attendance-daily-gate-dashboard/20260309-030248/attendance-daily-gate-dashboard.json` |
 | GA feature-branch dashboard with main remote signals | Attendance Daily Gate Dashboard `#22836616321` | PASS | `output/playwright/ga/22836616321/attendance-daily-gate-dashboard-22836616321-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `remoteSignalBranch=main`, `gateFlat.preflight.queryBranch=main`) |
+
+Additional hardening (same round):
+
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - now enforces `branch` + `remoteSignalBranch` and per-gate `queryBranch` routing contracts.
+  - now supports local report JSON (no `escalationIssue` field) by treating it as `none_or_closed` instead of hard-failing.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - adds negative fixture `dashboard.invalid.query-branch.json` proving non-main strict gate cannot accidentally bind to `main`.

@@ -5434,6 +5434,12 @@ Verification:
 | Local replay (feature branch + main remote signals) | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-030248/attendance-daily-gate-dashboard.json` |
 | Attendance Daily Gate Dashboard (feature branch, remote_signal_branch=main) | #22836616321 | PASS | `output/playwright/ga/22836616321/attendance-daily-gate-dashboard-22836616321-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.preflight.queryBranch=main`, `gateFlat.strict.queryBranch=codex/attendance-parallel-round17`) |
 
+Follow-up hardening:
+
+- dashboard validator now checks `queryBranch` routing and catches non-main strict/perf/longrun misbinding.
+- contract matrix includes explicit negative case (`dashboard.invalid.query-branch.json`) to keep this guard in CI.
+- local `attendance-daily-gate-report.mjs` output (without workflow-added `escalationIssue`) is now validator-compatible, preventing local false negatives.
+
 Decision:
 
 - feature-branch dashboard validation can now pass with production-like remote signals without forcing `main` branch verification only.
