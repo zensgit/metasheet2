@@ -660,6 +660,17 @@ EOF
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
 
+  workflow_file=".github/workflows/attendance-daily-gate-dashboard.yml"
+  if ! rg -n "branch:\\s*$" "$workflow_file" >/dev/null; then
+    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.branch"
+  fi
+  if ! rg -n "default:\\s*''" "$workflow_file" >/dev/null; then
+    die "dashboard workflow contract failed: inputs.branch default must be empty string for ref fallback"
+  fi
+  if ! rg -n "BRANCH:\\s*\\$\\{\\{\\s*inputs\\.branch\\s*\\|\\|\\s*github\\.ref_name\\s*\\|\\|\\s*'main'\\s*\\}\\}" "$workflow_file" >/dev/null; then
+    die "dashboard workflow contract failed: BRANCH env must fallback to github.ref_name"
+  fi
+
   info "OK: dashboard contract case passed"
   exit 0
 fi
