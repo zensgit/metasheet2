@@ -64,9 +64,15 @@ This round focused on production-gate reliability and async import regression ha
   - emits unified `summary.md` / `summary.json` under `output/playwright/attendance-fast-parallel-regression/<timestamp>/`.
   - supports `PROFILE=full|ops|contracts` and `MAX_PARALLEL=<n>` to target specific lanes.
   - default output root now uses `timestamp + pid` to avoid same-second collisions during concurrent runs.
+- `scripts/ops/attendance-fast-parallel-regression.test.mjs` (new)
+  - validates profile and max-parallel input guards.
+  - validates default check selection:
+    - `PROFILE=ops` => ops checks only.
+    - `PROFILE=contracts` => contract checks only.
 - `package.json`
   - adds npm shortcuts:
     - `pnpm verify:attendance-regression-fast`
+    - `pnpm verify:attendance-regression-fast:test`
     - `pnpm verify:attendance-regression-fast:ops`
     - `pnpm verify:attendance-regression-fast:contracts`
 - `scripts/ops/attendance-regression-local.sh`
@@ -98,6 +104,7 @@ Both documents now include:
 9. `pnpm verify:attendance-regression-fast` -> PASS
 10. `pnpm verify:attendance-regression-fast:ops` -> PASS
 11. `pnpm verify:attendance-regression-fast:contracts` -> PASS
+12. `pnpm verify:attendance-regression-fast:test` -> PASS
 
 Fast parallel evidence:
 
