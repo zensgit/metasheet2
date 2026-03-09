@@ -5138,3 +5138,33 @@ Evidence:
 - Dashboard run without explicit `branch` input: `22835813042` (SUCCESS)
   - `output/playwright/ga/22835813042/attendance-daily-gate-dashboard.json`
   - `branch=codex/attendance-parallel-round17` (auto-selected from workflow ref)
+
+### Update (2026-03-09): Strict Replay Reliability Hardening (Selector + Reason + Schema)
+
+Scope:
+
+- remove false strict failures caused by Playwright button locator ambiguity after rate-limited import retries.
+- ensure strict gate reason classification reports selector collisions before generic rate-limit codes.
+- keep strict `gate-summary.json` schema aligned with emitted fields (`uiLocale`).
+- keep dashboard contract workflow guard portable on runners that do not provide `rg`.
+
+Changes:
+
+- `scripts/verify-attendance-production-flow.mjs`
+  - `Import` button click now uses exact role-name match (`name='Import', exact=true`), preventing `Import` vs `Retry import` collisions.
+- `scripts/ops/attendance-run-gates.sh`
+  - `detect_playwright_reason()` now classifies `strict mode violation/locator.click` as `SELECTOR_STRICT_VIOLATION` before `RATE_LIMITED`.
+- `schemas/attendance/strict-gate-summary.schema.json`
+  - added optional `uiLocale` field (`string|null`) to match current summary payload.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard workflow contract checks now support both `rg` and `grep` (CI runners without `rg` no longer fail contract step).
+
+Verification:
+
+| Check | Command/Run | Status | Evidence |
+|---|---|---|---|
+| Dashboard contract matrix (portable runner check) | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Strict contract matrix (schema alignment) | `./scripts/ops/attendance-run-gate-contract-case.sh strict output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Strict gates (feature branch rerun) | Attendance Strict Gates (Prod) `#22836147992` | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-1/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-summary.json` |
+| Strict API smoke upload assertions | `#22836147992` artifact scan | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-api-smoke.log` (`import upload ok`, `import async upload ok`, `idempotency ok`, `export csv ok`) |
+| Daily dashboard rebinding check | Attendance Daily Gate Dashboard `#22836231315` | SUCCESS (workflow) / FAIL (report expected on branch) | `output/playwright/ga/22836231315/attendance-daily-gate-dashboard-22836231315-1/attendance-daily-gate-dashboard.json` (`strict=PASS`, `protection=PASS`, `preflight=NO_COMPLETED_RUN`, `storage=NO_COMPLETED_RUN`) |

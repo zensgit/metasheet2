@@ -5380,3 +5380,33 @@ Evidence:
 - Daily dashboard run `#22835813042`:
   - `output/playwright/ga/22835813042/attendance-daily-gate-dashboard.json`
   - confirmed `branch=codex/attendance-parallel-round17` without explicit `branch` input.
+
+## Post-Go Verification (2026-03-09): Strict Selector Collision Recovery + Schema/Contract Alignment
+
+Scope:
+
+- clear strict gate false negatives triggered by `Import` vs `Retry import` button ambiguity after rate-limit retries.
+- align strict reason classification and strict gate summary schema with emitted runtime fields.
+- keep dashboard contract checks portable across CI runners that may not provide `rg`.
+
+Changes:
+
+- `scripts/verify-attendance-production-flow.mjs`: `Import` locator now uses exact match to avoid strict-mode selector collisions.
+- `scripts/ops/attendance-run-gates.sh`: `detect_playwright_reason()` classifies selector strict violations before `RATE_LIMITED`.
+- `schemas/attendance/strict-gate-summary.schema.json`: added optional `uiLocale` to remove summary/schema drift.
+- `scripts/ops/attendance-run-gate-contract-case.sh`: added `rg`/`grep` fallback helper so dashboard contract checks remain runner-compatible.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Dashboard contract matrix (runner compatibility) | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Strict contract matrix (schema alignment) | `./scripts/ops/attendance-run-gate-contract-case.sh strict output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Attendance Strict Gates (Prod, feature branch) | #22836147992 | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-1/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard (feature branch rebind) | #22836231315 | SUCCESS (workflow) / FAIL (report expected on non-main missing histories) | `output/playwright/ga/22836231315/attendance-daily-gate-dashboard-22836231315-1/attendance-daily-gate-dashboard.json` (`strict=PASS`, `protection=PASS`, `preflight=NO_COMPLETED_RUN`, `storage=NO_COMPLETED_RUN`) |
+
+Decision:
+
+- strict replay signal recovered and stable on branch validation rerun.
+- contract matrix now protects against the CI-tooling mismatch (`rg` absent) that previously caused false failures.
+- **GO maintained** for production mainline path; non-main dashboard fail remains expected when remote P0/P1 histories are absent.
