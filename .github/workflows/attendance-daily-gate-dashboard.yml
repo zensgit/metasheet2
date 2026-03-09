@@ -7,6 +7,10 @@ on:
         description: 'Branch to evaluate'
         required: false
         default: ''
+      remote_signal_branch:
+        description: 'Branch used for remote infrastructure signals (preflight/metrics/storage/cleanup/protection)'
+        required: false
+        default: 'main'
       lookback_hours:
         description: 'Max age (hours) for latest completed runs'
         required: false
@@ -47,6 +51,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BRANCH: ${{ inputs.branch || github.ref_name || 'main' }}
+      REMOTE_SIGNAL_BRANCH: ${{ inputs.remote_signal_branch || 'main' }}
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
       INCLUDE_DRILL_RUNS: ${{ inputs.include_drill_runs || 'false' }}
       ESCALATION_ISSUE_TITLE: ${{ inputs.issue_title || '[Attendance Gate] Daily dashboard alert' }}

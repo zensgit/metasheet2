@@ -674,11 +674,20 @@ EOF
   if ! line_matches "^[[:space:]]*branch:[[:space:]]*$" "$workflow_file"; then
     die "dashboard workflow contract failed: missing workflow_dispatch.inputs.branch"
   fi
+  if ! line_matches "^[[:space:]]*remote_signal_branch:[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.remote_signal_branch"
+  fi
   if ! line_matches "^[[:space:]]*default:[[:space:]]*''[[:space:]]*$" "$workflow_file"; then
     die "dashboard workflow contract failed: inputs.branch default must be empty string for ref fallback"
   fi
+  if ! line_matches "^[[:space:]]*default:[[:space:]]*'main'[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: inputs.remote_signal_branch default must be 'main'"
+  fi
   if ! line_matches "BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.branch[[:space:]]*\\|\\|[[:space:]]*github\\.ref_name[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
     die "dashboard workflow contract failed: BRANCH env must fallback to github.ref_name"
+  fi
+  if ! line_matches "REMOTE_SIGNAL_BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.remote_signal_branch[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
+    die "dashboard workflow contract failed: REMOTE_SIGNAL_BRANCH env must fallback to 'main'"
   fi
 
   info "OK: dashboard contract case passed"

@@ -21,6 +21,7 @@ const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').tri
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
 const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')
 const branch = String(process.env.BRANCH || 'main').trim()
+const remoteSignalBranch = String(process.env.REMOTE_SIGNAL_BRANCH || 'main').trim()
 const includeDrillRuns = String(process.env.INCLUDE_DRILL_RUNS || '').trim() === 'true'
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
@@ -623,7 +624,23 @@ export function pickLatestCompletedRun(runList, options = {}) {
   return completedRuns[0] ?? null
 }
 
-function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError }) {
+const remoteSignalGates = new Set([
+  'Remote Preflight',
+  'Branch Protection',
+  'Host Metrics',
+  'Storage Health',
+  'Upload Cleanup',
+])
+
+export function resolveGateSignalBranch({ gateName, reportBranch, remoteSignalBranchValue }) {
+  const report = String(reportBranch || '').trim() || 'main'
+  const remote = String(remoteSignalBranchValue || '').trim() || 'main'
+  if (report === 'main') return report
+  if (remoteSignalGates.has(String(gateName || ''))) return remote
+  return report
+}
+
+function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, queryBranch }) {
   const findings = []
   let ok = true
   const completed = formatRun(latestCompleted)
@@ -642,6 +659,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
       name,
       severity,
       ok,
+      queryBranch,
       latest,
       completed,
       findings,
@@ -654,7 +672,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
       severity,
       code: 'NO_COMPLETED_RUN',
       gate: name,
-      message: `${name}: no completed run found on branch '${branch}'`,
+      message: `${name}: no completed run found on branch '${queryBranch}'`,
       runUrl: latest.url,
     })
   } else {
@@ -685,6 +703,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
     name,
     severity,
     ok,
+    queryBranch,
     latest,
     completed,
     findings,
@@ -695,6 +714,7 @@ function renderMarkdown({
   generatedAt,
   repoValue,
   branchValue,
+  remoteSignalBranchValue,
   lookbackHoursValue,
   cleanupLookbackHoursValue,
   preflightGate,
@@ -732,6 +752,7 @@ function renderMarkdown({
   lines.push(`Generated at (UTC): \`${generatedAt}\``)
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
+  lines.push(`Remote signal branch: \`${remoteSignalBranchValue}\``)
   lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`)`)
   lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
@@ -1318,16 +1339,67 @@ async function run() {
 
   info(`repository=${repo} branch=${branch}`)
 
-  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
-  const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: branch })
-  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
-  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
-  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
-  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
-  const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
-  const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
-  const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
-  const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
+  const preflightQueryBranch = resolveGateSignalBranch({
+    gateName: 'Remote Preflight',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const protectionQueryBranch = resolveGateSignalBranch({
+    gateName: 'Branch Protection',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const metricsQueryBranch = resolveGateSignalBranch({
+    gateName: 'Host Metrics',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const storageQueryBranch = resolveGateSignalBranch({
+    gateName: 'Storage Health',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const cleanupQueryBranch = resolveGateSignalBranch({
+    gateName: 'Upload Cleanup',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const localeZhQueryBranch = resolveGateSignalBranch({
+    gateName: 'Locale zh Smoke',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const strictQueryBranch = resolveGateSignalBranch({
+    gateName: 'Strict Gates',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const perfQueryBranch = resolveGateSignalBranch({
+    gateName: 'Perf Baseline',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const longrunQueryBranch = resolveGateSignalBranch({
+    gateName: 'Perf Long Run',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const contractQueryBranch = resolveGateSignalBranch({
+    gateName: 'Gate Contract Matrix',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+
+  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: preflightQueryBranch })
+  const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: protectionQueryBranch })
+  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: metricsQueryBranch })
+  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: storageQueryBranch })
+  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: cleanupQueryBranch })
+  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: localeZhQueryBranch })
+  const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: strictQueryBranch })
+  const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: perfQueryBranch })
+  const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: longrunQueryBranch })
+  const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: contractQueryBranch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
@@ -1424,6 +1496,7 @@ async function run() {
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
     severity: 'P0',
+    queryBranch: preflightQueryBranch,
     latestAny: preflightLatestAny,
     latestCompleted: preflightLatestCompleted,
     now,
@@ -1433,6 +1506,7 @@ async function run() {
   const protectionGate = evaluateGate({
     name: 'Branch Protection',
     severity: 'P1',
+    queryBranch: protectionQueryBranch,
     latestAny: protectionLatestAny,
     latestCompleted: protectionLatestCompleted,
     now,
@@ -1442,6 +1516,7 @@ async function run() {
   const metricsGate = evaluateGate({
     name: 'Host Metrics',
     severity: 'P1',
+    queryBranch: metricsQueryBranch,
     latestAny: metricsLatestAny,
     latestCompleted: metricsLatestCompleted,
     now,
@@ -1451,6 +1526,7 @@ async function run() {
   const storageGate = evaluateGate({
     name: 'Storage Health',
     severity: 'P1',
+    queryBranch: storageQueryBranch,
     latestAny: storageLatestAny,
     latestCompleted: storageLatestCompleted,
     now,
@@ -1461,6 +1537,7 @@ async function run() {
   const cleanupGate = evaluateGate({
     name: 'Upload Cleanup',
     severity: 'P2',
+    queryBranch: cleanupQueryBranch,
     latestAny: cleanupLatestAny,
     latestCompleted: cleanupLatestCompleted,
     now,
@@ -1470,6 +1547,7 @@ async function run() {
   const localeZhGate = evaluateGate({
     name: 'Locale zh Smoke',
     severity: 'P1',
+    queryBranch: localeZhQueryBranch,
     latestAny: localeZhLatestAny,
     latestCompleted: localeZhLatestCompleted,
     now,
@@ -1479,6 +1557,7 @@ async function run() {
   const strictGate = evaluateGate({
     name: 'Strict Gates',
     severity: 'P0',
+    queryBranch: strictQueryBranch,
     latestAny: strictLatestAny,
     latestCompleted: strictLatestCompleted,
     now,
@@ -1488,6 +1567,7 @@ async function run() {
   const perfGate = evaluateGate({
     name: 'Perf Baseline',
     severity: 'P1',
+    queryBranch: perfQueryBranch,
     latestAny: perfLatestAny,
     latestCompleted: perfLatestCompleted,
     now,
@@ -1498,6 +1578,7 @@ async function run() {
   const longrunGate = evaluateGate({
     name: 'Perf Long Run',
     severity: 'P1',
+    queryBranch: longrunQueryBranch,
     latestAny: longrunLatestAny,
     latestCompleted: longrunLatestCompleted,
     now,
@@ -1508,6 +1589,7 @@ async function run() {
   const contractGate = evaluateGate({
     name: 'Gate Contract Matrix',
     severity: 'P1',
+    queryBranch: contractQueryBranch,
     latestAny: contractLatestAny,
     latestCompleted: contractLatestCompleted,
     now,
@@ -1823,6 +1905,7 @@ async function run() {
     const flat = {
       gate: gate?.name || null,
       severity: gate?.severity || null,
+      queryBranch: gate?.queryBranch || null,
       status: gate?.ok ? 'PASS' : 'FAIL',
       reasonCode,
       reasonSummary,
@@ -1917,6 +2000,7 @@ async function run() {
     generatedAt,
     repository: repo,
     branch,
+    remoteSignalBranch,
     lookbackHours,
     p0Status,
     overallStatus,
@@ -1941,6 +2025,7 @@ async function run() {
     generatedAt,
     repoValue: repo,
     branchValue: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
     lookbackHoursValue: lookbackHours,
     cleanupLookbackHoursValue: cleanupLookbackHours,
     preflightGate,

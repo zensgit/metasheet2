@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseLocaleZhSummaryJson, pickLatestCompletedRun } from './attendance-daily-gate-report.mjs'
+import { parseLocaleZhSummaryJson, pickLatestCompletedRun, resolveGateSignalBranch } from './attendance-daily-gate-report.mjs'
 
 test('pickLatestCompletedRun skips excluded conclusions and falls back to previous valid run', () => {
   const list = [
@@ -79,4 +79,31 @@ test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, 'LUNAR_LABELS_MISSING')
+})
+
+test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Remote Preflight',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'main',
+  })
+  assert.equal(resolved, 'main')
+})
+
+test('resolveGateSignalBranch keeps strict gates on report branch', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Strict Gates',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'main',
+  })
+  assert.equal(resolved, 'codex/feature-branch')
+})
+
+test('resolveGateSignalBranch can override remote signal branch explicitly', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Host Metrics',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'release/ops-signal',
+  })
+  assert.equal(resolved, 'release/ops-signal')
 })
