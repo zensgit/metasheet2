@@ -19,6 +19,10 @@ on:
         description: 'Optional: override escalation issue title for workflow_dispatch drills (leave empty for production title)'
         required: false
         default: ''
+      escalate_issues_for_non_main:
+        description: 'Allow opening/closing escalation issues for non-main branch runs (true/false, default false)'
+        required: false
+        default: 'false'
   schedule:
     # Daily after strict/perf scheduled windows.
     - cron: '30 4 * * *'
@@ -54,6 +58,7 @@ jobs:
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
       CONTRACT_WORKFLOW: attendance-gate-contract-matrix.yml
       PROTECTION_WORKFLOW: attendance-branch-policy-drift-prod.yml
+      ESCALATE_ISSUES_FOR_NON_MAIN: ${{ inputs.escalate_issues_for_non_main || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,7 +75,7 @@ jobs:
           node ./scripts/ops/attendance-daily-gate-report.mjs
 
       - name: Open/update escalation issue on failure
-        if: steps.report.outputs.report_p0_status != 'pass'
+        if: steps.report.outputs.report_p0_status != 'pass' && (env.BRANCH == 'main' || env.ESCALATE_ISSUES_FOR_NON_MAIN == 'true')
         id: issue_open
         uses: actions/github-script@v7
         env:
@@ -221,7 +226,7 @@ jobs:
             }
 
       - name: Auto-close escalation issue on recovery
-        if: steps.report.outputs.report_p0_status == 'pass'
+        if: steps.report.outputs.report_p0_status == 'pass' && (env.BRANCH == 'main' || env.ESCALATE_ISSUES_FOR_NON_MAIN == 'true')
         id: issue_close
         uses: actions/github-script@v7
         env:
@@ -287,6 +292,8 @@ jobs:
           ISSUE_NUMBER: ${{ steps.issue_open.outputs.issue_number }}
           ISSUE_URL: ${{ steps.issue_open.outputs.issue_url }}
           ISSUE_ACTION: ${{ steps.issue_open.outputs.issue_action }}
+          BRANCH: ${{ env.BRANCH }}
+          ESCALATE_ISSUES_FOR_NON_MAIN: ${{ env.ESCALATE_ISSUES_FOR_NON_MAIN }}
         run: |
           set -euo pipefail
           md="${REPORT_MARKDOWN}"
@@ -307,6 +314,8 @@ jobs:
               if [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
                 echo "- Strict fast alert: [#${ISSUE_NUMBER}](${ISSUE_URL})" >> "$md"
               fi
+            elif [[ "${BRANCH:-main}" != "main" && "${ESCALATE_ISSUES_FOR_NON_MAIN:-false}" != "true" ]]; then
+              echo "- Issue: suppressed for non-main branch \`${BRANCH:-unknown}\` (set \`escalate_issues_for_non_main=true\` to enable)" >> "$md"
             elif [[ -n "${ISSUE_URL:-}" && -n "${ISSUE_NUMBER:-}" ]]; then
               echo "- Issue: [#${ISSUE_NUMBER}](${ISSUE_URL}) (${ISSUE_ACTION:-updated})" >> "$md"
             else
@@ -334,6 +343,8 @@ jobs:
               --arg issue_number "${ISSUE_NUMBER:-}" \
               --arg report_p0_status "${REPORT_P0_STATUS:-}" \
               --arg strict_fast_alert_title "${STRICT_FAST_ALERT_TITLE:-}" \
+              --arg report_branch "${BRANCH:-main}" \
+              --arg escalate_non_main "${ESCALATE_ISSUES_FOR_NON_MAIN:-false}" \
               '
               .escalationIssue = {
                 title: $issue_title,
@@ -345,6 +356,7 @@ jobs:
                 mode: (
                   if $report_p0_status == "pass" then "none_or_closed"
                   elif ($issue_action | startswith("suppressed_strict_only")) then "suppressed_strict_only"
+                  elif ($report_branch != "main" and $escalate_non_main != "true") then "suppressed_non_main"
                   elif $issue_url != "" then "open"
                   else "unknown"
                   end

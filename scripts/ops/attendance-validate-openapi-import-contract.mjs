@@ -121,6 +121,16 @@ if (importAsync) {
   }
 }
 
+const importJob = requireSchema('AttendanceImportJob')
+if (importJob) {
+  const props = importJob.properties || {}
+  for (const field of ['engine', 'processedRows', 'failedRows', 'elapsedMs', 'recordUpsertStrategy']) {
+    if (!hasOwn(props, field)) {
+      fail(`AttendanceImportJob missing telemetry field: ${field}`)
+    }
+  }
+}
+
 const sourceText = fs.readFileSync(sourceAttendancePath, 'utf8')
 for (const apiPath of requiredPaths) {
   if (!sourceText.includes(`${apiPath}:`)) {

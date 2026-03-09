@@ -145,6 +145,14 @@ if [[ "$CASE_ID" == "openapi" ]]; then
       "${invalid_openapi}" \
       packages/openapi/src/paths/attendance.yml
 
+  invalid_openapi_job="${openapi_dir}/openapi.invalid.job-telemetry.json"
+  jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi_job}"
+  expect_fail "openapi AttendanceImportJob telemetry contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi_job}" \
+      packages/openapi/src/paths/attendance.yml
+
   info "OK: openapi contract case passed"
   exit 0
 fi

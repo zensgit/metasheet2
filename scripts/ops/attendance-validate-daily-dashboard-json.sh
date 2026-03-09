@@ -46,7 +46,7 @@ case "$overall_status" in
 esac
 
 case "$escalation_mode" in
-  none_or_closed|suppressed_strict_only|open|unknown)
+  none_or_closed|suppressed_strict_only|suppressed_non_main|open|unknown)
     ;;
   *)
     die "invalid escalationIssue.mode=${escalation_mode:-<empty>}"
