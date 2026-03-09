@@ -5168,3 +5168,34 @@ Verification:
 | Strict gates (feature branch rerun) | Attendance Strict Gates (Prod) `#22836147992` | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-1/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-summary.json` |
 | Strict API smoke upload assertions | `#22836147992` artifact scan | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-api-smoke.log` (`import upload ok`, `import async upload ok`, `idempotency ok`, `export csv ok`) |
 | Daily dashboard rebinding check | Attendance Daily Gate Dashboard `#22836231315` | SUCCESS (workflow) / FAIL (report expected on branch) | `output/playwright/ga/22836231315/attendance-daily-gate-dashboard-22836231315-1/attendance-daily-gate-dashboard.json` (`strict=PASS`, `protection=PASS`, `preflight=NO_COMPLETED_RUN`, `storage=NO_COMPLETED_RUN`) |
+
+### Update (2026-03-09): Feature-branch Dashboard Uses Main Remote Signals by Default
+
+Scope:
+
+- remove non-main false negatives where feature branches have strict/perf runs but no remote ops history.
+- keep strict/perf/longrun/contract on the requested branch while reading remote ops signals from `main`.
+
+Changes:
+
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - new dispatch input `remote_signal_branch` (default: `main`).
+  - passes `REMOTE_SIGNAL_BRANCH` into report generator.
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - added branch resolver `resolveGateSignalBranch()`.
+  - remote gates (`Remote Preflight`, `Branch Protection`, `Host Metrics`, `Storage Health`, `Upload Cleanup`) use `REMOTE_SIGNAL_BRANCH` when report branch is non-main.
+  - gate flat payload now includes `queryBranch` for each gate.
+  - report top-level now includes `remoteSignalBranch`.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added resolver unit tests for remote/main/override branch behavior.
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard contract now enforces workflow inputs/env for `remote_signal_branch`.
+
+Verification:
+
+| Check | Command/Run | Status | Evidence |
+|---|---|---|---|
+| Daily report parser tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Local feature-branch report replay | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS (`REPORT_STATUS=pass`) | `output/playwright/attendance-daily-gate-dashboard/20260309-030248/attendance-daily-gate-dashboard.json` |
+| GA feature-branch dashboard with main remote signals | Attendance Daily Gate Dashboard `#22836616321` | PASS | `output/playwright/ga/22836616321/attendance-daily-gate-dashboard-22836616321-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `remoteSignalBranch=main`, `gateFlat.preflight.queryBranch=main`) |

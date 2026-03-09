@@ -5410,3 +5410,32 @@ Decision:
 - strict replay signal recovered and stable on branch validation rerun.
 - contract matrix now protects against the CI-tooling mismatch (`rg` absent) that previously caused false failures.
 - **GO maintained** for production mainline path; non-main dashboard fail remains expected when remote P0/P1 histories are absent.
+
+## Post-Go Verification (2026-03-09): Feature-branch Dashboard Remote-Signal Branching
+
+Scope:
+
+- eliminate feature-branch dashboard false negatives caused by missing remote ops histories.
+- keep strict/perf/longrun/contract bound to feature branch while remote ops gates bind to `main` by default.
+
+Changes:
+
+- dashboard workflow input added: `remote_signal_branch` (default `main`).
+- daily report now resolves per-gate query branch via `resolveGateSignalBranch()`.
+- remote gates query `main` on non-main report branches; gate metadata now records `queryBranch`.
+- dashboard contract matrix enforces the new workflow input/env mapping.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Daily report unit tests (branch resolver) | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Local replay (feature branch + main remote signals) | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-030248/attendance-daily-gate-dashboard.json` |
+| Attendance Daily Gate Dashboard (feature branch, remote_signal_branch=main) | #22836616321 | PASS | `output/playwright/ga/22836616321/attendance-daily-gate-dashboard-22836616321-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.preflight.queryBranch=main`, `gateFlat.strict.queryBranch=codex/attendance-parallel-round17`) |
+
+Decision:
+
+- feature-branch dashboard validation can now pass with production-like remote signals without forcing `main` branch verification only.
+- production `main` behavior remains unchanged.
+- **GO maintained**.
