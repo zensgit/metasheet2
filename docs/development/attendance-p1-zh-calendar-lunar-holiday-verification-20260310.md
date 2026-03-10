@@ -274,3 +274,28 @@ gh run download 22889675403 -D output/playwright/ga/22889675403
 - 证据路径：
   - `output/playwright/ga/22889675403/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22889675403/attendance-zh-locale-calendar.png`
+
+## 13. Mainline PR 验证（PR #403，run 22889790719）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-mainline-20260310 \
+  -f require_zh_core_labels=true \
+  -f require_toggle_checks=false \
+  -f verify_holiday=true
+
+gh run watch 22889790719 --exit-status
+gh run download 22889790719 -D output/playwright/ga/22889790719
+```
+- 结果：PASS
+- 阶段结果：
+  - `Run zh copy contract`：PASS
+  - `Run zh locale smoke`：PASS
+- 摘要字段：
+  - `status=pass`
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `toggleCheck.skipped=true`（当前部署未启用开关 UI）
+  - `cleanup.holidayDeleted=true`
+- 证据路径：
+  - `output/playwright/ga/22889790719/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889790719/attendance-zh-locale-calendar.png`
