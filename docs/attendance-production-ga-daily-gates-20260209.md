@@ -3337,9 +3337,10 @@ Observed:
 
 Execution summary:
 
-1. Enhanced `scripts/verify-attendance-locale-zh-smoke.mjs` to verify **both**:
+1. Enhanced `scripts/verify-attendance-locale-zh-smoke.mjs` to verify:
    - lunar day labels rendered in calendar cells (`zh-CN-u-ca-chinese`);
    - holiday badge rendered by creating a temporary holiday via `/api/attendance/holidays`, checking UI, then auto-cleaning it.
+   - calendar display toggle regression (`Lunar` / `Holiday` off -> markers hidden; on -> markers visible again).
 2. Added npm entrypoint:
    - `pnpm verify:attendance-locale-zh`
 
@@ -3349,7 +3350,9 @@ Local validation:
 |---|---|---|
 | Script syntax (`node --check scripts/verify-attendance-locale-zh-smoke.mjs`) | PASS | local shell output |
 
-Run command (production/staging):
+Run command (production/staging, local smoke auth fallback supported):
+
+Path A: direct token
 
 ```bash
 WEB_URL="http://142.171.239.56:8081" \
@@ -3359,10 +3362,42 @@ ORG_ID="default" \
 pnpm verify:attendance-locale-zh
 ```
 
+Path B: refresh-token fallback (uses `AUTH_TOKEN` as refresh input)
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<EXPIRED_OR_ROTATABLE_ADMIN_JWT_PLACEHOLDER>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
+Path C: login fallback (no pre-generated `AUTH_TOKEN` required)
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+LOGIN_EMAIL="<ATTENDANCE_ADMIN_EMAIL_PLACEHOLDER>" \
+LOGIN_PASSWORD="<ATTENDANCE_ADMIN_PASSWORD_PLACEHOLDER>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
 Expected log markers:
 - `created holiday: ...`
-- `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on`
+- `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on, toggleCheck=pass, authSource=...`
 - `deleted holiday: ...`
+
+Calendar toggle regression coverage:
+- 默认 `REQUIRE_TOGGLE_CHECKS=false` 时：
+  - 若目标环境尚未部署开关 UI，`toggleCheck` 记为 `skipped:<reason>`，不阻断 zh smoke。
+  - 若目标环境已部署开关 UI，仍会执行 `Lunar/Holiday` 开关检查并给出 `toggleCheck=pass|fail`。
+- 开启强校验（用于新版本环境）：
+  - `REQUIRE_TOGGLE_CHECKS=true` 时，开关 UI 缺失将直接失败。
+- `toggleCheck=pass` 表示 smoke 已完成两组开关断言：
+  - `Lunar`: on -> off -> on
+  - `Holiday`: on -> off -> on
+- Any visibility mismatch on toggle transitions fails the run and is captured in screenshot evidence.
 
 GitHub workflow (uses `ATTENDANCE_ADMIN_JWT` secret):
 
@@ -3380,9 +3415,23 @@ Artifact:
   - `attendance-locale-zh-smoke-prod-<runId>-<attempt>/auth-error.txt`
 
 Auth note:
-- Workflow first validates `ATTENDANCE_ADMIN_JWT`.
-- If JWT is invalid and `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` are configured, it auto-logins and continues.
-- If neither path yields a valid token, run fails with explicit rotation guidance.
+- Local and workflow runs resolve auth in the same order:
+  1. valid token path (`AUTH_TOKEN` locally / `ATTENDANCE_ADMIN_JWT` in workflow);
+  2. refresh-token fallback (`POST /auth/refresh-token` with the provided token);
+  3. login fallback (`LOGIN_EMAIL` + `LOGIN_PASSWORD` locally / `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` in workflow).
+- Runbook field `authSource` possible values: `token` | `refresh` | `login`.
+- If none of the above paths yields a valid token, run fails with explicit rotation guidance.
+- Never write real JWT/passwords into repo/docs; use placeholders only.
+
+Workflow dispatch examples:
+
+```bash
+# default (non-blocking toggle check for legacy deployed env)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_toggle_checks=false
+
+# strict toggle check (new env that already contains calendar toggle UI)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_toggle_checks=true
+```
 
 ### Update (2026-03-01): Auth Failure Path Evidence Verified
 
@@ -3620,6 +3669,28 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+### Update (2026-03-10): Dashboard Contract Schema v3 + Locale zh Gate
+
+Scope:
+
+- `attendance-daily-gate-report.mjs` now enriches `Locale zh Smoke` from artifact `attendance-zh-locale-summary.json`.
+- `gateFlat.schemaVersion` upgraded to `3`.
+- `gateFlat.localeZh` exports machine fields:
+  - `summarySchemaVersion`, `authSource`, `lunarLabelCount`, `holidayBadgeCount`, `holidayCheckEnabled`, `toggleCheckSkipped`, `zhOverviewTab`, `zhAdminTab`, `zhWorkflowTab`, `zhShellTabsChecked`.
+- `attendance-validate-daily-dashboard-json.sh` now validates locale gate contract and requires `gateFlat.schemaVersion>=3`.
+- `attendance-run-gate-contract-case.sh dashboard` adds locale v3 negative fixture (`dashboard.invalid.locale.json`).
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Dashboard validator syntax | local (2026-03-10) | PASS | `bash -n scripts/ops/attendance-validate-daily-dashboard-json.sh` |
+| Daily report syntax | local (2026-03-10) | PASS | `node --check scripts/ops/attendance-daily-gate-report.mjs` |
+| Attendance Gate Contract Case (strict) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Attendance Gate Contract Case (dashboard, schema v3 + locale) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json` |
+| Attendance Gate Contract Matrix (branch GA) | #22896171398 | PASS | `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.valid.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.invalid.locale.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-strict-22896171398-1/strict/gate-summary.json` |
+| Attendance Locale zh Smoke (branch GA) | #22896361190 | PASS | `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-calendar.png` |
 
 ### Update (2026-03-07): Daily Gates Refresh (Strict + Preflight + Storage + Policy + Dashboard)
 
