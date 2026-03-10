@@ -53,18 +53,62 @@ test('pickLatestCompletedRun returns null when no completed run exists', () => {
 
 test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: 'pass',
     locale: 'zh-CN',
     lunarCount: 28,
     holidayCheck: 'enabled',
     holidayBadgeCount: 1,
     holidayCalendarLabel: '二月 2026',
+    createdHolidayId: 'holiday-1',
+    createdHolidayDate: '2026-02-15',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: true,
+      error: null,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'refresh',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      overviewTab: true,
+      adminTab: true,
+      workflowTab: true,
+      shellTabsChecked: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
   }
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, null)
-  assert.equal(parsed?.schemaVersion, 1)
+  assert.equal(parsed?.schemaVersion, 3)
+  assert.equal(parsed?.authSource, 'refresh')
+  assert.equal(parsed?.zhLabelsStatus, 'pass')
+  assert.equal(parsed?.zhLabelsOk, 'true')
+  assert.equal(parsed?.zhNoEnglishLeak, 'true')
+  assert.equal(parsed?.zhOverviewTab, 'true')
+  assert.equal(parsed?.zhAdminTab, 'true')
+  assert.equal(parsed?.zhWorkflowTab, 'true')
+  assert.equal(parsed?.zhShellTabsChecked, 'true')
+  assert.equal(parsed?.toggleCheckStatus, 'pass')
+  assert.equal(parsed?.holidayCleanupDeleted, 'true')
   assert.equal(parsed?.locale, 'zh-CN')
   assert.equal(parsed?.lunarCount, '28')
   assert.equal(parsed?.holidayCheck, 'enabled')
@@ -74,7 +118,7 @@ test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
 
 test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'pass',
     locale: 'zh-CN',
     lunarCount: 0,
@@ -84,6 +128,201 @@ test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, 'LUNAR_LABELS_MISSING')
+})
+
+test('parseLocaleZhSummaryJson requires schema v2+', () => {
+  const payload = {
+    schemaVersion: 1,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 28,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'SUMMARY_SCHEMA_VERSION_UNSUPPORTED')
+})
+
+test('parseLocaleZhSummaryJson flags invalid authSource in schema v2', () => {
+  const payload = {
+    schemaVersion: 2,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 32,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    createdHolidayId: 'holiday-2',
+    createdHolidayDate: '2026-02-16',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: true,
+      error: null,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'legacy',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'AUTH_SOURCE_INVALID')
+})
+
+test('parseLocaleZhSummaryJson flags zh english leak in schema v2', () => {
+  const payload = {
+    schemaVersion: 2,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 32,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    createdHolidayId: 'holiday-3',
+    createdHolidayDate: '2026-02-17',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: true,
+      error: null,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'token',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: false,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'ZH_ENGLISH_LEAK_DETECTED')
+})
+
+test('parseLocaleZhSummaryJson flags holiday cleanup failure in schema v2', () => {
+  const payload = {
+    schemaVersion: 2,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 26,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    createdHolidayId: 'holiday-4',
+    createdHolidayDate: '2026-02-18',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: false,
+      error: 'permission denied',
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'token',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'HOLIDAY_CLEANUP_FAILED')
+})
+
+test('parseLocaleZhSummaryJson requires shell tab labels when schema v3 is provided', () => {
+  const payload = {
+    schemaVersion: 3,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 26,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    createdHolidayId: 'holiday-5',
+    createdHolidayDate: '2026-02-19',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: true,
+      error: null,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'token',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      overviewTab: false,
+      adminTab: true,
+      workflowTab: true,
+      shellTabsChecked: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'ZH_CORE_LABELS_INCOMPLETE')
+  assert.equal(parsed?.zhMissingFields, 'overviewTab')
 })
 
 test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {

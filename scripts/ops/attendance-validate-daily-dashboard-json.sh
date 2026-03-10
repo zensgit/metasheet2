@@ -258,6 +258,22 @@ function validate_locale_gate() {
   local gate_lunar_count
   local gate_holiday_check
   local gate_holiday_badge_count
+  local gate_auth_source
+  local gate_zh_labels_status
+  local gate_toggle_status
+  local gate_toggle_lunar_off
+  local gate_toggle_lunar_on
+  local gate_toggle_holiday_off
+  local gate_toggle_holiday_on
+  local gate_holiday_cleanup_deleted
+  local gate_holiday_cleanup_error
+  local gate_created_holiday_id
+  local gate_created_holiday_date
+  local gate_created_holiday_name
+  local gate_zh_overview_tab
+  local gate_zh_admin_tab
+  local gate_zh_workflow_tab
+  local gate_zh_shell_tabs_checked
 
   validate_basic_gate "$gate_key" "$gate_label"
 
@@ -277,13 +293,56 @@ function validate_locale_gate() {
   gate_lunar_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].lunarCount // empty' "$report_json")"
   gate_holiday_check="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayCheck // empty' "$report_json")"
   gate_holiday_badge_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayBadgeCount // empty' "$report_json")"
+  gate_auth_source="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].authSource // empty' "$report_json")"
+  gate_zh_labels_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhLabelsStatus // empty' "$report_json")"
+  gate_toggle_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleCheckStatus // empty' "$report_json")"
+  gate_toggle_lunar_off="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleLunarOffNoBadge // empty' "$report_json")"
+  gate_toggle_lunar_on="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleLunarOnRecovered // empty' "$report_json")"
+  gate_toggle_holiday_off="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleHolidayOffNoBadge // empty' "$report_json")"
+  gate_toggle_holiday_on="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleHolidayOnRecovered // empty' "$report_json")"
+  gate_holiday_cleanup_deleted="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayCleanupDeleted // empty' "$report_json")"
+  gate_holiday_cleanup_error="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayCleanupError // empty' "$report_json")"
+  gate_created_holiday_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayId // empty' "$report_json")"
+  gate_created_holiday_date="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayDate // empty' "$report_json")"
+  gate_created_holiday_name="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayName // empty' "$report_json")"
+  gate_zh_overview_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhOverviewTab // empty' "$report_json")"
+  gate_zh_admin_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhAdminTab // empty' "$report_json")"
+  gate_zh_workflow_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhWorkflowTab // empty' "$report_json")"
+  gate_zh_shell_tabs_checked="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhShellTabsChecked // empty' "$report_json")"
 
-  if [[ -z "$gate_schema_version" ]] || ! [[ "$gate_schema_version" =~ ^[0-9]+$ ]] || (( gate_schema_version < 1 )); then
-    die "${gate_label} contract failed: gateFlat.${gate_key}.summarySchemaVersion=${gate_schema_version:-<empty>} (expected integer >= 1 when status=PASS)"
+  if [[ -z "$gate_schema_version" ]] || ! [[ "$gate_schema_version" =~ ^[0-9]+$ ]] || (( gate_schema_version < 2 )); then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.summarySchemaVersion=${gate_schema_version:-<empty>} (expected integer >= 2 when status=PASS)"
   fi
 
   if [[ "$gate_locale" != "zh-CN" ]]; then
     die "${gate_label} contract failed: gateFlat.${gate_key}.locale=${gate_locale:-<empty>} (expected zh-CN when status=PASS)"
+  fi
+
+  case "$gate_auth_source" in
+    token|refresh|login)
+      ;;
+    *)
+      die "${gate_label} contract failed: gateFlat.${gate_key}.authSource=${gate_auth_source:-<empty>} (expected token|refresh|login when status=PASS)"
+      ;;
+  esac
+
+  case "$gate_zh_labels_status" in
+    pass|skipped:*)
+      ;;
+    *)
+      die "${gate_label} contract failed: gateFlat.${gate_key}.zhLabelsStatus=${gate_zh_labels_status:-<empty>} (expected pass or skipped:* when status=PASS)"
+      ;;
+  esac
+
+  if (( gate_schema_version >= 3 )); then
+    for shell_value in "$gate_zh_overview_tab" "$gate_zh_admin_tab" "$gate_zh_workflow_tab"; do
+      if [[ "$shell_value" != "true" ]]; then
+        die "${gate_label} contract failed: schemaVersion>=3 requires zhOverviewTab/zhAdminTab/zhWorkflowTab=true"
+      fi
+    done
+    if [[ "$gate_zh_shell_tabs_checked" != "true" ]]; then
+      die "${gate_label} contract failed: schemaVersion>=3 requires zhShellTabsChecked=true"
+    fi
   fi
 
   if [[ -z "$gate_lunar_count" ]] || ! [[ "$gate_lunar_count" =~ ^[0-9]+$ ]] || (( gate_lunar_count <= 0 )); then
@@ -302,7 +361,37 @@ function validate_locale_gate() {
     if [[ -z "$gate_holiday_badge_count" ]] || ! [[ "$gate_holiday_badge_count" =~ ^[0-9]+$ ]] || (( gate_holiday_badge_count <= 0 )); then
       die "${gate_label} contract failed: gateFlat.${gate_key}.holidayBadgeCount=${gate_holiday_badge_count:-<empty>} (expected positive integer when holidayCheck=enabled)"
     fi
+    if [[ "$gate_holiday_cleanup_deleted" != "true" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCleanupDeleted=${gate_holiday_cleanup_deleted:-<empty>} (expected true when holidayCheck=enabled)"
+    fi
+    if [[ -n "$gate_holiday_cleanup_error" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCleanupError=${gate_holiday_cleanup_error} (expected empty when holidayCheck=enabled)"
+    fi
+    if [[ -z "$gate_created_holiday_id" || -z "$gate_created_holiday_date" || -z "$gate_created_holiday_name" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.createdHoliday* fields must be non-empty when holidayCheck=enabled"
+    fi
+  else
+    if [[ -n "$gate_holiday_cleanup_deleted" && "$gate_holiday_cleanup_deleted" != "false" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCleanupDeleted=${gate_holiday_cleanup_deleted} (expected false or empty when holidayCheck=disabled)"
+    fi
+    if [[ -n "$gate_holiday_cleanup_error" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCleanupError=${gate_holiday_cleanup_error} (expected empty when holidayCheck=disabled)"
+    fi
   fi
+
+  if [[ "$gate_toggle_status" == skipped:* ]]; then
+    return 0
+  fi
+
+  if [[ "$gate_toggle_status" != "pass" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.toggleCheckStatus=${gate_toggle_status:-<empty>} (expected pass or skipped:* when status=PASS)"
+  fi
+
+  for toggle_value in "$gate_toggle_lunar_off" "$gate_toggle_lunar_on" "$gate_toggle_holiday_off" "$gate_toggle_holiday_on"; do
+    if [[ "$toggle_value" != "true" ]]; then
+      die "${gate_label} contract failed: gateFlat.${gate_key}.toggle check flags must all be true when toggleCheckStatus=pass"
+    fi
+  done
 }
 
 validate_locale_gate

@@ -13,6 +13,30 @@ Rules:
 - API: `http://142.171.239.56:8081/api`
 - Backend metrics (host-local): `http://127.0.0.1:8900/metrics/prom` (not exposed via nginx)
 
+## One-Click Production Acceptance Pack
+
+For release/rollback windows, run one command to execute preflight + strict gates twice + desktop/mobile Playwright + zh locale smoke:
+
+```bash
+AUTH_TOKEN="<ADMIN_JWT>" \
+PROVISION_USER_ID="<TARGET_USER_UUID_FOR_PROVISIONING_GATE>" \
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+scripts/ops/attendance-production-oneclick-verify.sh
+```
+
+Output:
+
+- Root: `output/playwright/attendance-production-oneclick-verify/<timestamp>/`
+- Summary: `summary.md`
+- Per-step logs: `*.log`
+
+Useful toggles:
+
+- Skip preflight: `RUN_PREFLIGHT=false`
+- Skip mobile UI: `RUN_UI_MOBILE=false`
+- Require calendar toggle assertions in zh smoke: `REQUIRE_TOGGLE_CHECKS=true`
+
 ## GA Gates (P0)
 
 ### 1) Strict Gates Twice (Stability PASS)
