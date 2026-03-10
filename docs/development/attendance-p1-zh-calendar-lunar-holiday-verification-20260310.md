@@ -485,3 +485,20 @@ pnpm --filter @metasheet/web exec vitest run \
   - `Observability E2E`: `22893451649`
   - `Phase 5 PR Validation`: `22893451705`
 EOF && git add docs/development/attendance-p1-zh-calendar-lunar-holiday-verification-20260310.md && git commit -m "docs(attendance): append latest green checks for pr403" && git push origin codex/attendance-zh-calendar-p1-mainline-20260310
+## 20. 日历补强（跨月可见区 + 失败清理）
+补强点：
+- `AttendanceView.loadHolidays()` 查询范围扩展为“筛选区间 + 当前月可见日历网格”并集，减少跨月首尾格节假日徽标缺失。
+- `loadHolidays()` 失败分支清空 `holidays`，避免陈旧徽标残留。
+
+涉及文件：
+- `apps/web/src/views/AttendanceView.vue`
+
+回归验证：
+```bash
+pnpm --filter @metasheet/web exec vitest run \
+  tests/attendance-import-preview-regression.spec.ts \
+  tests/attendance-experience-mobile-zh.spec.ts
+node --test scripts/ops/attendance-daily-gate-report.test.mjs
+scripts/ops/attendance-run-gate-contract-case.sh dashboard
+```
+- 结果：PASS。

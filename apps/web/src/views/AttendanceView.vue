@@ -4512,6 +4512,26 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   return toDateKey(date)
 }
 
+function compareDateKeys(a: string, b: string): number {
+  if (a === b) return 0
+  return a < b ? -1 : 1
+}
+
+function getCalendarVisibleRange(): { from: string; to: string } {
+  const monthStart = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth(), 1)
+  const monthEnd = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() + 1, 0)
+  const startOffset = (monthStart.getDay() + 6) % 7
+  const endOffset = 6 - ((monthEnd.getDay() + 6) % 7)
+  const visibleStart = new Date(monthStart)
+  visibleStart.setDate(visibleStart.getDate() - startOffset)
+  const visibleEnd = new Date(monthEnd)
+  visibleEnd.setDate(visibleEnd.getDate() + endOffset)
+  return {
+    from: toDateInput(visibleStart),
+    to: toDateInput(visibleEnd),
+  }
+}
+
 function formatDateTime(value: string | null): string {
   if (!value) return '--'
   const date = new Date(value)
@@ -8791,9 +8811,14 @@ function editHoliday(holiday: AttendanceHoliday) {
 async function loadHolidays() {
   holidayLoading.value = true
   try {
+    const visibleRange = getCalendarVisibleRange()
+    const selectedFrom = normalizeDateKey(fromDate.value) || visibleRange.from
+    const selectedTo = normalizeDateKey(toDate.value) || visibleRange.to
+    const requestFrom = compareDateKeys(visibleRange.from, selectedFrom) < 0 ? visibleRange.from : selectedFrom
+    const requestTo = compareDateKeys(visibleRange.to, selectedTo) > 0 ? visibleRange.to : selectedTo
     const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
+      from: requestFrom,
+      to: requestTo,
       orgId: normalizedOrgId(),
     })
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
@@ -8803,6 +8828,7 @@ async function loadHolidays() {
     }
     holidays.value = data.data.items || []
   } catch (error: any) {
+    holidays.value = []
     setStatus(error?.message || tr('Failed to load holidays', '加载节假日失败'), 'error')
   } finally {
     holidayLoading.value = false
