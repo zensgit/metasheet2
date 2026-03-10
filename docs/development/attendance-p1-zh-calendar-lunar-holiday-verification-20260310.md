@@ -101,3 +101,40 @@ gh run download 22884926952 -D output/playwright/ga/22884926952
 ## 5. 后续建议（下一轮）
 - 将 `AttendanceView.vue` 的历史 lint 问题拆分为独立清理 PR（避免与业务改动混合）。
 - 把本次 GA run `22884926952` 的证据路径同步追加到 Go/No-Go 文档。
+
+## 6. 脚本增强后的新断言字段说明（authSource, toggleCheck）
+- 适用范围：`scripts/verify-attendance-locale-zh-smoke.mjs` 增强后输出的日志与摘要字段。
+- 安全要求：示例仅使用占位符，不记录真实 JWT、邮箱或密码。
+
+### 6.1 `authSource`
+- 含义：本次 smoke 使用的鉴权来源。
+- 典型取值：
+  - `token`：直接使用 `AUTH_TOKEN`（或 CI 中的 `ATTENDANCE_ADMIN_JWT`）通过鉴权。
+  - `loginFallback`：未使用有效 token，改走 `LOGIN_EMAIL` + `LOGIN_PASSWORD`（或 CI 对应管理员账号密码）登录成功。
+- 作用：用于快速判断失败属于“凭据不可用”还是“业务回归”。
+
+### 6.2 `toggleCheck`
+- 含义：日历开关回归断言结果。
+- 检查内容：
+  - `Lunar` 开关执行 `on -> off -> on`，并校验农历文案显示/隐藏符合预期。
+  - `Holiday` 开关执行 `on -> off -> on`，并校验节假日徽标显示/隐藏符合预期。
+- 典型取值：
+  - `pass`：两组开关切换与可见性断言均通过。
+  - `fail`：任一开关切换后的可见性断言失败（应结合截图与日志定位）。
+
+### 6.3 摘要字段示例（占位符）
+```json
+{
+  "status": "pass",
+  "locale": "zh-CN",
+  "authSource": "loginFallback",
+  "toggleCheck": "pass",
+  "lunarCount": 42,
+  "holidayBadgeCount": 1,
+  "authContext": {
+    "token": "<AUTH_TOKEN_PLACEHOLDER_OR_EMPTY>",
+    "loginEmail": "<LOGIN_EMAIL_PLACEHOLDER>",
+    "loginPassword": "<LOGIN_PASSWORD_PLACEHOLDER>"
+  }
+}
+```
