@@ -71,6 +71,19 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 | Summary metadata probe | `jq '.profile,.maxParallel,.runContractCases,.totals.total' output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` | PASS | values: `\"full\"`, `6`, `true`, `6` |
 | Lane summary report tests | `pnpm verify:attendance-regression-fast:report:test` | PASS | node test stdout |
 | Lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
+| Sharding E2E flaky guard (rate limiter reset) | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS | local vitest stdout (17 passed) |
+| Core backend full test sweep (CI parity command) | `pnpm --filter @metasheet/core-backend test -- --run` | PASS | local vitest stdout (68 files / 868 tests passed) |
+
+## CI Stabilization Update (2026-03-10)
+
+- Fixed a flaky assertion in:
+  - `packages/core-backend/src/tests/sharding-e2e.test.ts`
+- Root cause:
+  - the test `should handle rate limiter reset per tenant` used a high refill rate (`tokensPerSecond=100`) and relied on a hot loop to exhaust capacity.
+  - under slower CI scheduling, elapsed time during the loop could refill tokens, causing an intermittent false negative at `expect(limitedResult.allowed).toBe(false)`.
+- Fix:
+  - scoped `vi.spyOn(Date, 'now').mockReturnValue(...)` within that single test and restored it in `finally`.
+  - this keeps token-bucket behavior deterministic for the exhaustion + reset assertion and avoids side effects to other cases.
 
 ## Branch / PR Status
 
