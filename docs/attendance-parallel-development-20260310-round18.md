@@ -89,6 +89,7 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 5. `17a2c6db` docs(attendance): track latest round17 metadata export commit
 6. `29f2ad0b` docs(attendance): add round18 parallel development and verification report
 7. `86226304` feat(ops): add fast regression lane summary reporter
+8. `4ddee5b7` test(ops): cover legacy metadata inference in lane reporter
 
 ## Next Parallel Wave
 
