@@ -115,6 +115,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
+  dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -138,10 +139,16 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
         "id": 200003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 200004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -173,6 +180,22 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "expectedRecordUpsertStrategy": "values",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -204,10 +227,16 @@ EOF
         "id": 600003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 600004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -239,6 +268,22 @@ EOF
       "expectedRecordUpsertStrategy": "staging",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -270,10 +315,16 @@ EOF
         "id": 300003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 300004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": false
@@ -299,6 +350,22 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 300004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -330,10 +397,16 @@ EOF
         "id": 400003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 400004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -361,6 +434,22 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -392,10 +481,16 @@ EOF
         "id": 500003,
         "conclusion": "success"
       }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 500004,
+        "conclusion": "success"
+      }
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -423,6 +518,110 @@ EOF
       "uploadCsv": "maybe",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
+  cat >"$dashboard_invalid_locale" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 700001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 700002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 700003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 700004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 3,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "maybe",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -441,6 +640,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
+  expect_fail "dashboard locale zh schema v3 contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale"
 
   info "OK: dashboard contract case passed"
   exit 0

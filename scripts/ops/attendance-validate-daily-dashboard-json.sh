@@ -25,8 +25,8 @@ strict_conclusion="$(jq -r '.gates.strict.completed.conclusion // empty' "$repor
 strict_summary_present="$(jq -r 'if (.gateFlat.strict | type == "object" and has("summaryPresent")) then (.gateFlat.strict.summaryPresent | tostring) else "" end' "$report_json")"
 strict_summary_valid="$(jq -r 'if (.gateFlat.strict | type == "object" and has("summaryValid")) then (.gateFlat.strict.summaryValid | tostring) else "" end' "$report_json")"
 
-if [[ -z "$schema_version" ]] || ! [[ "$schema_version" =~ ^[0-9]+$ ]] || (( schema_version < 2 )); then
-  die "invalid gateFlat.schemaVersion=${schema_version:-<empty>} (expected integer >= 2)"
+if [[ -z "$schema_version" ]] || ! [[ "$schema_version" =~ ^[0-9]+$ ]] || (( schema_version < 3 )); then
+  die "invalid gateFlat.schemaVersion=${schema_version:-<empty>} (expected integer >= 3)"
 fi
 
 case "$p0_status" in
@@ -188,9 +188,141 @@ function validate_perf_like_gate() {
 validate_perf_like_gate "perf" "Perf Baseline"
 validate_perf_like_gate "longrun" "Perf Long Run"
 
+function validate_locale_zh_gate() {
+  local gate_key="localeZh"
+  local gate_label="Locale zh Smoke"
+
+  local gate_object_exists
+  local gate_status
+  local gate_reason_code
+  local gate_run_id
+  local gate_completed_run_id
+  local gate_summary_schema_version
+  local gate_auth_source
+  local gate_lunar_label_count
+  local gate_holiday_badge_count
+  local gate_holiday_check_enabled
+  local gate_toggle_check_skipped
+  local gate_zh_shell_tabs_checked
+  local gate_zh_overview_tab
+  local gate_zh_admin_tab
+  local gate_zh_workflow_tab
+
+  gate_object_exists="$(jq -r --arg gate "$gate_key" 'if (.gateFlat[$gate] | type == "object") then "true" else "false" end' "$report_json")"
+  [[ "$gate_object_exists" == "true" ]] || die "${gate_label} contract failed: gateFlat.${gate_key} is missing"
+
+  gate_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].status // empty' "$report_json")"
+  case "$gate_status" in
+    PASS|FAIL)
+      ;;
+    *)
+      die "${gate_label} contract failed: invalid gateFlat.${gate_key}.status=${gate_status:-<empty>} (expected PASS|FAIL)"
+      ;;
+  esac
+
+  gate_reason_code="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("reasonCode") and .reasonCode != null then (.reasonCode | tostring) else "" end' "$report_json")"
+  gate_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if type == "object" and has("runId") and .runId != null then (.runId | tostring) else "" end' "$report_json")"
+  gate_completed_run_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].completed | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
+
+  if [[ -n "$gate_run_id" && -n "$gate_completed_run_id" && "$gate_run_id" != "$gate_completed_run_id" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.runId=${gate_run_id} mismatches gates.${gate_key}.completed.id=${gate_completed_run_id}"
+  fi
+
+  if [[ "$gate_status" == "FAIL" && -z "$gate_reason_code" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.status=FAIL requires non-empty reasonCode"
+  fi
+
+  if [[ "$gate_status" != "PASS" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$gate_reason_code" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.status=PASS but reasonCode=${gate_reason_code}"
+  fi
+
+  gate_summary_schema_version="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].summarySchemaVersion // empty' "$report_json")"
+  if [[ -z "$gate_summary_schema_version" ]] || ! [[ "$gate_summary_schema_version" =~ ^[0-9]+$ ]] || (( gate_summary_schema_version < 1 )); then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.summarySchemaVersion=${gate_summary_schema_version:-<empty>} (expected integer >= 1 when status=PASS)"
+  fi
+
+  gate_auth_source="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].authSource // empty' "$report_json")"
+  case "$gate_auth_source" in
+    token|refresh|login|unknown)
+      ;;
+    *)
+      die "${gate_label} contract failed: gateFlat.${gate_key}.authSource=${gate_auth_source:-<empty>} (expected token|refresh|login|unknown when status=PASS)"
+      ;;
+  esac
+
+  gate_lunar_label_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("lunarLabelCount") and .lunarLabelCount != null then (.lunarLabelCount | tostring) else "" end' "$report_json")"
+  if [[ -n "$gate_lunar_label_count" && ! "$gate_lunar_label_count" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.lunarLabelCount=${gate_lunar_label_count} (expected integer when present)"
+  fi
+
+  gate_holiday_badge_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("holidayBadgeCount") and .holidayBadgeCount != null then (.holidayBadgeCount | tostring) else "" end' "$report_json")"
+  if [[ -n "$gate_holiday_badge_count" && ! "$gate_holiday_badge_count" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.holidayBadgeCount=${gate_holiday_badge_count} (expected integer when present)"
+  fi
+
+  gate_holiday_check_enabled="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].holidayCheckEnabled // empty' "$report_json")"
+  if [[ -n "$gate_holiday_check_enabled" ]]; then
+    case "$gate_holiday_check_enabled" in
+      true|false)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.holidayCheckEnabled=${gate_holiday_check_enabled} (expected true|false when present)"
+        ;;
+    esac
+  fi
+
+  gate_toggle_check_skipped="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].toggleCheckSkipped // empty' "$report_json")"
+  if [[ -n "$gate_toggle_check_skipped" ]]; then
+    case "$gate_toggle_check_skipped" in
+      true|false)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.toggleCheckSkipped=${gate_toggle_check_skipped} (expected true|false when present)"
+        ;;
+    esac
+  fi
+
+  if (( gate_summary_schema_version >= 3 )); then
+    gate_zh_shell_tabs_checked="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhShellTabsChecked // empty' "$report_json")"
+    case "$gate_zh_shell_tabs_checked" in
+      true|false)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.zhShellTabsChecked=${gate_zh_shell_tabs_checked:-<empty>} (required true|false when summarySchemaVersion>=3)"
+        ;;
+    esac
+
+    if [[ "$gate_zh_shell_tabs_checked" == "true" ]]; then
+      gate_zh_overview_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhOverviewTab // empty' "$report_json")"
+      gate_zh_admin_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhAdminTab // empty' "$report_json")"
+      gate_zh_workflow_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhWorkflowTab // empty' "$report_json")"
+      case "$gate_zh_overview_tab" in
+        true|false) ;;
+        *) die "${gate_label} contract failed: gateFlat.${gate_key}.zhOverviewTab=${gate_zh_overview_tab:-<empty>} (required true|false when zhShellTabsChecked=true)" ;;
+      esac
+      case "$gate_zh_admin_tab" in
+        true|false) ;;
+        *) die "${gate_label} contract failed: gateFlat.${gate_key}.zhAdminTab=${gate_zh_admin_tab:-<empty>} (required true|false when zhShellTabsChecked=true)" ;;
+      esac
+      case "$gate_zh_workflow_tab" in
+        true|false) ;;
+        *) die "${gate_label} contract failed: gateFlat.${gate_key}.zhWorkflowTab=${gate_zh_workflow_tab:-<empty>} (required true|false when zhShellTabsChecked=true)" ;;
+      esac
+    fi
+  fi
+}
+
+validate_locale_zh_gate
+
 perf_status="$(jq -r '.gateFlat.perf.status // empty' "$report_json")"
 longrun_status="$(jq -r '.gateFlat.longrun.status // empty' "$report_json")"
 perf_schema="$(jq -r '.gateFlat.perf.summarySchemaVersion // empty' "$report_json")"
 longrun_schema="$(jq -r '.gateFlat.longrun.summarySchemaVersion // empty' "$report_json")"
+locale_zh_status="$(jq -r '.gateFlat.localeZh.status // empty' "$report_json")"
+locale_zh_schema="$(jq -r '.gateFlat.localeZh.summarySchemaVersion // empty' "$report_json")"
 
-info "OK: schemaVersion=$schema_version p0Status=$p0_status overallStatus=$overall_status mode=$escalation_mode strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>} strictSummaryValid=${strict_summary_valid:-<empty>} perfStatus=${perf_status:-<empty>} perfSchema=${perf_schema:-<empty>} longrunStatus=${longrun_status:-<empty>} longrunSchema=${longrun_schema:-<empty>}"
+info "OK: schemaVersion=$schema_version p0Status=$p0_status overallStatus=$overall_status mode=$escalation_mode strictConclusion=${strict_conclusion:-<empty>} strictSummaryPresent=${strict_summary_present:-<empty>} strictSummaryValid=${strict_summary_valid:-<empty>} perfStatus=${perf_status:-<empty>} perfSchema=${perf_schema:-<empty>} longrunStatus=${longrun_status:-<empty>} longrunSchema=${longrun_schema:-<empty>} localeZhStatus=${locale_zh_status:-<empty>} localeZhSchema=${locale_zh_schema:-<empty>}"

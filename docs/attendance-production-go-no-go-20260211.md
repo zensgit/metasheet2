@@ -2636,6 +2636,33 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-10): Dashboard Schema v3 Locale Contract
+
+This update hardens the daily dashboard contract so locale zh gate metadata is machine-verifiable.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - enriches `Locale zh Smoke` from `attendance-zh-locale-summary.json`
+  - exports `gateFlat.localeZh.*` fields
+  - bumps `gateFlat.schemaVersion` from `2` to `3`
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - adds locale gate contract checks
+  - requires `gateFlat.schemaVersion>=3`
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - adds locale v3 negative fixture (`dashboard.invalid.locale.json`)
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Case (strict) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Attendance Gate Contract Case (dashboard, schema v3 + locale) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json` |
+
+Decision:
+
+- **GO maintained**（contract hardening only, no production API path change）。
+
 ## Post-Go Validation (2026-03-10): Attendance zh Locale Smoke + Lunar/Holiday UX
 
 Scope:

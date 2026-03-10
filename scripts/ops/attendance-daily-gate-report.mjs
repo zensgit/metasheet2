@@ -28,6 +28,7 @@ const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remot
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
+const localeZhWorkflow = String(process.env.LOCALE_ZH_WORKFLOW || 'attendance-locale-zh-smoke-prod.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
 const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-policy-drift-prod.yml').trim()
 const protectionArtifactPrefix = protectionWorkflow.includes('branch-policy-drift')
@@ -379,6 +380,114 @@ function parsePerfSummaryJson(text) {
   }
 }
 
+function parseLocaleZhSummaryJson(text) {
+  if (!text) return null
+  let value = null
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  const invalidReasonsRaw = []
+  const statusRaw = typeof value?.status === 'string' ? value.status.trim().toLowerCase() : ''
+  if (statusRaw !== 'pass' && statusRaw !== 'fail') invalidReasonsRaw.push('status')
+
+  const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+    ? schemaVersionRaw
+    : null
+  if (schemaVersionRaw !== null && schemaVersion === null) invalidReasonsRaw.push('schema_version')
+
+  const authSourceRaw = typeof value?.authSource === 'string' ? value.authSource.trim().toLowerCase() : ''
+  const authSource = authSourceRaw || null
+  if (authSource && !['token', 'refresh', 'login', 'unknown'].includes(authSource)) {
+    invalidReasonsRaw.push('auth_source')
+  }
+
+  const localeRaw = typeof value?.locale === 'string' ? value.locale.trim() : ''
+  if (!localeRaw) invalidReasonsRaw.push('locale')
+
+  const lunarLabelCount = Number.isFinite(value?.lunarLabelCount)
+    ? Math.max(0, Number(value.lunarLabelCount))
+    : (Number.isFinite(value?.lunarCount) ? Math.max(0, Number(value.lunarCount)) : null)
+  const holidayBadgeCount = Number.isFinite(value?.holidayBadgeCount) ? Math.max(0, Number(value.holidayBadgeCount)) : null
+  const holidayCheckEnabled = typeof value?.holidayCheckEnabled === 'boolean' ? value.holidayCheckEnabled : null
+
+  const toggle = value && typeof value.toggleCheck === 'object' && value.toggleCheck ? value.toggleCheck : null
+  let toggleCheckSkipped = null
+  let toggleCheckReason = null
+  if (toggle) {
+    if (Object.prototype.hasOwnProperty.call(toggle, 'skipped') && typeof toggle.skipped !== 'boolean') {
+      invalidReasonsRaw.push('toggle_skipped')
+    } else if (typeof toggle.skipped === 'boolean') {
+      toggleCheckSkipped = toggle.skipped
+    }
+    if (Object.prototype.hasOwnProperty.call(toggle, 'reason') && toggle.reason !== null && typeof toggle.reason !== 'string') {
+      invalidReasonsRaw.push('toggle_reason')
+    } else if (typeof toggle.reason === 'string') {
+      toggleCheckReason = toggle.reason.trim() || null
+    }
+  }
+
+  let zhOverviewTab = null
+  let zhAdminTab = null
+  let zhWorkflowTab = null
+  let zhShellTabsChecked = null
+  const zhLabels = value && typeof value.zhLabels === 'object' && value.zhLabels ? value.zhLabels : null
+  if (zhLabels) {
+    const parseBool = (key) => {
+      const raw = zhLabels[key]
+      if (typeof raw === 'boolean') return raw
+      if (raw === 'true' || raw === 'false') return raw === 'true'
+      return null
+    }
+    zhOverviewTab = parseBool('overviewTab')
+    zhAdminTab = parseBool('adminTab')
+    zhWorkflowTab = parseBool('workflowTab')
+    if (zhOverviewTab === null) invalidReasonsRaw.push('zh_overview_tab')
+    if (zhAdminTab === null) invalidReasonsRaw.push('zh_admin_tab')
+    if (zhWorkflowTab === null) invalidReasonsRaw.push('zh_workflow_tab')
+  }
+  if (Object.prototype.hasOwnProperty.call(value || {}, 'zhShellTabsChecked')) {
+    const raw = value.zhShellTabsChecked
+    if (typeof raw === 'boolean') zhShellTabsChecked = raw
+    else if (raw === 'true' || raw === 'false') zhShellTabsChecked = raw === 'true'
+    else invalidReasonsRaw.push('zh_shell_tabs_checked')
+  }
+
+  if ((schemaVersion || 0) >= 3) {
+    if (zhShellTabsChecked === null) invalidReasonsRaw.push('zh_shell_tabs_checked')
+    if (zhShellTabsChecked === true && zhOverviewTab === null) invalidReasonsRaw.push('zh_overview_tab')
+    if (zhShellTabsChecked === true && zhAdminTab === null) invalidReasonsRaw.push('zh_admin_tab')
+    if (zhShellTabsChecked === true && zhWorkflowTab === null) invalidReasonsRaw.push('zh_workflow_tab')
+  }
+
+  const invalidReasons = Array.from(new Set(invalidReasonsRaw))
+  const summaryValid = invalidReasons.length === 0
+  const failedByStatus = statusRaw === 'fail'
+
+  return {
+    reason: summaryValid
+      ? (failedByStatus ? 'LOCALE_ZH_SMOKE_FAILED' : null)
+      : 'SUMMARY_INVALID',
+    schemaVersion,
+    summaryValid,
+    summaryInvalidReasons: summaryValid ? null : invalidReasons,
+    authSource,
+    locale: localeRaw || null,
+    lunarLabelCount: lunarLabelCount === null ? null : String(lunarLabelCount),
+    holidayBadgeCount: holidayBadgeCount === null ? null : String(holidayBadgeCount),
+    holidayCheckEnabled: holidayCheckEnabled === null ? null : holidayCheckEnabled ? 'true' : 'false',
+    toggleCheckSkipped: toggleCheckSkipped === null ? null : toggleCheckSkipped ? 'true' : 'false',
+    toggleCheckReason,
+    zhOverviewTab: zhOverviewTab === null ? null : zhOverviewTab ? 'true' : 'false',
+    zhAdminTab: zhAdminTab === null ? null : zhAdminTab ? 'true' : 'false',
+    zhWorkflowTab: zhWorkflowTab === null ? null : zhWorkflowTab ? 'true' : 'false',
+    zhShellTabsChecked: zhShellTabsChecked === null ? null : zhShellTabsChecked ? 'true' : 'false',
+  }
+}
+
 function parseStrictGateSummaryJson(text) {
   if (!text) return null
   let value = null
@@ -639,6 +748,7 @@ function renderMarkdown({
   strictGate,
   perfGate,
   longrunGate,
+  localeZhGate,
   contractGate,
   openTrackingIssues,
   openTrackingIssuesError,
@@ -655,6 +765,7 @@ function renderMarkdown({
     'Strict Gates': strictWorkflow,
     'Perf Baseline': perfWorkflow,
     'Perf Long Run': longrunWorkflow,
+    'Locale zh Smoke': localeZhWorkflow,
     'Gate Contract Matrix': contractWorkflow,
   }
 
@@ -735,6 +846,15 @@ function renderMarkdown({
         if (meta.uploadCsv) extra.push(`upload=${meta.uploadCsv}`)
         if (meta.regressionsCount) extra.push(`regressions=${meta.regressionsCount}`)
       }
+      if (gate.name === 'Locale zh Smoke') {
+        if (meta.schemaVersion) extra.push(`schema=${meta.schemaVersion}`)
+        if (meta.authSource) extra.push(`auth=${meta.authSource}`)
+        if (meta.holidayCheckEnabled) extra.push(`holiday_check=${meta.holidayCheckEnabled}`)
+        if (meta.lunarLabelCount) extra.push(`lunar_labels=${meta.lunarLabelCount}`)
+        if (meta.holidayBadgeCount) extra.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta.toggleCheckSkipped) extra.push(`toggle_skipped=${meta.toggleCheckSkipped}`)
+        if (meta.zhShellTabsChecked) extra.push(`zh_tabs_checked=${meta.zhShellTabsChecked}`)
+      }
     }
 
     const value = extra.length > 0 ? `${reason} ${extra.join(' ')}` : reason
@@ -743,7 +863,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -757,7 +877,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -767,7 +887,7 @@ function renderMarkdown({
   lines.push('## Escalation Rules')
   lines.push('')
   lines.push('- `P0` (Remote preflight / strict gate failure): immediate production block, rerun gate after fix, do not proceed with release actions.')
-  lines.push('- `P1` (Branch protection / host metrics / storage health / perf / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
+  lines.push('- `P1` (Branch protection / host metrics / storage health / perf / locale zh smoke / contract-matrix failure/stale runs): fix same day, rerun gates and record evidence.')
   lines.push('- `P2` (weekly upload cleanup signal / missing evidence metadata): fix within 24h.')
   lines.push('')
 
@@ -785,6 +905,7 @@ function renderMarkdown({
       [strictGate.name]: strictGate,
       [perfGate.name]: perfGate,
       [longrunGate.name]: longrunGate,
+      [localeZhGate.name]: localeZhGate,
       [contractGate.name]: contractGate,
     }
     lines.push('## Findings')
@@ -832,6 +953,16 @@ function renderMarkdown({
         if (meta?.exportMs) metaBits.push(`export_ms=${meta.exportMs}`)
         if (meta?.rollbackMs) metaBits.push(`rollback_ms=${meta.rollbackMs}`)
         if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
+      }
+      if (finding.gate === 'Locale zh Smoke') {
+        if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
+        if (meta?.authSource) metaBits.push(`auth=${meta.authSource}`)
+        if (meta?.locale) metaBits.push(`locale=${meta.locale}`)
+        if (meta?.holidayCheckEnabled) metaBits.push(`holiday_check=${meta.holidayCheckEnabled}`)
+        if (meta?.lunarLabelCount) metaBits.push(`lunar_labels=${meta.lunarLabelCount}`)
+        if (meta?.holidayBadgeCount) metaBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta?.toggleCheckSkipped) metaBits.push(`toggle_skipped=${meta.toggleCheckSkipped}`)
+        if (meta?.zhShellTabsChecked) metaBits.push(`zh_tabs_checked=${meta.zhShellTabsChecked}`)
       }
       if (finding.gate === 'Strict Gates') {
         if (meta?.summaryValid === false) metaBits.push('summary_valid=false')
@@ -1160,18 +1291,28 @@ function renderMarkdown({
       lines.push('- Strict Gates: latest run is `success` but `gate-summary.json` is missing from strict artifacts.')
       lines.push('- Strict Gates: rerun strict gates and verify upload artifacts include gate summaries before considering the gate healthy.')
     }
+
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_ZH_SUMMARY_INVALID')) {
+      lines.push('- Locale zh Smoke: latest run has invalid `attendance-zh-locale-summary.json` contract.')
+      lines.push('- Locale zh Smoke: verify zh smoke script outputs schema/auth/toggle fields and rerun workflow.')
+    }
+
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_ZH_SUMMARY_MISSING')) {
+      lines.push('- Locale zh Smoke: latest run is `success` but summary JSON is missing from artifacts.')
+      lines.push('- Locale zh Smoke: verify artifact upload path includes `attendance-zh-locale-summary.json` and rerun.')
+    }
   }
 
   lines.push('')
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / contract matrix manually when any `P1` finding exists.')
+  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / locale zh smoke / contract matrix manually when any `P1` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
@@ -1232,6 +1373,7 @@ async function run() {
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
+  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
   const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
@@ -1274,6 +1416,11 @@ async function run() {
   if (!includeDrillRuns && longrunListRaw.length !== longrunList.length) {
     info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
+  const localeZhListRaw = Array.isArray(localeZhRuns?.list) ? localeZhRuns.list : []
+  const localeZhList = includeDrillRuns ? localeZhListRaw : localeZhListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && localeZhListRaw.length !== localeZhList.length) {
+    info(`locale-zh: filtered drill/debug runs (${localeZhListRaw.length - localeZhList.length})`)
+  }
   const contractListRaw = Array.isArray(contractRuns?.list) ? contractRuns.list : []
   const contractList = includeDrillRuns ? contractListRaw : contractListRaw.filter((run) => !isDrillRun(run))
   if (!includeDrillRuns && contractListRaw.length !== contractList.length) {
@@ -1296,6 +1443,8 @@ async function run() {
   const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
   const longrunLatestAny = longrunList[0] ?? null
   const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
+  const localeZhLatestAny = localeZhList[0] ?? null
+  const localeZhLatestCompleted = localeZhList.find((run) => run?.status === 'completed') ?? null
   const contractLatestAny = contractList[0] ?? null
   const contractLatestCompleted = contractList.find((run) => run?.status === 'completed') ?? null
 
@@ -1372,6 +1521,16 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: longrunRuns.error,
+  })
+
+  const localeZhGate = evaluateGate({
+    name: 'Locale zh Smoke',
+    severity: 'P1',
+    latestAny: localeZhLatestAny,
+    latestCompleted: localeZhLatestCompleted,
+    now,
+    lookbackHoursValue: lookbackHours,
+    fetchError: localeZhRuns.error,
   })
 
   const contractGate = evaluateGate({
@@ -1549,6 +1708,41 @@ async function run() {
         })
       }
     }
+    if (localeZhGate.completed?.id) {
+      const runId = localeZhGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-locale-zh-smoke-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'locale-zh'),
+        innerSuffix: 'attendance-zh-locale-summary.json',
+        parse: parseLocaleZhSummaryJson,
+        allowAnyArtifactFallback: true,
+      })
+      if (meta) {
+        localeZhGate.meta = meta
+        if (meta.summaryValid === false) {
+          localeZhGate.ok = false
+          localeZhGate.findings.push({
+            severity: 'P1',
+            code: 'LOCALE_ZH_SUMMARY_INVALID',
+            gate: 'Locale zh Smoke',
+            message: 'Locale zh Smoke: latest completed run has invalid attendance-zh-locale-summary.json contract',
+            runUrl: localeZhGate.completed.url,
+          })
+        }
+      } else if (localeZhGate.completed?.conclusion === 'success') {
+        localeZhGate.ok = false
+        localeZhGate.findings.push({
+          severity: 'P1',
+          code: 'LOCALE_ZH_SUMMARY_MISSING',
+          gate: 'Locale zh Smoke',
+          message: 'Locale zh Smoke: latest completed run succeeded but attendance-zh-locale-summary.json is missing from artifacts',
+          runUrl: localeZhGate.completed.url,
+        })
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     info(`WARN: gate meta enrichment skipped: ${message}`)
@@ -1563,6 +1757,7 @@ async function run() {
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
+    ...localeZhGate.findings,
     ...contractGate.findings,
   ]
   const overallStatus = findings.length === 0 ? 'pass' : 'fail'
@@ -1592,6 +1787,8 @@ async function run() {
       else if (has('STALE_RUN')) reasonCode = 'STALE_RUN'
       else if (has('STRICT_SUMMARY_INVALID')) reasonCode = 'STRICT_SUMMARY_INVALID'
       else if (has('STRICT_SUMMARY_MISSING')) reasonCode = 'STRICT_SUMMARY_MISSING'
+      else if (has('LOCALE_ZH_SUMMARY_INVALID')) reasonCode = 'LOCALE_ZH_SUMMARY_INVALID'
+      else if (has('LOCALE_ZH_SUMMARY_MISSING')) reasonCode = 'LOCALE_ZH_SUMMARY_MISSING'
       else if (has('RUN_FAILED')) reasonCode = String(meta?.reason || 'RUN_FAILED')
       else reasonCode = codes[0] || 'FAIL'
     }
@@ -1641,6 +1838,14 @@ async function run() {
           if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
           if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
         }
+      } else if (gate.name === 'Locale zh Smoke') {
+        if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.authSource) summaryBits.push(`auth=${meta.authSource}`)
+        if (meta.holidayCheckEnabled) summaryBits.push(`holiday_check=${meta.holidayCheckEnabled}`)
+        if (meta.lunarLabelCount) summaryBits.push(`lunar_labels=${meta.lunarLabelCount}`)
+        if (meta.holidayBadgeCount) summaryBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta.toggleCheckSkipped) summaryBits.push(`toggle_skipped=${meta.toggleCheckSkipped}`)
+        if (meta.zhShellTabsChecked) summaryBits.push(`zh_tabs_checked=${meta.zhShellTabsChecked}`)
       }
     }
 
@@ -1691,6 +1896,21 @@ async function run() {
       } else if (gate.name === 'Strict Gates') {
         flat.failedGates = meta.failedGates ?? null
         flat.failedGateReasons = meta.failedGateReasons ?? null
+      } else if (gate.name === 'Locale zh Smoke') {
+        flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.authSource = meta.authSource ?? null
+        flat.locale = meta.locale ?? null
+        flat.lunarLabelCount = meta.lunarLabelCount ?? null
+        flat.holidayBadgeCount = meta.holidayBadgeCount ?? null
+        flat.holidayCheckEnabled = meta.holidayCheckEnabled ?? null
+        flat.toggleCheckSkipped = meta.toggleCheckSkipped ?? null
+        flat.toggleCheckReason = meta.toggleCheckReason ?? null
+        flat.zhOverviewTab = meta.zhOverviewTab ?? null
+        flat.zhAdminTab = meta.zhAdminTab ?? null
+        flat.zhWorkflowTab = meta.zhWorkflowTab ?? null
+        flat.zhShellTabsChecked = meta.zhShellTabsChecked ?? null
+        flat.summaryValid = meta.summaryValid ?? null
+        flat.summaryInvalidReasons = meta.summaryInvalidReasons ?? null
       } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
         if (includePerfMeta) {
           flat.summarySchemaVersion = meta.schemaVersion ?? null
@@ -1719,7 +1939,7 @@ async function run() {
   }
 
   const gateFlat = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     preflight: toGateFlat(preflightGate),
     protection: toGateFlat(protectionGate),
     metrics: toGateFlat(metricsGate),
@@ -1728,6 +1948,7 @@ async function run() {
     strict: toGateFlat(strictGate),
     perf: toGateFlat(perfGate),
     longrun: toGateFlat(longrunGate),
+    localeZh: toGateFlat(localeZhGate),
     contract: toGateFlat(contractGate),
   }
 
@@ -1749,6 +1970,7 @@ async function run() {
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
+      localeZh: localeZhGate,
       contract: contractGate,
     },
     findings,
@@ -1768,6 +1990,7 @@ async function run() {
     strictGate,
     perfGate,
     longrunGate,
+    localeZhGate,
     contractGate,
     openTrackingIssues,
     openTrackingIssuesError,
