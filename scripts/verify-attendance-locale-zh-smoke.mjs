@@ -509,7 +509,7 @@ async function run() {
   await ensureDir(outputDir)
   const summaryPath = path.join(outputDir, 'attendance-zh-locale-summary.json')
   const summary = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     webUrl: normalizeUrl(webUrl),
     apiBase,

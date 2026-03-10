@@ -293,6 +293,26 @@ export function parseLocaleZhSummaryJson(text) {
   const lunarCountValue = typeof value?.lunarCount === 'number' ? value.lunarCount : null
   const holidayBadgeCountValue = typeof value?.holidayBadgeCount === 'number' ? value.holidayBadgeCount : null
   const holidayCalendarLabel = typeof value?.holidayCalendarLabel === 'string' ? value.holidayCalendarLabel.trim() : ''
+  const authSourceRaw = typeof value?.authSource === 'string' ? value.authSource.trim().toLowerCase() : ''
+  const authSource = authSourceRaw || null
+  const zhLabelsValue = value?.zhLabels && typeof value.zhLabels === 'object' ? value.zhLabels : null
+  const zhLabelsSkipped = zhLabelsValue?.skipped === true
+  const zhLabelsOk = zhLabelsValue?.ok === true
+  const zhNoEnglishLeak = zhLabelsValue?.noEnglishLeak === true
+  const zhReason = typeof zhLabelsValue?.reason === 'string' ? zhLabelsValue.reason.trim() : ''
+  const zhCoreFieldKeys = [
+    'heading',
+    'checkInButton',
+    'checkOutButton',
+    'summaryCard',
+    'calendarCard',
+    'requestCard',
+    'submitButton',
+    'recentRequests',
+  ]
+  const zhMissingFields = zhLabelsValue
+    ? zhCoreFieldKeys.filter((field) => zhLabelsValue[field] !== true)
+    : zhCoreFieldKeys
   const error = typeof value?.error === 'string' ? value.error.trim() : ''
 
   let reason = null
@@ -302,6 +322,18 @@ export function parseLocaleZhSummaryJson(text) {
   else if (typeof lunarCountValue !== 'number' || lunarCountValue <= 0) reason = 'LUNAR_LABELS_MISSING'
   else if (holidayCheck === 'enabled' && (typeof holidayBadgeCountValue !== 'number' || holidayBadgeCountValue <= 0)) {
     reason = 'HOLIDAY_BADGE_MISSING'
+  } else if (schemaVersion >= 2) {
+    if (!authSource || !['token', 'refresh', 'login'].includes(authSource)) {
+      reason = 'AUTH_SOURCE_INVALID'
+    } else if (!zhLabelsValue || (!zhLabelsOk && !zhLabelsSkipped)) {
+      reason = 'ZH_LABELS_STATE_INVALID'
+    } else if (!zhLabelsSkipped) {
+      if (!zhNoEnglishLeak) {
+        reason = 'ZH_ENGLISH_LEAK_DETECTED'
+      } else if (zhMissingFields.length > 0) {
+        reason = 'ZH_CORE_LABELS_INCOMPLETE'
+      }
+    }
   }
 
   return {
@@ -313,6 +345,13 @@ export function parseLocaleZhSummaryJson(text) {
     holidayCheck: holidayCheck || null,
     holidayBadgeCount: holidayBadgeCountValue === null ? null : String(holidayBadgeCountValue),
     holidayCalendarLabel: holidayCalendarLabel || null,
+    authSource,
+    zhLabelsStatus: zhLabelsSkipped ? `skipped:${zhReason || 'not-required'}` : (zhLabelsOk ? 'pass' : 'fail'),
+    zhLabelsSkipped: zhLabelsSkipped ? 'true' : 'false',
+    zhLabelsOk: zhLabelsOk ? 'true' : 'false',
+    zhNoEnglishLeak: zhNoEnglishLeak ? 'true' : 'false',
+    zhMissingFields: zhMissingFields.length > 0 ? zhMissingFields.join(',') : null,
+    zhReason: zhReason || null,
     error: error || null,
   }
 }
@@ -809,6 +848,8 @@ function renderMarkdown({
         if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
       }
       if (gate.name === 'Locale zh Smoke') {
+        if (meta.authSource) extra.push(`auth=${meta.authSource}`)
+        if (meta.zhLabelsStatus) extra.push(`zh_labels=${meta.zhLabelsStatus}`)
         if (meta.locale) extra.push(`locale=${meta.locale}`)
         if (meta.lunarCount) extra.push(`lunar=${meta.lunarCount}`)
         if (meta.holidayCheck) extra.push(`holiday_check=${meta.holidayCheck}`)
@@ -1881,6 +1922,8 @@ async function run() {
         if (meta.staleCount) summaryBits.push(`stale_count=${meta.staleCount}`)
       } else if (gate.name === 'Locale zh Smoke') {
         if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.authSource) summaryBits.push(`auth=${meta.authSource}`)
+        if (meta.zhLabelsStatus) summaryBits.push(`zh_labels=${meta.zhLabelsStatus}`)
         if (meta.locale) summaryBits.push(`locale=${meta.locale}`)
         if (meta.lunarCount) summaryBits.push(`lunar=${meta.lunarCount}`)
         if (meta.holidayCheck) summaryBits.push(`holiday_check=${meta.holidayCheck}`)
@@ -1955,6 +1998,13 @@ async function run() {
         flat.staleCount = meta.staleCount ?? null
       } else if (gate.name === 'Locale zh Smoke') {
         flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.authSource = meta.authSource ?? null
+        flat.zhLabelsStatus = meta.zhLabelsStatus ?? null
+        flat.zhLabelsSkipped = meta.zhLabelsSkipped ?? null
+        flat.zhLabelsOk = meta.zhLabelsOk ?? null
+        flat.zhNoEnglishLeak = meta.zhNoEnglishLeak ?? null
+        flat.zhMissingFields = meta.zhMissingFields ?? null
+        flat.zhReason = meta.zhReason ?? null
         flat.locale = meta.locale ?? null
         flat.lunarCount = meta.lunarCount ?? null
         flat.holidayCheck = meta.holidayCheck ?? null

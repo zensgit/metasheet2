@@ -299,3 +299,33 @@ gh run download 22889790719 -D output/playwright/ga/22889790719
 - 证据路径：
   - `output/playwright/ga/22889790719/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22889790719/attendance-zh-locale-calendar.png`
+
+## 14. Daily Dashboard 合同升级（schema v2）
+目标：让 `attendance-daily-gate-report.mjs` 对 locale zh smoke 摘要执行更严格的契约校验，防止“脚本成功但中文门禁字段回退”漏检。
+
+代码变更：
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - `schemaVersion` 从 `1` 升级为 `2`。
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - `parseLocaleZhSummaryJson()` 在 `schemaVersion>=2` 时新增约束：
+    - `authSource` 必须属于 `token|refresh|login`
+    - `zhLabels` 状态必须可判定（`ok=true` 或 `skipped=true`）
+    - 非 skipped 时必须 `noEnglishLeak=true` 且核心字段完整
+  - 输出新增 meta 字段：
+    - `authSource`
+    - `zhLabelsStatus`
+    - `zhLabelsOk`
+    - `zhNoEnglishLeak`
+    - `zhMissingFields`
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - 新增用例：
+    - `AUTH_SOURCE_INVALID`
+    - `ZH_ENGLISH_LEAK_DETECTED`
+
+本地验证：
+```bash
+node --check scripts/ops/attendance-daily-gate-report.mjs
+node --check scripts/ops/attendance-daily-gate-report.test.mjs
+node --test scripts/ops/attendance-daily-gate-report.test.mjs
+```
+- 结果：PASS（12/12）

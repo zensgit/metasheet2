@@ -53,18 +53,37 @@ test('pickLatestCompletedRun returns null when no completed run exists', () => {
 
 test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'pass',
     locale: 'zh-CN',
     lunarCount: 28,
     holidayCheck: 'enabled',
     holidayBadgeCount: 1,
     holidayCalendarLabel: '二月 2026',
+    authSource: 'refresh',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
   }
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, null)
-  assert.equal(parsed?.schemaVersion, 1)
+  assert.equal(parsed?.schemaVersion, 2)
+  assert.equal(parsed?.authSource, 'refresh')
+  assert.equal(parsed?.zhLabelsStatus, 'pass')
+  assert.equal(parsed?.zhLabelsOk, 'true')
+  assert.equal(parsed?.zhNoEnglishLeak, 'true')
   assert.equal(parsed?.locale, 'zh-CN')
   assert.equal(parsed?.lunarCount, '28')
   assert.equal(parsed?.holidayCheck, 'enabled')
@@ -84,6 +103,64 @@ test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, 'LUNAR_LABELS_MISSING')
+})
+
+test('parseLocaleZhSummaryJson flags invalid authSource in schema v2', () => {
+  const payload = {
+    schemaVersion: 2,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 32,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    authSource: 'legacy',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'AUTH_SOURCE_INVALID')
+})
+
+test('parseLocaleZhSummaryJson flags zh english leak in schema v2', () => {
+  const payload = {
+    schemaVersion: 2,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 32,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    authSource: 'token',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      noEnglishLeak: false,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'ZH_ENGLISH_LEAK_DETECTED')
 })
 
 test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {
