@@ -66,7 +66,7 @@ concurrency:
   # Serialize baseline/longrun perf workflows per branch to reduce transient 502s
   # caused by concurrent heavy import load against the same production API.
   group: attendance-import-perf-shared-${{ github.ref_name }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
