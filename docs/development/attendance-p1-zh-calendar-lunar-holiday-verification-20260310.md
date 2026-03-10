@@ -465,3 +465,13 @@ pnpm --filter @metasheet/web exec vitest run \
 
 说明：
 - 本轮为本地与合同层验证；GA 远端 runId 将在下一轮触发 workflow 后追加。
+
+### 19.1 PR #403 CI 证据（commit `eba377ba`）
+- PR checks：全部通过（含 `contracts (strict/openapi/dashboard)`、`e2e`、`test (18.x/20.x)`、`coverage`）。
+- 关键 run：
+  - `Attendance Gate Contract Matrix`: `22893350034`
+  - `Plugin System Tests`: `22893350030`
+  - `Observability E2E`: `22893350040`
+- 本地下载证据：
+  - `output/playwright/ga/22893350034/attendance-gate-contract-matrix-dashboard-22893350034-1/dashboard.invalid.locale.json`
+  - `output/playwright/ga/22893350034/attendance-gate-contract-matrix-dashboard-22893350034-1/dashboard.valid.json`
