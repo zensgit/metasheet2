@@ -3670,6 +3670,26 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
 
+### Update (2026-03-10): Dashboard Contract Schema v3 + Locale zh Gate
+
+Scope:
+
+- `attendance-daily-gate-report.mjs` now enriches `Locale zh Smoke` from artifact `attendance-zh-locale-summary.json`.
+- `gateFlat.schemaVersion` upgraded to `3`.
+- `gateFlat.localeZh` exports machine fields:
+  - `summarySchemaVersion`, `authSource`, `lunarLabelCount`, `holidayBadgeCount`, `holidayCheckEnabled`, `toggleCheckSkipped`, `zhOverviewTab`, `zhAdminTab`, `zhWorkflowTab`, `zhShellTabsChecked`.
+- `attendance-validate-daily-dashboard-json.sh` now validates locale gate contract and requires `gateFlat.schemaVersion>=3`.
+- `attendance-run-gate-contract-case.sh dashboard` adds locale v3 negative fixture (`dashboard.invalid.locale.json`).
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Dashboard validator syntax | local (2026-03-10) | PASS | `bash -n scripts/ops/attendance-validate-daily-dashboard-json.sh` |
+| Daily report syntax | local (2026-03-10) | PASS | `node --check scripts/ops/attendance-daily-gate-report.mjs` |
+| Attendance Gate Contract Case (strict) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Attendance Gate Contract Case (dashboard, schema v3 + locale) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json` |
+
 ### Update (2026-03-07): Daily Gates Refresh (Strict + Preflight + Storage + Policy + Dashboard)
 
 Scope:

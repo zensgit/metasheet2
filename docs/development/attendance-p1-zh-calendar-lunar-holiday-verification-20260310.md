@@ -91,12 +91,41 @@ gh run download 22884926952 -D output/playwright/ga/22884926952
   - `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-calendar.png`
 
+### 3.7 Playwright 中文 smoke（PR #401 分支回归）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-zh-calendar-p1-20260310
+gh run watch 22888000382 --exit-status
+gh run download 22888000382 -D output/playwright/ga/22888000382
+```
+- 结果：FAIL（预期外，环境密钥问题）
+- 关键结论：
+  - 失败位置已从 workflow 前置鉴权步骤移动到脚本执行阶段，说明“前置阻断已移除，改由脚本统一处理鉴权”变更生效。
+  - 失败根因：`AUTH_TOKEN is invalid and LOGIN_EMAIL/LOGIN_PASSWORD are missing`
+  - 新增字段已落盘：`authSource`、`toggleCheck`（见摘要 JSON）
+- 证据路径：
+  - `output/playwright/ga/22888000382/attendance-locale-zh-smoke-prod-22888000382-1/attendance-zh-locale-summary.json`
+
+### 3.8 Playwright 中文 smoke（PR #401 分支二次回归，refresh fallback + toggle deploy-aware）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-zh-calendar-p1-20260310
+gh run watch 22889038364 --exit-status
+gh run download 22889038364 -D output/playwright/ga/22889038364
+```
+- 结果：PASS
+- 关键结论：
+  - `authSource=refresh`：旧 JWT 可通过 `/auth/refresh-token` 自动恢复，无需登录 secret。
+  - `toggleCheck.skipped=true`：当前线上环境尚未部署开关 UI，脚本按 deploy-aware 策略记录为 `skipped` 且不阻断。
+  - `status=pass`、`holidayDeleted=true`，核心 zh+holiday 回归链路通过并清理成功。
+- 证据路径：
+  - `output/playwright/ga/22889038364/attendance-locale-zh-smoke-prod-22889038364-1/attendance-zh-locale-summary.json`
+
 ## 4. 交付结论
 - 本轮 P1 改动已达到“可合并验证”状态：
   - 功能可用：农历/节假日显示开关 + 偏好持久化生效。
   - 中文覆盖增强：考勤设计器空态与一批运行时错误文案已本地化。
   - 编译、类型、测试、目标文件 ESLint 均通过。
   - Playwright 中文 smoke 已通过（GA run `22884926952`）。
+  - PR 分支回归已验证新脚本字段输出，`refresh-token` 回退已解除“仅依赖登录 secret”的阻塞。
 
 ## 5. 后续建议（下一轮）
 - 将 `AttendanceView.vue` 的历史 lint 问题拆分为独立清理 PR（避免与业务改动混合）。
@@ -147,3 +176,35 @@ gh run download 22884926952 -D output/playwright/ga/22884926952
   "holidayBadgeCount": 1
 }
 ```
+
+## 7. Gate Contract（Dashboard Schema v3 + Locale zh）补强（2026-03-10）
+
+### 7.1 变更范围
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - 新增 `attendance-zh-locale-summary.json` 解析与 `gateFlat.localeZh` 平铺字段输出。
+  - 增加 `LOCALE_ZH_SUMMARY_INVALID` / `LOCALE_ZH_SUMMARY_MISSING` 两类失败信号。
+  - `gateFlat.schemaVersion` 升级为 `3`。
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - 增加 `gateFlat.localeZh` 合同校验（`status/reasonCode/runId` 对齐、`summarySchemaVersion`、`authSource`、`zhShellTabsChecked` 与 v3 条件字段）。
+  - `gateFlat.schemaVersion` 最低门槛提升到 `>=3`。
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - `dashboard` 有效 fixture 升级到 `schemaVersion=3` 并加入 `localeZh` 正例。
+  - 新增 `dashboard.invalid.locale.json` 负例（`zhWorkflowTab=maybe`）验证 v3 locale 合同断言。
+
+### 7.2 本地验证
+执行命令：
+
+```bash
+node --check scripts/ops/attendance-daily-gate-report.mjs
+bash -n scripts/ops/attendance-validate-daily-dashboard-json.sh
+bash -n scripts/ops/attendance-run-gate-contract-case.sh
+scripts/ops/attendance-run-gate-contract-case.sh strict
+scripts/ops/attendance-run-gate-contract-case.sh dashboard
+```
+
+结果：全部 PASS（`dashboard` 用例中 5 个历史负例 + 1 个 locale v3 新负例均按预期 fail 并被 `expect_fail` 捕获）。
+
+证据路径：
+- `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json`
+- `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`
+- `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json`
