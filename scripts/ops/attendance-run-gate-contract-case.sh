@@ -13,7 +13,7 @@ function info() {
   echo "[attendance-run-gate-contract-case] $*" >&2
 }
 
-[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard> [output_root]"
+[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard|openapi> [output_root]"
 
 info "running zh copy contract guard"
 node ./scripts/ops/attendance-verify-zh-copy-contract.mjs
@@ -106,6 +106,51 @@ if [[ "$CASE_ID" == "strict" ]]; then
       schemas/attendance/strict-gate-summary.schema.json
 
   info "OK: strict contract case passed"
+  exit 0
+fi
+
+if [[ "$CASE_ID" == "openapi" ]]; then
+  openapi_dir="${case_dir}/openapi"
+  mkdir -p "$openapi_dir"
+
+  info "running openapi build"
+  if ! pnpm exec tsx packages/openapi/tools/build.ts >"${openapi_dir}/build.log" 2>&1; then
+    cat "${openapi_dir}/build.log" >&2
+    die "openapi build failed"
+  fi
+
+  if ! git diff --quiet -- \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/dist/openapi.yaml \
+    packages/openapi/dist/combined.openapi.yml; then
+    git diff -- \
+      packages/openapi/dist/openapi.json \
+      packages/openapi/dist/openapi.yaml \
+      packages/openapi/dist/combined.openapi.yml >"${openapi_dir}/dist-drift.patch"
+    die "openapi dist drift detected; rebuild artifacts and commit generated outputs"
+  fi
+
+  node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/src/paths/attendance.yml >"${openapi_dir}/validate.log"
+
+  invalid_openapi="${openapi_dir}/openapi.invalid.json"
+  jq 'del(.paths["/api/attendance/import/commit-async"])' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi}"
+  expect_fail "openapi import path contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi}" \
+      packages/openapi/src/paths/attendance.yml
+
+  invalid_openapi_job="${openapi_dir}/openapi.invalid.job-telemetry.json"
+  jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi_job}"
+  expect_fail "openapi AttendanceImportJob telemetry contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi_job}" \
+      packages/openapi/src/paths/attendance.yml
+
+  info "OK: openapi contract case passed"
   exit 0
 fi
 
