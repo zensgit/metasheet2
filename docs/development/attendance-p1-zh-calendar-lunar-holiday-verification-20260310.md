@@ -208,3 +208,19 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 - `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json`
 - `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`
 - `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json`
+
+### 7.3 GA 合同矩阵回归（分支）
+执行：
+
+```bash
+gh workflow run attendance-gate-contract-matrix.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run view 22896171398 --json status,conclusion
+gh run download 22896171398 -D output/playwright/ga/22896171398
+```
+
+结果：PASS（runId: `22896171398`）
+
+证据路径：
+- `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.valid.json`
+- `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.invalid.locale.json`
+- `output/playwright/ga/22896171398/attendance-gate-contract-matrix-strict-22896171398-1/strict/gate-summary.json`

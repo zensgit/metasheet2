@@ -3689,6 +3689,7 @@ Local verification:
 | Daily report syntax | local (2026-03-10) | PASS | `node --check scripts/ops/attendance-daily-gate-report.mjs` |
 | Attendance Gate Contract Case (strict) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
 | Attendance Gate Contract Case (dashboard, schema v3 + locale) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json` |
+| Attendance Gate Contract Matrix (branch GA) | #22896171398 | PASS | `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.valid.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.invalid.locale.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-strict-22896171398-1/strict/gate-summary.json` |
 
 ### Update (2026-03-07): Daily Gates Refresh (Strict + Preflight + Storage + Policy + Dashboard)
 
