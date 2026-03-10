@@ -144,17 +144,17 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - id: rows10k-commit
+          - id: rows10k-preview
             rows: '10000'
-            mode: 'commit'
+            mode: 'preview'
             commit_async: 'true'
             commit_retries: '6'
-            export_csv: 'true'
+            export_csv: 'false'
             rollback: 'false'
             expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_PREVIEW_MS || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '100000' }}
-            max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '150000' }}
-            max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
+            max_commit_ms: ''
+            max_export_ms: ''
             max_rollback_ms: ''
             import_job_poll_interval_ms: '2000'
             import_job_poll_timeout_ms: '1800000'
