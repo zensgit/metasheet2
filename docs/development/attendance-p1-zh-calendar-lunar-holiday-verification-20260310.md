@@ -329,3 +329,25 @@ node --check scripts/ops/attendance-daily-gate-report.test.mjs
 node --test scripts/ops/attendance-daily-gate-report.test.mjs
 ```
 - 结果：PASS（12/12）
+
+## 15. Mainline PR 回归（schema v2，run 22890158371）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-mainline-20260310 \
+  -f require_zh_core_labels=true \
+  -f require_toggle_checks=false \
+  -f verify_holiday=true
+
+gh run watch 22890158371 --exit-status
+gh run download 22890158371 -D output/playwright/ga/22890158371
+```
+- 结果：PASS
+- 关键字段（artifact summary）：
+  - `schemaVersion=2`
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `zhLabels.noEnglishLeak=true`
+  - `cleanup.holidayDeleted=true`
+- 证据路径：
+  - `output/playwright/ga/22890158371/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22890158371/attendance-zh-locale-calendar.png`
