@@ -4007,3 +4007,26 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+### Update (2026-03-10): Locale zh Smoke `schemaVersion=3` + Shell Tab Contract Signal
+
+Scope:
+
+- upgraded `attendance-zh-locale-summary.json` from `schemaVersion=1` to `schemaVersion=3`.
+- smoke summary now emits locale shell metadata:
+  - `zhShellTabsChecked`
+  - `zhLabels.overviewTab/adminTab/workflowTab`
+- workflow `attendance-locale-zh-smoke-prod.yml` now supports:
+  - `require_shell_tab_checks` input
+  - step summary fields: `SUMMARY SCHEMA`, `zh shell tabs checked`, `zh tab labels`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (branch, schema v3) | #22905331052 | PASS | `output/playwright/ga/22905331052/attendance-locale-zh-smoke-prod-22905331052-1/attendance-zh-locale-summary.json` (`schemaVersion=3`, `authSource=refresh`, `zhShellTabsChecked=true`, `zhLabels.overviewTab=true`) |
+| Attendance Gate Contract Matrix (branch, dashboard schema v3) | #22905331065 | PASS | `output/playwright/ga/22905331065/attendance-gate-contract-matrix-dashboard-22905331065-1/dashboard.valid.json` (`gateFlat.schemaVersion=3`, `gateFlat.localeZh.summarySchemaVersion=3`) |
+
+Notes:
+
+- one initial workflow run (`#22905244251`) used the previous head SHA because it was dispatched in parallel with `git push`; rerun on head SHA `ad4bbbebf8a37378a5777a448e27185401d99d67` fixed the evidence baseline.

@@ -4064,3 +4064,31 @@ Observed highlights:
 Decision:
 
 - **GO maintained**.
+
+## Post-Go Validation (2026-03-10): Locale zh Summary Schema v3 + Contract Re-Verification
+
+Scope:
+
+- aligned locale zh smoke artifact schema with dashboard gate contract v3.
+- ensured branch evidence includes shell tab localization signals and remains backward-compatible with environments that skip optional checks.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (branch `codex/attendance-pr396-pr399-delivery-md-20260310`) | #22905331052 | PASS | `output/playwright/ga/22905331052/attendance-locale-zh-smoke-prod-22905331052-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22905331052/attendance-locale-zh-smoke-prod-22905331052-1/attendance-zh-locale-calendar.png` |
+| Attendance Gate Contract Matrix (branch `codex/attendance-pr396-pr399-delivery-md-20260310`) | #22905331065 | PASS | `output/playwright/ga/22905331065/attendance-gate-contract-matrix-dashboard-22905331065-1/dashboard.valid.json`, `output/playwright/ga/22905331065/attendance-gate-contract-matrix-dashboard-22905331065-1/dashboard.invalid.locale.json`, `output/playwright/ga/22905331065/attendance-gate-contract-matrix-strict-22905331065-1/strict/gate-summary.json` |
+
+Observed highlights:
+
+- run head SHA is pinned to `ad4bbbebf8a37378a5777a448e27185401d99d67` for both runs.
+- locale summary now reports:
+  - `schemaVersion=3`
+  - `authSource=refresh`
+  - `zhShellTabsChecked=true`
+  - `zhLabels.overviewTab=true`
+- contract matrix remains green with locale v3 negative-case guard (`dashboard.invalid.locale.json`) intact.
+
+Decision:
+
+- **GO maintained**.

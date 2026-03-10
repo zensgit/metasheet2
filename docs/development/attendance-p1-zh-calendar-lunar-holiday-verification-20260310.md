@@ -244,3 +244,66 @@ gh run download 22896361190 -D output/playwright/ga/22896361190
 证据路径：
 - `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-summary.json`
 - `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-calendar.png`
+
+## 8. Locale zh Smoke Summary Schema v3 对齐（2026-03-10，增量）
+
+### 8.1 变更内容
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - `attendance-zh-locale-summary.json` 升级到 `schemaVersion=3`。
+  - 新增输出字段：
+    - `zhShellTabsChecked`
+    - `zhShellTabReason`
+    - `zhShellTabSamples`
+    - `zhLabels.overviewTab/adminTab/workflowTab`
+    - `requireShellTabChecks`
+  - 新增壳层中文 Tab 检查：
+    - 断言存在 `总览` Tab。
+    - 断言不出现 `Overview/Admin Center/Workflow Designer` 英文 Tab 文案。
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - 新增 `workflow_dispatch` 输入 `require_shell_tab_checks`（默认 `false`）。
+  - 新增环境变量 `REQUIRE_SHELL_TAB_CHECKS` 透传到 smoke 脚本。
+  - Step Summary 增加：
+    - `SUMMARY SCHEMA`
+    - `zh shell tabs checked`
+    - `zh tab labels`
+
+### 8.2 本地验证
+执行命令：
+
+```bash
+node --check scripts/verify-attendance-locale-zh-smoke.mjs
+bash scripts/ops/attendance-run-gate-contract-case.sh dashboard
+```
+
+结果：PASS。
+
+### 8.3 GA 回归（修正 run 取错提交后）
+第一次触发 `attendance-locale-zh-smoke-prod.yml` 与 `git push` 并行，导致 run 锁定旧 SHA（`a6480d06`）；随后在新 SHA（`ad4bbbeb`）重新触发并通过。
+
+执行：
+
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run watch 22905331052 --exit-status
+gh run download 22905331052 -D output/playwright/ga/22905331052
+
+gh workflow run attendance-gate-contract-matrix.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run watch 22905331065 --exit-status
+gh run download 22905331065 -D output/playwright/ga/22905331065
+```
+
+结果：全部 PASS（headSha 均为 `ad4bbbebf8a37378a5777a448e27185401d99d67`）。
+
+关键证据：
+- Locale zh smoke：
+  - `output/playwright/ga/22905331052/attendance-locale-zh-smoke-prod-22905331052-1/attendance-zh-locale-summary.json`
+  - 关键字段：
+    - `"schemaVersion": 3`
+    - `"authSource": "refresh"`
+    - `"zhShellTabsChecked": true`
+    - `"zhLabels": { "overviewTab": true, "adminTab": true, "workflowTab": false }`
+- Contract matrix：
+  - `output/playwright/ga/22905331065/attendance-gate-contract-matrix-dashboard-22905331065-1/dashboard.valid.json`
+  - 关键字段：
+    - `.gateFlat.schemaVersion == 3`
+    - `.gateFlat.localeZh.summarySchemaVersion == 3`
