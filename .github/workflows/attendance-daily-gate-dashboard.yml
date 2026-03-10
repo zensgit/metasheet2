@@ -6,7 +6,7 @@ on:
       branch:
         description: 'Branch to evaluate'
         required: false
-        default: 'main'
+        default: ''
       lookback_hours:
         description: 'Max age (hours) for latest completed runs'
         required: false
