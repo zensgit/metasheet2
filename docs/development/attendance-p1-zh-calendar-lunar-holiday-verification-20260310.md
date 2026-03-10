@@ -351,3 +351,22 @@ gh run download 22890158371 -D output/playwright/ga/22890158371
 - 证据路径：
   - `output/playwright/ga/22890158371/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22890158371/attendance-zh-locale-calendar.png`
+
+## 16. Daily Dashboard 本地验证（schema v2 元数据）
+```bash
+GH_TOKEN="$(gh auth token)" \
+GITHUB_REPOSITORY="zensgit/metasheet2" \
+BRANCH="codex/attendance-zh-calendar-p1-mainline-20260310" \
+LOOKBACK_HOURS="48" \
+node scripts/ops/attendance-daily-gate-report.mjs
+```
+- 结果：脚本执行成功并生成报告（`REPORT_STATUS=fail`，因为该分支没有 strict gate completed run，不是 locale gate 回归）。
+- 关键验证点：`gateFlat.localeZh` 成功解析并包含新增 schema v2 字段：
+  - `summarySchemaVersion=2`
+  - `authSource=refresh`
+  - `zhLabelsStatus=pass`
+  - `zhLabelsOk=true`
+  - `zhNoEnglishLeak=true`
+- 证据路径：
+  - `output/playwright/attendance-daily-gate-dashboard/20260310-063235/attendance-daily-gate-dashboard.json`
+  - `output/playwright/attendance-daily-gate-dashboard/20260310-063235/attendance-daily-gate-dashboard.md`
