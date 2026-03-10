@@ -4030,3 +4030,4 @@ Verification:
 Notes:
 
 - one initial workflow run (`#22905244251`) used the previous head SHA because it was dispatched in parallel with `git push`; rerun on head SHA `ad4bbbebf8a37378a5777a448e27185401d99d67` fixed the evidence baseline.
+- when validating `Attendance Daily Gate Dashboard` on feature branches, pass `-f branch=<feature-branch>` explicitly; otherwise the workflow defaults to `main` data source.

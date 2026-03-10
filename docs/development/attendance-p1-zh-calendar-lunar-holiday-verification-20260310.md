@@ -307,3 +307,32 @@ gh run download 22905331065 -D output/playwright/ga/22905331065
   - 关键字段：
     - `.gateFlat.schemaVersion == 3`
     - `.gateFlat.localeZh.summarySchemaVersion == 3`
+
+### 8.4 Daily Dashboard 分支验证（locale v3 信号接入）
+执行：
+
+```bash
+# 注意必须显式传 branch，否则默认评估 main
+gh workflow run attendance-daily-gate-dashboard.yml \
+  --ref codex/attendance-pr396-pr399-delivery-md-20260310 \
+  -f branch=codex/attendance-pr396-pr399-delivery-md-20260310 \
+  -f lookback_hours=72
+gh run watch 22905522662 --exit-status || true
+gh run download 22905522662 -D output/playwright/ga/22905522662
+```
+
+结果：
+- `Validate report JSON contract` PASS（合同检查通过）。
+- workflow 最终 FAIL（预期内）：分支上未跑 P0 门禁（`Remote Preflight`、`Strict`），`p0Status=fail`。
+
+关键证据：
+- `output/playwright/ga/22905522662/attendance-daily-gate-dashboard-22905522662-1/attendance-daily-gate-dashboard.json`
+  - `gateFlat.localeZh.runId=22905331052`
+  - `gateFlat.localeZh.summarySchemaVersion=3`
+  - `gateFlat.localeZh.zhShellTabsChecked="true"`
+  - `gateFlat.localeZh.zhOverviewTab="true"`
+  - `gateFlat.localeZh.zhAdminTab="true"`
+  - `gateFlat.localeZh.zhWorkflowTab="false"`
+
+说明：
+- 先前 run `22905467569` 未显式传 `branch`，按默认 `main` 取数，抓到旧 locale run（schema v1）；已通过本次 run 修正验证。
