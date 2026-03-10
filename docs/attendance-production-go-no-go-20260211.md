@@ -2636,6 +2636,32 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-10): Attendance zh Locale Smoke + Lunar/Holiday UX
+
+Scope:
+
+- verified Chinese locale smoke after calendar display-toggle hardening (`Lunar` / `Holiday`).
+- confirmed remote production environment still passes zh locale calendar assertions using GA token resolution path.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | #22884926952 | PASS | `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-calendar.png`, `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/auth-resolve-meta.txt` |
+
+Observed highlights:
+
+- summary confirms locale + calendar coverage:
+  - `status=pass`
+  - `locale=zh-CN`
+  - `lunarCount=42`
+  - `holidayBadgeCount=1`
+- created test holiday was cleaned successfully (`cleanup.holidayDeleted=true`).
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Verification (2026-03-07): Mainline Gate Refresh + Source Regression Baseline
 
 Goal:
@@ -3970,6 +3996,41 @@ Observed highlights:
   - `elapsedMs=427000`
 - P1 tracker status after recovery:
   - #157 `[Attendance P1] Perf longrun alert` is `CLOSED`.
+
+Decision:
+
+- **GO maintained**.
+
+## Post-Go Validation (2026-03-07): Strict Recovery + Dashboard Rebind (PR #354)
+
+Scope:
+
+- recovered strict gate instability caused by transient group lookup visibility in API smoke (`created group not found`).
+- merged hardening (`feat(attendance-ops): post-merge verifier + smoke group lookup hardening`, PR #354).
+- re-ran strict + dashboard to confirm latest signal binding and issue recovery.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (main, post-merge verifier) | #22798018578 | PASS | `output/playwright/attendance-post-merge-verify/20260307-191518/branch-policy-drift.log`, `output/playwright/attendance-post-merge-verify/20260307-191518/summary.json` |
+| Attendance Strict Gates (Prod, post-merge recovery) | #22798120660 | PASS | `output/playwright/ga/22798120660/attendance-strict-gates-prod-22798120660-1/20260307-112300-1/gate-summary.json`, `output/playwright/ga/22798120660/attendance-strict-gates-prod-22798120660-1/20260307-112300-2/gate-summary.json`, `output/playwright/ga/22798120660/attendance-strict-gates-prod-22798120660-1/20260307-112300-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard (main, post strict recovery) | #22798182279 | PASS | `output/playwright/ga/22798182279/attendance-daily-gate-dashboard-22798182279-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22798182279/attendance-daily-gate-dashboard-22798182279-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- strict API smoke confirms upload/idempotency/export/group membership chain:
+  - `import upload ok`
+  - `idempotency ok`
+  - `export csv ok`
+  - `group + membership ok`
+- dashboard is green and bound to refreshed gate sources:
+  - `overallStatus=pass`
+  - `p0Status=pass`
+  - `gateFlat.strict.runId=22798120660`
+  - `gateFlat.protection.runId=22798018578`
+- open attendance tracking issues:
+  - `[]`
 
 Decision:
 
