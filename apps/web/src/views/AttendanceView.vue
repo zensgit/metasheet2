@@ -144,6 +144,16 @@
               <span class="attendance__calendar-label">{{ calendarLabel }}</span>
               <button class="attendance__btn" @click="shiftMonth(1)">{{ tr('Next', '下月') }}</button>
             </div>
+            <div class="attendance__calendar-flags">
+              <label class="attendance__calendar-flag">
+                <input v-model="showLunarLabel" type="checkbox" />
+                <span>{{ tr('Lunar', '农历') }}</span>
+              </label>
+              <label class="attendance__calendar-flag">
+                <input v-model="showHolidayBadge" type="checkbox" />
+                <span>{{ tr('Holiday', '节假日') }}</span>
+              </label>
+            </div>
           </div>
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
@@ -163,8 +173,8 @@
               <span class="attendance__calendar-date">{{ day.day }}</span>
               <span v-if="day.statusLabel" class="attendance__calendar-status">{{ day.statusLabel }}</span>
               <span v-else class="attendance__calendar-status attendance__calendar-status--empty">--</span>
-              <span v-if="day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
-              <span v-if="day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
+              <span v-if="showLunarLabel && day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
+              <span v-if="showHolidayBadge && day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
             </div>
           </div>
         </div>
@@ -1956,22 +1966,6 @@
                 </div>
                 <div v-if="importAsyncJob.error">{{ tr('Error', '错误') }}: {{ importAsyncJob.error }}</div>
               </div>
-              <div v-if="importStatusVisible" class="attendance__status attendance__status--error">
-                <div>
-                  {{ statusMessage }}
-                </div>
-                <div v-if="statusCode">{{ tr('Code', '代码') }}: {{ statusCode }}</div>
-                <div v-if="statusHint">{{ statusHint }}</div>
-                <button
-                  v-if="statusActionLabel"
-                  class="attendance__btn attendance__btn--inline"
-                  type="button"
-                  :disabled="statusActionBusy"
-                  @click="runStatusAction"
-                >
-                  {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
-                </button>
-              </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
                 {{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}
               </div>
@@ -3322,8 +3316,6 @@ interface AttendanceStatusMeta {
   code?: string
   hint?: string
   action?: AttendanceStatusAction
-  context?: AttendanceStatusContext
-  sticky?: boolean
 }
 
 const props = withDefaults(
@@ -3337,6 +3329,40 @@ const props = withDefaults(
 
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
+
+interface AttendanceCalendarDisplayPrefs {
+  showLunar: boolean
+  showHoliday: boolean
+}
+
+function loadCalendarDisplayPrefs(): AttendanceCalendarDisplayPrefs {
+  const defaults: AttendanceCalendarDisplayPrefs = {
+    showLunar: true,
+    showHoliday: true,
+  }
+  if (typeof window === 'undefined') return defaults
+  try {
+    const raw = window.localStorage.getItem(CALENDAR_DISPLAY_PREFS_STORAGE_KEY)
+    if (!raw) return defaults
+    const parsed = JSON.parse(raw) as Partial<AttendanceCalendarDisplayPrefs>
+    return {
+      showLunar: parsed.showLunar !== false,
+      showHoliday: parsed.showHoliday !== false,
+    }
+  } catch {
+    return defaults
+  }
+}
+
+function persistCalendarDisplayPrefs(prefs: AttendanceCalendarDisplayPrefs): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CALENDAR_DISPLAY_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
 
 interface AttendanceSummary {
   total_days: number
@@ -3690,7 +3716,6 @@ interface AttendanceImportJob {
   progress: number
   total: number
   engine?: 'standard' | 'bulk' | string | null
-  recordUpsertStrategy?: string | null
   processedRows?: number
   failedRows?: number
   elapsedMs?: number
@@ -4048,8 +4073,8 @@ const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
 const importAsyncPolling = ref(false)
-const reconcileResult = ref<AttendanceReconcileResult | null>(null)
-const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
+const _reconcileResult = ref<AttendanceReconcileResult | null>(null)
+const _rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
 function toNonNegativeNumber(value: unknown): number | null {
   const num = Number(value)
@@ -4158,14 +4183,6 @@ const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
-const importStatusVisible = computed(() => {
-  const context = statusMeta.value?.context
-  return Boolean(
-    statusKind.value === 'error'
-    && statusMessage.value
-    && (context === 'import-preview' || context === 'import-run')
-  )
-})
 const canResumeImportJobFromStatus = computed(() => {
   const action = statusMeta.value?.action
   if (action !== 'retry-run-import') return false
@@ -4218,6 +4235,9 @@ const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
+const calendarDisplayPrefs = loadCalendarDisplayPrefs()
+const showLunarLabel = ref(calendarDisplayPrefs.showLunar)
+const showHolidayBadge = ref(calendarDisplayPrefs.showHoliday)
 
 const weekDays = computed(() => (
   isZh.value
@@ -4226,6 +4246,10 @@ const weekDays = computed(() => (
 ))
 const calendarLabel = computed(() => {
   return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+})
+
+watch([showLunarLabel, showHolidayBadge], ([showLunar, showHoliday]) => {
+  persistCalendarDisplayPrefs({ showLunar, showHoliday })
 })
 
 const recordMap = computed(() => {
@@ -5038,7 +5062,7 @@ function resolveImportJobProcessedRows(job: AttendanceImportJob | null): number 
   return Number.isFinite(fallback) ? Math.max(0, Math.floor(fallback)) : 0
 }
 
-function resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
+function _resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
   if (!job) return 0
   const direct = Number(job.failedRows)
   if (Number.isFinite(direct)) return Math.max(0, Math.floor(direct))
@@ -5050,7 +5074,7 @@ function resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
   return 0
 }
 
-function formatImportElapsedMs(value: unknown): string {
+function _formatImportElapsedMs(value: unknown): string {
   const numeric = Number(value)
   if (!Number.isFinite(numeric) || numeric < 0) return '--'
   if (numeric < 1000) return `${Math.round(numeric)} ms`
@@ -5534,8 +5558,6 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 async function previewImport() {
   clearImportPreviewTask()
   clearImportAsyncJob()
-  importPreview.value = []
-  importCsvWarnings.value = []
   const payload = buildImportPayload()
   if (!payload) {
     setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
@@ -5621,8 +5643,6 @@ async function previewImport() {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    importPreview.value = []
-    importCsvWarnings.value = []
     if (importPreviewTask.value) {
       importPreviewTask.value = {
         ...importPreviewTask.value,
@@ -5718,23 +5738,10 @@ async function resumeImportAsyncJobPolling() {
     }
     const imported = Number(finalJob.progress ?? 0)
     const total = Number(finalJob.total ?? 0)
-    const perfSuffix = buildImportPerfSuffix({
-      engine: finalJob.engine,
-      recordUpsertStrategy: finalJob.recordUpsertStrategy,
-      processedRows: finalJob.processedRows ?? imported,
-      failedRows: finalJob.failedRows,
-      elapsedMs: finalJob.elapsedMs,
-    })
     if (total && imported !== total) {
-      setStatus(tr(
-        `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-        `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
-      ))
+      setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
     } else {
-      setStatus(tr(
-        `Imported ${imported} rows (async job).${perfSuffix.en}`,
-        `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
-      ))
+      setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
     }
     await loadRecords()
     await loadImportBatches()
@@ -5748,42 +5755,6 @@ function clearImportAsyncJob() {
   importJobPollSeq += 1
   importAsyncPolling.value = false
   importAsyncJob.value = null
-}
-
-function buildImportPerfSuffix(input: {
-  engine?: unknown
-  recordUpsertStrategy?: unknown
-  processedRows?: unknown
-  failedRows?: unknown
-  elapsedMs?: unknown
-}): { en: string; zh: string } {
-  const processedRows = toNonNegativeNumber(input.processedRows) ?? 0
-  const failedRows = toNonNegativeNumber(input.failedRows) ?? 0
-  const elapsedMs = toNonNegativeNumber(input.elapsedMs) ?? 0
-  const importEngine = String(input.engine ?? '').trim().toLowerCase()
-  const importStrategy = String(input.recordUpsertStrategy ?? '').trim().toLowerCase()
-
-  const perfBitsEn: string[] = []
-  const perfBitsZh: string[] = []
-  if (importEngine) {
-    perfBitsEn.push(`engine=${importEngine}`)
-    perfBitsZh.push(`引擎=${importEngine}`)
-  }
-  if (importStrategy) {
-    perfBitsEn.push(`strategy=${importStrategy}`)
-    perfBitsZh.push(`策略=${importStrategy}`)
-  }
-  perfBitsEn.push(`processed=${processedRows}`)
-  perfBitsZh.push(`处理=${processedRows}`)
-  perfBitsEn.push(`failed=${failedRows}`)
-  perfBitsZh.push(`失败=${failedRows}`)
-  perfBitsEn.push(`elapsedMs=${elapsedMs}`)
-  perfBitsZh.push(`耗时毫秒=${elapsedMs}`)
-
-  return {
-    en: perfBitsEn.length ? ` (${perfBitsEn.join(', ')})` : '',
-    zh: perfBitsZh.length ? `（${perfBitsZh.join('，')}）` : '',
-  }
 }
 
 async function runImport() {
@@ -5845,22 +5816,9 @@ async function runImport() {
         const finalJob = await pollImportJob(job.id)
         const imported = Number(finalJob.progress ?? 0)
         const total = Number(finalJob.total ?? 0)
-        const perfSuffix = buildImportPerfSuffix({
-          engine: finalJob.engine,
-          recordUpsertStrategy: finalJob.recordUpsertStrategy,
-          processedRows: finalJob.processedRows ?? imported,
-          failedRows: finalJob.failedRows,
-          elapsedMs: finalJob.elapsedMs,
-        })
-        setStatus(tr(
-          `Imported ${imported} rows (async job).${perfSuffix.en}`,
-          `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
-        ))
+        setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
         if (total && imported !== total) {
-          setStatus(tr(
-            `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-            `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
-          ))
+          setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
         }
 
         await loadRecords()
@@ -5914,24 +5872,13 @@ async function runImport() {
       ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
     ]
     importCsvWarnings.value = Array.from(new Set(importWarnings))
-    const count = Number(data.data?.imported ?? 0)
-    const processedRows = toNonNegativeNumber(data.data?.processedRows) ?? count
-    const perfSuffix = buildImportPerfSuffix({
-      engine: data.data?.engine,
-      recordUpsertStrategy: data.data?.recordUpsertStrategy,
-      processedRows,
-      failedRows: data.data?.failedRows,
-      elapsedMs: data.data?.elapsedMs,
-    })
+    const count = data.data?.imported ?? 0
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
     if (groupCreated || groupMembersAdded) {
-      setStatus(tr(
-        `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffix.en}`,
-        `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffix.zh}`,
-      ))
+      setStatus(tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`))
     } else {
-      setStatus(tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`))
+      setStatus(tr(`Imported ${count} rows.`, `已导入 ${count} 行。`))
     }
     await loadRecords()
     await loadImportBatches()
@@ -6322,7 +6269,7 @@ function isAbortError(error: unknown): boolean {
   return name === 'aborterror'
 }
 
-async function apiFetchWithTimeout(path: string, options: RequestInit = {}, timeoutMs = ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS): Promise<Response> {
+async function apiFetchWithTimeout(path: string, options: globalThis.RequestInit = {}, timeoutMs = ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
   const parentSignal = options.signal
   let parentAbortHandler: (() => void) | null = null
@@ -6366,10 +6313,19 @@ function localizeRuntimeErrorMessage(rawMessage: string, fallbackMessage: string
   if (!isZh.value) return message
 
   const mappings: Array<[RegExp, string]> = [
+    [/^admin permissions required\b/i, '需要管理员权限'],
     [/^failed to load anomalies\b/i, '加载异常失败'],
     [/^failed to load requests\b/i, '加载申请失败'],
     [/^failed to load request report\b/i, '加载申请报表失败'],
     [/^failed to load admin data\b/i, '加载管理数据失败'],
+    [/^failed to load leave types\b/i, '加载请假类型失败'],
+    [/^failed to save leave type\b/i, '保存请假类型失败'],
+    [/^failed to delete leave type\b/i, '删除请假类型失败'],
+    [/^failed to load overtime rules\b/i, '加载加班规则失败'],
+    [/^failed to save overtime rule\b/i, '保存加班规则失败'],
+    [/^failed to delete overtime rule\b/i, '删除加班规则失败'],
+    [/^code and name are required\b/i, '编码和名称为必填项'],
+    [/^name is required\b/i, '名称为必填项'],
     [/^refresh failed\b/i, '刷新失败'],
     [/^request failed\b/i, '申请失败'],
     [/^request update failed\b/i, '申请处理失败'],
@@ -6519,12 +6475,7 @@ function classifyStatusError(
 
 function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
   const { message, meta } = classifyStatusError(error, fallbackMessage, context)
-  const sticky = context === 'import-preview' || context === 'import-run'
-  setStatus(message || fallbackMessage, 'error', {
-    ...(meta || {}),
-    context,
-    sticky,
-  })
+  setStatus(message || fallbackMessage, 'error', meta)
 }
 
 async function runStatusAction() {
@@ -6582,23 +6533,25 @@ async function runStatusAction() {
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: AttendanceStatusMeta | null = null) {
+  const normalizedMessage = kind === 'error'
+    ? localizeRuntimeErrorMessage(message, message)
+    : message
   statusKind.value = kind
   statusMeta.value = kind === 'error' ? meta : null
-  if (statusMessage.value === message && message) {
+  if (statusMessage.value === normalizedMessage && normalizedMessage) {
     statusMessage.value = ''
     void nextTick(() => {
-      statusMessage.value = message
+      statusMessage.value = normalizedMessage
     })
   } else {
-    statusMessage.value = message
+    statusMessage.value = normalizedMessage
   }
-  if (!message) return
-  if (kind === 'error' && meta?.sticky) return
+  if (!normalizedMessage) return
   const timeoutMs = kind === 'error'
     ? (meta?.action || meta?.hint ? 10000 : 7000)
     : 4000
   window.setTimeout(() => {
-    if (statusMessage.value === message) {
+    if (statusMessage.value === normalizedMessage) {
       statusMessage.value = ''
       if (statusMeta.value === meta) {
         statusMeta.value = null
@@ -7646,7 +7599,7 @@ async function exportCsv() {
       throw new Error(message)
     }
     const disposition = response.headers.get('content-disposition')
-    const match = disposition?.match(/filename=\"?([^\";]+)\"?/)
+    const match = disposition?.match(/filename="?([^";]+)"?/)
     const filename = match?.[1] || 'attendance-export.csv'
     const blob = new Blob([text], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -8096,7 +8049,7 @@ async function loadLeaveTypes() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load leave types')
+      throw new Error(data?.error?.message || tr('Failed to load leave types', '加载请假类型失败'))
     }
     adminForbidden.value = false
     leaveTypes.value = data.data.items || []
@@ -8115,7 +8068,7 @@ async function saveLeaveType() {
   const isEditing = Boolean(leaveTypeEditingId.value)
   try {
     if (!leaveTypeForm.code.trim() || !leaveTypeForm.name.trim()) {
-      throw new Error('Code and name are required')
+      throw new Error(tr('Code and name are required', '编码和名称为必填项'))
     }
     const payload = {
       code: leaveTypeForm.code.trim(),
@@ -8135,11 +8088,11 @@ async function saveLeaveType() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save leave type')
+      throw new Error(data?.error?.message || tr('Failed to save leave type', '保存请假类型失败'))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
@@ -8158,11 +8111,11 @@ async function deleteLeaveType(id: string) {
     const response = await apiFetch(`/api/attendance/leave-types/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete leave type')
+      throw new Error(data?.error?.message || tr('Failed to delete leave type', '删除请假类型失败'))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
@@ -8203,7 +8156,7 @@ async function loadOvertimeRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load overtime rules')
+      throw new Error(data?.error?.message || tr('Failed to load overtime rules', '加载加班规则失败'))
     }
     adminForbidden.value = false
     overtimeRules.value = data.data.items || []
@@ -8222,7 +8175,7 @@ async function saveOvertimeRule() {
   const isEditing = Boolean(overtimeRuleEditingId.value)
   try {
     if (!overtimeRuleForm.name.trim()) {
-      throw new Error('Name is required')
+      throw new Error(tr('Name is required', '名称为必填项'))
     }
     const payload = {
       name: overtimeRuleForm.name.trim(),
@@ -8242,11 +8195,11 @@ async function saveOvertimeRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save overtime rule')
+      throw new Error(data?.error?.message || tr('Failed to save overtime rule', '保存加班规则失败'))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
@@ -8269,11 +8222,11 @@ async function deleteOvertimeRule(id: string) {
     const response = await apiFetch(`/api/attendance/overtime-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete overtime rule')
+      throw new Error(data?.error?.message || tr('Failed to delete overtime rule', '删除加班规则失败'))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
@@ -9918,6 +9871,20 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   gap: 8px;
 }
 
+.attendance__calendar-flags {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.attendance__calendar-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #4b5563;
+  font-size: 12px;
+}
+
 .attendance__calendar-label {
   font-weight: 600;
   font-size: 14px;
@@ -10321,6 +10288,16 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   .attendance__calendar-cell {
     min-height: 60px;
     padding: 6px;
+  }
+
+  .attendance__calendar-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .attendance__calendar-nav,
+  .attendance__calendar-flags {
+    flex-wrap: wrap;
   }
 
   .attendance__request-meta {

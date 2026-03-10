@@ -3,7 +3,7 @@
     <article class="attendance-workflow__card">
       <h3>{{ t.title }}</h3>
       <p class="attendance-workflow__empty">
-        {{ t.disabledHint }}
+        {{ t.empty }}
       </p>
     </article>
   </section>
@@ -26,19 +26,15 @@ withDefaults(
 )
 
 const { isZh } = useLocale()
-
-const t = computed(() => {
-  if (isZh.value) {
-    return {
-      title: '审批流程设计',
-      disabledHint: '当前租户未启用流程能力。',
+const t = computed(() => (isZh.value
+  ? {
+      title: '审批流程设计器',
+      empty: '当前租户未启用流程能力。',
     }
-  }
-  return {
-    title: 'Approval Workflow Designer',
-    disabledHint: 'Workflow capability is not enabled for this tenant.',
-  }
-})
+  : {
+      title: 'Approval Workflow Designer',
+      empty: 'Workflow capability is not enabled for this tenant.',
+    }))
 </script>
 
 <style scoped>
