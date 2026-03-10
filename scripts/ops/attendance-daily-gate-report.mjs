@@ -34,6 +34,8 @@ const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance
 const protectionArtifactPrefix = protectionWorkflow.includes('branch-policy-drift')
   ? 'attendance-branch-policy-drift-prod'
   : 'attendance-branch-protection-prod'
+const enableRemoteSignalFallback = String(process.env.ENABLE_REMOTE_SIGNAL_FALLBACK || 'true').trim() === 'true'
+const remoteSignalFallbackBranch = String(process.env.REMOTE_SIGNAL_FALLBACK_BRANCH || 'main').trim()
 const lookbackHours = Math.max(1, Number(process.env.LOOKBACK_HOURS || 36))
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-daily-gate-dashboard').trim()
 
@@ -636,6 +638,76 @@ async function tryGetWorkflowRuns({ ownerValue, repoValue, workflowFile, branchV
   }
 }
 
+function toRunList(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function filterDrillRuns(list) {
+  const normalized = toRunList(list)
+  return includeDrillRuns ? normalized : normalized.filter((run) => !isDrillRun(run))
+}
+
+function hasCompletedRun(list) {
+  return filterDrillRuns(list).some((run) => run?.status === 'completed')
+}
+
+async function resolveRemoteSignalRuns({
+  gateName,
+  workflowFile,
+  ownerValue,
+  repoValue,
+  branchValue,
+  primaryRuns,
+}) {
+  const result = {
+    list: toRunList(primaryRuns?.list),
+    error: primaryRuns?.error || null,
+    sourceBranch: branchValue,
+    fallbackUsed: false,
+    fallbackError: null,
+  }
+
+  const remoteGate = gateName === 'Remote Preflight'
+    || gateName === 'Host Metrics'
+    || gateName === 'Storage Health'
+    || gateName === 'Upload Cleanup'
+  const canFallback = enableRemoteSignalFallback
+    && remoteGate
+    && remoteSignalFallbackBranch
+    && remoteSignalFallbackBranch !== branchValue
+  if (!canFallback) {
+    return result
+  }
+
+  const primaryHasCompleted = hasCompletedRun(result.list)
+  if (!result.error && primaryHasCompleted) {
+    return result
+  }
+
+  const fallbackRuns = await tryGetWorkflowRuns({
+    ownerValue,
+    repoValue,
+    workflowFile,
+    branchValue: remoteSignalFallbackBranch,
+  })
+  result.fallbackError = fallbackRuns.error || null
+  if (fallbackRuns.error) {
+    return result
+  }
+
+  const fallbackList = toRunList(fallbackRuns.list)
+  const fallbackHasCompleted = hasCompletedRun(fallbackList)
+  if (fallbackHasCompleted || !primaryHasCompleted || result.error) {
+    info(`${gateName}: using fallback branch '${remoteSignalFallbackBranch}'`)
+    result.list = fallbackList
+    result.error = fallbackRuns.error || null
+    result.sourceBranch = remoteSignalFallbackBranch
+    result.fallbackUsed = true
+  }
+
+  return result
+}
+
 function ageHours(now, iso) {
   if (!iso) return Number.POSITIVE_INFINITY
   const value = Date.parse(iso)
@@ -666,7 +738,7 @@ function formatRun(run) {
   }
 }
 
-function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError }) {
+function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, sourceBranch = branch }) {
   const findings = []
   let ok = true
   const completed = formatRun(latestCompleted)
@@ -697,7 +769,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
       severity,
       code: 'NO_COMPLETED_RUN',
       gate: name,
-      message: `${name}: no completed run found on branch '${branch}'`,
+      message: `${name}: no completed run found on branch '${sourceBranch}'`,
       runUrl: latest.url,
     })
   } else {
@@ -727,6 +799,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
   return {
     name,
     severity,
+    sourceBranch,
     ok,
     latest,
     completed,
@@ -1365,16 +1438,49 @@ async function run() {
 
   info(`repository=${repo} branch=${branch}`)
 
-  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
+  const preflightRunsPrimary = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
   const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: branch })
-  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
-  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
-  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
+  const metricsRunsPrimary = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
+  const storageRunsPrimary = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
+  const cleanupRunsPrimary = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
   const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
   const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
+
+  const preflightRuns = await resolveRemoteSignalRuns({
+    gateName: 'Remote Preflight',
+    workflowFile: preflightWorkflow,
+    ownerValue: owner,
+    repoValue: repoName,
+    branchValue: branch,
+    primaryRuns: preflightRunsPrimary,
+  })
+  const metricsRuns = await resolveRemoteSignalRuns({
+    gateName: 'Host Metrics',
+    workflowFile: metricsWorkflow,
+    ownerValue: owner,
+    repoValue: repoName,
+    branchValue: branch,
+    primaryRuns: metricsRunsPrimary,
+  })
+  const storageRuns = await resolveRemoteSignalRuns({
+    gateName: 'Storage Health',
+    workflowFile: storageWorkflow,
+    ownerValue: owner,
+    repoValue: repoName,
+    branchValue: branch,
+    primaryRuns: storageRunsPrimary,
+  })
+  const cleanupRuns = await resolveRemoteSignalRuns({
+    gateName: 'Upload Cleanup',
+    workflowFile: cleanupWorkflow,
+    ownerValue: owner,
+    repoValue: repoName,
+    branchValue: branch,
+    primaryRuns: cleanupRunsPrimary,
+  })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
@@ -1456,6 +1562,7 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: preflightRuns.error,
+    sourceBranch: preflightRuns.sourceBranch || branch,
   })
   const protectionGate = evaluateGate({
     name: 'Branch Protection',
@@ -1474,6 +1581,7 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: metricsRuns.error,
+    sourceBranch: metricsRuns.sourceBranch || branch,
   })
   const storageGate = evaluateGate({
     name: 'Storage Health',
@@ -1483,6 +1591,7 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: storageRuns.error,
+    sourceBranch: storageRuns.sourceBranch || branch,
   })
   const cleanupLookbackHours = Math.max(lookbackHours, 200)
   const cleanupGate = evaluateGate({
@@ -1493,6 +1602,7 @@ async function run() {
     now,
     lookbackHoursValue: cleanupLookbackHours,
     fetchError: cleanupRuns.error,
+    sourceBranch: cleanupRuns.sourceBranch || branch,
   })
   const strictGate = evaluateGate({
     name: 'Strict Gates',
@@ -1848,6 +1958,14 @@ async function run() {
         if (meta.zhShellTabsChecked) summaryBits.push(`zh_tabs_checked=${meta.zhShellTabsChecked}`)
       }
     }
+    if (gate?.sourceBranch && gate.sourceBranch !== branch && (
+      gate.name === 'Remote Preflight'
+      || gate.name === 'Host Metrics'
+      || gate.name === 'Storage Health'
+      || gate.name === 'Upload Cleanup'
+    )) {
+      summaryBits.push(`signal_branch=${gate.sourceBranch}`)
+    }
 
     const reasonSummary = reasonCode
       ? summaryBits.length > 0 ? `${reasonCode} ${summaryBits.join(' ')}` : reasonCode
@@ -1933,6 +2051,10 @@ async function run() {
           flat.regressionsSample = meta.regressionsSample ?? null
         }
       }
+    }
+
+    if (gate.name === 'Remote Preflight' || gate.name === 'Host Metrics' || gate.name === 'Storage Health' || gate.name === 'Upload Cleanup') {
+      flat.signalBranch = gate?.sourceBranch ?? null
     }
 
     return flat
