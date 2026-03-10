@@ -4042,3 +4042,36 @@ Notes:
     - `output/playwright/ga/22906356737/attendance-locale-zh-smoke-prod-22906356737-1/attendance-zh-locale-summary.json`
     - `output/playwright/ga/22906356758/attendance-gate-contract-matrix-dashboard-22906356758-1/dashboard.valid.json`
     - `output/playwright/ga/22906356758/attendance-gate-contract-matrix-dashboard-22906356758-1/dashboard.valid.locale-legacy.json`
+
+### Update (2026-03-10): Daily Dashboard Remote-Signal Fallback for Feature Branches
+
+Scope:
+
+- fixed feature-branch false P0 failures in `Attendance Daily Gate Dashboard` when `Remote Preflight`/`Host Metrics`/`Storage Health`/`Upload Cleanup` only run on `main`.
+- dashboard now falls back remote gate signal lookup to default branch (`main`) when current branch has no completed remote run.
+- strict/perf/longrun/locale/contract gates continue to use the requested branch, preserving branch-specific verification intent.
+
+Implementation:
+
+- script: `scripts/ops/attendance-daily-gate-report.mjs`
+  - added envs:
+    - `ENABLE_REMOTE_SIGNAL_FALLBACK=true|false` (default `true`)
+    - `REMOTE_SIGNAL_FALLBACK_BRANCH=main` (default `main`)
+  - remote gate flat summary now includes `signalBranch` for traceability.
+- workflow: `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - now sets:
+    - `ENABLE_REMOTE_SIGNAL_FALLBACK: 'true'`
+    - `REMOTE_SIGNAL_FALLBACK_BRANCH: ${{ github.event.repository.default_branch || 'main' }}`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (dashboard contract re-check) | local (`scripts/ops/attendance-run-gate-contract-case.sh dashboard`) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.locale-legacy.json` |
+| Attendance Daily Gate Dashboard (feature branch fallback validation) | #22907506488 | PASS | `output/playwright/ga/22907506488/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22907506488/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- `p0Status=pass` on branch `codex/attendance-pr396-pr399-delivery-md-20260310`.
+- `gateFlat.preflight.signalBranch=main` confirms remote signal fallback is active.
+- `gateFlat.strict.status=PASS` remains sourced from the feature branch run.

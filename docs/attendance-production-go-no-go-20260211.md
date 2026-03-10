@@ -2636,6 +2636,33 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-10): Daily Dashboard Feature-Branch Remote Signal Fallback
+
+Scope:
+
+- removed false P0 alerts on feature branches caused by missing remote preflight-style runs.
+- remote operations gates now use default branch signal fallback when branch-local completed runs do not exist.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (dashboard contract) | local (`scripts/ops/attendance-run-gate-contract-case.sh dashboard`) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.locale-legacy.json` |
+| Attendance Daily Gate Dashboard (feature branch, fallback enabled) | #22907506488 | PASS | `output/playwright/ga/22907506488/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22907506488/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- run head SHA: `16b4185881ee0bbb6470d7bec8ce8192b799b051`.
+- dashboard result:
+  - `p0Status=pass`
+  - `overallStatus=fail` (P1 only: branch-local perf/longrun not yet run)
+  - `gateFlat.preflight.signalBranch=main`
+  - `gateFlat.strict.status=PASS`
+
+Decision:
+
+- **GO maintained** (P0 remains green; fallback fixes remote-gate branch drift noise without relaxing strict/perf gate semantics).
+
 ## Post-Go Validation (2026-03-10): Daily Dashboard Locale Legacy Compatibility
 
 Scope:
