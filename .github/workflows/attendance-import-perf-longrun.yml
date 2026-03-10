@@ -148,6 +148,7 @@ jobs:
             rows: '10000'
             mode: 'commit'
             commit_async: 'true'
+            commit_retries: '6'
             export_csv: 'true'
             rollback: 'false'
             expected_upsert_strategy: ''
@@ -334,6 +335,7 @@ jobs:
           IMPORT_JOB_POLL_TIMEOUT_MS: ${{ matrix.import_job_poll_timeout_ms }}
           IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
           IMPORT_JOB_RECOVERY_ATTEMPTS: ${{ matrix.import_job_recovery_attempts }}
+          COMMIT_RETRIES: ${{ matrix.commit_retries || '' }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail
