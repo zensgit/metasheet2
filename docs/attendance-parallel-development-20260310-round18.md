@@ -89,9 +89,17 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 
 - Branch: `codex/attendance-parallel-round17`
 - PR: `https://github.com/zensgit/metasheet2/pull/396`
-- Latest head in this round: `17a2c6db`
+- Latest head in this round: `6cc08d12`
 - Required checks: PASS on latest head
 - Current blocker: `REVIEW_REQUIRED` (repository policy requires at least one approving review by write user)
+- Latest green CI evidence:
+  - `Plugin System Tests`: run `22880956543` (Node 18/20 both `SUCCESS`)
+  - `Attendance Gate Contract Matrix`: run `22880956520` (`SUCCESS`)
+  - `Batch2 Test Stabilization`: run `22880956533` (`SUCCESS`)
+  - `SafetyGuard E2E`: run `22880956528` (`SUCCESS`)
+  - `Observability E2E`: run `22880956547` (`SUCCESS`)
+  - `Migration Replay`: run `22880956539` (`SUCCESS`)
+  - `Phase 5 PR Validation`: run `22880956580` (`SUCCESS`)
 
 ## Commits (Round18)
 
@@ -103,6 +111,7 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 6. `29f2ad0b` docs(attendance): add round18 parallel development and verification report
 7. `86226304` feat(ops): add fast regression lane summary reporter
 8. `4ddee5b7` test(ops): cover legacy metadata inference in lane reporter
+9. `6cc08d12` test(core-backend): stabilize sharding rate-limit reset assertion
 
 ## Next Parallel Wave
 
