@@ -59,8 +59,16 @@ scripts/ops/attendance-onprem-package-verify.sh \
 
 ```text
 metasheet/
+  plugins/
+    plugin-attendance/
   apps/
+    web/
+      package.json
+      dist/
   packages/
+    core-backend/
+      package.json
+      dist/
   scripts/ops/
     attendance-onprem-package-install.sh
     attendance-onprem-package-upgrade.sh
@@ -82,10 +90,10 @@ metasheet/
   pnpm-workspace.yaml
 ```
 
-建议同时包含（降低现场依赖）：
+说明：
 
-- `apps/web/dist`
-- `packages/core-backend/dist`
+- `apps/web/dist` 与 `packages/core-backend/dist` 现在是交付包必选项（非可选）。
+- `plugins/` 下只允许包含 `plugin-attendance`，确保交付包是“考勤专用”。
 
 ## 2. 首次安装（照抄）
 
@@ -137,6 +145,7 @@ scripts/ops/attendance-onprem-package-upgrade.sh
 默认行为：
 
 - 不执行 `git pull`
+- 执行 `pnpm install --frozen-lockfile`
 - 执行 migration
 - 重启服务
 - 执行健康检查

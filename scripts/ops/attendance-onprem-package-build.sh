@@ -17,8 +17,11 @@ ARCHIVE_ZIP_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.zip"
 CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
 
 REQUIRED_PATHS=(
-  "apps/web/dist/index.html"
-  "packages/core-backend/dist/src/db/migrate.js"
+  "apps/web/dist"
+  "apps/web/package.json"
+  "packages/core-backend/dist"
+  "packages/core-backend/package.json"
+  "plugins/plugin-attendance"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-onprem-deploy-easy.sh"
@@ -163,6 +166,8 @@ cat > "${OUTPUT_DIR}/${PACKAGE_NAME}.json" <<EOF
   "name": "${PACKAGE_NAME}",
   "version": "${PACKAGE_VERSION}",
   "tag": "${PACKAGE_TAG}",
+  "attendanceOnly": true,
+  "includedPlugins": ["plugin-attendance"],
   "archive": "$(basename "$ARCHIVE_TGZ_PATH")",
   "archiveZip": "$(basename "$ARCHIVE_ZIP_PATH")",
   "checksumFile": "$(basename "$CHECKSUM_FILE")",

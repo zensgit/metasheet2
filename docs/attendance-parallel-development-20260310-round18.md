@@ -75,6 +75,9 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 | Core backend full test sweep (CI parity command) | `pnpm --filter @metasheet/core-backend test -- --run` | PASS | local vitest stdout (68 files / 868 tests passed) |
 | Fast full lane rerun on latest head | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-082356-42394/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260310-082356-42394/summary.json` |
 | Lane report refresh on latest head | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260310-002410/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260310-002410/attendance-fast-parallel-report.json` |
+| On-prem package verify (.tgz) | `scripts/ops/attendance-onprem-package-verify.sh output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-local-audit2-20260310.tgz` | PASS | local verify stdout |
+| On-prem package verify (.zip) | `scripts/ops/attendance-onprem-package-verify.sh output/releases/attendance-onprem/metasheet-attendance-onprem-v2.5.0-local-audit2-20260310.zip` | PASS | local verify stdout |
+| Extracted package dependency install | `pnpm install --frozen-lockfile` (in extracted package root) | PASS | local pnpm stdout |
 
 ## CI Stabilization Update (2026-03-10)
 
@@ -86,6 +89,17 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 - Fix:
   - scoped `vi.spyOn(Date, 'now').mockReturnValue(...)` within that single test and restored it in `finally`.
   - this keeps token-bucket behavior deterministic for the exhaustion + reset assertion and avoids side effects to other cases.
+
+## On-Prem Package Hardening Update (2026-03-10)
+
+- Fixed packaging gap for customer delivery package:
+  - include full `apps/web/dist/` and full `packages/core-backend/dist/` instead of single-file subset.
+  - include `plugins/plugin-attendance/` to make runtime plugin discovery deterministic in attendance-only mode.
+  - include `apps/web/package.json` and `packages/core-backend/package.json` so extracted package can run `pnpm install --frozen-lockfile`.
+- Enforced attendance-only plugin scope in verifier:
+  - `scripts/ops/attendance-onprem-package-verify.sh` now fails if `plugins/` contains any plugin other than `plugin-attendance`.
+- Operational default hardening:
+  - `attendance-onprem-package-install.sh` and `attendance-onprem-package-upgrade.sh` now default to `INSTALL_DEPS=1`.
 
 ## Branch / PR Status
 

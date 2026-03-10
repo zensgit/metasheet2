@@ -118,7 +118,12 @@ pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 
 required=(
   "apps/web/dist/index.html"
+  "apps/web/package.json"
+  "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/package.json"
+  "plugins/plugin-attendance/plugin.json"
+  "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
@@ -136,6 +141,18 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+if [[ -d "${pkg_root}/plugins" ]]; then
+  extra_plugins="$(
+    find "${pkg_root}/plugins" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
+      | grep -v '^plugin-attendance$' \
+      || true
+  )"
+  if [[ -n "$extra_plugins" ]]; then
+    echo "$extra_plugins" >&2
+    die "Attendance on-prem package must only include plugin-attendance under plugins/"
+  fi
+fi
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
