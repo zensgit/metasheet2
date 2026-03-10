@@ -295,11 +295,24 @@ export function parseLocaleZhSummaryJson(text) {
   const holidayCalendarLabel = typeof value?.holidayCalendarLabel === 'string' ? value.holidayCalendarLabel.trim() : ''
   const authSourceRaw = typeof value?.authSource === 'string' ? value.authSource.trim().toLowerCase() : ''
   const authSource = authSourceRaw || null
+  const createdHolidayId = typeof value?.createdHolidayId === 'string' ? value.createdHolidayId.trim() : ''
+  const createdHolidayDate = typeof value?.createdHolidayDate === 'string' ? value.createdHolidayDate.trim() : ''
+  const createdHolidayName = typeof value?.createdHolidayName === 'string' ? value.createdHolidayName.trim() : ''
   const zhLabelsValue = value?.zhLabels && typeof value.zhLabels === 'object' ? value.zhLabels : null
   const zhLabelsSkipped = zhLabelsValue?.skipped === true
   const zhLabelsOk = zhLabelsValue?.ok === true
   const zhNoEnglishLeak = zhLabelsValue?.noEnglishLeak === true
   const zhReason = typeof zhLabelsValue?.reason === 'string' ? zhLabelsValue.reason.trim() : ''
+  const toggleCheckValue = value?.toggleCheck && typeof value.toggleCheck === 'object' ? value.toggleCheck : null
+  const toggleSkipped = toggleCheckValue?.skipped === true
+  const toggleReason = typeof toggleCheckValue?.reason === 'string' ? toggleCheckValue.reason.trim() : ''
+  const toggleLunarOffNoBadge = toggleCheckValue?.lunarOffNoBadge === true
+  const toggleLunarOnRecovered = toggleCheckValue?.lunarOnRecovered === true
+  const toggleHolidayOffNoBadge = toggleCheckValue?.holidayOffNoBadge === true
+  const toggleHolidayOnRecovered = toggleCheckValue?.holidayOnRecovered === true
+  const cleanupValue = value?.cleanup && typeof value.cleanup === 'object' ? value.cleanup : null
+  const holidayCleanupDeleted = cleanupValue?.holidayDeleted === true
+  const holidayCleanupError = typeof cleanupValue?.error === 'string' ? cleanupValue.error.trim() : ''
   const zhCoreFieldKeys = [
     'heading',
     'checkInButton',
@@ -318,22 +331,30 @@ export function parseLocaleZhSummaryJson(text) {
   let reason = null
   if (status === 'fail') reason = 'LOCALE_SMOKE_FAILED'
   else if (schemaVersion === null) reason = 'SUMMARY_INVALID'
+  else if (schemaVersion < 2) reason = 'SUMMARY_SCHEMA_VERSION_UNSUPPORTED'
   else if (locale !== 'zh-CN') reason = 'LOCALE_NOT_ZH_CN'
   else if (typeof lunarCountValue !== 'number' || lunarCountValue <= 0) reason = 'LUNAR_LABELS_MISSING'
+  else if (!['enabled', 'disabled'].includes(holidayCheck)) reason = 'HOLIDAY_CHECK_INVALID'
   else if (holidayCheck === 'enabled' && (typeof holidayBadgeCountValue !== 'number' || holidayBadgeCountValue <= 0)) {
     reason = 'HOLIDAY_BADGE_MISSING'
-  } else if (schemaVersion >= 2) {
-    if (!authSource || !['token', 'refresh', 'login'].includes(authSource)) {
-      reason = 'AUTH_SOURCE_INVALID'
-    } else if (!zhLabelsValue || (!zhLabelsOk && !zhLabelsSkipped)) {
-      reason = 'ZH_LABELS_STATE_INVALID'
-    } else if (!zhLabelsSkipped) {
-      if (!zhNoEnglishLeak) {
-        reason = 'ZH_ENGLISH_LEAK_DETECTED'
-      } else if (zhMissingFields.length > 0) {
-        reason = 'ZH_CORE_LABELS_INCOMPLETE'
-      }
-    }
+  } else if (!authSource || !['token', 'refresh', 'login'].includes(authSource)) reason = 'AUTH_SOURCE_INVALID'
+  else if (!zhLabelsValue || (!zhLabelsOk && !zhLabelsSkipped)) reason = 'ZH_LABELS_STATE_INVALID'
+  else if (!zhLabelsSkipped && !zhNoEnglishLeak) reason = 'ZH_ENGLISH_LEAK_DETECTED'
+  else if (!zhLabelsSkipped && zhMissingFields.length > 0) reason = 'ZH_CORE_LABELS_INCOMPLETE'
+  else if (!toggleCheckValue) reason = 'TOGGLE_CHECK_MISSING'
+  else if (toggleSkipped && !toggleReason) reason = 'TOGGLE_CHECK_STATE_INVALID'
+  else if (!toggleSkipped && (
+    !toggleLunarOffNoBadge
+    || !toggleLunarOnRecovered
+    || !toggleHolidayOffNoBadge
+    || !toggleHolidayOnRecovered
+  )) reason = 'TOGGLE_CHECK_FAILED'
+  else if (holidayCheck === 'enabled' && (!cleanupValue || !holidayCleanupDeleted || Boolean(holidayCleanupError))) {
+    reason = 'HOLIDAY_CLEANUP_FAILED'
+  } else if (holidayCheck === 'enabled' && (!createdHolidayId || !createdHolidayDate || !createdHolidayName)) {
+    reason = 'HOLIDAY_TRACE_MISSING'
+  } else if (holidayCheck === 'disabled' && cleanupValue && (holidayCleanupDeleted || Boolean(holidayCleanupError))) {
+    reason = 'HOLIDAY_CLEANUP_UNEXPECTED'
   }
 
   return {
@@ -352,6 +373,16 @@ export function parseLocaleZhSummaryJson(text) {
     zhNoEnglishLeak: zhNoEnglishLeak ? 'true' : 'false',
     zhMissingFields: zhMissingFields.length > 0 ? zhMissingFields.join(',') : null,
     zhReason: zhReason || null,
+    toggleCheckStatus: toggleSkipped ? `skipped:${toggleReason || 'not-required'}` : 'pass',
+    toggleLunarOffNoBadge: toggleLunarOffNoBadge ? 'true' : 'false',
+    toggleLunarOnRecovered: toggleLunarOnRecovered ? 'true' : 'false',
+    toggleHolidayOffNoBadge: toggleHolidayOffNoBadge ? 'true' : 'false',
+    toggleHolidayOnRecovered: toggleHolidayOnRecovered ? 'true' : 'false',
+    holidayCleanupDeleted: holidayCleanupDeleted ? 'true' : 'false',
+    holidayCleanupError: holidayCleanupError || null,
+    createdHolidayId: createdHolidayId || null,
+    createdHolidayDate: createdHolidayDate || null,
+    createdHolidayName: createdHolidayName || null,
     error: error || null,
   }
 }
@@ -850,10 +881,12 @@ function renderMarkdown({
       if (gate.name === 'Locale zh Smoke') {
         if (meta.authSource) extra.push(`auth=${meta.authSource}`)
         if (meta.zhLabelsStatus) extra.push(`zh_labels=${meta.zhLabelsStatus}`)
+        if (meta.toggleCheckStatus) extra.push(`toggle=${meta.toggleCheckStatus}`)
         if (meta.locale) extra.push(`locale=${meta.locale}`)
         if (meta.lunarCount) extra.push(`lunar=${meta.lunarCount}`)
         if (meta.holidayCheck) extra.push(`holiday_check=${meta.holidayCheck}`)
         if (meta.holidayBadgeCount) extra.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta.holidayCleanupDeleted) extra.push(`cleanup_deleted=${meta.holidayCleanupDeleted}`)
       }
       if (gate.name === 'Strict Gates') {
         if (meta.summaryValid === false) extra.push('summary=invalid')
@@ -1924,10 +1957,12 @@ async function run() {
         if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
         if (meta.authSource) summaryBits.push(`auth=${meta.authSource}`)
         if (meta.zhLabelsStatus) summaryBits.push(`zh_labels=${meta.zhLabelsStatus}`)
+        if (meta.toggleCheckStatus) summaryBits.push(`toggle=${meta.toggleCheckStatus}`)
         if (meta.locale) summaryBits.push(`locale=${meta.locale}`)
         if (meta.lunarCount) summaryBits.push(`lunar=${meta.lunarCount}`)
         if (meta.holidayCheck) summaryBits.push(`holiday_check=${meta.holidayCheck}`)
         if (meta.holidayBadgeCount) summaryBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta.holidayCleanupDeleted) summaryBits.push(`cleanup_deleted=${meta.holidayCleanupDeleted}`)
       } else if (gate.name === 'Strict Gates') {
         if (meta.failedGates) summaryBits.push(`failed=${meta.failedGates}`)
         const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
@@ -2005,11 +2040,21 @@ async function run() {
         flat.zhNoEnglishLeak = meta.zhNoEnglishLeak ?? null
         flat.zhMissingFields = meta.zhMissingFields ?? null
         flat.zhReason = meta.zhReason ?? null
+        flat.toggleCheckStatus = meta.toggleCheckStatus ?? null
+        flat.toggleLunarOffNoBadge = meta.toggleLunarOffNoBadge ?? null
+        flat.toggleLunarOnRecovered = meta.toggleLunarOnRecovered ?? null
+        flat.toggleHolidayOffNoBadge = meta.toggleHolidayOffNoBadge ?? null
+        flat.toggleHolidayOnRecovered = meta.toggleHolidayOnRecovered ?? null
         flat.locale = meta.locale ?? null
         flat.lunarCount = meta.lunarCount ?? null
         flat.holidayCheck = meta.holidayCheck ?? null
         flat.holidayBadgeCount = meta.holidayBadgeCount ?? null
         flat.holidayCalendarLabel = meta.holidayCalendarLabel ?? null
+        flat.holidayCleanupDeleted = meta.holidayCleanupDeleted ?? null
+        flat.holidayCleanupError = meta.holidayCleanupError ?? null
+        flat.createdHolidayId = meta.createdHolidayId ?? null
+        flat.createdHolidayDate = meta.createdHolidayDate ?? null
+        flat.createdHolidayName = meta.createdHolidayName ?? null
         flat.localeSummaryStatus = meta.status ?? null
         flat.localeSummaryError = meta.error ?? null
       } else if (gate.name === 'Strict Gates') {

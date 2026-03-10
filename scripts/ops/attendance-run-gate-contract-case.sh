@@ -176,6 +176,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
+  dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
   dashboard_invalid_query_branch="${case_dir}/dashboard.invalid.query-branch.json"
 
   cat >"$dashboard_valid" <<'EOF'
@@ -246,12 +247,24 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "status": "PASS",
       "reasonCode": null,
       "runId": 200004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -329,12 +342,24 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 210004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -412,12 +437,24 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 600004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -489,12 +526,24 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 300004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -544,11 +593,11 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 400002,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "scenario": "100000-commit",
       "rows": 100000,
       "mode": "commit",
-      "uploadCsv": "true",
+      "uploadCsv": "maybe",
       "previewMs": "1200",
       "regressionsCount": "0"
     },
@@ -568,12 +617,24 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 400004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -647,12 +708,24 @@ EOF
       "status": "PASS",
       "reasonCode": null,
       "runId": 500004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 2,
       "locale": "zh-CN",
       "lunarCount": "26",
       "holidayCheck": "enabled",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCalendarLabel": "二月 2026",
+      "authSource": "token",
+      "zhLabelsStatus": "pass",
+      "toggleCheckStatus": "pass",
+      "toggleLunarOffNoBadge": "true",
+      "toggleLunarOnRecovered": "true",
+      "toggleHolidayOffNoBadge": "true",
+      "toggleHolidayOnRecovered": "true",
+      "holidayCleanupDeleted": "true",
+      "holidayCleanupError": null,
+      "createdHolidayId": "holiday-zh-contract",
+      "createdHolidayDate": "2026-02-15",
+      "createdHolidayName": "回归节-contract"
     }
   },
   "escalationIssue": {
@@ -696,6 +769,7 @@ EOF
   annotate_dashboard_fixture "$dashboard_invalid_upsert" "main" "main"
 
   jq '.gateFlat.strict.queryBranch = "main"' "$dashboard_valid_non_main" >"$dashboard_invalid_query_branch"
+  jq '.gateFlat.localeZh.summarySchemaVersion = 1' "$dashboard_valid" >"$dashboard_invalid_locale"
 
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_non_main"
@@ -707,6 +781,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
+  expect_fail "dashboard locale gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale"
   expect_fail "dashboard query-branch routing contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_query_branch"
 

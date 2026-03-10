@@ -271,8 +271,8 @@ async function findHolidayBadgeAcrossMonths(page, holidayName) {
     'prev',
   ]
   const navButtonByStep = {
-    next: page.getByRole('button', { name: /^(Next|下月)$/ }),
-    prev: page.getByRole('button', { name: /^(Prev|上月)$/ }),
+    next: page.getByRole('button', { name: /^下月$/ }),
+    prev: page.getByRole('button', { name: /^上月$/ }),
   }
 
   for (const step of navPlan) {
@@ -304,8 +304,8 @@ async function findAnyHolidayBadgeAcrossMonths(page) {
     'prev',
   ]
   const navButtonByStep = {
-    next: page.getByRole('button', { name: /^(Next|下月)$/ }),
-    prev: page.getByRole('button', { name: /^(Prev|上月)$/ }),
+    next: page.getByRole('button', { name: /^下月$/ }),
+    prev: page.getByRole('button', { name: /^上月$/ }),
   }
 
   for (const step of navPlan) {
@@ -401,8 +401,8 @@ async function verifyCalendarToggleChecks(page, options = {}) {
     return toggleCheck
   }
 
-  const lunarCheckbox = await getCalendarFlagCheckbox(page, /(Lunar|农历)/i, 'Lunar/农历')
-  const holidayCheckbox = await getCalendarFlagCheckbox(page, /(Holiday|节假日)/i, 'Holiday/节假日')
+  const lunarCheckbox = await getCalendarFlagCheckbox(page, /农历/, '农历')
+  const holidayCheckbox = await getCalendarFlagCheckbox(page, /节假日/, '节假日')
 
   await setCalendarFlag(lunarCheckbox, true, 'Lunar/农历')
   await setCalendarFlag(holidayCheckbox, true, 'Holiday/节假日')
@@ -488,7 +488,9 @@ async function verifyCoreZhLabels(page, options = {}) {
 
   const attendanceText = await page.locator('.attendance').first().innerText().catch(() => '')
   const englishLeakMatches = String(attendanceText || '')
-    .match(/\b(Check In|Check Out|Summary|Calendar|Adjustment Request|Submit request|Recent requests)\b/g) || []
+    .match(
+      /\b(Check In|Check Out|Summary|Calendar|Adjustment Request|Submit request|Recent requests|Admin permissions required|Use default rule|Default|Standard Shift)\b/g,
+    ) || []
 
   check.englishLeakSamples = Array.from(new Set(englishLeakMatches)).slice(0, 6)
   check.noEnglishLeak = check.englishLeakSamples.length === 0
@@ -671,7 +673,7 @@ async function run() {
       const toInput = page.locator('#attendance-to-date')
       await fromInput.fill(monthStart)
       await toInput.fill(monthEnd)
-      await page.getByRole('button', { name: /^(Refresh|刷新)$/ }).first().click()
+      await page.getByRole('button', { name: /^刷新$/ }).first().click()
       await page.waitForLoadState('networkidle', { timeout: timeoutMs })
       await page.waitForTimeout(300)
 

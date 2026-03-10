@@ -405,3 +405,63 @@ gh run download 22890415809 -D output/playwright/ga/22890415809
 - 证据路径：
   - `output/playwright/ga/22890415809/attendance-daily-gate-dashboard.json`
   - `output/playwright/ga/22890415809/attendance-daily-gate-dashboard.md`
+
+## 19. P0 加速收口（中文泄漏 + 日期边界 + Locale 合同）
+目标：在不改业务 API 的前提下，补齐三类高优先级风险：
+1. 中文页面残留英文（管理员权限报错、默认规则/班次文案）。
+2. 月边界日期在 UTC+ 时区的偏移（`toISOString().slice(0,10)`）。
+3. locale zh gate 仍可被 `schemaVersion=1` 绕过。
+
+代码变更（本轮）：
+- `apps/web/src/views/AttendanceView.vue`
+  - `toDateInput()` 改为本地日期拼装（复用 `toDateKey`），避免 UTC 偏移导致的跨月错位。
+  - `normalizeDateKey()` 由 UTC 截断改为本地日期键。
+  - 管理员 403 报错统一改为 `createForbiddenError()`，消除英文 `Admin permissions required` 直出。
+  - 文案修复：
+    - `(Optional) Use default rule` -> `tr(...)` 双语。
+    - `ruleForm` 默认名由硬编码 `Default` 改为 `tr('Default','默认')`。
+    - `shiftForm` 默认名由硬编码 `Standard Shift` 改为 `tr('Standard Shift','标准班次')`。
+    - `Index format` 下拉显示文案改为可读双语示例（保留 value 兼容）。
+  - 导入预览失败路径显式清空陈旧 `importPreview/importCsvWarnings`，避免 retry 后残留旧数据。
+  - `AttendanceStatusMeta` 增加 `context` 并在错误分类时赋值，保证前端状态动作上下文可追踪。
+- `scripts/verify-attendance-locale-zh-smoke.mjs`
+  - zh smoke 的月份导航/开关/刷新按钮匹配改为中文严格匹配（不再接受英文）。
+  - 扩充英文泄漏检测词表（覆盖 `Admin permissions required`、`Use default rule`、`Standard Shift` 等）。
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - locale parser 强制 `summarySchemaVersion >= 2`。
+  - 新增解析并输出：
+    - `toggleCheckStatus` + 四个 toggle 布尔位
+    - `holidayCleanupDeleted/holidayCleanupError`
+    - `createdHolidayId/Date/Name`
+  - 新增失败原因：`SUMMARY_SCHEMA_VERSION_UNSUPPORTED`、`TOGGLE_CHECK_MISSING/FAILED`、`HOLIDAY_CLEANUP_FAILED` 等。
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - locale PASS 合同升级：
+    - `summarySchemaVersion >= 2`
+    - `authSource in token|refresh|login`
+    - `zhLabelsStatus` 合法
+    - toggle 合同（pass 时四个布尔位必须 true）
+    - holiday enabled 时必须 `holidayCleanupDeleted=true` 且 `createdHoliday*` 完整
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard fixture 同步到 locale schema v2 字段集。
+  - 新增 locale 负例：`summarySchemaVersion=1` 必须失败。
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - 新增/更新 locale 契约测试：schema v2 强制、cleanup 失败负例等。
+
+本地验证：
+```bash
+node --check scripts/verify-attendance-locale-zh-smoke.mjs
+node --check scripts/ops/attendance-daily-gate-report.mjs
+node --test scripts/ops/attendance-daily-gate-report.test.mjs
+scripts/ops/attendance-run-gate-contract-case.sh dashboard
+pnpm --filter @metasheet/web exec vitest run \
+  tests/attendance-import-preview-regression.spec.ts \
+  tests/attendance-experience-mobile-zh.spec.ts
+```
+结果：
+- `attendance-daily-gate-report.test.mjs`：PASS（14/14）
+- `attendance-run-gate-contract-case.sh dashboard`：PASS（含 locale schema v2 负例）
+- 前端 attendance 定向测试：PASS（2/2）
+- zh smoke / daily-report 脚本语法检查：PASS
+
+说明：
+- 本轮为本地与合同层验证；GA 远端 runId 将在下一轮触发 workflow 后追加。
