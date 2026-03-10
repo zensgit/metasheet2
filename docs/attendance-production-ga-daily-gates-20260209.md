@@ -3985,3 +3985,30 @@ Local verification:
 | zh copy contract | local (2026-03-03) | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
 | Attendance Gate Contract Case (strict) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Case (dashboard) | local (2026-03-03) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.strict.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.perf.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.longrun.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.upsert.json` |
+
+### Update (2026-03-10): zh Core Labels Gate Added to Locale Smoke
+
+Scope:
+- `scripts/verify-attendance-locale-zh-smoke.mjs` now validates a zh-only core label set inside `.attendance` and rejects common English fallback texts.
+- `attendance-locale-zh-smoke-prod.yml` now supports `require_zh_core_labels` (default `true`) and reports `ZH_LABELS` in step summary.
+
+New env/input:
+- `REQUIRE_ZH_CORE_LABELS=true|false` (script env)
+- `workflow_dispatch` input: `require_zh_core_labels` (default `true`)
+
+Expected pass marker (script log):
+- `PASS: ... toggleCheck=... zhLabels=pass authSource=...`
+
+Expected step summary fields:
+- `REQUIRE_ZH_CORE_LABELS`
+- `ZH_LABELS` (`pass` | `fail` | `skipped:<reason>`)
+
+Dispatch examples:
+
+```bash
+# strict zh label gating enabled (default)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_zh_core_labels=true
+
+# temporary downgrade (diagnosis only)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_zh_core_labels=false
+```

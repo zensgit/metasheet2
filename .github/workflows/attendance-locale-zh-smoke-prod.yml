@@ -27,6 +27,10 @@ on:
         description: 'Require calendar toggle assertions (true/false). Keep false until target env has toggle UI.'
         required: false
         default: 'false'
+      require_zh_core_labels:
+        description: 'Require zh core labels and reject English fallback texts in attendance area (true/false)'
+        required: false
+        default: 'true'
       drill_fail:
         description: 'Drill mode: force failure path and skip real smoke'
         required: false
@@ -55,6 +59,7 @@ jobs:
       ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       REQUIRE_TOGGLE_CHECKS: ${{ inputs.require_toggle_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_TOGGLE_CHECKS || 'false' }}
+      REQUIRE_ZH_CORE_LABELS: ${{ inputs.require_zh_core_labels || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_CORE_LABELS || 'true' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
@@ -110,8 +115,10 @@ jobs:
         run: |
           set -euo pipefail
           auth_source='unknown'
+          zh_labels='unknown'
           if [[ -f output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json ]]; then
             auth_source="$(jq -r '.authSource // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            zh_labels="$(jq -r 'if .zhLabels.skipped == true then ("skipped:" + (.zhLabels.reason // "not-required")) elif .zhLabels.ok == true then "pass" else "fail" end' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
           fi
           {
             echo "## Attendance Locale zh Smoke (Prod)"
@@ -121,7 +128,9 @@ jobs:
             echo "- ORG_ID: \`${ORG_ID}\`"
             echo "- VERIFY_HOLIDAY: \`${VERIFY_HOLIDAY}\`"
             echo "- REQUIRE_TOGGLE_CHECKS: \`${REQUIRE_TOGGLE_CHECKS}\`"
+            echo "- REQUIRE_ZH_CORE_LABELS: \`${REQUIRE_ZH_CORE_LABELS}\`"
             echo "- AUTH SOURCE: \`${auth_source}\`"
+            echo "- ZH_LABELS: \`${zh_labels}\`"
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"

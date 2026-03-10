@@ -177,3 +177,34 @@ gh run download 22889038364 -D output/playwright/ga/22889038364
 - 证据路径：
   - `output/playwright/ga/22889038364/attendance-locale-zh-smoke-prod-22889038364-1/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22889038364/attendance-locale-zh-smoke-prod-22889038364-1/attendance-zh-locale-calendar.png`
+
+## 8. 新增断言：zh 核心文案门禁（2026-03-10）
+- 新增目的：防止考勤主区域在 `zh-CN` 下回退到英文核心文案（例如 `Check In`、`Summary`、`Submit request`）。
+- 脚本变更：`scripts/verify-attendance-locale-zh-smoke.mjs`
+  - 新增 `summary.zhLabels` 输出对象。
+  - 默认开启 `REQUIRE_ZH_CORE_LABELS=true`（可通过 env 显式关闭）。
+- workflow 变更：`.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - 新增 `workflow_dispatch.inputs.require_zh_core_labels`（默认 `true`）。
+  - Step Summary 新增 `ZH_LABELS` 字段。
+
+`summary.zhLabels` 字段示例（占位符）：
+
+```json
+{
+  "zhLabels": {
+    "heading": true,
+    "checkInButton": true,
+    "checkOutButton": true,
+    "summaryCard": true,
+    "calendarCard": true,
+    "requestCard": true,
+    "submitButton": true,
+    "recentRequests": true,
+    "noEnglishLeak": true,
+    "ok": true,
+    "skipped": false,
+    "reason": null,
+    "englishLeakSamples": []
+  }
+}
+```

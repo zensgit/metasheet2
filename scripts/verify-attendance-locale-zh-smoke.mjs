@@ -13,6 +13,7 @@ const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-locale
 const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
 const requireToggleChecks = process.env.REQUIRE_TOGGLE_CHECKS === 'true'
+const requireZhCoreLabels = process.env.REQUIRE_ZH_CORE_LABELS !== 'false'
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -436,6 +437,70 @@ async function verifyCalendarToggleChecks(page, options = {}) {
   return toggleCheck
 }
 
+async function verifyCoreZhLabels(page, options = {}) {
+  const enforceZhLabels = options.requireZhCoreLabels !== false
+  const check = {
+    heading: false,
+    checkInButton: false,
+    checkOutButton: false,
+    summaryCard: false,
+    calendarCard: false,
+    requestCard: false,
+    submitButton: false,
+    recentRequests: false,
+    noEnglishLeak: false,
+    ok: false,
+    skipped: false,
+    reason: null,
+    englishLeakSamples: [],
+  }
+
+  if (!enforceZhLabels) {
+    check.skipped = true
+    check.reason = 'REQUIRE_ZH_CORE_LABELS=false'
+    check.ok = true
+    return check
+  }
+
+  await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
+  check.heading = true
+
+  await page.getByRole('button', { name: '上班打卡', exact: true }).waitFor({ timeout: timeoutMs })
+  check.checkInButton = true
+
+  await page.getByRole('button', { name: '下班打卡', exact: true }).waitFor({ timeout: timeoutMs })
+  check.checkOutButton = true
+
+  await page.getByRole('heading', { name: '汇总', exact: true }).waitFor({ timeout: timeoutMs })
+  check.summaryCard = true
+
+  await page.getByRole('heading', { name: '日历', exact: true }).waitFor({ timeout: timeoutMs })
+  check.calendarCard = true
+
+  await page.getByRole('heading', { name: '补卡申请', exact: true }).waitFor({ timeout: timeoutMs })
+  check.requestCard = true
+
+  await page.getByRole('button', { name: '提交申请', exact: true }).waitFor({ timeout: timeoutMs })
+  check.submitButton = true
+
+  await page.getByText('最近申请', { exact: true }).waitFor({ timeout: timeoutMs })
+  check.recentRequests = true
+
+  const attendanceText = await page.locator('.attendance').first().innerText().catch(() => '')
+  const englishLeakMatches = String(attendanceText || '')
+    .match(/\b(Check In|Check Out|Summary|Calendar|Adjustment Request|Submit request|Recent requests)\b/g) || []
+
+  check.englishLeakSamples = Array.from(new Set(englishLeakMatches)).slice(0, 6)
+  check.noEnglishLeak = check.englishLeakSamples.length === 0
+
+  if (!check.noEnglishLeak) {
+    throw new Error('Zh core labels check found English fallback text: ' + check.englishLeakSamples.join(', '))
+  }
+
+  check.ok = true
+  return check
+}
+
 async function writeSummaryJson(filePath, summary) {
   await fs.writeFile(filePath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
 }
@@ -476,6 +541,21 @@ async function run() {
       holidayOnRecovered: false,
       skipped: false,
       reason: null,
+    },
+    zhLabels: {
+      heading: false,
+      checkInButton: false,
+      checkOutButton: false,
+      summaryCard: false,
+      calendarCard: false,
+      requestCard: false,
+      submitButton: false,
+      recentRequests: false,
+      noEnglishLeak: false,
+      ok: false,
+      skipped: false,
+      reason: null,
+      englishLeakSamples: [],
     },
     // backward-compatible aliases used by some local tooling
     ok: false,
@@ -521,6 +601,10 @@ async function run() {
 
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
+
+    summary.zhLabels = await verifyCoreZhLabels(page, {
+      requireZhCoreLabels,
+    })
 
     const lunarSamples = await verifyLunarLabelsMeaningful(page)
     const lunarCount = lunarSamples.length
@@ -624,7 +708,8 @@ async function run() {
     const toggleStatus = summary.toggleCheck.skipped
       ? `skipped:${summary.toggleCheck.reason || 'not-required'}`
       : (togglePass ? 'pass' : 'fail')
-    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, authSource=${summary.authSource}, screenshot=${screenshotPath}`)
+    const zhStatus = summary.zhLabels?.skipped ? `skipped:${summary.zhLabels.reason || 'not-required'}` : (summary.zhLabels?.ok ? 'pass' : 'fail')
+    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, zhLabels=${zhStatus}, authSource=${summary.authSource}, screenshot=${screenshotPath}`)
   } catch (error) {
     summary.status = 'fail'
     summary.error = (error && error.message) || String(error)
