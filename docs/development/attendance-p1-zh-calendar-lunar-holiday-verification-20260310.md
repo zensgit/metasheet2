@@ -208,3 +208,25 @@ gh run download 22889038364 -D output/playwright/ga/22889038364
   }
 }
 ```
+
+## 9. GA 回归验证（zh core labels，run 22889357568）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-20260310 \
+  -f require_zh_core_labels=true \
+  -f require_toggle_checks=false \
+  -f verify_holiday=true
+
+gh run watch 22889357568 --exit-status
+gh run download 22889357568 -D output/playwright/ga/22889357568
+```
+- 结果：PASS
+- 关键摘要（`attendance-zh-locale-summary.json`）：
+  - `status=pass`
+  - `authSource=refresh`
+  - `zhLabels.ok=true`（`noEnglishLeak=true`）
+  - `toggleCheck.skipped=true`（原因：当前部署尚未启用开关 UI，符合非强制模式预期）
+  - `cleanup.holidayDeleted=true`
+- 证据路径：
+  - `output/playwright/ga/22889357568/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889357568/attendance-zh-locale-calendar.png`

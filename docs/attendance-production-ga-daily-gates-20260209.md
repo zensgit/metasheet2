@@ -4012,3 +4012,13 @@ gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_zh_cor
 # temporary downgrade (diagnosis only)
 gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_zh_core_labels=false
 ```
+
+Evidence (PR #401 branch):
+- Workflow run: `22889357568` (PASS)
+- Local artifact path:
+  - `output/playwright/ga/22889357568/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889357568/attendance-zh-locale-calendar.png`
+- Key fields:
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `toggleCheck.skipped=true` (`calendar flags not available in this deployment`)
