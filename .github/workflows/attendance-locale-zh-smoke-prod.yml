@@ -1,6 +1,10 @@
 name: Attendance Locale zh Smoke (Prod)
+run-name: >-
+  Attendance Locale zh Smoke (Prod)${{ github.event_name == 'workflow_dispatch' && github.event.inputs.drill_fail == 'true' && ' [DRILL]' || '' }}
 
 on:
+  schedule:
+    - cron: '18 2 * * *'
   workflow_dispatch:
     inputs:
       web_url:
@@ -19,6 +23,15 @@ on:
         description: 'Verify holiday badge with temp holiday create/delete (true/false)'
         required: false
         default: 'true'
+      drill_fail:
+        description: 'Drill mode: force failure path and skip real smoke'
+        required: false
+        type: boolean
+        default: false
+      issue_title:
+        description: 'Optional issue title override for drill issue tracking'
+        required: false
+        default: ''
 
 concurrency:
   group: attendance-locale-zh-smoke-prod
@@ -26,6 +39,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   smoke:
@@ -41,87 +55,59 @@ jobs:
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
       HEADLESS: 'true'
       OUTPUT_DIR: output/playwright/attendance-locale-zh-smoke
+      DRILL_FAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.drill_fail == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare output directory
+        run: mkdir -p output/playwright/attendance-locale-zh-smoke
+
+      - name: Drill failure injection
+        if: ${{ env.DRILL_FAIL == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-locale-zh-smoke/drill
+          cat > output/playwright/attendance-locale-zh-smoke/drill/drill.txt <<EOF
+          Drill mode enabled.
+          This run intentionally failed with exit code 97 before executing real zh smoke steps.
+          Run URL: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          exit 97
+
       - name: Setup pnpm
+        if: ${{ env.DRILL_FAIL != 'true' }}
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
       - name: Setup Node.js
+        if: ${{ env.DRILL_FAIL != 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
 
       - name: Install dependencies
+        if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
+        if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm exec playwright install chromium --with-deps
 
-      - name: Prepare output directory
-        run: mkdir -p output/playwright/attendance-locale-zh-smoke
-
-      - name: Resolve valid auth token
-        id: resolve-auth-token
-        run: |
-          set -euo pipefail
-
-          validate_token() {
-            local token="$1"
-            if [[ -z "$token" ]]; then
-              return 1
-            fi
-            local code
-            code="$(curl -s -o /tmp/attendance_auth_me.json -w '%{http_code}' \
-              -H "Authorization: Bearer ${token}" \
-              "${API_BASE}/auth/me" || true)"
-            [[ "$code" == "200" ]]
-          }
-
-          if validate_token "${AUTH_TOKEN:-}"; then
-            echo "AUTH_TOKEN_EFFECTIVE=${AUTH_TOKEN}" >> "$GITHUB_ENV"
-            echo "auth_source=secret_jwt" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [[ -n "${LOGIN_EMAIL:-}" && -n "${LOGIN_PASSWORD:-}" ]]; then
-            login_json="$(mktemp)"
-            curl -sS -X POST "${API_BASE}/auth/login" \
-              -H 'Content-Type: application/json' \
-              -d "{\"email\":\"${LOGIN_EMAIL}\",\"password\":\"${LOGIN_PASSWORD}\"}" > "${login_json}"
-            login_token="$(jq -r '.data.token // empty' "${login_json}")"
-            if validate_token "${login_token}"; then
-              echo "AUTH_TOKEN_EFFECTIVE=${login_token}" >> "$GITHUB_ENV"
-              echo "auth_source=login_secret" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          cat > output/playwright/attendance-locale-zh-smoke/auth-error.txt <<EOF
-          No valid attendance admin token.
-          Tried: ATTENDANCE_ADMIN_JWT validation via /api/auth/me.
-          Fallback: ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login.
-          Remediation:
-          - Rotate ATTENDANCE_ADMIN_JWT, or
-          - Configure ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD secrets.
-          API_BASE=${API_BASE}
-          EOF
-          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
-          exit 1
-
       - name: Run zh locale smoke
-        env:
-          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
+        if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm verify:attendance-locale-zh
 
       - name: Write step summary
         if: always()
         run: |
           set -euo pipefail
+          auth_source='unknown'
+          if [[ -f output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json ]]; then
+            auth_source="$(jq -r '.authSource // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+          fi
           {
             echo "## Attendance Locale zh Smoke (Prod)"
             echo ""
@@ -129,7 +115,7 @@ jobs:
             echo "- API_BASE: \`${API_BASE}\`"
             echo "- ORG_ID: \`${ORG_ID}\`"
             echo "- VERIFY_HOLIDAY: \`${VERIFY_HOLIDAY}\`"
-            echo "- AUTH SOURCE: \`${{ steps.resolve-auth-token.outputs.auth_source || 'unknown' }}\`"
+            echo "- AUTH SOURCE: \`${auth_source}\`"
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
@@ -143,3 +129,152 @@ jobs:
           retention-days: 14
           path: |
             output/playwright/attendance-locale-zh-smoke/**
+
+  issue:
+    if: always()
+    needs: smoke
+    runs-on: ubuntu-latest
+    env:
+      DRILL_FAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.drill_fail == 'true' }}
+      ISSUE_TITLE_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.issue_title || '' }}
+      DEFAULT_ISSUE_TITLE: '[Attendance P1] Locale zh smoke alert（非 paging）'
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      ARTIFACT_NAME: attendance-locale-zh-smoke-prod-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Resolve issue title and policy
+        id: policy
+        run: |
+          set -euo pipefail
+
+          manage_issue='true'
+          issue_title="${DEFAULT_ISSUE_TITLE}"
+
+          if [[ "${DRILL_FAIL}" == 'true' ]]; then
+            if [[ -n "${ISSUE_TITLE_INPUT}" ]]; then
+              issue_title="${ISSUE_TITLE_INPUT}"
+            else
+              manage_issue='false'
+            fi
+          fi
+
+          {
+            printf 'manage_issue=%s\n' "${manage_issue}"
+            printf 'issue_title=%s\n' "${issue_title}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip issue operations (drill without issue_title)
+        if: ${{ steps.policy.outputs.manage_issue != 'true' }}
+        run: echo 'Drill mode without issue_title; skipping issue management.'
+
+      - name: Find matching issue
+        if: ${{ steps.policy.outputs.manage_issue == 'true' }}
+        id: find-issue
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.policy.outputs.issue_title }}
+        with:
+          script: |
+            const issueTitle = process.env.ISSUE_TITLE;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+
+            const matches = issues
+              .filter((issue) => !issue.pull_request && issue.title === issueTitle)
+              .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+
+            const openIssue = matches.find((issue) => issue.state === 'open');
+            const targetIssue = openIssue || matches[0];
+
+            core.setOutput('target_issue_number', targetIssue ? String(targetIssue.number) : '');
+            core.setOutput('target_issue_state', targetIssue ? targetIssue.state : '');
+            core.setOutput('open_issue_number', openIssue ? String(openIssue.number) : '');
+
+      - name: Create/reopen/comment on smoke failure
+        if: ${{ steps.policy.outputs.manage_issue == 'true' && needs.smoke.result == 'failure' }}
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.policy.outputs.issue_title }}
+          TARGET_ISSUE_NUMBER: ${{ steps.find-issue.outputs.target_issue_number }}
+          TARGET_ISSUE_STATE: ${{ steps.find-issue.outputs.target_issue_state }}
+          RUN_URL: ${{ env.RUN_URL }}
+          ARTIFACT_NAME: ${{ env.ARTIFACT_NAME }}
+        with:
+          script: |
+            const issueTitle = process.env.ISSUE_TITLE;
+            const issueNumber = Number(process.env.TARGET_ISSUE_NUMBER || '0');
+            const issueState = process.env.TARGET_ISSUE_STATE;
+            const body = [
+              'Attendance locale zh smoke failed.',
+              '',
+              `Run URL: ${process.env.RUN_URL}`,
+              '',
+              'Download artifacts:',
+              `\`gh run download ${context.runId} --repo ${context.repo.owner}/${context.repo.repo} --name ${process.env.ARTIFACT_NAME}\``,
+            ].join('\n');
+
+            if (!issueNumber) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body,
+              });
+              return;
+            }
+
+            if (issueState !== 'open') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: 'open',
+              });
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body,
+            });
+
+      - name: Comment and close open issue on recovery
+        if: ${{ steps.policy.outputs.manage_issue == 'true' && needs.smoke.result == 'success' && steps.find-issue.outputs.open_issue_number != '' }}
+        uses: actions/github-script@v7
+        env:
+          OPEN_ISSUE_NUMBER: ${{ steps.find-issue.outputs.open_issue_number }}
+          RUN_URL: ${{ env.RUN_URL }}
+          ARTIFACT_NAME: ${{ env.ARTIFACT_NAME }}
+        with:
+          script: |
+            const issueNumber = Number(process.env.OPEN_ISSUE_NUMBER || '0');
+            const body = [
+              'Attendance locale zh smoke recovered.',
+              '',
+              `Run URL: ${process.env.RUN_URL}`,
+              '',
+              'Download artifacts:',
+              `\`gh run download ${context.runId} --repo ${context.repo.owner}/${context.repo.repo} --name ${process.env.ARTIFACT_NAME}\``,
+            ].join('\n');
+
+            if (!issueNumber) {
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body,
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed',
+            });
