@@ -312,7 +312,7 @@ gh run download 22905331065 -D output/playwright/ga/22905331065
 执行：
 
 ```bash
-# 注意必须显式传 branch，否则默认评估 main
+# 建议显式传 branch；从本次修正后，不传时默认取当前 ref_name
 gh workflow run attendance-daily-gate-dashboard.yml \
   --ref codex/attendance-pr396-pr399-delivery-md-20260310 \
   -f branch=codex/attendance-pr396-pr399-delivery-md-20260310 \

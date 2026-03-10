@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 20
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      BRANCH: ${{ inputs.branch || 'main' }}
+      BRANCH: ${{ inputs.branch || github.ref_name || 'main' }}
       LOOKBACK_HOURS: ${{ inputs.lookback_hours || '36' }}
       INCLUDE_DRILL_RUNS: ${{ inputs.include_drill_runs || 'false' }}
       ESCALATION_ISSUE_TITLE: ${{ inputs.issue_title || '[Attendance Gate] Daily dashboard alert' }}
@@ -51,6 +51,7 @@ jobs:
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
+      LOCALE_ZH_WORKFLOW: attendance-locale-zh-smoke-prod.yml
       CONTRACT_WORKFLOW: attendance-gate-contract-matrix.yml
       PROTECTION_WORKFLOW: attendance-branch-policy-drift-prod.yml
     steps:
