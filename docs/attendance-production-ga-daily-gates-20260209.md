@@ -5505,6 +5505,9 @@ Changes:
     - `output/playwright/attendance-fast-parallel-regression/<timestamp>-<pid>/`
 - new script tests `scripts/ops/attendance-fast-parallel-regression.test.mjs`:
   - validates input guards and default lane composition behavior.
+- new report utility `scripts/ops/attendance-fast-parallel-summary-report.mjs` + tests:
+  - aggregates latest `full/ops/contracts` lane status into markdown/json.
+  - keeps backward compatibility by inferring profile metadata for older summaries.
 - `scripts/ops/attendance-regression-local.sh` now forces per-check cwd to repository root, avoiding false failures from login-shell cwd differences.
 - `package.json` adds shortcuts:
   - `pnpm verify:attendance-regression-fast`
@@ -5524,6 +5527,8 @@ Verification:
 | Fast parallel run (contracts lane) | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
 | Fast parallel run (full lane, collision-safe output path) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json` |
 | Fast parallel run (`summary.json` metadata contract) | `pnpm verify:attendance-regression-fast` + `jq '.profile,.maxParallel,.runContractCases,.totals.total' <summary.json>` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` |
+| Fast lane summary report tests | `pnpm verify:attendance-regression-fast:report:test` | PASS | node test stdout |
+| Fast lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
 
 Operational note:
 

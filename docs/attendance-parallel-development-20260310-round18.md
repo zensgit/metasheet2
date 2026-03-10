@@ -48,6 +48,18 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
   - `pnpm verify:attendance-regression-fast:ops`
   - `pnpm verify:attendance-regression-fast:contracts`
 
+### 5) Lane summary report utility (new)
+
+- Added `scripts/ops/attendance-fast-parallel-summary-report.mjs`:
+  - consumes fast regression `summary.json` files.
+  - outputs one Markdown lane-health table + JSON payload.
+  - defaults to latest row per profile (`full/ops/contracts`) while preserving an all-rows mode (`LATEST_PER_PROFILE=false`).
+  - backward-compatible inference for older summaries without metadata.
+- Added `scripts/ops/attendance-fast-parallel-summary-report.test.mjs` (3 tests).
+- Added package scripts:
+  - `pnpm verify:attendance-regression-fast:report`
+  - `pnpm verify:attendance-regression-fast:report:test`
+
 ## Verification
 
 | Check | Command | Status | Evidence |
@@ -57,6 +69,8 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 | Ops lane run | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.json` |
 | Contracts lane run | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
 | Summary metadata probe | `jq '.profile,.maxParallel,.runContractCases,.totals.total' output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` | PASS | values: `\"full\"`, `6`, `true`, `6` |
+| Lane summary report tests | `pnpm verify:attendance-regression-fast:report:test` | PASS | node test stdout |
+| Lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
 
 ## Branch / PR Status
 
@@ -73,6 +87,7 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 3. `4077520b` docs(attendance): update round17 commit log and profile evidence
 4. `02a9855b` feat(ops): export fast regression profile metadata in summaries
 5. `17a2c6db` docs(attendance): track latest round17 metadata export commit
+6. `29f2ad0b` docs(attendance): add round18 parallel development and verification report
 
 ## Next Parallel Wave
 

@@ -5734,6 +5734,9 @@ Changes:
   - writes `results.tsv`, `summary.md`, and `summary.json` to a timestamped evidence directory (`timestamp + pid` suffix to avoid collisions).
 - added `scripts/ops/attendance-fast-parallel-regression.test.mjs`:
   - locks profile input guards and default lane composition behavior.
+- added `scripts/ops/attendance-fast-parallel-summary-report.mjs` + tests:
+  - aggregates latest `full/ops/contracts` lane health into markdown/json reports.
+  - infers profile metadata for older summaries to keep report continuity.
 - updated `scripts/ops/attendance-regression-local.sh` to execute checks from repository root explicitly (`cd "$ROOT_DIR"`), preventing login-shell cwd drift.
 - added pnpm shortcuts:
   - `pnpm verify:attendance-regression-fast`
@@ -5754,6 +5757,8 @@ Verification:
 | Fast parallel regression run (contracts lane) | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
 | Fast parallel regression run (full lane, collision-safe output path) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json` |
 | Fast parallel regression run (structured summary metadata) | `pnpm verify:attendance-regression-fast` + `jq '.profile,.maxParallel,.runContractCases,.totals.total' <summary.json>` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` |
+| Fast lane summary report tests | `pnpm verify:attendance-regression-fast:report:test` | PASS | node test stdout |
+| Fast lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
 
 Decision:
 
