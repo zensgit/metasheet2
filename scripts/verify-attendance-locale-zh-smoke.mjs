@@ -135,6 +135,18 @@ async function loginForToken() {
   return nextToken
 }
 
+async function refreshTokenFromApi(tokenValue) {
+  const payload = await apiRequestJson('/auth/refresh-token', {
+    method: 'POST',
+    body: JSON.stringify({ token: tokenValue }),
+  }, '')
+  const nextToken = extractTokenFromPayload(payload)
+  if (!nextToken) {
+    throw new Error('POST /auth/refresh-token returned empty token')
+  }
+  return nextToken
+}
+
 async function resolveAuthToken() {
   if (authToken) {
     const status = await validateTokenWithAuthMe(authToken)
@@ -145,7 +157,22 @@ async function resolveAuthToken() {
       log(`AUTH_TOKEN validation inconclusive (${status.reason}), keep using AUTH_TOKEN`)
       return 'token'
     }
-    log(`AUTH_TOKEN is not usable (${status.reason}), trying login fallback`)
+    log(`AUTH_TOKEN is not usable (${status.reason}), trying refresh/login fallback`)
+
+    try {
+      const refreshedToken = await refreshTokenFromApi(authToken)
+      const refreshStatus = await validateTokenWithAuthMe(refreshedToken)
+      if (refreshStatus.usable !== false) {
+        authToken = refreshedToken
+        if (refreshStatus.usable === null) {
+          log(`Refresh token validation inconclusive (${refreshStatus.reason}), continue with refreshed token`)
+        }
+        return 'refresh'
+      }
+      log(`refresh token is not usable (${refreshStatus.reason}), continue to login fallback`)
+    } catch (error) {
+      log(`refresh fallback failed: ${error?.message || error}`)
+    }
   }
 
   if (!loginEmail || !loginPassword) {
