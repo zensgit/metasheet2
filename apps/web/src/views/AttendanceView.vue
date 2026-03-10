@@ -3286,6 +3286,15 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+import {
+  compareDateKeys,
+  formatCalendarMonthLabel,
+  formatLunarDayLabel,
+  getCalendarVisibleRange,
+  normalizeDateKey,
+  toDateInput,
+  toDateKey,
+} from './attendanceCalendarUtils'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -4246,7 +4255,10 @@ const weekDays = computed(() => (
     : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 ))
 const calendarLabel = computed(() => {
-  return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+  return formatCalendarMonthLabel(calendarMonth.value, {
+    locale: isZh.value ? 'zh-CN' : 'en-US',
+    timeZone: isZh.value ? 'Asia/Shanghai' : defaultTimezone,
+  })
 })
 
 watch([showLunarLabel, showHolidayBadge], ([showLunar, showHoliday]) => {
@@ -4290,7 +4302,10 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const holidayName = typeof holiday?.name === 'string' && holiday.name.trim().length > 0
       ? holiday.name.trim()
       : undefined
-    const lunarLabel = formatLunarDayLabel(date)
+    const lunarLabel = formatLunarDayLabel(date, {
+      enabled: isZh.value,
+      timeZone: 'Asia/Shanghai',
+    })
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
@@ -4491,47 +4506,6 @@ const importForm = reactive({
   payload: '{}',
 })
 
-function toDateInput(date: Date): string {
-  return toDateKey(date)
-}
-
-function toDateKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function normalizeDateKey(value: string | null | undefined): string | null {
-  const raw = String(value || '').trim()
-  if (!raw) return null
-  const direct = raw.match(/^(\d{4}-\d{2}-\d{2})/)
-  if (direct) return direct[1]
-  const date = new Date(raw)
-  if (Number.isNaN(date.getTime())) return null
-  return toDateKey(date)
-}
-
-function compareDateKeys(a: string, b: string): number {
-  if (a === b) return 0
-  return a < b ? -1 : 1
-}
-
-function getCalendarVisibleRange(): { from: string; to: string } {
-  const monthStart = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth(), 1)
-  const monthEnd = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() + 1, 0)
-  const startOffset = (monthStart.getDay() + 6) % 7
-  const endOffset = 6 - ((monthEnd.getDay() + 6) % 7)
-  const visibleStart = new Date(monthStart)
-  visibleStart.setDate(visibleStart.getDate() - startOffset)
-  const visibleEnd = new Date(monthEnd)
-  visibleEnd.setDate(visibleEnd.getDate() + endOffset)
-  return {
-    from: toDateInput(visibleStart),
-    to: toDateInput(visibleEnd),
-  }
-}
-
 function formatDateTime(value: string | null): string {
   if (!value) return '--'
   const date = new Date(value)
@@ -4651,20 +4625,6 @@ function formatRequestType(value: string): string {
         overtime: 'Overtime request',
       }
   return map[value] ?? value
-}
-
-function formatLunarDayLabel(date: Date): string | undefined {
-  if (!isZh.value || Number.isNaN(date.getTime())) return undefined
-  try {
-    const text = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
-      month: 'short',
-      day: 'numeric',
-    }).format(date)
-    const normalized = text.replace(/\s+/g, '')
-    return normalized || undefined
-  } catch {
-    return undefined
-  }
 }
 
 function formatWarningsShort(warnings: string[]): string {
@@ -8811,7 +8771,7 @@ function editHoliday(holiday: AttendanceHoliday) {
 async function loadHolidays() {
   holidayLoading.value = true
   try {
-    const visibleRange = getCalendarVisibleRange()
+    const visibleRange = getCalendarVisibleRange(calendarMonth.value)
     const selectedFrom = normalizeDateKey(fromDate.value) || visibleRange.from
     const selectedTo = normalizeDateKey(toDate.value) || visibleRange.to
     const requestFrom = compareDateKeys(visibleRange.from, selectedFrom) < 0 ? visibleRange.from : selectedFrom

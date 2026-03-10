@@ -448,6 +448,10 @@ async function verifyCoreZhLabels(page, options = {}) {
     requestCard: false,
     submitButton: false,
     recentRequests: false,
+    overviewTab: false,
+    adminTab: false,
+    workflowTab: false,
+    shellTabsChecked: false,
     noEnglishLeak: false,
     ok: false,
     skipped: false,
@@ -486,10 +490,36 @@ async function verifyCoreZhLabels(page, options = {}) {
   await page.getByText('最近申请', { exact: true }).waitFor({ timeout: timeoutMs })
   check.recentRequests = true
 
+  const shellTabs = page.locator('.attendance-shell__tabs').first()
+  const shellTabCount = await shellTabs.count().catch(() => 0)
+  if (shellTabCount > 0) {
+    check.shellTabsChecked = true
+    await shellTabs.getByRole('button', { name: '总览', exact: true }).waitFor({ timeout: timeoutMs })
+    check.overviewTab = true
+
+    const adminTabAny = await shellTabs.getByRole('button', { name: /^(管理中心|Admin Center)$/ }).count().catch(() => 0)
+    if (adminTabAny > 0) {
+      await shellTabs.getByRole('button', { name: '管理中心', exact: true }).waitFor({ timeout: timeoutMs })
+    }
+    check.adminTab = true
+
+    const workflowTabAny = await shellTabs.getByRole('button', { name: /^(流程设计|Workflow Designer)$/ }).count().catch(() => 0)
+    if (workflowTabAny > 0) {
+      await shellTabs.getByRole('button', { name: '流程设计', exact: true }).waitFor({ timeout: timeoutMs })
+    }
+    check.workflowTab = true
+  } else {
+    check.overviewTab = true
+    check.adminTab = true
+    check.workflowTab = true
+  }
+
+  const shellText = await page.locator('.attendance-shell').first().innerText().catch(() => '')
   const attendanceText = await page.locator('.attendance').first().innerText().catch(() => '')
-  const englishLeakMatches = String(attendanceText || '')
+  const compositeText = [shellText, attendanceText].filter(Boolean).join('\n')
+  const englishLeakMatches = String(compositeText || '')
     .match(
-      /\b(Check In|Check Out|Summary|Calendar|Adjustment Request|Submit request|Recent requests|Admin permissions required|Use default rule|Default|Standard Shift)\b/g,
+      /\b(Check In|Check Out|Summary|Calendar|Adjustment Request|Submit request|Recent requests|Overview|Admin Center|Workflow Designer|Desktop recommended|Back to Overview|Admin permissions required|Use default rule|Default|Standard Shift)\b/g,
     ) || []
 
   check.englishLeakSamples = Array.from(new Set(englishLeakMatches)).slice(0, 6)
@@ -553,6 +583,10 @@ async function run() {
       requestCard: false,
       submitButton: false,
       recentRequests: false,
+      overviewTab: false,
+      adminTab: false,
+      workflowTab: false,
+      shellTabsChecked: false,
       noEnglishLeak: false,
       ok: false,
       skipped: false,

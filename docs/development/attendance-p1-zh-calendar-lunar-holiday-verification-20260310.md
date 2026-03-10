@@ -484,7 +484,6 @@ pnpm --filter @metasheet/web exec vitest run \
   - `Plugin System Tests`: `22893451653`
   - `Observability E2E`: `22893451649`
   - `Phase 5 PR Validation`: `22893451705`
-EOF && git add docs/development/attendance-p1-zh-calendar-lunar-holiday-verification-20260310.md && git commit -m "docs(attendance): append latest green checks for pr403" && git push origin codex/attendance-zh-calendar-p1-mainline-20260310
 ## 20. 日历补强（跨月可见区 + 失败清理）
 补强点：
 - `AttendanceView.loadHolidays()` 查询范围扩展为“筛选区间 + 当前月可见日历网格”并集，减少跨月首尾格节假日徽标缺失。
@@ -502,3 +501,38 @@ node --test scripts/ops/attendance-daily-gate-report.test.mjs
 scripts/ops/attendance-run-gate-contract-case.sh dashboard
 ```
 - 结果：PASS。
+
+## 21. 并行推进（时区稳定 + 壳层中文门禁 + 前端回归）
+补强点：
+- 新增可复用日历工具模块：`apps/web/src/views/attendanceCalendarUtils.ts`
+  - `toDateKey/toDateInput/normalizeDateKey/compareDateKeys/getCalendarVisibleRange`
+  - `formatCalendarMonthLabel`（含时区 fallback）
+  - `formatLunarDayLabel`（默认 `Asia/Shanghai`，非法时区 fallback）
+- `AttendanceView.vue` 接入工具模块，统一日历月份与农历格式化时区策略，减少跨时区显示漂移风险。
+- `scripts/verify-attendance-locale-zh-smoke.mjs` 增强：
+  - 新增壳层 tab 中文校验（`总览/管理中心/流程设计`，按可见性校验）。
+  - 英文泄漏词表纳入 `Overview/Admin Center/Workflow Designer/Desktop recommended/Back to Overview`。
+- 新增前端回归测试：
+  - `apps/web/tests/attendance-calendar-utils.spec.ts`
+  - `apps/web/tests/attendance-experience-zh-tabs.spec.ts`
+
+本地验证：
+```bash
+node --check scripts/verify-attendance-locale-zh-smoke.mjs
+pnpm --filter @metasheet/web exec vitest run \
+  tests/attendance-calendar-utils.spec.ts \
+  tests/attendance-experience-zh-tabs.spec.ts
+pnpm --filter @metasheet/web exec vitest run \
+  tests/attendance-experience-mobile-zh.spec.ts \
+  tests/attendance-import-preview-regression.spec.ts
+pnpm --filter @metasheet/web exec tsc --noEmit
+node --test scripts/ops/attendance-daily-gate-report.test.mjs
+scripts/ops/attendance-run-gate-contract-case.sh dashboard
+```
+
+结果：
+- `attendance-calendar-utils.spec.ts` + `attendance-experience-zh-tabs.spec.ts`：PASS（7 tests）
+- 既有移动端 zh 与导入预览回归：PASS（2 tests）
+- `tsc --noEmit`：PASS
+- daily dashboard parser 测试：PASS（14/14）
+- dashboard contract case：PASS
