@@ -16,6 +16,7 @@ const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
 const groupLookupRetryAttempts = Math.max(1, Number(process.env.GROUP_LOOKUP_RETRY_ATTEMPTS || 8))
 const groupLookupRetryDelayMs = Math.max(100, Number(process.env.GROUP_LOOKUP_RETRY_DELAY_MS || 750))
+const groupLookupMaxPages = Math.max(1, Number(process.env.GROUP_LOOKUP_MAX_PAGES || 20))
 const importEngines = new Set(['standard', 'bulk'])
 
 function normalizeProductMode(value) {
@@ -294,17 +295,22 @@ async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = 
 async function findGroupByName(groupName) {
   let lastCount = 0
   for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
-    const groups = await apiFetch('/attendance/groups?pageSize=200', { method: 'GET' })
-    assertOk(groups, 'GET /attendance/groups')
-    const items = Array.isArray(groups.body?.data?.items) ? groups.body.data.items : []
-    lastCount = items.length
-    const created = items.find((g) => g && g.name === groupName)
-    if (created?.id) {
-      if (attempt > 1) {
-        log(`group lookup recovered after retry: attempt=${attempt}/${groupLookupRetryAttempts}`)
+    let scanned = 0
+    for (let page = 1; page <= groupLookupMaxPages; page += 1) {
+      const groups = await apiFetch(`/attendance/groups?page=${page}&pageSize=200`, { method: 'GET' })
+      assertOk(groups, `GET /attendance/groups?page=${page}`)
+      const items = Array.isArray(groups.body?.data?.items) ? groups.body.data.items : []
+      scanned += items.length
+      const created = items.find((g) => g && g.name === groupName)
+      if (created?.id) {
+        if (attempt > 1 || page > 1) {
+          log(`group lookup recovered: attempt=${attempt}/${groupLookupRetryAttempts} page=${page}/${groupLookupMaxPages}`)
+        }
+        return created
       }
-      return created
+      if (items.length < 200) break
     }
+    lastCount = scanned
     if (attempt < groupLookupRetryAttempts) {
       await sleep(groupLookupRetryDelayMs)
     }
@@ -315,17 +321,22 @@ async function findGroupByName(groupName) {
 async function ensureGroupMember(groupId, userId) {
   let lastCount = 0
   for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
-    const members = await apiFetch(`/attendance/groups/${groupId}/members?pageSize=200`, { method: 'GET' })
-    assertOk(members, 'GET /attendance/groups/:id/members')
-    const items = Array.isArray(members.body?.data?.items) ? members.body.data.items : []
-    lastCount = items.length
-    const hasMember = items.some((m) => m && (m.userId === userId || m.user_id === userId))
-    if (hasMember) {
-      if (attempt > 1) {
-        log(`membership lookup recovered after retry: attempt=${attempt}/${groupLookupRetryAttempts}`)
+    let scanned = 0
+    for (let page = 1; page <= groupLookupMaxPages; page += 1) {
+      const members = await apiFetch(`/attendance/groups/${groupId}/members?page=${page}&pageSize=200`, { method: 'GET' })
+      assertOk(members, `GET /attendance/groups/:id/members?page=${page}`)
+      const items = Array.isArray(members.body?.data?.items) ? members.body.data.items : []
+      scanned += items.length
+      const hasMember = items.some((m) => m && (m.userId === userId || m.user_id === userId))
+      if (hasMember) {
+        if (attempt > 1 || page > 1) {
+          log(`membership lookup recovered: attempt=${attempt}/${groupLookupRetryAttempts} page=${page}/${groupLookupMaxPages}`)
+        }
+        return true
       }
-      return true
+      if (items.length < 200) break
     }
+    lastCount = scanned
     if (attempt < groupLookupRetryAttempts) {
       await sleep(groupLookupRetryDelayMs)
     }
