@@ -4022,3 +4022,14 @@ Evidence (PR #401 branch):
   - `authSource=refresh`
   - `zhLabels.ok=true`
   - `toggleCheck.skipped=true` (`calendar flags not available in this deployment`)
+
+### Update (2026-03-10): zh Copy Contract Expanded
+- Script: `scripts/ops/attendance-verify-zh-copy-contract.mjs`
+- Added wrapper coverage:
+  - `apps/web/src/views/attendance/AttendanceExperienceView.vue`
+  - `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`
+- Contract now enforces:
+  - key zh snippets exist in wrapper locale maps;
+  - no hard-coded English template leaks in those zh-guarded wrappers.
+- Local verification command:
+  - `pnpm verify:attendance-zh-copy-contract` (PASS)

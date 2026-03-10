@@ -230,3 +230,17 @@ gh run download 22889357568 -D output/playwright/ga/22889357568
 - 证据路径：
   - `output/playwright/ga/22889357568/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22889357568/attendance-zh-locale-calendar.png`
+
+## 10. zh copy contract 扩展（2026-03-10）
+- 文件：`scripts/ops/attendance-verify-zh-copy-contract.mjs`
+- 扩展内容：
+  - 保留 `AttendanceView.vue` 历史英文片段黑名单检查。
+  - 新增 `AttendanceExperienceView.vue` / `AttendanceWorkflowDesigner.vue` 的中文契约检查：
+    - 必须包含关键中文文案配置。
+    - 模板区域不得出现 hard-coded 英文提示文案。
+
+本地验证：
+```bash
+pnpm verify:attendance-zh-copy-contract
+```
+- 结果：PASS
