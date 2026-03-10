@@ -22,6 +22,7 @@
 - 新增前端测试：
   - `apps/web/tests/attendance-calendar-utils.spec.ts`
   - `apps/web/tests/attendance-experience-zh-tabs.spec.ts`
+  - `apps/web/tests/attendance-workflow-designer-zh.spec.ts`
 - 更新验证记录：
   - `docs/development/attendance-p1-zh-calendar-lunar-holiday-verification-20260310.md`
 
@@ -36,6 +37,7 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 pnpm --filter @metasheet/web exec vitest run \
   tests/attendance-calendar-utils.spec.ts \
   tests/attendance-experience-zh-tabs.spec.ts \
+  tests/attendance-workflow-designer-zh.spec.ts \
   tests/attendance-experience-mobile-zh.spec.ts \
   tests/attendance-import-preview-regression.spec.ts
 pnpm --filter @metasheet/web exec tsc --noEmit
@@ -45,7 +47,7 @@ pnpm verify:attendance-zh-copy-contract
 结果：
 - `attendance-daily-gate-report.test.mjs`: PASS（15/15）
 - `attendance-run-gate-contract-case.sh dashboard`: PASS
-- Web vitest: PASS（4 files / 9 tests）
+- Web vitest: PASS（5 files / 11 tests）
 - `tsc --noEmit`: PASS
 - zh copy contract: PASS
 

@@ -518,13 +518,15 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 - 新增前端回归测试：
   - `apps/web/tests/attendance-calendar-utils.spec.ts`
   - `apps/web/tests/attendance-experience-zh-tabs.spec.ts`
+  - `apps/web/tests/attendance-workflow-designer-zh.spec.ts`
 
 本地验证：
 ```bash
 node --check scripts/verify-attendance-locale-zh-smoke.mjs
 pnpm --filter @metasheet/web exec vitest run \
   tests/attendance-calendar-utils.spec.ts \
-  tests/attendance-experience-zh-tabs.spec.ts
+  tests/attendance-experience-zh-tabs.spec.ts \
+  tests/attendance-workflow-designer-zh.spec.ts
 pnpm --filter @metasheet/web exec vitest run \
   tests/attendance-experience-mobile-zh.spec.ts \
   tests/attendance-import-preview-regression.spec.ts
@@ -534,7 +536,7 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 ```
 
 结果：
-- `attendance-calendar-utils.spec.ts` + `attendance-experience-zh-tabs.spec.ts`：PASS（7 tests）
+- `attendance-calendar-utils.spec.ts` + `attendance-experience-zh-tabs.spec.ts` + `attendance-workflow-designer-zh.spec.ts`：PASS（9 tests）
 - 既有移动端 zh 与导入预览回归：PASS（2 tests）
 - `tsc --noEmit`：PASS
 - daily dashboard parser 测试：PASS（15/15，含 schema v3 壳层 tab 校验）
