@@ -13,6 +13,7 @@ const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-locale
 const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
 const requireToggleChecks = process.env.REQUIRE_TOGGLE_CHECKS === 'true'
+const requireShellTabChecks = process.env.REQUIRE_SHELL_TAB_CHECKS === 'true'
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -436,6 +437,48 @@ async function verifyCalendarToggleChecks(page, options = {}) {
   return toggleCheck
 }
 
+async function verifyZhShellTabs(page, options = {}) {
+  const requireChecks = options.requireShellTabChecks === true
+  const result = {
+    checked: false,
+    overviewTab: false,
+    adminTab: false,
+    workflowTab: false,
+    reason: null,
+    tabTexts: [],
+  }
+
+  const tabs = page.locator('.attendance-shell__tabs')
+  const tabsCount = await tabs.count().catch(() => 0)
+  if (tabsCount === 0) {
+    if (requireChecks) {
+      throw new Error('Attendance shell tabs are required but not available in this deployment')
+    }
+    result.reason = 'attendance shell tabs not available in this deployment'
+    return result
+  }
+
+  const tabButtons = tabs.locator('.attendance-shell__tab')
+  await tabButtons.first().waitFor({ timeout: timeoutMs })
+  const rawTexts = await tabButtons.allTextContents().catch(() => [])
+  const tabTexts = rawTexts.map((text) => String(text || '').trim()).filter(Boolean)
+  result.tabTexts = tabTexts.slice(0, 12)
+  result.checked = true
+  result.overviewTab = tabTexts.some((text) => text.includes('总览'))
+  result.adminTab = tabTexts.some((text) => text.includes('管理中心'))
+  result.workflowTab = tabTexts.some((text) => text.includes('流程设计'))
+
+  if (!result.overviewTab) {
+    throw new Error(`Expected zh overview tab label "总览"; observed tabs=${JSON.stringify(result.tabTexts)}`)
+  }
+  const hasEnglishTabs = tabTexts.some((text) => /^(Overview|Admin Center|Workflow Designer)$/i.test(text))
+  if (hasEnglishTabs) {
+    throw new Error(`Expected zh shell tab labels, found English label in tabs=${JSON.stringify(result.tabTexts)}`)
+  }
+
+  return result
+}
+
 async function writeSummaryJson(filePath, summary) {
   await fs.writeFile(filePath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
 }
@@ -444,12 +487,13 @@ async function run() {
   await ensureDir(outputDir)
   const summaryPath = path.join(outputDir, 'attendance-zh-locale-summary.json')
   const summary = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     webUrl: normalizeUrl(webUrl),
     apiBase,
     orgId,
     verifyHoliday,
+    requireShellTabChecks,
     status: 'fail',
     locale: 'zh-CN',
     lunarCount: 0,
@@ -469,6 +513,14 @@ async function run() {
     },
     error: null,
     authSource: 'unknown',
+    zhShellTabsChecked: false,
+    zhShellTabReason: null,
+    zhShellTabSamples: [],
+    zhLabels: {
+      overviewTab: false,
+      adminTab: false,
+      workflowTab: false,
+    },
     toggleCheck: {
       lunarOffNoBadge: false,
       lunarOnRecovered: false,
@@ -521,6 +573,16 @@ async function run() {
 
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
+
+    const zhShellTabs = await verifyZhShellTabs(page, { requireShellTabChecks })
+    summary.zhShellTabsChecked = zhShellTabs.checked
+    summary.zhShellTabReason = zhShellTabs.reason
+    summary.zhShellTabSamples = Array.isArray(zhShellTabs.tabTexts) ? zhShellTabs.tabTexts.slice(0, 12) : []
+    summary.zhLabels = {
+      overviewTab: zhShellTabs.overviewTab,
+      adminTab: zhShellTabs.adminTab,
+      workflowTab: zhShellTabs.workflowTab,
+    }
 
     const lunarSamples = await verifyLunarLabelsMeaningful(page)
     const lunarCount = lunarSamples.length
@@ -624,7 +686,9 @@ async function run() {
     const toggleStatus = summary.toggleCheck.skipped
       ? `skipped:${summary.toggleCheck.reason || 'not-required'}`
       : (togglePass ? 'pass' : 'fail')
-    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, authSource=${summary.authSource}, screenshot=${screenshotPath}`)
+    log(
+      `PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, authSource=${summary.authSource}, zhTabsChecked=${summary.zhShellTabsChecked}, zhTabs=${JSON.stringify(summary.zhLabels)}, screenshot=${screenshotPath}`,
+    )
   } catch (error) {
     summary.status = 'fail'
     summary.error = (error && error.message) || String(error)

@@ -27,6 +27,10 @@ on:
         description: 'Require calendar toggle assertions (true/false). Keep false until target env has toggle UI.'
         required: false
         default: 'false'
+      require_shell_tab_checks:
+        description: 'Require zh shell tab checks (true/false). Keep false for legacy deployments without shell tabs.'
+        required: false
+        default: 'false'
       drill_fail:
         description: 'Drill mode: force failure path and skip real smoke'
         required: false
@@ -55,6 +59,7 @@ jobs:
       ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       REQUIRE_TOGGLE_CHECKS: ${{ inputs.require_toggle_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_TOGGLE_CHECKS || 'false' }}
+      REQUIRE_SHELL_TAB_CHECKS: ${{ inputs.require_shell_tab_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_SHELL_TAB_CHECKS || 'false' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
@@ -110,8 +115,18 @@ jobs:
         run: |
           set -euo pipefail
           auth_source='unknown'
+          summary_schema='unknown'
+          zh_shell_tabs_checked='unknown'
+          zh_overview_tab='unknown'
+          zh_admin_tab='unknown'
+          zh_workflow_tab='unknown'
           if [[ -f output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json ]]; then
             auth_source="$(jq -r '.authSource // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            summary_schema="$(jq -r '.schemaVersion // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            zh_shell_tabs_checked="$(jq -r '.zhShellTabsChecked // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            zh_overview_tab="$(jq -r '.zhLabels.overviewTab // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            zh_admin_tab="$(jq -r '.zhLabels.adminTab // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            zh_workflow_tab="$(jq -r '.zhLabels.workflowTab // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
           fi
           {
             echo "## Attendance Locale zh Smoke (Prod)"
@@ -121,7 +136,11 @@ jobs:
             echo "- ORG_ID: \`${ORG_ID}\`"
             echo "- VERIFY_HOLIDAY: \`${VERIFY_HOLIDAY}\`"
             echo "- REQUIRE_TOGGLE_CHECKS: \`${REQUIRE_TOGGLE_CHECKS}\`"
+            echo "- REQUIRE_SHELL_TAB_CHECKS: \`${REQUIRE_SHELL_TAB_CHECKS}\`"
+            echo "- SUMMARY SCHEMA: \`${summary_schema}\`"
             echo "- AUTH SOURCE: \`${auth_source}\`"
+            echo "- zh shell tabs checked: \`${zh_shell_tabs_checked}\`"
+            echo "- zh tab labels: \`overview=${zh_overview_tab} admin=${zh_admin_tab} workflow=${zh_workflow_tab}\`"
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
