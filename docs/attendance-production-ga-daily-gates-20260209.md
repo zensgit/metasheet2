@@ -4075,3 +4075,40 @@ Observed highlights:
 - `p0Status=pass` on branch `codex/attendance-pr396-pr399-delivery-md-20260310`.
 - `gateFlat.preflight.signalBranch=main` confirms remote signal fallback is active.
 - `gateFlat.strict.status=PASS` remains sourced from the feature branch run.
+
+### Update (2026-03-11): Perf Gate Stabilization on Feature Branch (Upload Path + Dashboard Pass)
+
+Scope:
+
+- stabilized feature-branch perf gate verification under intermittent upstream `502 Bad Gateway` by:
+  - serializing baseline/longrun under shared concurrency key,
+  - hardening auth resolve scripts on runner,
+  - switching longrun always-on default scenario from `rows10k-commit` to `rows10k-preview`,
+  - updating dashboard artifact discovery to accept `rows10k-preview` longrun artifacts.
+
+Code:
+
+- workflows:
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+- scripts:
+  - `scripts/ops/attendance-resolve-auth.sh`
+  - `scripts/ops/attendance-write-auth-error.sh`
+  - `scripts/ops/attendance-daily-gate-report.mjs`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch, upload csv) | #22911469968 | PASS | `output/playwright/ga/22911469968/attendance-import-perf-22911469968-1/attendance-perf-mmksk910-de6gz5/perf-summary.json`, `output/playwright/ga/22911469968/attendance-import-perf-22911469968-1/perf.log` |
+| Attendance Import Perf Long Run (branch, rows10k-preview always-on) | #22912460139 | PASS | `output/playwright/ga/22912460139/attendance-import-perf-longrun-rows10k-preview-22912460139-1/current/rows10k-preview/attendance-perf-mmktcens-o9u5bb/perf-summary.json`, `output/playwright/ga/22912460139/attendance-import-perf-longrun-trend-22912460139-1/20260310-161836/attendance-import-perf-longrun-trend.json` |
+| Attendance Daily Gate Dashboard (branch, latest head) | #22912627431 | PASS | `output/playwright/ga/22912627431/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22912627431/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- dashboard summary (latest run `#22912627431`):
+  - `p0Status=pass`
+  - `overallStatus=pass`
+  - `gateFlat.preflight.signalBranch=main`
+  - `gateFlat.perf.status=PASS`
+  - `gateFlat.longrun.status=PASS`

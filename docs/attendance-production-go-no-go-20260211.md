@@ -2663,6 +2663,35 @@ Decision:
 
 - **GO maintained** (P0 remains green; fallback fixes remote-gate branch drift noise without relaxing strict/perf gate semantics).
 
+## Post-Go Validation (2026-03-11): Perf Gate Recovery + Dashboard Full Green (Branch)
+
+Scope:
+
+- recovered branch-level perf signal completeness after transient upstream 502s.
+- ensured dashboard consumes the new longrun always-on artifact (`rows10k-preview`) and returns full green.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (branch) | #22911469968 | PASS | `output/playwright/ga/22911469968/attendance-import-perf-22911469968-1/attendance-perf-mmksk910-de6gz5/perf-summary.json`, `output/playwright/ga/22911469968/attendance-import-perf-22911469968-1/perf.log` |
+| Attendance Import Perf Long Run (branch) | #22912460139 | PASS | `output/playwright/ga/22912460139/attendance-import-perf-longrun-rows10k-preview-22912460139-1/current/rows10k-preview/attendance-perf-mmktcens-o9u5bb/perf-summary.json`, `output/playwright/ga/22912460139/attendance-import-perf-longrun-trend-22912460139-1/20260310-161836/attendance-import-perf-longrun-trend.md` |
+| Attendance Daily Gate Dashboard (branch, latest) | #22912627431 | PASS | `output/playwright/ga/22912627431/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22912627431/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- latest dashboard report:
+  - `p0Status=pass`
+  - `overallStatus=pass`
+  - `gateFlat.preflight.signalBranch=main`
+  - `gateFlat.perf.runId=22911469968`
+  - `gateFlat.longrun.runId=22912460139`
+- no open `[Attendance Gate]` issue was created by this verification batch.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-10): Daily Dashboard Locale Legacy Compatibility
 
 Scope:
