@@ -91,12 +91,27 @@ gh run download 22884926952 -D output/playwright/ga/22884926952
   - `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-summary.json`
   - `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-calendar.png`
 
+### 3.7 Playwright 中文 smoke（PR #401 分支回归）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-zh-calendar-p1-20260310
+gh run watch 22888000382 --exit-status
+gh run download 22888000382 -D output/playwright/ga/22888000382
+```
+- 结果：FAIL（预期外，环境密钥问题）
+- 关键结论：
+  - 失败位置已从 workflow 前置鉴权步骤移动到脚本执行阶段，说明“前置阻断已移除，改由脚本统一处理鉴权”变更生效。
+  - 失败根因：`AUTH_TOKEN is invalid and LOGIN_EMAIL/LOGIN_PASSWORD are missing`
+  - 新增字段已落盘：`authSource`、`toggleCheck`（见摘要 JSON）
+- 证据路径：
+  - `output/playwright/ga/22888000382/attendance-locale-zh-smoke-prod-22888000382-1/attendance-zh-locale-summary.json`
+
 ## 4. 交付结论
 - 本轮 P1 改动已达到“可合并验证”状态：
   - 功能可用：农历/节假日显示开关 + 偏好持久化生效。
   - 中文覆盖增强：考勤设计器空态与一批运行时错误文案已本地化。
   - 编译、类型、测试、目标文件 ESLint 均通过。
   - Playwright 中文 smoke 已通过（GA run `22884926952`）。
+  - PR 分支回归已验证新脚本字段输出，当前唯一阻塞项为仓库 secret 失效/缺失（非代码逻辑错误）。
 
 ## 5. 后续建议（下一轮）
 - 将 `AttendanceView.vue` 的历史 lint 问题拆分为独立清理 PR（避免与业务改动混合）。
