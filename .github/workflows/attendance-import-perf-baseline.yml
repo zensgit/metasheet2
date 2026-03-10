@@ -63,9 +63,10 @@ on:
     - cron: '20 3 * * *'
 
 concurrency:
-  # Avoid schedule/manual cross-cancellation while preserving dedupe per trigger source.
-  group: attendance-import-perf-baseline-${{ github.event_name == 'schedule' && 'schedule' || github.event_name == 'workflow_dispatch' && 'manual' || 'other' }}
-  cancel-in-progress: true
+  # Serialize baseline/longrun perf workflows per branch to reduce transient 502s
+  # caused by concurrent heavy import load against the same production API.
+  group: attendance-import-perf-shared-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -138,6 +139,8 @@ jobs:
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
       ROWS: ${{ inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
       MODE: ${{ inputs.mode || 'commit' }}
       ROLLBACK: 'true'
@@ -154,12 +157,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve attendance auth token
+        run: |
+          set -euo pipefail
+          output_root="output/playwright/attendance-import-perf"
+          mkdir -p "$output_root"
+          auth_meta_file="${output_root}/auth-resolve-meta.txt"
+          auth_token_file="${RUNNER_TEMP}/attendance-auth-token.txt"
+
+          if AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_RESOLVE_META_FILE="$auth_meta_file" ./scripts/ops/attendance-resolve-auth.sh > "$auth_token_file"; then
+            resolved_token="$(tr -d '\r\n' < "$auth_token_file")"
+            if [[ -z "$resolved_token" ]]; then
+              AUTH_RESOLVE_META_FILE="$auth_meta_file" \
+                AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
+                API_BASE="$API_BASE" \
+                ./scripts/ops/attendance-write-auth-error.sh
+              echo "::error::Resolved attendance auth token is empty."
+              exit 1
+            fi
+            echo "::add-mask::${resolved_token}"
+            echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          AUTH_RESOLVE_META_FILE="$auth_meta_file" \
+            AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
+            API_BASE="$API_BASE" \
+            ./scripts/ops/attendance-write-auth-error.sh
+          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Run perf baseline (rollback enabled)
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           # Always capture logs so failures are diagnosable from artifacts.
