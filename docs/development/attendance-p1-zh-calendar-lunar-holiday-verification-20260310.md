@@ -111,11 +111,11 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
   - 中文覆盖增强：考勤设计器空态与一批运行时错误文案已本地化。
   - 编译、类型、测试、目标文件 ESLint 均通过。
   - Playwright 中文 smoke 已通过（GA run `22884926952`）。
-  - PR 分支回归已验证新脚本字段输出，当前唯一阻塞项为仓库 secret 失效/缺失（非代码逻辑错误）。
+  - PR 分支回归二次验证已通过（GA run `22889038364`），鉴权 fallback 与部署感知开关断言行为符合预期。
 
 ## 5. 后续建议（下一轮）
 - 将 `AttendanceView.vue` 的历史 lint 问题拆分为独立清理 PR（避免与业务改动混合）。
-- 把本次 GA run `22884926952` 的证据路径同步追加到 Go/No-Go 文档。
+- 把本次 PR 分支 GA run `22889038364` 的证据路径同步追加到 Go/No-Go 文档。
 
 ## 6. 脚本增强后的新断言字段说明（authSource, toggleCheck）
 - 适用范围：`scripts/verify-attendance-locale-zh-smoke.mjs` 增强后输出的日志与摘要字段。
@@ -162,3 +162,18 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
   "holidayBadgeCount": 1
 }
 ```
+
+## 7. 追加验证（PR #401，run 22889038364）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-zh-calendar-p1-20260310
+gh run watch 22889038364 --exit-status
+gh run download 22889038364 -D output/playwright/ga/22889038364
+```
+- 结果：PASS
+- 关键结论：
+  - `authSource=refresh`：`AUTH_TOKEN` 失效时可自动走 refresh-token 链路。
+  - `toggleCheck=skipped:calendar flags not available in this deployment`：目标部署尚未启用开关 UI 时不阻断 smoke（`REQUIRE_TOGGLE_CHECKS=false` 默认行为）。
+  - `status=pass`、节假日校验与清理链路通过。
+- 证据路径：
+  - `output/playwright/ga/22889038364/attendance-locale-zh-smoke-prod-22889038364-1/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889038364/attendance-locale-zh-smoke-prod-22889038364-1/attendance-zh-locale-calendar.png`
