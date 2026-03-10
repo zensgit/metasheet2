@@ -4032,3 +4032,6 @@ Notes:
 - one initial workflow run (`#22905244251`) used the previous head SHA because it was dispatched in parallel with `git push`; rerun on head SHA `ad4bbbebf8a37378a5777a448e27185401d99d67` fixed the evidence baseline.
 - from this update onward, `Attendance Daily Gate Dashboard` defaults `BRANCH` to `github.ref_name` (previously `main`); for manual drills, passing `-f branch=<feature-branch>` is still recommended for readability.
 - verification run `#22905839102` confirms default-branch fix: workflow env prints `BRANCH=codex/attendance-pr396-pr399-delivery-md-20260310` without explicit `-f branch=...`.
+- compatibility run `#22906252111` confirms dashboard validator now accepts legacy locale summary (`summarySchemaVersion=1`, `authSource=null`) while keeping v3 strict checks:
+  - evidence: `output/playwright/ga/22906252111/attendance-daily-gate-dashboard-22906252111-1/attendance-daily-gate-dashboard.json`
+  - result: `p0Status=pass`, `overallStatus=pass`, `gateFlat.localeZh.summarySchemaVersion=1`

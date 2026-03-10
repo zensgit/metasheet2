@@ -2636,6 +2636,33 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-10): Daily Dashboard Locale Legacy Compatibility
+
+Scope:
+
+- hardened dashboard JSON validator to support legacy locale smoke summaries (`summarySchemaVersion=1`) during upgrade windows, while preserving strict requirements for `summarySchemaVersion>=3`.
+- added contract-matrix legacy positive fixture to prevent regressions.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Daily Gate Dashboard (branch workflow evaluating `main`) | #22906252111 | PASS | `output/playwright/ga/22906252111/attendance-daily-gate-dashboard-22906252111-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22906252111/attendance-daily-gate-dashboard-22906252111-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- dashboard output is green while reading legacy locale gate summary:
+  - `branch=main`
+  - `p0Status=pass`
+  - `overallStatus=pass`
+  - `gateFlat.localeZh.summarySchemaVersion=1`
+  - `gateFlat.localeZh.authSource=null`
+- contract matrix local run remains strict for schema v3 fields and still fails expected negative cases.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-10): Dashboard Schema v3 Locale Contract
 
 This update hardens the daily dashboard contract so locale zh gate metadata is machine-verifiable.

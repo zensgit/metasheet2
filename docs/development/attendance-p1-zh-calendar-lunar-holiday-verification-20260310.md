@@ -365,3 +365,45 @@ gh run download 22905839102 -D output/playwright/ga/22905839102
 证据路径：
 - `output/playwright/ga/22905839102/attendance-daily-gate-dashboard-22905839102-1/attendance-daily-gate-dashboard.json`
 - `output/playwright/ga/22905839102/attendance-daily-gate-dashboard-22905839102-1/attendance-daily-gate-dashboard.md`
+
+### 8.6 Dashboard 合同平滑升级（兼容 locale summary schema v1）
+背景：
+- 主干历史 `Locale zh Smoke` 产物仍可能是 `summarySchemaVersion=1`（无 `authSource`）。
+- 若 validator 对 `authSource` 一律强制，会造成升级窗口内假失败。
+
+实现：
+- 文件：`scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - 当 `summarySchemaVersion>=3`：`authSource` 必填且必须为 `token|refresh|login|unknown`。
+  - 当 `summarySchemaVersion<3`：`authSource` 允许为空；若存在则仍校验枚举合法。
+- 文件：`scripts/ops/attendance-run-gate-contract-case.sh`
+  - 新增正例：`dashboard.valid.locale-legacy.json`（`summarySchemaVersion=1` 且 `authSource` 缺失）。
+
+本地验证：
+
+```bash
+bash scripts/ops/attendance-run-gate-contract-case.sh dashboard
+```
+
+结果：PASS（新增 legacy 正例通过，既有 5 个负例 + locale v3 负例仍按预期失败并被捕获）。
+
+GA 验证（评估 main 历史数据）：
+
+```bash
+gh workflow run attendance-daily-gate-dashboard.yml \
+  --ref codex/attendance-pr396-pr399-delivery-md-20260310 \
+  -f branch=main \
+  -f lookback_hours=72 \
+  -f issue_title='[Attendance Dashboard Drill] Locale legacy schema compatibility test'
+gh run watch 22906252111 --exit-status
+gh run download 22906252111 -D output/playwright/ga/22906252111
+```
+
+结果：PASS。
+
+关键证据：
+- `output/playwright/ga/22906252111/attendance-daily-gate-dashboard-22906252111-1/attendance-daily-gate-dashboard.json`
+  - `branch="main"`
+  - `p0Status="pass"`
+  - `overallStatus="pass"`
+  - `gateFlat.localeZh.summarySchemaVersion=1`
+  - `gateFlat.localeZh.authSource=null`
