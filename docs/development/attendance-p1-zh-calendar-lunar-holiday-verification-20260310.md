@@ -251,3 +251,26 @@ pnpm verify:attendance-zh-copy-contract
   - 命令：`pnpm verify:attendance-zh-copy-contract`
   - 位置：`Install dependencies` 之后、Playwright 浏览器安装之前。
 - 目的：在进入浏览器回归前先拦截静态文案回归，减少定位成本。
+
+## 12. GA 回归验证（含 zh copy contract 前置，run 22889675403）
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-20260310 \
+  -f require_zh_core_labels=true \
+  -f require_toggle_checks=false \
+  -f verify_holiday=true
+
+gh run watch 22889675403 --exit-status
+gh run download 22889675403 -D output/playwright/ga/22889675403
+```
+- 结果：PASS
+- 阶段结果：
+  - `Run zh copy contract`：PASS（已前置到 smoke workflow）
+  - Playwright zh smoke：PASS
+- 摘要字段：
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `toggleCheck.skipped=true`（目标环境尚未启用开关 UI）
+- 证据路径：
+  - `output/playwright/ga/22889675403/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889675403/attendance-zh-locale-calendar.png`

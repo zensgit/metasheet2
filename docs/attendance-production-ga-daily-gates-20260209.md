@@ -4041,3 +4041,12 @@ Evidence (PR #401 branch):
   2. `pnpm verify:attendance-zh-copy-contract`
   3. Playwright browser install + zh smoke UI flow
 - Benefit: catches static zh copy regressions before browser stage, reducing false-negative UI failures.
+
+Evidence refresh (PR #401 branch, with copy-contract pre-step):
+- Workflow run: `22889675403` (PASS)
+- Local artifact path:
+  - `output/playwright/ga/22889675403/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22889675403/attendance-zh-locale-calendar.png`
+- Step status highlights:
+  - `Run zh copy contract`: PASS
+  - `zhLabels.ok=true`
