@@ -336,3 +336,32 @@ gh run download 22905522662 -D output/playwright/ga/22905522662
 
 说明：
 - 先前 run `22905467569` 未显式传 `branch`，按默认 `main` 取数，抓到旧 locale run（schema v1）；已通过本次 run 修正验证。
+
+### 8.5 Daily Dashboard 分支默认值修复（`github.ref_name`）
+修复：
+- 文件：`.github/workflows/attendance-daily-gate-dashboard.yml`
+- 变更：
+  - `workflow_dispatch.inputs.branch.default: ''`
+  - `BRANCH: ${{ inputs.branch || github.ref_name || 'main' }}`
+- 目的：不传 `branch` 时，自动评估当前触发分支，而不是固定 `main`。
+
+验证：
+
+```bash
+gh workflow run attendance-daily-gate-dashboard.yml \
+  --ref codex/attendance-pr396-pr399-delivery-md-20260310 \
+  -f lookback_hours=72 \
+  -f issue_title='[Attendance Dashboard Drill] Branch ref default test'
+gh run watch 22905839102 --exit-status || true
+gh run download 22905839102 -D output/playwright/ga/22905839102
+```
+
+结果：
+- run 环境中 `BRANCH=codex/attendance-pr396-pr399-delivery-md-20260310`（默认值修复生效）。
+- JSON 合同校验 PASS：
+  - `[attendance-validate-daily-dashboard-json] OK: schemaVersion=3 ... localeZhStatus=PASS localeZhSchema=3`
+- workflow 仍为 FAIL（预期）：该分支未执行 P0 门禁（`preflight/strict`），`p0Status=fail`。
+
+证据路径：
+- `output/playwright/ga/22905839102/attendance-daily-gate-dashboard-22905839102-1/attendance-daily-gate-dashboard.json`
+- `output/playwright/ga/22905839102/attendance-daily-gate-dashboard-22905839102-1/attendance-daily-gate-dashboard.md`
