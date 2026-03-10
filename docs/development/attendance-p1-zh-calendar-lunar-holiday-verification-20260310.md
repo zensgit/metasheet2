@@ -407,3 +407,19 @@ gh run download 22906252111 -D output/playwright/ga/22906252111
   - `overallStatus="pass"`
   - `gateFlat.localeZh.summarySchemaVersion=1`
   - `gateFlat.localeZh.authSource=null`
+
+补充回归（同分支最新提交）：
+
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run watch 22906356737 --exit-status
+gh run download 22906356737 -D output/playwright/ga/22906356737
+
+gh workflow run attendance-gate-contract-matrix.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run watch 22906356758 --exit-status
+gh run download 22906356758 -D output/playwright/ga/22906356758
+```
+
+结果：全部 PASS。
+- locale smoke：`schemaVersion=3`、`authSource=refresh`、`zhShellTabsChecked=true`
+- contract matrix：新增 `dashboard.valid.locale-legacy.json` 已进入 artifact，`summarySchemaVersion=1` + `authSource=null` 正例通过。

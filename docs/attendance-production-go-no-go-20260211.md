@@ -2658,6 +2658,9 @@ Observed highlights:
   - `gateFlat.localeZh.summarySchemaVersion=1`
   - `gateFlat.localeZh.authSource=null`
 - contract matrix local run remains strict for schema v3 fields and still fails expected negative cases.
+- latest branch re-run after compatibility patch:
+  - `Attendance Locale zh Smoke (Prod)` `#22906356737` PASS (`schemaVersion=3`, `authSource=refresh`)
+  - `Attendance Gate Contract Matrix` `#22906356758` PASS (`dashboard.valid.locale-legacy.json` included and validated)
 
 Decision:
 

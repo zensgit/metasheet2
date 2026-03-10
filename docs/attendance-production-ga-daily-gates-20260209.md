@@ -4035,3 +4035,10 @@ Notes:
 - compatibility run `#22906252111` confirms dashboard validator now accepts legacy locale summary (`summarySchemaVersion=1`, `authSource=null`) while keeping v3 strict checks:
   - evidence: `output/playwright/ga/22906252111/attendance-daily-gate-dashboard-22906252111-1/attendance-daily-gate-dashboard.json`
   - result: `p0Status=pass`, `overallStatus=pass`, `gateFlat.localeZh.summarySchemaVersion=1`
+- follow-up branch revalidation on latest head:
+  - `Attendance Locale zh Smoke (Prod)` `#22906356737` PASS
+  - `Attendance Gate Contract Matrix` `#22906356758` PASS
+  - evidence:
+    - `output/playwright/ga/22906356737/attendance-locale-zh-smoke-prod-22906356737-1/attendance-zh-locale-summary.json`
+    - `output/playwright/ga/22906356758/attendance-gate-contract-matrix-dashboard-22906356758-1/dashboard.valid.json`
+    - `output/playwright/ga/22906356758/attendance-gate-contract-matrix-dashboard-22906356758-1/dashboard.valid.locale-legacy.json`
