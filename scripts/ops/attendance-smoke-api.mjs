@@ -14,6 +14,8 @@ const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
+const groupLookupRetryAttempts = Math.max(1, Number(process.env.GROUP_LOOKUP_RETRY_ATTEMPTS || 8))
+const groupLookupRetryDelayMs = Math.max(100, Number(process.env.GROUP_LOOKUP_RETRY_DELAY_MS || 750))
 const importEngines = new Set(['standard', 'bulk'])
 
 function normalizeProductMode(value) {
@@ -287,6 +289,48 @@ async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = 
 
     await sleep(intervalMs)
   }
+}
+
+async function findGroupByName(groupName) {
+  let lastCount = 0
+  for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
+    const groups = await apiFetch('/attendance/groups?pageSize=200', { method: 'GET' })
+    assertOk(groups, 'GET /attendance/groups')
+    const items = Array.isArray(groups.body?.data?.items) ? groups.body.data.items : []
+    lastCount = items.length
+    const created = items.find((g) => g && g.name === groupName)
+    if (created?.id) {
+      if (attempt > 1) {
+        log(`group lookup recovered after retry: attempt=${attempt}/${groupLookupRetryAttempts}`)
+      }
+      return created
+    }
+    if (attempt < groupLookupRetryAttempts) {
+      await sleep(groupLookupRetryDelayMs)
+    }
+  }
+  return { id: null, lastCount }
+}
+
+async function ensureGroupMember(groupId, userId) {
+  let lastCount = 0
+  for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
+    const members = await apiFetch(`/attendance/groups/${groupId}/members?pageSize=200`, { method: 'GET' })
+    assertOk(members, 'GET /attendance/groups/:id/members')
+    const items = Array.isArray(members.body?.data?.items) ? members.body.data.items : []
+    lastCount = items.length
+    const hasMember = items.some((m) => m && (m.userId === userId || m.user_id === userId))
+    if (hasMember) {
+      if (attempt > 1) {
+        log(`membership lookup recovered after retry: attempt=${attempt}/${groupLookupRetryAttempts}`)
+      }
+      return true
+    }
+    if (attempt < groupLookupRetryAttempts) {
+      await sleep(groupLookupRetryDelayMs)
+    }
+  }
+  return { ok: false, lastCount }
 }
 
 async function run() {
@@ -710,17 +754,17 @@ async function run() {
   log(`batch items ok: rows=${batchItems.length}`)
 
   // 8) group exists + membership
-  const groups = await apiFetch('/attendance/groups?pageSize=200', { method: 'GET' })
-  assertOk(groups, 'GET /attendance/groups')
-  const groupItems = groups.body?.data?.items || []
-  const created = groupItems.find((g) => g && g.name === groupName)
-  if (!created?.id) die('created group not found')
+  const created = await findGroupByName(groupName)
+  if (!created?.id) {
+    const observed = Number.isFinite(created?.lastCount) ? `, observed_groups=${created.lastCount}` : ''
+    die(`created group not found after retries (${groupLookupRetryAttempts} attempts${observed})`)
+  }
 
-  const members = await apiFetch(`/attendance/groups/${created.id}/members?pageSize=200`, { method: 'GET' })
-  assertOk(members, 'GET /attendance/groups/:id/members')
-  const memberItems = members.body?.data?.items || []
-  const hasMember = memberItems.some((m) => m && (m.userId === userId || m.user_id === userId))
-  if (!hasMember) die('importing user is not a member of created group')
+  const memberCheck = await ensureGroupMember(created.id, userId)
+  if (memberCheck !== true) {
+    const observed = Number.isFinite(memberCheck?.lastCount) ? `, observed_members=${memberCheck.lastCount}` : ''
+    die(`importing user is not a member of created group after retries (${groupLookupRetryAttempts} attempts${observed})`)
+  }
   log('group + membership ok')
 
   // 9) request create + approve
