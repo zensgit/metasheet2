@@ -73,6 +73,8 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 | Lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
 | Sharding E2E flaky guard (rate limiter reset) | `pnpm --filter @metasheet/core-backend exec vitest run src/tests/sharding-e2e.test.ts` | PASS | local vitest stdout (17 passed) |
 | Core backend full test sweep (CI parity command) | `pnpm --filter @metasheet/core-backend test -- --run` | PASS | local vitest stdout (68 files / 868 tests passed) |
+| Fast full lane rerun on latest head | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-082356-42394/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260310-082356-42394/summary.json` |
+| Lane report refresh on latest head | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260310-002410/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260310-002410/attendance-fast-parallel-report.json` |
 
 ## CI Stabilization Update (2026-03-10)
 
@@ -93,6 +95,13 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
 - Required checks: PASS on latest head
 - Current blocker: `REVIEW_REQUIRED` (repository policy requires at least one approving review by write user)
 - Latest green CI evidence:
+  - `Plugin System Tests`: run `22881065017` (Node 18/20 both `SUCCESS`)
+  - `Attendance Gate Contract Matrix`: run `22881064996` (`SUCCESS`)
+  - `Batch2 Test Stabilization`: run `22881064994` (`SUCCESS`)
+  - `SafetyGuard E2E`: run `22881064991` (`SUCCESS`)
+  - `Observability E2E`: run `22881065001` (`SUCCESS`)
+  - `Migration Replay`: run `22881065031` (`SUCCESS`)
+  - `Phase 5 PR Validation`: run `22881065000` (`SUCCESS`)
   - `Plugin System Tests`: run `22880956543` (Node 18/20 both `SUCCESS`)
   - `Attendance Gate Contract Matrix`: run `22880956520` (`SUCCESS`)
   - `Batch2 Test Stabilization`: run `22880956533` (`SUCCESS`)
