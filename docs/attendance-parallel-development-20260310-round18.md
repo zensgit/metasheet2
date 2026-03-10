@@ -54,8 +54,8 @@ Round18 continued the gate-ops acceleration track on top of PR #396 with three g
   - consumes fast regression `summary.json` files.
   - outputs one Markdown lane-health table + JSON payload.
   - defaults to latest row per profile (`full/ops/contracts`) while preserving an all-rows mode (`LATEST_PER_PROFILE=false`).
-  - backward-compatible inference for older summaries without metadata.
-- Added `scripts/ops/attendance-fast-parallel-summary-report.test.mjs` (3 tests).
+  - backward-compatible inference for older summaries without metadata (`profile/maxParallel/runContractCases`).
+- Added `scripts/ops/attendance-fast-parallel-summary-report.test.mjs` (4 tests).
 - Added package scripts:
   - `pnpm verify:attendance-regression-fast:report`
   - `pnpm verify:attendance-regression-fast:report:test`

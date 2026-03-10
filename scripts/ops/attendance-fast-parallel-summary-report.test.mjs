@@ -102,3 +102,27 @@ test('attendance-fast-parallel-summary-report fails when source root has no summ
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}${result.stdout}`, /no summary\.json found under/);
 });
+
+test('attendance-fast-parallel-summary-report infers legacy metadata from checks', () => {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-fast-report-source-legacy-'));
+  const reportRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-fast-report-out-'));
+  writeSummary(sourceRoot, '20260310-020101-100', {
+    timestamp: '20260310-020101-100',
+    outputRoot: path.join(sourceRoot, '20260310-020101-100'),
+    totals: { total: 4, pass: 4, fail: 0, skip: 0 },
+    checks: [
+      { check: 'ops-auth-scripts-tests', status: 'PASS' },
+      { check: 'ops-dispatcher-tests', status: 'PASS' },
+      { check: 'ops-telemetry-utils-tests', status: 'PASS' },
+      { check: 'ops-daily-gate-report-tests', status: 'PASS' },
+    ],
+  });
+
+  const result = runReport({
+    OUTPUT_ROOT: sourceRoot,
+    REPORT_ROOT: reportRoot,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const markdown = result.stdout;
+  assert.match(markdown, /\|\s20260310-020101-100\s\|\sops\s\|\s4\s\|\sNO\s\|/);
+});
