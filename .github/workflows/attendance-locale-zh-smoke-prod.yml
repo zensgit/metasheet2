@@ -120,9 +120,11 @@ jobs:
           set -euo pipefail
           auth_source='unknown'
           zh_labels='unknown'
+          schema_version='unknown'
           if [[ -f output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json ]]; then
             auth_source="$(jq -r '.authSource // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
             zh_labels="$(jq -r 'if .zhLabels.skipped == true then ("skipped:" + (.zhLabels.reason // "not-required")) elif .zhLabels.ok == true then "pass" else "fail" end' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
+            schema_version="$(jq -r '.schemaVersion // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
           fi
           {
             echo "## Attendance Locale zh Smoke (Prod)"
@@ -135,6 +137,7 @@ jobs:
             echo "- REQUIRE_ZH_CORE_LABELS: \`${REQUIRE_ZH_CORE_LABELS}\`"
             echo "- AUTH SOURCE: \`${auth_source}\`"
             echo "- ZH_LABELS: \`${zh_labels}\`"
+            echo "- SUMMARY_SCHEMA_VERSION: \`${schema_version}\`"
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"

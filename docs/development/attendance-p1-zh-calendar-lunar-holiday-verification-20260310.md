@@ -370,3 +370,8 @@ node scripts/ops/attendance-daily-gate-report.mjs
 - 证据路径：
   - `output/playwright/attendance-daily-gate-dashboard/20260310-063235/attendance-daily-gate-dashboard.json`
   - `output/playwright/attendance-daily-gate-dashboard/20260310-063235/attendance-daily-gate-dashboard.md`
+
+## 17. Workflow Summary 字段补充
+- 文件：`.github/workflows/attendance-locale-zh-smoke-prod.yml`
+- 变更：Step Summary 新增 `SUMMARY_SCHEMA_VERSION`，从 `attendance-zh-locale-summary.json` 读取。
+- 目的：在 Actions 页面无需下载 artifact 即可快速确认当前摘要合同版本（`schemaVersion=2`）。
