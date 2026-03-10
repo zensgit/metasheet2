@@ -475,3 +475,13 @@ pnpm --filter @metasheet/web exec vitest run \
 - 本地下载证据：
   - `output/playwright/ga/22893350034/attendance-gate-contract-matrix-dashboard-22893350034-1/dashboard.invalid.locale.json`
   - `output/playwright/ga/22893350034/attendance-gate-contract-matrix-dashboard-22893350034-1/dashboard.valid.json`
+
+### 19.2 文档提交后的复检（run 2289345xxxx）
+- 触发来源：文档证据补充 commit `c139a187`。
+- 结果：PR #403 checks 全绿（除策略性 skip 项外）。
+- 关键 run：
+  - `Attendance Gate Contract Matrix`: `22893451688`
+  - `Plugin System Tests`: `22893451653`
+  - `Observability E2E`: `22893451649`
+  - `Phase 5 PR Validation`: `22893451705`
+EOF && git add docs/development/attendance-p1-zh-calendar-lunar-holiday-verification-20260310.md && git commit -m "docs(attendance): append latest green checks for pr403" && git push origin codex/attendance-zh-calendar-p1-mainline-20260310
