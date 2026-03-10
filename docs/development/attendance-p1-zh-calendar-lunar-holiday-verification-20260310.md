@@ -375,3 +375,33 @@ node scripts/ops/attendance-daily-gate-report.mjs
 - 文件：`.github/workflows/attendance-locale-zh-smoke-prod.yml`
 - 变更：Step Summary 新增 `SUMMARY_SCHEMA_VERSION`，从 `attendance-zh-locale-summary.json` 读取。
 - 目的：在 Actions 页面无需下载 artifact 即可快速确认当前摘要合同版本（`schemaVersion=2`）。
+
+## 18. Mainline PR 门禁联动验证（Strict + Dashboard）
+### 18.1 Strict Gates（run 22890261948）
+```bash
+gh workflow run attendance-strict-gates-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-mainline-20260310
+
+gh run watch 22890261948 --exit-status
+```
+- 结果：PASS（`strict-gates` job success）
+
+### 18.2 Daily Dashboard（run 22890415809）
+```bash
+gh workflow run attendance-daily-gate-dashboard.yml \
+  --ref codex/attendance-zh-calendar-p1-mainline-20260310 \
+  -f lookback_hours=48
+
+gh run watch 22890415809 --exit-status
+gh run download 22890415809 -D output/playwright/ga/22890415809
+```
+- 结果：workflow PASS（P0 未失败；dashboard report 允许 P1 findings）
+- 关键校验：`gateFlat.localeZh` 含 schema v2 新字段：
+  - `summarySchemaVersion=2`
+  - `authSource=refresh`
+  - `zhLabelsStatus=pass`
+  - `zhNoEnglishLeak=true`
+- 关键校验：`gateFlat.strict.status=PASS`（引用 run `22890261948`）
+- 证据路径：
+  - `output/playwright/ga/22890415809/attendance-daily-gate-dashboard.json`
+  - `output/playwright/ga/22890415809/attendance-daily-gate-dashboard.md`
