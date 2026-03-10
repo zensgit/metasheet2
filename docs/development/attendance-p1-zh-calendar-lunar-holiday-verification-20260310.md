@@ -541,3 +541,30 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 - `tsc --noEmit`：PASS
 - daily dashboard parser 测试：PASS（15/15，含 schema v3 壳层 tab 校验）
 - dashboard contract case：PASS
+
+## 22. 分支远端 smoke（schema v3）验证
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml \
+  --ref codex/attendance-zh-calendar-p1-mainline-20260310 \
+  -f require_zh_core_labels=true \
+  -f require_toggle_checks=false \
+  -f verify_holiday=true
+
+gh run watch 22894858521 --exit-status
+gh run download 22894858521 \
+  -n attendance-locale-zh-smoke-prod-22894858521-1 \
+  -D output/playwright/ga/22894858521
+```
+
+- 结果：PASS
+- 关键摘要（`attendance-zh-locale-summary.json`）：
+  - `status=pass`
+  - `schemaVersion=3`
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `zhLabels.overviewTab=true`
+  - `zhLabels.adminTab=true`
+  - `zhLabels.workflowTab=true`
+- 证据路径：
+  - `output/playwright/ga/22894858521/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22894858521/attendance-zh-locale-calendar.png`

@@ -55,20 +55,34 @@ pnpm verify:attendance-zh-copy-contract
 - `ffac991f` feat(attendance-zh): harden calendar timezone utils and shell zh checks
 - `b1943376` test(attendance): make calendar utils date-normalization assertion timezone-safe
 - `281fb549` feat(attendance-gates): require zh shell tab labels in locale schema v3
+- `d31b1dd0` test(attendance-zh): add workflow designer zh regression coverage
 
 ## CI 进展（PR #403）
 - 最新完成批次（全绿，strict enhanced gate 为策略性 skip）：
-  - `Attendance Gate Contract Matrix`: `22894284006`
-  - `Observability E2E`: `22894283960`
-  - `Phase 5 PR Validation`: `22894283963`
-  - `Plugin System Tests + coverage`: `22894283998`
+  - `Attendance Gate Contract Matrix`: `22894853137`
+  - `Observability E2E`: `22894853106`
+  - `Phase 5 PR Validation`: `22894853065`
+  - `Plugin System Tests + coverage`: `22894853112`
 - PR 状态：`MERGEABLE`，阻塞项为 `REVIEW_REQUIRED`（需要审批）。
+
+## 远端 zh smoke（分支）
+- workflow：`attendance-locale-zh-smoke-prod.yml`
+- runId：`22894858521`
+- 结果：PASS
+- 关键摘要：
+  - `schemaVersion=3`
+  - `authSource=refresh`
+  - `zhLabels.ok=true`
+  - `zhLabels.overviewTab/adminTab/workflowTab=true`
+- 本地证据：
+  - `output/playwright/ga/22894858521/attendance-zh-locale-summary.json`
+  - `output/playwright/ga/22894858521/attendance-zh-locale-calendar.png`
 
 ## 生产可部署判断（当前）
 - 代码层：本轮改动不涉及破坏性 API/DB 变更，可作为增量上线。
 - 上线前建议保持：至少一轮完整 PR checks 绿灯 + 目标环境 smoke（Desktop + Mobile + zh locale）通过。
 
 ## 下一并行批次（不依赖本批合并即可继续）
-1. GA 侧：触发 `attendance-locale-zh-smoke-prod.yml`（分支）并回填 runId 到 Go/No-Go 文档。
-2. 前端侧：补充 `AttendanceWorkflowDesigner` 的 zh 文案契约测试（与 shell tab 契约同级）。
-3. 门禁侧：daily dashboard 输出中新增 `schemaVersion` 变更提示，便于跨版本排障。
+1. 文档侧：把 run `22894858521` 证据同步追加到 Go/No-Go 与日常门禁手册。
+2. 门禁侧：daily dashboard 增加 locale schema 版本提示，降低跨版本排障成本。
+3. 发布侧：等待外部审批后合并 PR #403，并执行一次 strict/perf/dashboard 全套验收。
