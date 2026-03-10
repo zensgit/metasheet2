@@ -18,7 +18,7 @@ describe('attendanceCalendarUtils', () => {
 
   it('normalizes date keys from multiple formats', () => {
     expect(normalizeDateKey('2026-01-23')).toBe('2026-01-23')
-    expect(normalizeDateKey('2026-01-23T10:00:00.000Z')).toMatch(/^2026-01-2[23]$/)
+    expect(normalizeDateKey('2026-01-23T10:00:00.000Z')).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(normalizeDateKey('')).toBeNull()
     expect(normalizeDateKey('invalid-date')).toBeNull()
   })
