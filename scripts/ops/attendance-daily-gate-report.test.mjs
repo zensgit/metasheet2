@@ -53,7 +53,7 @@ test('pickLatestCompletedRun returns null when no completed run exists', () => {
 
 test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: 'pass',
     locale: 'zh-CN',
     lunarCount: 28,
@@ -85,6 +85,10 @@ test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
       requestCard: true,
       submitButton: true,
       recentRequests: true,
+      overviewTab: true,
+      adminTab: true,
+      workflowTab: true,
+      shellTabsChecked: true,
       noEnglishLeak: true,
       ok: true,
       skipped: false,
@@ -94,11 +98,15 @@ test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, null)
-  assert.equal(parsed?.schemaVersion, 2)
+  assert.equal(parsed?.schemaVersion, 3)
   assert.equal(parsed?.authSource, 'refresh')
   assert.equal(parsed?.zhLabelsStatus, 'pass')
   assert.equal(parsed?.zhLabelsOk, 'true')
   assert.equal(parsed?.zhNoEnglishLeak, 'true')
+  assert.equal(parsed?.zhOverviewTab, 'true')
+  assert.equal(parsed?.zhAdminTab, 'true')
+  assert.equal(parsed?.zhWorkflowTab, 'true')
+  assert.equal(parsed?.zhShellTabsChecked, 'true')
   assert.equal(parsed?.toggleCheckStatus, 'pass')
   assert.equal(parsed?.holidayCleanupDeleted, 'true')
   assert.equal(parsed?.locale, 'zh-CN')
@@ -266,6 +274,55 @@ test('parseLocaleZhSummaryJson flags holiday cleanup failure in schema v2', () =
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, 'HOLIDAY_CLEANUP_FAILED')
+})
+
+test('parseLocaleZhSummaryJson requires shell tab labels when schema v3 is provided', () => {
+  const payload = {
+    schemaVersion: 3,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 26,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    createdHolidayId: 'holiday-5',
+    createdHolidayDate: '2026-02-19',
+    createdHolidayName: '回归节',
+    cleanup: {
+      holidayDeleted: true,
+      error: null,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: true,
+      lunarOnRecovered: true,
+      holidayOffNoBadge: true,
+      holidayOnRecovered: true,
+      skipped: false,
+      reason: null,
+    },
+    authSource: 'token',
+    zhLabels: {
+      heading: true,
+      checkInButton: true,
+      checkOutButton: true,
+      summaryCard: true,
+      calendarCard: true,
+      requestCard: true,
+      submitButton: true,
+      recentRequests: true,
+      overviewTab: false,
+      adminTab: true,
+      workflowTab: true,
+      shellTabsChecked: true,
+      noEnglishLeak: true,
+      ok: true,
+      skipped: false,
+      reason: null,
+    },
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'ZH_CORE_LABELS_INCOMPLETE')
+  assert.equal(parsed?.zhMissingFields, 'overviewTab')
 })
 
 test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {

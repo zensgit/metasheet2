@@ -512,6 +512,9 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 - `scripts/verify-attendance-locale-zh-smoke.mjs` 增强：
   - 新增壳层 tab 中文校验（`总览/管理中心/流程设计`，按可见性校验）。
   - 英文泄漏词表纳入 `Overview/Admin Center/Workflow Designer/Desktop recommended/Back to Overview`。
+- locale 摘要 schema 升级：
+  - `attendance-zh-locale-summary.json` 从 `schemaVersion=2` 升级为 `schemaVersion=3`。
+  - `scripts/ops/attendance-daily-gate-report.mjs` 在 `schemaVersion>=3` 时强制校验 `zhLabels.overviewTab/adminTab/workflowTab`。
 - 新增前端回归测试：
   - `apps/web/tests/attendance-calendar-utils.spec.ts`
   - `apps/web/tests/attendance-experience-zh-tabs.spec.ts`
@@ -534,5 +537,5 @@ scripts/ops/attendance-run-gate-contract-case.sh dashboard
 - `attendance-calendar-utils.spec.ts` + `attendance-experience-zh-tabs.spec.ts`：PASS（7 tests）
 - 既有移动端 zh 与导入预览回归：PASS（2 tests）
 - `tsc --noEmit`：PASS
-- daily dashboard parser 测试：PASS（14/14）
+- daily dashboard parser 测试：PASS（15/15，含 schema v3 壳层 tab 校验）
 - dashboard contract case：PASS

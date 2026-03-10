@@ -302,6 +302,10 @@ export function parseLocaleZhSummaryJson(text) {
   const zhLabelsSkipped = zhLabelsValue?.skipped === true
   const zhLabelsOk = zhLabelsValue?.ok === true
   const zhNoEnglishLeak = zhLabelsValue?.noEnglishLeak === true
+  const zhOverviewTab = zhLabelsValue?.overviewTab === true
+  const zhAdminTab = zhLabelsValue?.adminTab === true
+  const zhWorkflowTab = zhLabelsValue?.workflowTab === true
+  const zhShellTabsChecked = zhLabelsValue?.shellTabsChecked === true
   const zhReason = typeof zhLabelsValue?.reason === 'string' ? zhLabelsValue.reason.trim() : ''
   const toggleCheckValue = value?.toggleCheck && typeof value.toggleCheck === 'object' ? value.toggleCheck : null
   const toggleSkipped = toggleCheckValue?.skipped === true
@@ -323,9 +327,13 @@ export function parseLocaleZhSummaryJson(text) {
     'submitButton',
     'recentRequests',
   ]
+  const zhShellFieldKeys = schemaVersion !== null && schemaVersion >= 3
+    ? ['overviewTab', 'adminTab', 'workflowTab']
+    : []
+  const zhRequiredFieldKeys = [...zhCoreFieldKeys, ...zhShellFieldKeys]
   const zhMissingFields = zhLabelsValue
-    ? zhCoreFieldKeys.filter((field) => zhLabelsValue[field] !== true)
-    : zhCoreFieldKeys
+    ? zhRequiredFieldKeys.filter((field) => zhLabelsValue[field] !== true)
+    : zhRequiredFieldKeys
   const error = typeof value?.error === 'string' ? value.error.trim() : ''
 
   let reason = null
@@ -371,6 +379,10 @@ export function parseLocaleZhSummaryJson(text) {
     zhLabelsSkipped: zhLabelsSkipped ? 'true' : 'false',
     zhLabelsOk: zhLabelsOk ? 'true' : 'false',
     zhNoEnglishLeak: zhNoEnglishLeak ? 'true' : 'false',
+    zhOverviewTab: zhOverviewTab ? 'true' : 'false',
+    zhAdminTab: zhAdminTab ? 'true' : 'false',
+    zhWorkflowTab: zhWorkflowTab ? 'true' : 'false',
+    zhShellTabsChecked: zhShellTabsChecked ? 'true' : 'false',
     zhMissingFields: zhMissingFields.length > 0 ? zhMissingFields.join(',') : null,
     zhReason: zhReason || null,
     toggleCheckStatus: toggleSkipped ? `skipped:${toggleReason || 'not-required'}` : 'pass',
