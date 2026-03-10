@@ -246,13 +246,23 @@ function validate_locale_zh_gate() {
   fi
 
   gate_auth_source="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].authSource // empty' "$report_json")"
-  case "$gate_auth_source" in
-    token|refresh|login|unknown)
-      ;;
-    *)
-      die "${gate_label} contract failed: gateFlat.${gate_key}.authSource=${gate_auth_source:-<empty>} (expected token|refresh|login|unknown when status=PASS)"
-      ;;
-  esac
+  if (( gate_summary_schema_version >= 3 )); then
+    case "$gate_auth_source" in
+      token|refresh|login|unknown)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.authSource=${gate_auth_source:-<empty>} (required token|refresh|login|unknown when summarySchemaVersion>=3)"
+        ;;
+    esac
+  elif [[ -n "$gate_auth_source" ]]; then
+    case "$gate_auth_source" in
+      token|refresh|login|unknown)
+        ;;
+      *)
+        die "${gate_label} contract failed: gateFlat.${gate_key}.authSource=${gate_auth_source} (expected token|refresh|login|unknown when present)"
+        ;;
+    esac
+  fi
 
   gate_lunar_label_count="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("lunarLabelCount") and .lunarLabelCount != null then (.lunarLabelCount | tostring) else "" end' "$report_json")"
   if [[ -n "$gate_lunar_label_count" && ! "$gate_lunar_label_count" =~ ^[0-9]+$ ]]; then

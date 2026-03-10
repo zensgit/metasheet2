@@ -111,6 +111,7 @@ fi
 
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
+  dashboard_valid_locale_legacy="${case_dir}/dashboard.valid.locale-legacy.json"
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
@@ -196,6 +197,87 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "zhAdminTab": "true",
       "zhWorkflowTab": "true",
       "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
+  cat >"$dashboard_valid_locale_legacy" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 210001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 210002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 210003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 210004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 3,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1"
     }
   },
   "escalationIssue": {
@@ -632,6 +714,7 @@ EOF
 EOF
 
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
+  ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_locale_legacy"
   expect_fail "dashboard strict-summary-validity contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_strict"
   expect_fail "dashboard perf gateFlat contract" \
