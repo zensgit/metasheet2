@@ -55,8 +55,11 @@ pnpm verify:attendance-zh-copy-contract
 - `281fb549` feat(attendance-gates): require zh shell tab labels in locale schema v3
 
 ## CI 进展（PR #403）
-- 最新触发批次（进行中）：`22894248206 / 22894248207 / 22894248222 / 22894248233`
-- 上一批已完成且全绿（除策略性 skip）：`22894171579 / 22894171582 / 22894171604 / 22894171589`
+- 最新完成批次（全绿，strict enhanced gate 为策略性 skip）：
+  - `Attendance Gate Contract Matrix`: `22894284006`
+  - `Observability E2E`: `22894283960`
+  - `Phase 5 PR Validation`: `22894283963`
+  - `Plugin System Tests + coverage`: `22894283998`
 - PR 状态：`MERGEABLE`，阻塞项为 `REVIEW_REQUIRED`（需要审批）。
 
 ## 生产可部署判断（当前）
