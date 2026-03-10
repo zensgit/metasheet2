@@ -3389,7 +3389,12 @@ Expected log markers:
 - `deleted holiday: ...`
 
 Calendar toggle regression coverage:
-- `toggleCheck=pass` means the smoke run verified both toggles:
+- 默认 `REQUIRE_TOGGLE_CHECKS=false` 时：
+  - 若目标环境尚未部署开关 UI，`toggleCheck` 记为 `skipped:<reason>`，不阻断 zh smoke。
+  - 若目标环境已部署开关 UI，仍会执行 `Lunar/Holiday` 开关检查并给出 `toggleCheck=pass|fail`。
+- 开启强校验（用于新版本环境）：
+  - `REQUIRE_TOGGLE_CHECKS=true` 时，开关 UI 缺失将直接失败。
+- `toggleCheck=pass` 表示 smoke 已完成两组开关断言：
   - `Lunar`: on -> off -> on
   - `Holiday`: on -> off -> on
 - Any visibility mismatch on toggle transitions fails the run and is captured in screenshot evidence.
@@ -3417,6 +3422,16 @@ Auth note:
 - Runbook field `authSource` possible values: `token` | `refresh` | `login`.
 - If none of the above paths yields a valid token, run fails with explicit rotation guidance.
 - Never write real JWT/passwords into repo/docs; use placeholders only.
+
+Workflow dispatch examples:
+
+```bash
+# default (non-blocking toggle check for legacy deployed env)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_toggle_checks=false
+
+# strict toggle check (new env that already contains calendar toggle UI)
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref main -f require_toggle_checks=true
+```
 
 ### Update (2026-03-01): Auth Failure Path Evidence Verified
 

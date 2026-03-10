@@ -135,9 +135,14 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
 - 检查内容：
   - `Lunar` 开关执行 `on -> off -> on`，并校验农历文案显示/隐藏符合预期。
   - `Holiday` 开关执行 `on -> off -> on`，并校验节假日徽标显示/隐藏符合预期。
-- 典型取值：
-  - `pass`：两组开关切换与可见性断言均通过。
-  - `fail`：任一开关切换后的可见性断言失败（应结合截图与日志定位）。
+- 字段结构（对象）：
+  - `lunarOffNoBadge` / `lunarOnRecovered`
+  - `holidayOffNoBadge` / `holidayOnRecovered`
+  - `skipped` / `reason`
+- 典型状态：
+  - `skipped=false` 且四个布尔值全 `true`：开关断言通过。
+  - `skipped=true`：目标环境未部署开关 UI（且未开启 `REQUIRE_TOGGLE_CHECKS=true`），不作为阻断项。
+  - `skipped=false` 且任一布尔值为 `false`：开关断言失败（应结合截图与日志定位）。
 
 ### 6.3 摘要字段示例（占位符）
 ```json
@@ -145,13 +150,15 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
   "status": "pass",
   "locale": "zh-CN",
   "authSource": "refresh",
-  "toggleCheck": "pass",
+  "toggleCheck": {
+    "lunarOffNoBadge": true,
+    "lunarOnRecovered": true,
+    "holidayOffNoBadge": true,
+    "holidayOnRecovered": true,
+    "skipped": false,
+    "reason": null
+  },
   "lunarCount": 42,
-  "holidayBadgeCount": 1,
-  "authContext": {
-    "token": "<AUTH_TOKEN_PLACEHOLDER_OR_EMPTY>",
-    "loginEmail": "<LOGIN_EMAIL_PLACEHOLDER>",
-    "loginPassword": "<LOGIN_PASSWORD_PLACEHOLDER>"
-  }
+  "holidayBadgeCount": 1
 }
 ```
